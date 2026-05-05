@@ -414,6 +414,11 @@ func setupFormulaFactory(t *testing.T) string {
 		t.Fatal(err)
 	}
 
+	// Create go.mod so ResolveSourceRoot identifies this as the source tree
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/stempeck/agentfactory\n\ngo 1.24\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	// Create template directory for template file writes
 	tmplDir := filepath.Join(dir, "internal", "templates", "roles")
 	if err := os.MkdirAll(tmplDir, 0755); err != nil {
@@ -979,6 +984,7 @@ func TestProvisioningPipeline_DescriptionFirstSentence(t *testing.T) {
 			os.MkdirAll(filepath.Join(configDir, "agents"), 0755)
 			os.MkdirAll(filepath.Join(dir, "internal", "templates", "roles"), 0755)
 
+			os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/stempeck/agentfactory\n\ngo 1.24\n"), 0644)
 			os.WriteFile(filepath.Join(configDir, "factory.json"), []byte(`{"type":"factory","version":1,"name":"agentfactory"}`), 0644)
 			os.WriteFile(filepath.Join(configDir, "agents.json"), []byte(`{"agents":{"manager":{"type":"interactive","description":"Interactive agent"}}}`), 0644)
 

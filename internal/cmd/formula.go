@@ -196,8 +196,14 @@ func runFormulaAgentGen(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "✓ Agent entry added to .agentfactory/agents.json (formula: %s)\n", f.Name)
 	}
 
+	// Resolve source root for template output
+	srcRoot, err := config.ResolveSourceRoot(root)
+	if err != nil {
+		return fmt.Errorf("resolving source root: %w", err)
+	}
+
 	// Write role template to source tree
-	tmplDir := filepath.Join(root, "internal", "templates", "roles")
+	tmplDir := filepath.Join(srcRoot, "internal", "templates", "roles")
 	if err := os.MkdirAll(tmplDir, 0755); err != nil {
 		return fmt.Errorf("creating template directory: %w", err)
 	}
@@ -205,7 +211,11 @@ func runFormulaAgentGen(cmd *cobra.Command, args []string) error {
 	if err := os.WriteFile(tmplPath, []byte(tmplContent), 0644); err != nil {
 		return fmt.Errorf("writing role template: %w", err)
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "✓ Role template written: internal/templates/roles/%s.md.tmpl\n", agentName)
+	if srcRoot != root {
+		fmt.Fprintf(cmd.ErrOrStderr(), "✓ Role template written: %s\n", tmplPath)
+	} else {
+		fmt.Fprintf(cmd.ErrOrStderr(), "✓ Role template written: internal/templates/roles/%s.md.tmpl\n", agentName)
+	}
 
 	// Create workspace directory
 	wsDirCreated := false
@@ -303,8 +313,14 @@ func runFormulaAgentGenDelete(cmd *cobra.Command, agentName string) error {
 		return err
 	}
 
+	// Resolve source root for template location
+	srcRoot, err := config.ResolveSourceRoot(root)
+	if err != nil {
+		return fmt.Errorf("resolving source root: %w", err)
+	}
+
 	// Paths
-	tmplPath := filepath.Join(root, "internal", "templates", "roles", agentName+".md.tmpl")
+	tmplPath := filepath.Join(srcRoot, "internal", "templates", "roles", agentName+".md.tmpl")
 	wsDir := config.AgentDir(root, agentName)
 
 	// Check workspace for uncommitted changes (warn only)
