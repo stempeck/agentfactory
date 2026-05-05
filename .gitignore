@@ -1,0 +1,85 @@
+# Binaries
+/af
+*.exe
+
+# Build
+/dist/
+/build/
+
+# Go vendor directory (dependencies are managed via go.mod/go.sum, not vendoring)
+# Notice: vendoring is useful for air-gapped environments. 
+# If you need to vendor dependencies, you can run `go mod vendor` and commit the 
+# resulting /vendor/ directory. However, by default, we ignore it.
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+coverage.out
+*.test
+
+# Python virtualenvs (Phase 4 dev toolchain)
+.venv/
+.venv-*/
+__pycache__/
+*.pyc
+
+# Local config
+config.toml
+!config.example.toml
+
+# Runtime state
+state.json
+.runtime/
+.agentfactory/worktrees/
+.agentfactory/*
+!.agentfactory/agents/
+!.agentfactory/agents.json
+!.agentfactory/dispatch.json
+!.agentfactory/factory.json
+!.agentfactory/messaging.json
+.agentfactory/agents/**
+!.agentfactory/agents/*/
+!.agentfactory/agents/*/.claude/
+!.agentfactory/agents/*/.claude/settings.json
+!.agentfactory/agents/*/CLAUDE.md
+
+# Clone-specific CLAUDE.local.md (Also, CLAUDE.md is regenerated locally per clone)
+CLAUDE.local.md
+.claude/skills/**
+.claude/memory-summary-hook.sh
+!.claude/skills/github-issue/
+!.claude/skills/github-issue/SKILL.md
+!.claude/skills/formula-create/
+!.claude/skills/formula-create/SKILL.md
+!.claude/skills/formula-create/*.md
+!.claude/skills/documentation-update/
+!.claude/skills/documentation-update/SKILL.md
+!.claude/skills/rapid-implement/
+!.claude/skills/rapid-implement/SKILL.md
+
+# IMPLREADME/NEXTSTEPS/GHERKINSCENARIOS are generated locally
+IMPLREADME.md
+NEXTSTEPS.md
+GHERKINSCENARIOS.feature
+run-*.sh
+/todos/ultra-implement/*
+loop-logs/
+/todos/rootcause*
+/todos/rapid/*
+/todos/architecture-docs/*
+test_fail_output.txt
+test_results.txt
+
+# Embedded formulas are committed so `go install @latest` works
+# Run `go generate ./...` after modifying .beads/formulas/
+

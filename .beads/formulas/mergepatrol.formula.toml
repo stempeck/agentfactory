@@ -1,0 +1,481 @@
+description = """
+## Overview
+PR merge processor patrol loop.
+
+The MergePatrol is the Engineer in the engine room. You process agent branches, merging them to main one at a time with sequential rebasing.
+
+**The Scotty Test**: Before proceeding past any failure, ask yourself: "Would Scotty walk past a warp core leak because it existed before his shift?"
+
+## Merge Flow
+
+The MergePatrol receives MERGE_READY mail from agents when they complete work:
+
+```
+Agent                      MergePatrol                    Git
+   │                          │                           │
+   │ MERGE_READY              │                           │
+   │─────────────────────────>│                           │
+   │                          │                           │
+   │                    (verify branch)                   │
+   │                          │ fetch & rebase            │
+   │                          │──────────────────────────>│
+   │                          │                           │
+   │                    (run tests)                       │
+   │                          │                           │
+   │                    (if pass)                         │
+   │                          │ merge & push              │
+   │                          │──────────────────────────>│
+   │                          │                           │
+   │ MERGED                   │                           │
+   │<─────────────────────────│                           │
+   │                          │                           │
+```
+
+After successful merge, MergePatrol sends MERGED mail back to the agent so it can
+complete cleanup (remove the agent worktree).
+
+## MANDATORY: Exact Step Execution
+Execute each formula step EXACTLY as written, in order, with no modifications.
+Do NOT skip steps, combine steps, or "optimize" the process. Each step exists
+because it is part of a known working process. For example, if a step says to
+restart an agent, restart it — do not reason that "keeping existing context
+would be better." Your job is faithful execution of these steps, not improvement
+of them.
+"""
+formula = "mergepatrol"
+version = 4
+
+[[steps]]
+id = "inbox-check"
+title = "Check mergepatrol mail"
+description = """
+Check mail for MERGE_READY submissions, escalations, and messages.
+
+```bash
+af mail inbox
+```
+
+For each message:
+
+**MERGE_READY**:
+An agent's work is ready for merge. Extract details and track for processing.
+
+```bash
+# Parse MERGE_READY message body:
+# Branch: <branch>
+# Issue: <issue-id>
+# Agent: <agent-name>
+# PR: <pr-url>
+# Verified: clean git state, issue closed
+
+# Track in your processing queue for this patrol cycle:
+# - Branch name
+# - Issue ID
+# - Agent name (REQUIRED for MERGED notification)
+# - PR URL (REQUIRED for closing after merge)
+```
+
+**IMPORTANT**: You MUST track the agent name, PR URL, AND message ID - you will need them
+in merge-push step to send MERGED notification, close the PR, and delete the mail.
+
+Mark as read. The work will be processed in queue-scan/process-branch.
+**Do NOT delete yet** - delete after merge/reject decision in merge-push step.
+
+**Merge verification (REQUIRED before deleting in any later step)**:
+Before deleting any MERGE_READY message, you MUST verify the merge landed on main:
+```bash
+git log main --oneline -10  # Confirm merge commit for this branch exists
+git diff --name-only main...<branch>  # Should be empty if content is on main
+```
+Only delete after merge-push step confirms the merge landed.
+
+**PATROL: Wake up**:
+MergePatrol detected PRs waiting but mergepatrol idle. Acknowledge and delete:
+```bash
+af mail delete <message-id>
+```
+
+**HELP / Blocked**:
+Assess and respond. If you can't help, escalate to manager.
+Delete after handling:
+```bash
+af mail delete <message-id>
+```
+
+**HANDOFF**:
+Read predecessor context. Check for in-flight merges.
+Delete after absorbing context:
+```bash
+af mail delete <message-id>
+```
+
+**Hygiene principle**: Delete messages after they're fully processed.
+Keep only: pending PRs in queue. Inbox should be near-empty."""
+
+[[steps]]
+id = "queue-scan"
+title = "Scan processing queue"
+needs = ["inbox-check"]
+description = """
+Build the processing queue from MERGE_READY messages collected in inbox-check.
+
+```bash
+git fetch --prune origin
+```
+
+The MERGE_READY messages from inbox-check are your source of truth for pending merges.
+
+If no MERGE_READY messages were found, skip to context-check step.
+
+For each queued branch, verify it still exists:
+```bash
+git branch -r | grep <branch>
+```
+
+If branch doesn't exist for a queued item:
+- Notify the sender that the branch is gone
+- Remove from processing queue
+
+Track verified branch list for this cycle."""
+
+[[steps]]
+id = "process-branch"
+title = "Mechanical rebase"
+needs = ["queue-scan"]
+description = """
+Pick next branch from queue. Attempt mechanical rebase on current main.
+
+**Step 1: Checkout and attempt rebase**
+```bash
+git checkout -b temp origin/<agent-branch>
+git rebase origin/main
+```
+
+**Step 2: Check rebase result**
+
+The rebase exits with:
+- Exit code 0: Success - proceed to run-tests
+- Exit code 1 (conflicts): Conflict detected - proceed to Step 3
+
+To detect conflict state after rebase fails:
+```bash
+# Check if we're in a conflicted rebase state
+ls .git/rebase-merge 2>/dev/null && echo "CONFLICT_STATE"
+```
+
+**Step 3: Handle conflicts (if any)**
+
+If rebase SUCCEEDED (exit code 0):
+- Skip to run-tests step (continue normal merge flow)
+
+If rebase FAILED with conflicts:
+
+1. **Abort the rebase** (DO NOT leave repo in conflicted state):
+```bash
+git rebase --abort
+```
+
+2. **Record conflict metadata**:
+```bash
+# Capture main SHA for reference
+MAIN_SHA=$(git rev-parse origin/main)
+BRANCH_SHA=$(git rev-parse origin/<agent-branch>)
+```
+
+3. **Create conflict-resolution task**:
+```bash
+af bead create --type task --priority 1 \
+  --title "Resolve merge conflicts: <original-issue-title>" \
+  --description="## Conflict Resolution Required
+
+Original PR: <pr-url>
+Branch: <agent-branch>
+Original Issue: <issue-id>
+Conflict with main at: ${MAIN_SHA}
+Branch SHA: ${BRANCH_SHA}
+
+## Instructions
+1. Clone/checkout the branch
+2. Rebase on current main: git rebase origin/main
+3. Resolve conflicts
+4. Force push: git push -f origin <branch>
+5. Close this task when done
+
+The PR will be re-queued for processing after conflicts are resolved."
+```
+
+4. **Skip this PR** (do NOT delete branch):
+- Leave branch intact for conflict resolution
+- Leave PR open (will be re-processed after resolution)
+- Continue to loop-check for next branch
+
+**CRITICAL**: Never delete a branch that has conflicts. The branch contains
+the original work and must be preserved for conflict resolution.
+
+Track: rebase result (success/conflict), conflict task ID if created."""
+
+[[steps]]
+id = "run-tests"
+title = "Run test suite"
+needs = ["process-branch"]
+description = """
+Run the test suite.
+
+```bash
+go test ./...
+```
+
+Track results: pass count, fail count, specific failures."""
+
+[[steps]]
+id = "handle-failures"
+title = "Handle test failures"
+needs = ["run-tests"]
+description = """
+**VERIFICATION GATE**: This step enforces the Beads Promise.
+
+If tests PASSED: This step auto-completes. Proceed to merge.
+
+If tests FAILED:
+1. Diagnose: Is this a branch regression or pre-existing on main?
+2. If branch caused it:
+   - Abort merge
+   - Notify agent: "Tests failing. Please fix and resubmit."
+   - Skip to loop-check
+3. If pre-existing on main:
+   - Option A: Fix it yourself (you're the Engineer!)
+   - Option B: File a bead: af bead create --type bug --priority 1 --title "..."
+
+**GATE REQUIREMENT**: You CANNOT proceed to merge-push without:
+- Tests passing, OR
+- Fix committed, OR
+- Bead filed for the failure
+
+This is non-negotiable. Never disavow. Never "note and proceed." """
+
+[[steps]]
+id = "merge-push"
+title = "Merge and push to main"
+needs = ["handle-failures"]
+description = """
+Merge to main and push. CRITICAL: Notifications come IMMEDIATELY after push.
+
+**Step 1: Merge and Push**
+```bash
+git checkout main
+git merge --ff-only temp
+git push origin main
+```
+
+⚠️ **STOP HERE - DO NOT PROCEED UNTIL STEPS 2-3 COMPLETE**
+
+**Step 2: Send MERGED Notification (REQUIRED - DO THIS IMMEDIATELY)**
+
+RIGHT NOW, before any cleanup, send MERGED mail to the agent:
+
+```bash
+af mail send <agent-name> -s "MERGED <agent-name>" -m "Branch: <branch>
+Issue: <issue-id>
+Merged-At: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+This signals the agent that its work has landed. WITHOUT THIS NOTIFICATION,
+agent worktrees accumulate indefinitely and the lifecycle breaks.
+
+**Step 3: Close the PR (REQUIRED - DO THIS IMMEDIATELY)**
+
+⚠️ **VERIFICATION BEFORE CLOSING**: Confirm the work is actually on main:
+```bash
+# Get the commit message/issue from the branch
+git log origin/main --oneline | grep "<issue-id>"
+# OR verify the commit SHA is on main:
+git branch --contains <commit-sha> | grep main
+```
+
+If work is NOT on main, DO NOT close the PR. Investigate first.
+
+The PR was merged via fast-forward, so close it:
+```bash
+gh pr close <pr-url> --comment "Merged to main at $(git rev-parse --short HEAD)"
+```
+
+**Step 4: Delete the MERGE_READY mail (REQUIRED)**
+```bash
+af mail delete <merge-ready-message-id>
+```
+The message ID was tracked when you processed inbox-check.
+
+**Step 5: Cleanup (only after Steps 2-4 confirmed)**
+```bash
+git branch -d temp
+git push origin --delete <agent-branch>
+```
+
+**VERIFICATION GATE**: You CANNOT proceed to loop-check without:
+- [x] MERGED mail sent to agent
+- [x] PR closed
+- [x] MERGE_READY mail deleted
+- [x] Branch deleted from origin (git push origin --delete <agent-branch>)
+
+If you skipped any of these steps, GO BACK AND DO THEM NOW.
+
+Main has moved. Any remaining branches need rebasing on new baseline."""
+
+[[steps]]
+id = "loop-check"
+title = "Check for more work"
+needs = ["merge-push"]
+description = """
+More branches to process?
+
+**Entry paths:**
+- Normal: After successful merge-push
+- Conflict-skip: After process-branch created conflict-resolution task
+
+If yes: Return to process-branch with next branch.
+If no: Continue to generate-summary.
+
+**Track for this cycle:**
+- branches_merged: count and names of successfully merged branches
+- branches_conflict: count and names of branches skipped due to conflicts
+- conflict_tasks: IDs of conflict-resolution tasks created
+
+This tracking feeds into generate-summary for the patrol digest."""
+
+[[steps]]
+id = "generate-summary"
+title = "Generate handoff summary"
+needs = ["loop-check"]
+description = """
+Summarize this patrol cycle.
+
+**VERIFICATION**: Before generating summary, confirm for each merged branch:
+- [ ] MERGED mail was sent to agent
+- [ ] PR was closed
+- [ ] MERGE_READY mail deleted
+
+If any notifications or deletions were missed, do them now!
+
+Include in summary:
+- Branches merged (count, names)
+- MERGED mails sent (count - should match branches merged)
+- PRs closed (count - should match branches merged)
+- MERGE_READY mails deleted (count - should match branches merged)
+- Test results (pass/fail)
+- Branches with conflicts (count, names)
+- Conflict-resolution tasks created (IDs)
+- Issues filed (if any)
+- Any escalations sent
+
+**Conflict tracking is important** for monitoring queue health. If many branches
+conflict, it may indicate main is moving too fast or branches are too stale.
+
+This becomes the digest when the patrol is squashed."""
+
+[[steps]]
+id = "context-check"
+title = "Check own context limit"
+needs = ["generate-summary"]
+description = """
+Check own context usage.
+
+If context is HIGH (>80%):
+- Write handoff summary
+- Prepare for burn/respawn
+
+If context is LOW:
+- Can continue processing"""
+
+[[steps]]
+id = "patrol-cleanup"
+title = "End-of-cycle inbox hygiene"
+needs = ["context-check"]
+description = """
+Verify inbox hygiene before ending patrol cycle.
+
+**Step 1: Check inbox state**
+```bash
+af mail inbox
+```
+
+Inbox should contain ONLY:
+- Unprocessed MERGE_READY messages (will process next cycle)
+- Active work items
+
+**Step 2: Delete any stale messages**
+
+Look for messages that were processed but not deleted:
+- PATROL: Wake up that was acknowledged → delete
+- HELP/Blocked that was handled → delete
+- MERGE_READY where merge completed but deletion was missed:
+  **VERIFY before deleting** — do NOT assume the merge completed:
+  1. Parse Branch from message body
+  2. Verify merge landed: `git log main --oneline | grep <branch-or-issue>`
+  3. If merged (commit found on main): delete the message
+  4. If NOT merged: DO NOT delete. This represents unfinished work.
+     Leave for next patrol cycle.
+
+```bash
+# For each stale message found:
+af mail delete <message-id>
+```
+
+**Step 3: Check for orphaned PRs**
+
+Look for open PRs with no corresponding branch:
+```bash
+gh pr list --state open
+```
+
+For each open PR:
+1. Check if branch exists: `git ls-remote origin refs/heads/<branch>`
+2. If branch gone, verify work is on main: `git log origin/main --oneline | grep "<issue>"`
+3. If work on main → close PR with comment "Merged (verified on main)"
+4. If work NOT on main → investigate before closing
+
+**NEVER close a PR without verifying the work landed or is unrecoverable.**
+
+**Goal**: Inbox should have ≤3 active messages at end of cycle.
+Keep only: pending PRs in queue."""
+
+[[steps]]
+id = "burn-or-loop"
+title = "Burn and respawn or loop"
+needs = ["patrol-cleanup"]
+description = """
+End of patrol cycle decision.
+
+**Step 1: Estimate remaining context**
+
+Ask yourself:
+- Have I processed many branches this cycle?
+- Is the conversation getting long?
+- Am I starting to lose track of earlier context?
+
+Rule of thumb: If you've done 3+ merges or processed significant cleanup work,
+it's time for a fresh session.
+
+**Step 2: Decision tree**
+
+If queue non-empty AND context LOW:
+- Squash this wisp to digest
+- Spawn fresh patrol wisp
+- Return to inbox-check
+
+If queue empty OR context HIGH OR good stopping point:
+- Squash wisp with summary digest
+- Use `af handoff` for clean session transition:
+
+```bash
+af handoff -s "Patrol complete" -m "Merged X branches, Y tests passed.
+Queue: empty/N remaining
+Next: [any notes for successor]"
+```
+
+**Why af handoff?**
+- Sends handoff mail to yourself with context
+- Respawns with fresh Claude instance
+- SessionStart hook runs af prime
+- Successor picks up from your hook
+
+**DO NOT just exit.** Always use `af handoff` for proper lifecycle."""

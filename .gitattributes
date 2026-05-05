@@ -1,0 +1,30 @@
+
+# Default behavior: auto-detect text files and normalize to LF
+* text=auto
+
+# Source code - always LF in repository
+*.go text eol=lf
+*.sh text eol=lf
+*.bash text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+
+# Scripts must be LF (WSL requirement)
+*.formula.toml text eol=lf
+
+# Windows-specific files can be CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.exe binary
+*.dll binary

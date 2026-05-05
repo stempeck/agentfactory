@@ -1,0 +1,75 @@
+# CI workflow for agentfactory.
+#
+# Three jobs run independently on every push and pull request:
+#
+#   - unit         : `make test` against the unit-test tier. Runs without any
+#                    external backend on PATH (the in-memory `memstore` is the
+#                    fixture for unit tests; see CLAUDE.md "Test suite
+#                    separation").
+#   - integration  : `make test-integration` runs the `//go:build integration`
+#                    tier. Requires Python 3.12 (the in-tree MCP issue-store
+#                    server at `py/issuestore/` is spawned by mcpstore) and
+#                    tmux (used by internal/cmd/integration_test.go). The
+#                    Makefile builds a venv from py/requirements.txt on demand.
+#   - supply-chain-lint : --require-hashes enforcement for all pip install sites.
+
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: go build
+        run: go build ./...
+      - name: make test
+        run: make test
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: install tmux (required by internal/cmd/integration_test.go)
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      # Python 3.12 is required by the in-tree MCP server
+      # (py/issuestore/server.py) that mcpstore spawns and by install.go's
+      # checkPython312. The Makefile's test-integration target builds a
+      # venv from py/requirements.txt; this step only needs to put
+      # python3.12 on PATH.
+      - name: install python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: make test-integration
+        run: make test-integration
+
+  supply-chain-lint:
+    name: supply-chain-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: verify pip installs use --require-hashes
+        run: |
+          FAILURES=0
+          for f in $(grep -rl 'pip.*install' --include='*.sh' . --exclude-dir=.designs --exclude-dir=.agentfactory) Dockerfile Makefile; do
+            if [ -f "$f" ] && grep -q 'pip.*install' "$f" && ! grep -q 'require-hashes' "$f"; then
+              echo "ERROR: $f has pip install without --require-hashes"
+              FAILURES=$((FAILURES + 1))
+            fi
+          done
+          exit $FAILURES

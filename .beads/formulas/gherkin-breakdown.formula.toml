@@ -1,0 +1,732 @@
+description = """
+## Overview
+Create Gherkin scenarios from an English requirements document through iterative
+drafting, review, and validation until the final `GHERKINSCENARIOS.feature`
+matches the requirements precisely.
+
+This step-based formula progresses through:
+1. Load requirements and establish traceability matrix
+2. Draft initial scenarios covering all acceptance criteria
+3. Review pass: identify gaps and add missing scenarios
+4. Review pass: fix mistakes, improve clarity, consolidate duplicates
+5. Parse validation: ensure valid Gherkin syntax
+6. Quality gate: check if iteration is needed (loops back to step 3 if not perfect)
+7. Finalize and commit the feature file
+
+The formula iterates through review cycles until the quality gate passes,
+ensuring comprehensive coverage and correctness.
+
+## MANDATORY: Exact Step Execution
+Execute each formula step EXACTLY as written, in order, with no modifications.
+Do NOT skip steps, combine steps, or "optimize" the process. Each step exists
+because it is part of a known working process. For example, if a step says to
+restart an agent, restart it — do not reason that "keeping existing context
+would be better." Your job is faithful execution of these steps, not improvement
+of them.
+"""
+formula = "gherkin-breakdown"
+version = 2
+
+[inputs]
+[inputs.requirements_bead]
+description = "Bead ID containing the requirements text (preferred)"
+type = "string"
+required = false
+default = ""
+
+[inputs.requirements_path]
+description = "Path to requirements file in the workspace (fallback if bead not provided)"
+type = "string"
+required = false
+default = ""
+
+[inputs.target_workspace]
+description = "Target workspace where final file will be committed (default: current)"
+type = "string"
+required = false
+default = ""
+
+[inputs.output_path]
+description = "Path for output feature file (default: GHERKINSCENARIOS.feature)"
+type = "string"
+required = false
+default = "GHERKINSCENARIOS.feature"
+
+[inputs.max_iterations]
+description = "Maximum review iterations before forcing completion (default: 3)"
+type = "number"
+required = false
+default = "3"
+
+# ============================================================================
+# STEPS - Pre-expanded iteration workflow (max_iterations = 3)
+#
+# Structure:
+#   load-requirements
+#     -> draft-scenarios
+#       -> [iteration 1]: review-coverage-1 -> review-quality-1 -> parse-validate-1 -> quality-gate-1
+#         -> [iteration 2]: review-coverage-2 -> review-quality-2 -> parse-validate-2 -> quality-gate-2
+#           -> [iteration 3]: review-coverage-3 -> review-quality-3 -> parse-validate-3 -> quality-gate-3
+#             -> finalize
+#
+# Each quality-gate can short-circuit remaining iterations if quality passes.
+# ============================================================================
+
+[[steps]]
+id = "load-requirements"
+title = "Load requirements and establish traceability"
+description = """
+**Entry criteria:** Requirements source is available (bead or file path).
+
+**Actions:**
+1. If `requirements_bead` is provided:
+   - Run `af bead show {{requirements_bead}}` to read the full requirements text
+2. Otherwise, read the file at `{{requirements_path}}` in the workspace
+
+3. Parse the requirements document and extract:
+   - All acceptance criteria (numbered or bulleted items)
+   - User stories or feature descriptions
+   - Edge cases mentioned
+   - Error conditions specified
+
+4. Create a **traceability matrix** as a comment block:
+   ```gherkin
+   # TRACEABILITY MATRIX
+   # REQ-001: [acceptance criterion text] -> Scenario(s): TBD
+   # REQ-002: [acceptance criterion text] -> Scenario(s): TBD
+   # ...
+   ```
+
+5. Store the parsed requirements and matrix in the step bead description
+   for downstream steps to reference.
+
+**Exit criteria:**
+- Requirements text fully loaded
+- Traceability matrix created with all identified requirements
+- Step bead contains parsed requirements for downstream reference
+"""
+
+[[steps]]
+id = "draft-scenarios"
+title = "Draft initial Gherkin scenarios"
+needs = ["load-requirements"]
+description = """
+**Entry criteria:** Requirements loaded and traceability matrix established.
+
+**Actions:**
+1. Read the requirements and traceability matrix from the previous step bead
+
+2. For EACH acceptance criterion in the matrix, create one or more scenarios:
+   ```gherkin
+   # maps-to: REQ-001
+   Scenario: [Descriptive title matching the requirement]
+     Given [precondition with concrete values]
+     When [action with specific data]
+     Then [expected outcome with verifiable assertion]
+   ```
+
+3. Apply these Gherkin best practices:
+   - Use concrete example data, not placeholders like "<value>"
+   - Use Scenario Outline + Examples table when multiple data variations exist
+   - Keep scenarios focused on ONE behavior each
+   - Use Background for common setup across scenarios
+   - Apply appropriate tags (@smoke, @regression, @edge-case, etc.)
+
+4. Structure the feature file:
+   ```gherkin
+   Feature: [Feature name from requirements]
+     As a [role]
+     I want [capability]
+     So that [benefit]
+
+     # TRACEABILITY MATRIX
+     # REQ-001: ... -> Scenario: ...
+     # REQ-002: ... -> Scenario: ...
+
+     Background:
+       [Common setup if applicable]
+
+     # maps-to: REQ-001
+     Scenario: First scenario
+       ...
+   ```
+
+5. Write the draft to `{{output_path}}` in the workspace
+
+**Exit criteria:**
+- Draft feature file created with scenarios for all requirements
+- Each scenario has `# maps-to: REQ-XXX` traceability comment
+- File written to workspace
+- Iteration counter initialized to 1
+"""
+
+# ============================================================================
+# ITERATION 1
+# ============================================================================
+
+[[steps]]
+id = "review-coverage-1"
+title = "Iteration 1: Review pass - identify gaps and add missing scenarios"
+needs = ["draft-scenarios"]
+description = """
+**Iteration 1 of 3** - Coverage review
+
+**Entry criteria:** Draft scenarios exist in `{{output_path}}`.
+
+**Actions:**
+1. Read the current `{{output_path}}` and the original requirements
+
+2. Cross-reference each requirement against existing scenarios:
+   - Check the traceability matrix: does every REQ-XXX have a mapped scenario?
+   - Are there implicit requirements not captured? (error handling, edge cases)
+   - Are there requirements that need multiple scenarios to fully cover?
+
+3. For each gap found, add scenarios:
+   ```gherkin
+   # maps-to: REQ-005 (ADDED: gap identified in review)
+   Scenario: [New scenario covering the gap]
+     Given ...
+     When ...
+     Then ...
+   ```
+
+4. If a requirement is AMBIGUOUS and cannot be reasonably interpreted:
+   - Create a QUESTION bead: `af bead create --type task --labels "question" --title "Clarification needed: REQ-XXX"`
+   - Add a placeholder scenario with @needs-clarification tag
+   - Document the ambiguity in the step bead
+
+5. Update the traceability matrix with new mappings
+
+6. Save the updated feature file
+
+**Exit criteria:**
+- All requirements have at least one mapped scenario
+- Ambiguous requirements documented with QUESTION beads
+- Traceability matrix updated
+- Gap analysis recorded in step bead description
+"""
+
+[[steps]]
+id = "review-quality-1"
+title = "Iteration 1: Review pass - fix mistakes and improve clarity"
+needs = ["review-coverage-1"]
+description = """
+**Iteration 1 of 3** - Quality review
+
+**Entry criteria:** Coverage review complete, all requirements mapped.
+
+**Actions:**
+1. Read the current `{{output_path}}`
+
+2. Check for and fix these issues:
+
+   **Syntax issues:**
+   - Correct Given/When/Then keyword usage
+   - Fix indentation and formatting
+   - Ensure proper table alignment for Examples
+
+   **Duplicate scenarios:**
+   - Identify scenarios testing the same behavior
+   - Consolidate into single scenarios or Scenario Outlines
+   - Preserve all traceability comments when merging
+
+   **Vague steps:**
+   - Replace vague language with concrete values
+   - BAD: "Given a user exists"
+   - GOOD: "Given a user 'alice@example.com' with role 'admin' exists"
+
+   **Scenario titles:**
+   - Ensure titles describe the behavior, not implementation
+   - BAD: "Scenario: Test login button"
+   - GOOD: "Scenario: User can authenticate with valid credentials"
+
+   **Step consistency:**
+   - Ensure similar actions use consistent step wording
+   - This enables step definition reuse
+
+3. Preserve ALL `# maps-to` references when editing
+
+4. Save the improved feature file
+
+**Exit criteria:**
+- No syntax errors in Gherkin
+- No duplicate scenarios
+- All steps use concrete example data
+- Consistent step wording throughout
+- Changes documented in step bead
+"""
+
+[[steps]]
+id = "parse-validate-1"
+title = "Iteration 1: Parse and validate Gherkin syntax"
+needs = ["review-quality-1"]
+description = """
+**Iteration 1 of 3** - Parse validation
+
+**Entry criteria:** Quality review complete.
+
+**Actions:**
+1. Read the current `{{output_path}}`
+
+2. Validate Gherkin syntax using available tools:
+   ```bash
+   # Try cucumber if available
+   cucumber --dry-run --format progress {{output_path}} 2>&1 || true
+
+   # Or use a Gherkin parser directly
+   # npx @cucumber/gherkin-utils --format ndjson {{output_path}}
+   ```
+
+3. If no parser is available, perform manual validation:
+   - Every Scenario has at least one Given, When, Then
+   - Scenario Outline has matching Examples table
+   - Examples table columns match <placeholder> names
+   - No orphaned steps outside scenarios
+   - Feature keyword present at top
+   - Proper indentation (2 spaces)
+
+4. For each parse error found:
+   - Document the error location and type
+   - Apply the fix directly
+   - Re-validate after fix
+
+5. Check semantic issues:
+   - Examples tables have headers matching placeholders
+   - No empty scenarios
+   - Tags are valid identifiers (@word-word format)
+
+6. Record validation results in step bead:
+   - Number of scenarios
+   - Number of parse errors found and fixed
+   - Any remaining issues
+
+**Exit criteria:**
+- Feature file parses without errors
+- All semantic issues resolved
+- Validation report in step bead
+"""
+
+[[steps]]
+id = "quality-gate-1"
+title = "Iteration 1: Quality gate - assess if iteration needed"
+needs = ["parse-validate-1"]
+description = """
+**Iteration 1 of 3** - Quality gate with early exit
+
+**Entry criteria:** Parse validation complete.
+
+**Actions:**
+1. Read the current `{{output_path}}` and original requirements
+
+2. Run the quality checklist:
+
+   **Coverage check:**
+   - [ ] Every acceptance criterion has >= 1 scenario
+   - [ ] Edge cases from requirements are covered
+   - [ ] Error conditions have scenarios
+
+   **Quality check:**
+   - [ ] No parse errors
+   - [ ] No duplicate scenarios
+   - [ ] All steps use concrete data
+   - [ ] Traceability complete (every REQ mapped)
+
+   **Completeness check:**
+   - [ ] No @needs-clarification tags remaining (unless QUESTION beads created)
+   - [ ] No TODO comments in scenarios
+   - [ ] Background used appropriately
+
+3. Count issues found in each category
+
+4. **Decision logic (EARLY EXIT):**
+   ```
+   IF all checks pass:
+     -> Mark steps review-coverage-2, review-quality-2, parse-validate-2,
+        quality-gate-2, review-coverage-3, review-quality-3, parse-validate-3,
+        quality-gate-3 as 'skipped: quality passed on iteration 1'
+     -> Record: "Quality gate PASSED on iteration 1 - skipping iterations 2-3"
+     -> Proceed to finalize step
+
+   ELSE:
+     -> Record issues found
+     -> Record: "Quality gate FAILED on iteration 1, proceeding to iteration 2"
+     -> Proceed to review-coverage-2 (next in dependency chain)
+   ```
+
+5. To skip remaining iterations, close each step with status 'skipped':
+   ```bash
+   af bead close <step-id> --reason "Skipped: quality passed on iteration 1"
+   ```
+
+**Exit criteria:**
+- Quality assessment complete
+- Either: all checks pass (skip iterations 2-3), OR proceed to iteration 2
+- Decision recorded in step bead
+"""
+
+# ============================================================================
+# ITERATION 2
+# ============================================================================
+
+[[steps]]
+id = "review-coverage-2"
+title = "Iteration 2: Review pass - identify gaps and add missing scenarios"
+needs = ["quality-gate-1"]
+description = """
+**Iteration 2 of 3** - Coverage review
+
+**Note:** This step runs only if quality-gate-1 failed. If quality-gate-1 passed,
+this step will be marked as 'skipped'.
+
+**Entry criteria:** Quality gate 1 failed, issues documented.
+
+**Actions:**
+1. Read the issues identified in quality-gate-1
+
+2. Read the current `{{output_path}}` and the original requirements
+
+3. Focus on addressing the specific gaps identified:
+   - Missing scenario coverage
+   - Incomplete edge case handling
+   - Missing error condition scenarios
+
+4. For each gap found, add scenarios:
+   ```gherkin
+   # maps-to: REQ-XXX (ADDED: iteration 2 - addressing gap from iteration 1)
+   Scenario: [New scenario covering the gap]
+     Given ...
+     When ...
+     Then ...
+   ```
+
+5. Update the traceability matrix with new mappings
+
+6. Save the updated feature file
+
+**Exit criteria:**
+- Gaps from iteration 1 addressed
+- Traceability matrix updated
+- Changes documented in step bead
+"""
+
+[[steps]]
+id = "review-quality-2"
+title = "Iteration 2: Review pass - fix mistakes and improve clarity"
+needs = ["review-coverage-2"]
+description = """
+**Iteration 2 of 3** - Quality review
+
+**Note:** This step runs only if quality-gate-1 failed.
+
+**Entry criteria:** Coverage review 2 complete.
+
+**Actions:**
+1. Read the current `{{output_path}}`
+
+2. Address quality issues identified in iteration 1:
+   - Fix any remaining syntax issues
+   - Consolidate duplicates introduced in iteration 2
+   - Improve vague steps
+   - Ensure consistent step wording
+
+3. Preserve ALL `# maps-to` references when editing
+
+4. Save the improved feature file
+
+**Exit criteria:**
+- Quality issues from iteration 1 addressed
+- New scenarios meet quality standards
+- Changes documented in step bead
+"""
+
+[[steps]]
+id = "parse-validate-2"
+title = "Iteration 2: Parse and validate Gherkin syntax"
+needs = ["review-quality-2"]
+description = """
+**Iteration 2 of 3** - Parse validation
+
+**Note:** This step runs only if quality-gate-1 failed.
+
+**Entry criteria:** Quality review 2 complete.
+
+**Actions:**
+1. Read the current `{{output_path}}`
+
+2. Validate Gherkin syntax (same process as iteration 1)
+
+3. Fix any parse errors introduced in iteration 2
+
+4. Record validation results in step bead
+
+**Exit criteria:**
+- Feature file parses without errors
+- All semantic issues resolved
+- Validation report in step bead
+"""
+
+[[steps]]
+id = "quality-gate-2"
+title = "Iteration 2: Quality gate - assess if iteration needed"
+needs = ["parse-validate-2"]
+description = """
+**Iteration 2 of 3** - Quality gate with early exit
+
+**Note:** This step runs only if quality-gate-1 failed.
+
+**Entry criteria:** Parse validation 2 complete.
+
+**Actions:**
+1. Read the current `{{output_path}}` and original requirements
+
+2. Run the quality checklist (same as iteration 1)
+
+3. Count issues found in each category
+
+4. **Decision logic (EARLY EXIT):**
+   ```
+   IF all checks pass:
+     -> Mark steps review-coverage-3, review-quality-3, parse-validate-3,
+        quality-gate-3 as 'skipped: quality passed on iteration 2'
+     -> Record: "Quality gate PASSED on iteration 2 - skipping iteration 3"
+     -> Proceed to finalize step
+
+   ELSE:
+     -> Record issues found
+     -> Record: "Quality gate FAILED on iteration 2, proceeding to iteration 3"
+     -> Proceed to review-coverage-3 (next in dependency chain)
+   ```
+
+5. To skip remaining iterations, close each step with status 'skipped':
+   ```bash
+   af bead close <step-id> --reason "Skipped: quality passed on iteration 2"
+   ```
+
+**Exit criteria:**
+- Quality assessment complete
+- Either: all checks pass (skip iteration 3), OR proceed to iteration 3
+- Decision recorded in step bead
+"""
+
+# ============================================================================
+# ITERATION 3 (FINAL)
+# ============================================================================
+
+[[steps]]
+id = "review-coverage-3"
+title = "Iteration 3: Review pass - identify gaps and add missing scenarios"
+needs = ["quality-gate-2"]
+description = """
+**Iteration 3 of 3 (FINAL)** - Coverage review
+
+**Note:** This step runs only if quality-gate-2 failed. If quality-gate-1 or
+quality-gate-2 passed, this step will be marked as 'skipped'.
+
+**Entry criteria:** Quality gate 2 failed, issues documented.
+
+**Actions:**
+1. Read the issues identified in quality-gate-2
+
+2. Read the current `{{output_path}}` and the original requirements
+
+3. This is the FINAL iteration - address all remaining gaps:
+   - Any still-missing scenario coverage
+   - Remaining edge case handling
+   - Final error condition scenarios
+
+4. For each gap found, add scenarios:
+   ```gherkin
+   # maps-to: REQ-XXX (ADDED: iteration 3 - final pass)
+   Scenario: [New scenario covering the gap]
+     Given ...
+     When ...
+     Then ...
+   ```
+
+5. Update the traceability matrix with new mappings
+
+6. Save the updated feature file
+
+**Exit criteria:**
+- All addressable gaps resolved
+- Traceability matrix finalized
+- Changes documented in step bead
+"""
+
+[[steps]]
+id = "review-quality-3"
+title = "Iteration 3: Review pass - fix mistakes and improve clarity"
+needs = ["review-coverage-3"]
+description = """
+**Iteration 3 of 3 (FINAL)** - Quality review
+
+**Note:** This step runs only if quality-gate-2 failed.
+
+**Entry criteria:** Coverage review 3 complete.
+
+**Actions:**
+1. Read the current `{{output_path}}`
+
+2. Final quality pass - address all remaining issues:
+   - Fix any remaining syntax issues
+   - Final duplicate consolidation
+   - Final step clarity improvements
+   - Ensure consistent step wording throughout
+
+3. Preserve ALL `# maps-to` references when editing
+
+4. Save the improved feature file
+
+**Exit criteria:**
+- All addressable quality issues resolved
+- Feature file at highest achievable quality
+- Changes documented in step bead
+"""
+
+[[steps]]
+id = "parse-validate-3"
+title = "Iteration 3: Parse and validate Gherkin syntax"
+needs = ["review-quality-3"]
+description = """
+**Iteration 3 of 3 (FINAL)** - Parse validation
+
+**Note:** This step runs only if quality-gate-2 failed.
+
+**Entry criteria:** Quality review 3 complete.
+
+**Actions:**
+1. Read the current `{{output_path}}`
+
+2. Final Gherkin syntax validation
+
+3. Fix any parse errors introduced in iteration 3
+
+4. Record final validation results in step bead
+
+**Exit criteria:**
+- Feature file parses without errors
+- All semantic issues resolved
+- Final validation report in step bead
+"""
+
+[[steps]]
+id = "quality-gate-3"
+title = "Iteration 3: Quality gate - final assessment"
+needs = ["parse-validate-3"]
+description = """
+**Iteration 3 of 3 (FINAL)** - Final quality gate
+
+**Note:** This step runs only if quality-gate-2 failed. This is the LAST
+iteration - we proceed to finalize regardless of outcome.
+
+**Entry criteria:** Parse validation 3 complete.
+
+**Actions:**
+1. Read the current `{{output_path}}` and original requirements
+
+2. Run the quality checklist (same as previous iterations)
+
+3. Count issues found in each category
+
+4. **Decision logic (FINAL - NO LOOP):**
+   ```
+   IF all checks pass:
+     -> Record: "Quality gate PASSED on iteration 3"
+     -> Proceed to finalize step
+
+   ELSE (max iterations reached):
+     -> Record all remaining issues as WARNINGS (not blockers)
+     -> Record: "Quality gate FORCED after 3 iterations - proceeding with warnings"
+     -> Proceed to finalize step with warnings documented
+   ```
+
+5. Document any remaining issues as warnings in finalize step context
+
+**Exit criteria:**
+- Final quality assessment complete
+- Remaining issues documented as warnings (if any)
+- Ready to proceed to finalize
+"""
+
+# ============================================================================
+# FINALIZE
+# ============================================================================
+
+[[steps]]
+id = "finalize"
+title = "Finalize and commit feature file"
+needs = ["quality-gate-3"]
+description = """
+**Entry criteria:** Quality gate passed (or max iterations reached on quality-gate-3).
+
+**Note:** This step depends on quality-gate-3, but may be unblocked early if
+quality-gate-1 or quality-gate-2 pass and skip remaining iterations.
+
+**Actions:**
+1. Read the final `{{output_path}}`
+
+2. Determine which iteration completed:
+   - Check which quality-gate marked as passed or if max iterations forced
+
+3. Add header documentation:
+   ```gherkin
+   # Generated from: {{requirements_path}} or {{requirements_bead}}
+   # Generated by: gherkin-breakdown formula
+   # Iterations: [1, 2, or 3 based on which quality-gate passed]
+   # Coverage: [X] requirements -> [Y] scenarios
+   #
+   # TRACEABILITY MATRIX
+   # REQ-001: [text] -> Scenario: [name] (line XX)
+   # ...
+
+   Feature: ...
+   ```
+
+4. If there are warnings from quality-gate-3 (max iterations reached):
+   - Add a WARNING section in the header documenting remaining issues
+   - These should be reviewed by a human
+
+5. Final formatting pass:
+   - Ensure consistent 2-space indentation
+   - Blank line between scenarios
+   - Tags on their own line above scenarios
+
+6. Commit the feature file:
+   ```bash
+   git add {{output_path}}
+   git commit -m "feat: add Gherkin scenarios from requirements
+
+   Generated by gherkin-breakdown formula.
+   - Requirements source: {{requirements_path or requirements_bead}}
+   - Scenarios: [count]
+   - Iterations: [count]
+   - Coverage: [X/Y] requirements mapped"
+   ```
+
+7. Push the branch:
+   ```bash
+   git push origin $(git branch --show-current)
+   ```
+
+8. Create a pull request:
+   ```bash
+   gh pr create \
+     --title "Add Gherkin scenarios from requirements" \
+     --body "Feature file generated by gherkin-breakdown.
+
+   ## Summary
+   - Source: {{requirements_path or requirements_bead}}
+   - Scenarios: [count]
+   - Review iterations: [count]
+
+   ## Traceability
+   [Include matrix summary]"
+   ```
+
+9. Record the PR URL in the step bead description
+
+**Exit criteria:**
+- Feature file committed and pushed
+- PR created
+- Formula complete
+"""

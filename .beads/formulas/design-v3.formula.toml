@@ -1,0 +1,976 @@
+description = """
+## Overview
+Structured design exploration with constraint verification, dependency mapping,
+and cross-dimension conflict detection for agents.
+
+Requirements come from the assigned bead — which may contain an inline design
+problem statement, a path to a requirements document, or a link to a GitHub issue.
+
+This formula guides an agent through the design-v3 structured exploration process:
+1. Analyze the problem, extract constraints, calibrate scope
+2. Verify constraints before any solution exploration
+3. Explore 6 dimensions with constraint gates per dimension
+4. Audit constraints, detect cross-dimension conflicts, map dependencies
+5. Synthesize into unified, actionable design document
+6. Finalize with verification and commit
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| issue | cli | The issue/design-request ID assigned to this agent |
+
+## Supervisor Communication Contract
+
+This formula sends messages to the supervisor expecting specific responses.
+When building out the supervisor role, it must handle:
+
+| Inbound message | When sent | Expected response |
+|-----------------|-----------|-------------------|
+| HELP: unclear requirements | Agent blocked on ambiguous input | Clarification or decision |
+| NOTICE: main has failing tests | Pre-existing failures found | Acknowledgment |
+| Stuck/blocked notification | Agent can't proceed | Unblocking help or reassignment |
+| WORK_DONE (via `af done`) | All formula steps complete | Process merge, close issue, dispatch conflict resolution if needed |
+
+## Failure Modes
+
+| Situation | Action |
+|-----------|--------|
+| Constraints unclear | Mail Supervisor for clarification, do not guess |
+| Cross-dimension conflict unresolvable | Document options, mail Supervisor for decision |
+| Tests fail | Fix them. Do not proceed with failures. |
+| Context filling up | Use af handoff to cycle to fresh session |
+| Blocked on external | Mail Supervisor, mark yourself stuck |
+| Scope unclear | Default to 'medium' unless problem is obviously small or large |
+
+## Anti-Patterns to Avoid
+
+| Anti-Pattern | Prevention |
+|--------------|------------|
+| Proposing SQL when "flat file only" required | Data dimension constraint check |
+| Over-engineering simple problems | Scope calibration reduces dimensions/depth |
+| Ignoring constraints in favor of "better" solution | Constraint gates reject violating options |
+| Leaving constraint compliance implicit | Explicit "Constraints Respected" section |
+| Implicit inter-component dependencies | Phase 2.8 Dependency Graph |
+| Vague phase deliverables | Phase Acceptance Criteria with checkboxes |
+| Security vs Scale decided silently | Phase 2.7 Conflict Matrix with rationale |
+| Risks discovered during implementation | Risk Registry in design phase |
+| Irreversible decisions made without awareness | Reversibility analysis per option |
+
+## MANDATORY: Exact Step Execution
+Execute each formula step EXACTLY as written, in order, with no modifications.
+Do NOT skip steps, combine steps, or "optimize" the process. Each step exists
+because it is part of a known working process. For example, if a step says to
+restart a agent, restart it — do not reason that "keeping existing context
+would be better." Your job is faithful execution of these steps, not improvement
+of them.
+"""
+formula = "design-v3"
+version = 1
+
+# ============================================================================
+# PRE-WORK INVARIANT STEPS
+# ============================================================================
+
+[[steps]]
+id = "load-context"
+title = "Load context and understand design assignment"
+description = """
+Initialize your session and understand the design problem you're assigned.
+
+**1. Prime your environment:**
+```bash
+af prime                    # Load role context
+```
+
+**2. Read your assigned issue:**
+```bash
+af bead show {{issue}}           # Full issue details
+```
+
+**3. Check inbox for additional context:**
+```bash
+af mail inbox
+# Read any HANDOFF or assignment messages
+```
+
+**4. Extract requirements from the bead:**
+The bead is your source of truth. It may provide requirements in one of three forms:
+
+- **Inline requirements**: The bead description itself contains the design problem. Extract requirements directly.
+- **Proposal document path**: The bead references a file (e.g., `docs/design-request.md`). Read it completely.
+- **GitHub issue link**: The bead contains a URL (e.g., `https://github.com/org/repo/issues/123`).
+  Fetch the issue via `gh issue view <number> --repo <org/repo>` and extract requirements from it.
+
+Whichever form, capture the full requirements — this is your design problem statement.
+
+**5. Identify design inputs:**
+- **Problem**: The core design problem or feature request
+- **Context**: Existing code, architecture, constraints mentioned
+- **Scope**: Size hint if provided ('small', 'medium', 'large'). Default: medium
+- **Output directory**: Where to create design artifacts. Default: `.designs/<issue-id>`
+
+**6. Verify you can proceed:**
+- No unresolved blockers on the issue
+- You understand the design problem
+- Required context is available
+
+If blocked or unclear, mail Supervisor immediately:
+```bash
+af mail send supervisor -s "HELP: Unclear design requirements" -m "Issue: {{issue}}
+Question: <what you need clarified>"
+```
+
+**Exit criteria:** You understand the design problem and can begin analysis."""
+
+[[steps]]
+id = "branch-setup"
+title = "Set up working branch"
+needs = ["load-context"]
+description = """
+Ensure you're on a clean feature branch ready for work.
+
+**1. Check current branch state:**
+```bash
+git status
+git branch --show-current
+```
+
+**2. If not on a feature branch, create one:**
+```bash
+# Standard naming: agent/<your-name> or feature/<issue-id>
+git checkout -b agent/<name>
+```
+
+**3. Ensure clean working state:**
+```bash
+git status                  # Should show "working tree clean"
+git stash list              # Should be empty
+```
+
+If dirty state from previous work:
+```bash
+# If changes are relevant to this issue:
+git add -A && git commit -m "WIP: <description>"
+
+# If changes are unrelated cruft:
+git stash push -m "unrelated changes before {{issue}}"
+# Or discard if truly garbage:
+git checkout -- .
+```
+
+**4. Sync with main:**
+```bash
+git fetch origin
+git rebase origin/main      # Get latest, rebase your branch
+```
+
+If rebase conflicts:
+- Resolve them carefully
+- Test after resolution
+- If stuck, mail Supervisor
+
+**Exit criteria:** You're on a clean feature branch, rebased on latest main."""
+
+[[steps]]
+id = "preflight-tests"
+title = "Verify tests pass on main"
+needs = ["branch-setup"]
+description = """
+Check if the codebase is healthy BEFORE starting your work.
+
+**The Scotty Principle:** Don't walk past a broken warp core. But also don't
+let someone else's mess consume your entire mission.
+
+**1. Check tests on main:**
+```bash
+git stash                   # Save your branch state
+git checkout origin/main
+# Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
+# Then run it. Examples: make test, npm test, cargo test, go test ./...
+```
+
+**2. If tests PASS:**
+```bash
+git checkout -              # Back to your branch
+git stash pop               # Restore state
+```
+Continue to implement step.
+
+**3. If tests FAIL on main:**
+
+Make a judgment call:
+
+| Situation | Action |
+|-----------|--------|
+| Quick fix (<15 min) | Fix it, commit to main, then continue |
+| Medium fix (15-60 min) | Fix if it blocks your work, else file bead |
+| Big fix (>1 hour) | File bead, notify Supervisor, proceed with your work |
+
+**Quick fix path:**
+```bash
+# Fix the issue
+git add <files>
+git commit -m "fix: <description> (pre-existing failure)"
+git push origin main
+git checkout -
+git stash pop
+git rebase origin/main      # Get your fix
+```
+
+**File and proceed path:**
+```bash
+af bead create --title "Pre-existing test failure: <description>" \
+  --type bug --priority 1
+
+af mail send supervisor -s "NOTICE: Main has failing tests" \
+  -m "Found pre-existing test failures on main.
+Filed: <bead-id>
+Proceeding with my assigned work ({{issue}})."
+
+git checkout -
+git stash pop
+```
+
+**Context consideration:**
+If fixing pre-existing failures consumed significant context:
+```bash
+af handoff -s "Fixed pre-existing failures, ready for assigned work" \
+  -m "Issue: {{issue}}
+Fixed: <what you fixed>
+Ready to start: phase-1-problem-analysis step"
+```
+Fresh session continues from phase-1-problem-analysis.
+
+**Exit criteria:** Tests pass on main (or issue filed), ready to begin design work."""
+
+# ============================================================================
+# DOMAIN STEPS (from .claude/skills/design-v3/SKILL.md)
+# ============================================================================
+
+[[steps]]
+id = "phase-1-problem-analysis"
+title = "Phase 1: Problem Analysis"
+needs = ["preflight-tests"]
+description = """
+
+Parse the design problem and extract structured requirements.
+
+**Entry:** Requirements are available (from bead description, proposal file, or GitHub issue).
+
+**1. Parse the requirements and extract:**
+   - Core requirement (what needs to exist)
+   - User needs (who benefits and how)
+   - **CONSTRAINTS (what limits the solution)** ← CRITICAL
+   - Success criteria (how to know it works)
+
+**2. Determine scope implications:**
+   - Small: Single file/function change → **Use reduced dimension set** (Data, API, Integration only)
+   - Medium: Multiple files/package affected → **Standard 6 dimensions**
+   - Large: System-wide or cross-service impact → **Full depth analysis**
+
+**3. Create the output directory and problem summary:**
+
+Determine the output directory (default: `.designs/{{issue}}`):
+```bash
+OUTPUT_DIR=".designs/{{issue}}"
+mkdir -p "$OUTPUT_DIR"
+```
+
+Write the problem summary to `$OUTPUT_DIR/problem-summary.md`:
+
+```markdown
+# Problem Summary
+
+## Core Requirement
+[One sentence describing what must be built]
+
+## User Needs
+- [Need 1]
+- [Need 2]
+
+## Constraints (HARD LIMITS - solutions MUST respect these)
+- [ ] [Constraint 1] ← Use checkboxes for verification
+- [ ] [Constraint 2]
+- [ ] [Constraint 3]
+
+## Scope: [small/medium/large]
+
+## Scope Calibration
+- Dimensions to analyze: [list based on scope]
+- Depth per dimension: [shallow/standard/deep]
+```
+
+**Anti-pattern:** Do NOT skip constraint extraction. Constraints discovered late cause
+rework in every downstream dimension.
+
+**Exit criteria:** Problem understood, constraints explicitly listed with checkboxes,
+scope calibrated, problem-summary.md written."""
+
+[[steps]]
+id = "phase-1-5-constraint-verification"
+title = "Phase 1.5: Constraint Verification Gate"
+needs = ["phase-1-problem-analysis"]
+description = """
+
+Ensure constraints are understood before ANY solution exploration.
+
+**Entry:** Problem summary with constraints listed.
+
+**Purpose:** This is a quality gate. Do NOT proceed to dimension analysis
+until every constraint is fully understood and has verification criteria.
+
+**1. For each constraint, answer:**
+   - What does this constraint prohibit?
+   - What does this constraint require?
+   - How will I verify proposals respect this?
+   - What is the impact if this constraint is relaxed?
+
+**2. Create constraint verification checklist** (append to problem-summary.md or
+create separate `$OUTPUT_DIR/constraints.md`):
+
+```markdown
+# Constraint Verification Checklist
+
+## Constraint: [e.g., "No database migrations (flat file only)"]
+- **Prohibits:** SQL tables, schema migrations, database dependencies
+- **Requires:** JSON/TOML/YAML flat files, no external DB
+- **Verification:** Check all data.md proposals use flat files only
+- **Relaxation Impact:** Would enable faster queries but add deployment complexity
+
+## Constraint: [e.g., "Must be backward compatible"]
+- **Prohibits:** Breaking changes to existing API/schema
+- **Requires:** Default values, migration path for existing data
+- **Verification:** Check all proposals include backward compat strategy
+- **Relaxation Impact:** Would simplify implementation but risk breaking consumers
+```
+
+**3. Checkpoint:** Can I explain each constraint in my own words?
+   - YES → Proceed to dimension analysis
+   - NO → Re-read requirements, mail Supervisor for clarification
+
+**Anti-pattern:** Do NOT ignore constraints in favor of a "better" solution.
+Constraint gates exist to reject violating options.
+
+**Exit criteria:** All constraints understood and verification criteria defined."""
+
+[[steps]]
+id = "phase-2-dimension-analysis"
+title = "Phase 2: Dimension Analysis (with Constraint Gates)"
+needs = ["phase-1-5-constraint-verification"]
+description = """
+
+Explore the design problem from 6 specialized dimensions, each gated by constraints.
+
+**Entry:** Problem summary and constraint checklist available.
+
+**Scope Calibration:**
+
+| Scope | Dimensions to Analyze | Depth |
+|-------|----------------------|-------|
+| Small | Data, API, Integration only | Shallow (1-2 options each) |
+| Medium | All 6 dimensions | Standard (2-3 options each) |
+| Large | All 6 dimensions | Deep (3-4 options each) |
+
+**For each dimension, follow this template with constraint gate:**
+
+```markdown
+# [Dimension Title]
+
+## Summary
+(1-2 paragraph overview)
+
+## Constraint Check (BEFORE exploring options)
+For each constraint from Phase 1.5:
+- [ ] [Constraint 1]: How this dimension must respect it
+- [ ] [Constraint 2]: How this dimension must respect it
+
+## Options Explored
+
+#### Option 1: [name]
+- **Description**: What is it?
+- **Constraint Compliance**: ✓ Respects [C1], ✓ Respects [C2] | ✗ VIOLATES [C3]
+- **Pros**: Benefits
+- **Cons**: Drawbacks
+- **Effort**: Low/Medium/High
+- **Reversibility**: Easy/Moderate/Difficult
+
+### Recommendation
+[Only recommend options that pass ALL constraint checks]
+
+## Dependencies Produced
+- [What this dimension's recommendation requires from other dimensions]
+- [What this dimension provides to other dimensions]
+
+## Risks Identified
+- [Risk 1]: [Description] - Severity: [Low/Medium/High] - Mitigation: [Strategy]
+
+## Constraints Identified
+- [Any NEW constraints discovered during this dimension's analysis]
+```
+
+**CRITICAL RULE:** If an option violates ANY constraint, it CANNOT be recommended.
+Mark it as "REJECTED: violates [constraint]" and move on.
+
+**The 6 Dimensions:**
+
+1. **API & Interface Design** (`$OUTPUT_DIR/api.md`)
+   Focus: Interface design and developer ergonomics.
+   Explore: CLI flags/subcommands, function signatures, config interface,
+   error messages, naming conventions, consistency with existing interfaces.
+
+2. **Data Model** (`$OUTPUT_DIR/data.md`)
+   Focus: Data model, storage, and migrations.
+   **CONSTRAINT-SENSITIVE:** This dimension most often violates storage constraints.
+   Double-check before proposing SQL, databases, or migrations.
+
+3. **User Experience** (`$OUTPUT_DIR/ux.md`)
+   Focus: User experience and workflow ergonomics.
+
+4. **Scalability** (`$OUTPUT_DIR/scale.md`)
+   Focus: Performance at scale and bottlenecks.
+   **CONSTRAINT-SENSITIVE:** Scale optimizations may introduce dependencies that
+   violate simplicity constraints. Verify before proposing caching layers, queues,
+   or external services.
+
+5. **Security** (`$OUTPUT_DIR/security.md`)
+   Focus: Threat model and attack surface.
+
+6. **Integration** (`$OUTPUT_DIR/integration.md`)
+   Focus: How it fits existing system.
+
+**Commit dimension analyses:**
+```bash
+git add "$OUTPUT_DIR"/*.md
+git commit -m "design: dimension analyses for {{issue}}"
+```
+
+**Context management:** Dimension analysis is the heaviest phase. If context is
+filling up after completing all dimensions, use `af handoff`:
+```bash
+af handoff -s "Dimension analysis complete" -m "Issue: {{issue}}
+Output dir: $OUTPUT_DIR
+Completed: All 6 dimension analyses
+Ready for: phase-2-5-constraint-audit step"
+```
+
+**Exit criteria:** All required dimension analyses complete (based on scope calibration),
+each with constraint checks, dependency mappings, and risk identifications."""
+
+[[steps]]
+id = "phase-2-5-constraint-audit"
+title = "Phase 2.5: Pre-Synthesis Constraint Audit"
+needs = ["phase-2-dimension-analysis"]
+description = """
+
+Final constraint check before synthesis to catch any violations.
+
+**Entry:** All dimension analyses complete.
+
+**1. Re-read the original constraints from Phase 1**
+
+**2. For each dimension's recommendation, verify:**
+
+```markdown
+# Pre-Synthesis Constraint Audit
+
+| Dimension | Recommendation | C1 | C2 | C3 | Status |
+|-----------|---------------|----|----|----|----|
+| API | [summary] | ✓ | ✓ | ✓ | PASS |
+| Data | [summary] | ✓ | ✓ | ✗ | **FAIL - REVISE** |
+| UX | [summary] | ✓ | ✓ | ✓ | PASS |
+| Scale | [summary] | ✓ | ✓ | ✓ | PASS |
+| Security | [summary] | ✓ | ✓ | ✓ | PASS |
+| Integration | [summary] | ✓ | ✓ | ✓ | PASS |
+```
+
+**3. If ANY dimension fails:**
+   - Return to that dimension's file
+   - Select a different option that passes all constraints
+   - Update the recommendation
+   - Re-run this audit
+
+Do NOT proceed to conflict matrix or synthesis with constraint violations.
+
+**Exit criteria:** All dimension recommendations pass constraint audit. Ready for
+conflict detection."""
+
+[[steps]]
+id = "phase-2-7-conflict-matrix"
+title = "Phase 2.7: Cross-Dimension Conflict Matrix"
+needs = ["phase-2-5-constraint-audit"]
+description = """
+
+Surface conflicts BETWEEN dimensions before synthesis.
+
+**Entry:** All dimensions pass constraint audit.
+
+**1. Build conflict matrix:**
+
+```markdown
+# Cross-Dimension Conflict Matrix
+
+|              | API | Data | UX | Scale | Security | Integration |
+|--------------|-----|------|----|-------|----------|-------------|
+| **API**      | -   |      |    |       |          |             |
+| **Data**     | ○   | -    |    |       |          |             |
+| **UX**       | ○   | ○    | -  |       |          |             |
+| **Scale**    | ○   | ⚠    | ○  | -     |          |             |
+| **Security** | ○   | ○    | ⚠  | ✗     | -        |             |
+| **Integration** | ○ | ○   | ○  | ○     | ○        | -           |
+
+Legend: ○ No conflict, ⚠ Tension (trade-off needed), ✗ Direct conflict (resolution required)
+```
+
+**2. For each ⚠ or ✗, document:**
+
+```markdown
+## Conflict: [Dimension A] vs [Dimension B]
+- **Nature**: [What the conflict is]
+- **Impact**: [What cannot coexist]
+- **Resolution Options**:
+  1. [Dimension A] wins: [trade-off]
+  2. [Dimension B] wins: [trade-off]
+  3. Hybrid: [compromise approach]
+- **Chosen Resolution**: [Option] because [rationale]
+```
+
+Write to `$OUTPUT_DIR/conflicts.md`.
+
+**Anti-pattern:** Do NOT decide Security vs Scale trade-offs silently.
+Every ⚠ and ✗ must have documented rationale.
+
+**Exit criteria:** All cross-dimension conflicts identified and resolution documented."""
+
+[[steps]]
+id = "phase-2-8-dependency-graph"
+title = "Phase 2.8: Dependency Graph"
+needs = ["phase-2-7-conflict-matrix"]
+description = """
+
+Map explicit dependencies between design components.
+
+**Entry:** Conflicts resolved.
+
+**1. Create dependency graph** (`$OUTPUT_DIR/dependencies.md`):
+
+```markdown
+# Dependency Graph
+
+## File Dependencies
+api.md ─────► data.md (API shapes require specific data structures)
+     │
+     └─────► integration.md (API must conform to existing patterns)
+
+data.md ────► scale.md (Storage format affects query performance)
+     │
+     └─────► security.md (Data model must support ACLs)
+
+security.md ─► scale.md (Security decisions constrain caching)
+
+ux.md ───────► api.md (UX flows require specific commands)
+
+## Component Dependencies
+| Component | Depends On | Provides To |
+|-----------|------------|-------------|
+| [Component 1] | [Dependencies] | [Dependents] |
+| [Component 2] | [Dependencies] | [Dependents] |
+```
+
+**2. Verify no circular dependencies**
+
+**3. Identify critical path:**
+   - Which components must be built first?
+   - What is the minimum viable implementation order?
+
+**Context management:** If context is filling after conflict matrix and dependency
+mapping, use `af handoff`:
+```bash
+af handoff -s "Pre-synthesis phases complete" -m "Issue: {{issue}}
+Output dir: $OUTPUT_DIR
+Completed: dimension analyses, constraint audit, conflict matrix, dependency graph
+Ready for: phase-3-synthesis step"
+```
+
+**Anti-pattern:** Do NOT leave inter-component dependencies implicit.
+Every dependency must be in the graph.
+
+**Exit criteria:** Dependencies mapped, critical path identified, no circular dependencies."""
+
+[[steps]]
+id = "phase-3-synthesis"
+title = "Phase 3: Synthesis"
+needs = ["phase-2-8-dependency-graph"]
+description = """
+
+Synthesize all dimension analyses into a unified, actionable design document.
+
+**Entry:** All dimension analyses pass constraint audit, conflicts resolved,
+dependencies mapped.
+
+**1. Read all dimension analyses** from `$OUTPUT_DIR/`
+
+**2. Reference conflict resolutions from Phase 2.7**
+
+**3. Create unified design document** (`$OUTPUT_DIR/design-doc.md`):
+
+```markdown
+# Design: [Problem Title]
+
+## Executive Summary
+(2-3 paragraph overview)
+
+## Constraints Respected
+All proposals in this design respect the following constraints:
+- ✓ [Constraint 1]
+- ✓ [Constraint 2]
+- ✓ [Constraint 3]
+
+## Problem Statement
+(Clear statement of what we're solving)
+
+## Proposed Design
+
+### Overview
+(High-level approach - 1 paragraph)
+
+### Key Components
+(Main pieces and how they fit together)
+
+### Component Dependency Graph
+[Component A] ──► [Component B] ──► [Component C]
+
+### Interface
+(CLI/API summary)
+
+### Data Model
+(Schema summary - MUST match storage constraints)
+
+## Cross-Dimension Trade-offs
+
+| Conflict | Resolution | Rationale |
+|----------|------------|-----------|
+| [Dim A] vs [Dim B] | [chosen] | [why] |
+
+## Trade-offs and Decisions
+
+### Decisions Made
+| Decision | Options Considered | Chosen | Rationale | Reversibility |
+|----------|-------------------|--------|-----------|---------------|
+| [decision] | [A, B, C] | [chosen] | [why] | [Easy/Moderate/Difficult] |
+
+### Open Questions
+- [ ] [Question 1]: [Options] - needs decision
+
+## Risk Registry
+
+| Risk | Severity | Likelihood | Mitigation | Owner |
+|------|----------|------------|------------|-------|
+| [Risk 1] | High | Medium | [Strategy] | TBD |
+
+## Implementation Plan
+
+### Phase 1: [Name] (Effort: [X])
+**Deliverables:**
+1. [Specific deliverable]
+
+**Acceptance Criteria:**
+- [ ] [Criterion 1]: [Specific, verifiable condition]
+
+**Dependencies:** [What must exist before this phase can start]
+**Risks addressed:** [Which risks from registry this phase mitigates]
+
+### Phase 2: [Name] (Effort: [X])
+...
+
+## Appendix: Dimension Analyses
+- [API Design](api.md)
+- [Data Model](data.md)
+- [User Experience](ux.md)
+- [Scalability](scale.md)
+- [Security](security.md)
+- [Integration](integration.md)
+- [Dependencies](dependencies.md)
+```
+
+**Commit synthesis:**
+```bash
+git add "$OUTPUT_DIR"/design-doc.md
+git commit -m "design: synthesized design document for {{issue}}"
+```
+
+**Exit criteria:** Synthesis complete, all constraints verified, dependencies mapped,
+design-doc.md written."""
+
+[[steps]]
+id = "phase-4-finalize"
+title = "Phase 4: Finalize"
+needs = ["phase-3-synthesis"]
+description = """
+
+Final verification of the complete design.
+
+**Entry:** design-doc.md created.
+
+**1. Final constraint verification:**
+   - Re-read "Constraints Respected" section
+   - Verify each constraint is actually respected in the design
+   - If ANY violation found: STOP, return to Phase 2.5 (go back to
+     phase-2-5-constraint-audit and rework)
+
+**2. Dependency verification:**
+   - Verify dependency graph is accurate
+   - Verify implementation phases respect dependencies
+   - No component should be scheduled before its dependencies
+
+**3. Risk verification:**
+   - All identified risks have mitigation strategies
+   - Risks are assigned to implementation phases
+
+**4. Quality check:**
+   - [ ] All required dimension files exist (based on scope)
+   - [ ] design-doc.md includes "Constraints Respected" section
+   - [ ] No REJECTED options appear in recommendations
+   - [ ] Implementation plan matches scope (not over-engineered)
+   - [ ] dependencies.md exists with component mapping
+   - [ ] All phases have acceptance criteria
+   - [ ] Risk registry is populated
+   - [ ] Cross-dimension conflicts documented
+
+**5. Commit the final design:**
+```bash
+git add "$OUTPUT_DIR"/
+git commit -m "design: finalized design for {{issue}}"
+```
+
+**Success Criteria (from design-v3 skill):**
+1. **Constraint compliance:** Zero violations of stated constraints
+2. **Scope calibration:** Design complexity matches problem complexity
+3. **Dependency clarity:** All component dependencies explicit and acyclic
+4. **Conflict resolution:** All cross-dimension conflicts documented with rationale
+5. **Actionable phases:** Each phase has verifiable acceptance criteria
+6. **Risk awareness:** Risks identified and mitigated in implementation plan
+
+**Exit criteria:** Design complete, constraint-verified, dependency-mapped, and committed."""
+
+# ============================================================================
+# POST-WORK INVARIANT STEPS
+# ============================================================================
+
+[[steps]]
+id = "self-review"
+title = "Self-review changes"
+needs = ["phase-4-finalize"]
+description = """
+Review your own changes before running tests.
+
+**1. Review the diff:**
+```bash
+git diff origin/main...HEAD     # All changes vs main
+git log --oneline origin/main..HEAD  # All commits
+```
+
+**2. Check for common issues:**
+
+| Category | Look For |
+|----------|----------|
+| Bugs | Off-by-one, null handling, edge cases |
+| Security | Injection, auth bypass, exposed secrets |
+| Style | Naming, formatting, code organization |
+| Completeness | Missing error handling, incomplete paths |
+| Cruft | Debug prints, commented code, TODOs |
+
+**3. Fix issues found:**
+Don't just note them - fix them now. Amend or add commits as needed.
+
+**4. Verify no unintended changes:**
+```bash
+git diff --stat origin/main...HEAD
+# Only files relevant to {{issue}} should appear
+```
+
+If you accidentally modified unrelated files, remove those changes.
+
+**Exit criteria:** Changes are clean, reviewed, and ready for testing."""
+
+[[steps]]
+id = "run-tests"
+title = "Run tests and verify coverage"
+needs = ["self-review"]
+description = """
+Verify your changes don't break anything and are properly tested.
+
+**1. Run the full test suite:**
+```bash
+# Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
+# Then run it. Examples: make test, npm test, cargo test, go test ./...
+```
+
+**ALL TESTS MUST PASS.** Do not proceed with failures.
+
+**2. If tests fail:**
+- Read the failure output carefully
+- Determine if your change caused it:
+  - If yes: Fix it. Return to implement step if needed.
+  - If no (pre-existing): File a bead, but still must pass for your PR
+
+```bash
+# Check if failure exists on main:
+git stash
+git checkout main
+# Run the same test command you discovered above
+git checkout -
+git stash pop
+```
+
+**3. Verify test coverage for new code:**
+- New features should have tests
+- Bug fixes should have regression tests
+- If you added significant code without tests, add them now
+
+**4. Validate terraform if .tf files were modified:**
+```bash
+# Check if any .tf files were changed in this branch
+TF_CHANGED=$(git diff --name-only origin/main...HEAD -- '*.tf' | head -1)
+if [ -n "$TF_CHANGED" ]; then
+  echo "Terraform files modified — running validation..."
+  TF_DIR=$(dirname "$TF_CHANGED")
+  (cd "$TF_DIR" && terraform validate) || { echo "FAIL: terraform validate failed"; exit 1; }
+  terraform fmt -check -recursive "$TF_DIR" || { echo "FAIL: terraform fmt check failed — run 'terraform fmt'"; exit 1; }
+  echo "Terraform validation passed."
+fi
+```
+
+**5. Run any other quality checks:**
+```bash
+# Linting (if configured)
+golangci-lint run ./...
+
+# Build check
+go build ./...
+```
+
+**Exit criteria:** All tests pass, terraform valid (if applicable), new code has appropriate test coverage."""
+
+[[steps]]
+id = "cleanup-workspace"
+title = "Clean up workspace"
+needs = ["run-tests"]
+description = """
+Ensure workspace is pristine before handoff.
+
+**Note:** The design-v3 process creates design documents in `.designs/{{issue}}/`
+which are the actual deliverables — these should NOT be deleted. They are committed
+as part of the work product.
+
+**1. Check for uncommitted changes:**
+```bash
+git status
+```
+Must show "working tree clean". If not:
+- Commit legitimate changes
+- Discard garbage: `git checkout -- .`
+
+**2. Check for untracked files:**
+```bash
+git status --porcelain
+```
+Should be empty. If not:
+- Add to .gitignore if appropriate
+- Remove if temporary: `rm <file>`
+- Commit if needed
+
+**3. Check stash:**
+```bash
+git stash list
+```
+Should be empty. If not:
+- Pop and commit: `git stash pop && git add -A && git commit`
+- Or drop if garbage: `git stash drop`
+
+**4. Push your branch:**
+```bash
+git push -u origin $(git branch --show-current)
+```
+
+**5. Verify nothing left behind:**
+```bash
+git status                  # Clean
+git stash list              # Empty
+git log origin/main..HEAD   # Your commits
+git diff origin/main...HEAD # Your changes (expected)
+```
+
+**Exit criteria:** Branch pushed, workspace clean, no cruft."""
+
+[[steps]]
+id = "prepare-for-review"
+title = "Prepare work for review"
+needs = ["cleanup-workspace"]
+description = """
+Verify work is complete and ready for review.
+
+**Note:** Do NOT close the issue. The Supervisor will close it after successful merge.
+This enables conflict-resolution retries without reopening closed issues.
+
+**1. Verify the issue shows your work:**
+```bash
+af bead show {{issue}}
+# Status should still be 'in_progress' (you're working on it)
+```
+
+**2. Add completion notes:**
+```bash
+af bead update {{issue}} --notes "Implemented: design-v3 exploration for {{issue}}.
+Design artifacts in .designs/{{issue}}/
+Includes: dimension analyses, conflict matrix, dependency graph, synthesized design-doc.md"
+```
+
+**Exit criteria:** Issue updated with completion notes."""
+
+[[steps]]
+id = "submit-and-exit"
+title = "Submit PR and exit"
+needs = ["prepare-for-review"]
+description = """
+Create a PR and signal completion.
+
+**Ephemeral Agent Model:**
+Once you submit, you're done. The Supervisor will:
+1. Review and merge your PR
+2. Handle rebasing (mechanical rebases done automatically)
+3. Close your issue after successful merge
+4. Create conflict-resolution tasks if needed (fresh agent handles those)
+
+**1. Create a pull request:**
+```bash
+gh pr create --title "design: {{issue}}" --body "Design artifacts for {{issue}}.
+See .designs/{{issue}}/design-doc.md for the synthesized design."
+```
+
+**2. Complete the formula:**
+```bash
+af done
+```
+
+`af done` closes the current formula step and — since this is the last step —
+mails WORK_DONE to the Supervisor and cleans up the checkpoint.
+
+**3. You're done:**
+Your PR is open and the Supervisor knows you're done.
+Your workspace can be cleaned up - all work is pushed to origin.
+
+If you have context remaining, you may:
+- Pick up new work from `af prime`
+- Or use `af handoff` to cycle to a fresh session
+
+If the Supervisor needs conflict resolution, it will dispatch a fresh agent.
+You do NOT need to wait around.
+
+**Exit criteria:** PR created, Supervisor notified via WORK_DONE, agent done."""
+
+[vars]
+[vars.issue]
+description = "The issue/design-request ID assigned to this agent"
+required = true
+source = "cli"

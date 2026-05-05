@@ -1,0 +1,59 @@
+formula = "investigate"
+description = """
+## Overview 
+Investigate a codebase question or bug with structured analysis
+"""
+version = 1
+
+[vars]
+[vars.issue]
+description = "What to investigate (bug description, question, or issue reference)"
+required = true
+source = "cli"
+
+[[steps]]
+id = "orient"
+title = "Orient and scope"
+description = """
+Read the issue or question: ${issue}
+
+Investigate the codebase to understand the affected layers, files, and data flow.
+Produce a short written summary of what you found — affected files, the break point
+(if a bug), and any contextual gotchas an implementer should know.
+
+Do NOT fix anything. Do NOT propose solutions. Map the terrain.
+
+## MANDATORY: Exact Step Execution
+Execute each formula step EXACTLY as written, in order, with no modifications.
+Do NOT skip steps, combine steps, or "optimize" the process. Each step exists
+because it is part of a known working process. For example, if a step says to
+restart an agent, restart it — do not reason that "keeping existing context
+would be better." Your job is faithful execution of these steps, not improvement
+of them.
+"""
+
+[[steps]]
+id = "verify"
+title = "Verify findings against symptoms"
+needs = ["orient"]
+description = """
+Re-read your orient summary. For each claim you made:
+1. Cite the exact file and line that supports it
+2. If you cannot cite evidence, retract the claim
+
+If your findings do not fully explain the reported symptoms, say what is missing.
+"""
+
+[[steps]]
+id = "report"
+title = "Write up findings"
+needs = ["verify"]
+description = """
+Write a concise report with:
+- Summary (1-2 sentences)
+- Affected files with their roles
+- The break point or answer
+- Gotchas the implementer should know
+
+Mail the report to the dispatcher.
+"""
