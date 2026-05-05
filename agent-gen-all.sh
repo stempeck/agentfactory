@@ -46,6 +46,8 @@ if [ ! -f "$AF_SRC/go.mod" ] || ! grep -q agentfactory "$AF_SRC/go.mod" 2>/dev/n
     exit 1
 fi
 
+export AF_SOURCE_ROOT="$AF_SRC"
+
 PROJECT="$(pwd)"
 echo "project:   $PROJECT"
 echo "af source: $AF_SRC"
