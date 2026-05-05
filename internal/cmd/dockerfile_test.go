@@ -45,8 +45,8 @@ func TestDockerfileSupplyChainInvariants(t *testing.T) {
 	})
 
 	t.Run("nodesource_gpg_keyring", func(t *testing.T) {
-		if !strings.Contains(content, "dd of=/usr/share/keyrings/nodesource") {
-			t.Error("missing dd keyring pattern for NodeSource")
+		if !strings.Contains(content, "gpg --dearmor -o /usr/share/keyrings/nodesource") {
+			t.Error("missing gpg --dearmor keyring pattern for NodeSource")
 		}
 		if !strings.Contains(content, "signed-by=/usr/share/keyrings/nodesource") {
 			t.Error("missing signed-by for NodeSource apt source")
