@@ -44,9 +44,10 @@ cd agentfactory
 
 This builds a container with all prerequisites, clones your target repo, and runs `quickstart.sh` inside it. When it finishes, the container is ready for `af up`.
 
-#### Using quickstart.sh (inside an existing container)
+#### Using quickstart.sh (inside the docker container @ docker exec -it -u dev "af_ghusername_repo" bash)
 
 ```bash
+cd ~/projects/agentfactory/
 ./quickstart.sh           # full setup — installs af, Claude Code, configures workspace
 ```
 
@@ -118,10 +119,12 @@ This is the core workflow: turn a SKILL.md into an autonomous agent.
 ### 1. Create a formula from your skill
 
 ```bash
-claude -p "/formula-create /path/to/your/SKILL.md"
+claude
+/formula-create "/path/to/your/SKILL.md"
+# e.g. ./.claude/skills/rapid-implement/SKILL.md")
 ```
 
-This generates a `.formula.toml` file in `.beads/formulas/`.
+This generates a `.formula.toml` file in `.beads/formulas/`. Be patient. It can take some time.
 
 NOTICE: `.claude/skills/rapid-implement/SKILL.md` was provided in case you want to try creating your first coding agent.
 
