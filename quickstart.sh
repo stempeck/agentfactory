@@ -382,11 +382,11 @@ configure_shell() {
 
     {
         echo "$begin_marker"
-        echo 'export ANTHROPIC_MODEL="claude-opus-4-6"'
-        echo 'export ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-4-6"'
-        echo 'export ANTHROPIC_DEFAULT_SONNET_MODEL="claude-sonnet-4-6"'
-        echo 'export CLAUDE_CODE_EFFORT_LEVEL="high"'
-        echo 'export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1'
+        echo 'export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-opus-4-6}"'
+        echo 'export ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL:-claude-opus-4-6}"'
+        echo 'export ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-6}"'
+        echo 'export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL:-high}"'
+        echo 'export CLAUDE_CODE_DISABLE_AUTO_MEMORY="${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-1}"'
         echo "$end_marker"
     } >> "$shell_config"
     log_info "Updated model config in $shell_config"
