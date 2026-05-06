@@ -434,6 +434,126 @@ func TestInstallInitFormulas_SkipWhenEqual(t *testing.T) {
 	}
 }
 
+func TestWriteAgentsMd_CreatesNewFile(t *testing.T) {
+	dir := setupFactoryDir(t)
+
+	if err := writeAgentsMd(dir); err != nil {
+		t.Fatalf("writeAgentsMd: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("reading AGENTS.md: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "## BEGIN AgentFactory Agents") {
+		t.Error("missing begin marker")
+	}
+	if !strings.Contains(content, "## END AgentFactory Agents") {
+		t.Error("missing end marker")
+	}
+	if !strings.Contains(content, "| `manager` |") {
+		t.Error("missing manager agent row")
+	}
+	if !strings.Contains(content, "| `supervisor` |") {
+		t.Error("missing supervisor agent row")
+	}
+	if !strings.Contains(content, "af sling --agent") {
+		t.Error("missing dispatch syntax")
+	}
+}
+
+func TestWriteAgentsMd_BlockReplace(t *testing.T) {
+	dir := setupFactoryDir(t)
+
+	prelude := "# My Project Notes\n\nSome existing content.\n\n"
+	agentsMdPath := filepath.Join(dir, "AGENTS.md")
+	if err := os.WriteFile(agentsMdPath, []byte(prelude), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeAgentsMd(dir); err != nil {
+		t.Fatalf("first writeAgentsMd: %v", err)
+	}
+
+	data, err := os.ReadFile(agentsMdPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if !strings.HasPrefix(content, prelude) {
+		t.Error("existing content was not preserved")
+	}
+	if strings.Count(content, agentsMdBegin) != 1 {
+		t.Error("expected exactly one begin marker")
+	}
+
+	// Modify agents.json — add an agent, re-run, verify block updated
+	agentsCfg := filepath.Join(dir, ".agentfactory", "agents.json")
+	if err := os.WriteFile(agentsCfg, []byte(`{"agents":{"manager":{"type":"interactive","description":"Interactive agent"},"supervisor":{"type":"autonomous","description":"Autonomous agent"},"worker":{"type":"autonomous","description":"Worker agent"}}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeAgentsMd(dir); err != nil {
+		t.Fatalf("second writeAgentsMd: %v", err)
+	}
+
+	data, err = os.ReadFile(agentsMdPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content = string(data)
+
+	if !strings.HasPrefix(content, prelude) {
+		t.Error("existing content lost after block replace")
+	}
+	if !strings.Contains(content, "| `worker` |") {
+		t.Error("new worker agent not in updated block")
+	}
+	if strings.Count(content, agentsMdBegin) != 1 {
+		t.Error("duplicate begin markers after replace")
+	}
+}
+
+func TestAgentDescriptionLine(t *testing.T) {
+	tests := []struct {
+		name string
+		desc string
+		want string
+	}{
+		{
+			name: "simple",
+			desc: "Interactive agent for human-supervised work",
+			want: "Interactive agent for human-supervised work",
+		},
+		{
+			name: "with_overview_header",
+			desc: "## Overview\nStructured design exploration via parallel specialized analysts.",
+			want: "Structured design exploration via parallel specialized analysts.",
+		},
+		{
+			name: "truncates_long_line",
+			desc: strings.Repeat("x", 100),
+			want: strings.Repeat("x", 77) + "...",
+		},
+		{
+			name: "skips_blank_lines",
+			desc: "\n\n## Overview\n\nThe real description.",
+			want: "The real description.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := agentDescriptionLine(tt.desc)
+			if got != tt.want {
+				t.Errorf("agentDescriptionLine(%q) = %q, want %q", tt.desc, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestInstallRoleFallbackWarning(t *testing.T) {
 	origStderr := os.Stderr
 	r, w, err := os.Pipe()
