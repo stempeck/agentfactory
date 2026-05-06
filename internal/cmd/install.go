@@ -351,17 +351,19 @@ func writeAgentsMd(cwd string) error {
 }
 
 func agentDescriptionLine(desc string) string {
+	var parts []string
 	for _, line := range strings.Split(desc, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if len(trimmed) > 80 {
-			return trimmed[:77] + "..."
-		}
-		return trimmed
+		parts = append(parts, trimmed)
 	}
-	return strings.TrimSpace(desc)
+	result := strings.Join(parts, " ")
+	if len(result) > 128 {
+		return result[:125] + "..."
+	}
+	return result
 }
 
 func checkPythonMCPDeps(factoryRoot string, out io.Writer) error {

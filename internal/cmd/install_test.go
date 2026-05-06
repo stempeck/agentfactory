@@ -529,19 +529,19 @@ func TestAgentDescriptionLine(t *testing.T) {
 			want: "Interactive agent for human-supervised work",
 		},
 		{
-			name: "with_overview_header",
-			desc: "## Overview\nStructured design exploration via parallel specialized analysts.",
+			name: "strips_overview_joins_lines",
+			desc: "## Overview\nStructured design exploration via\nparallel specialized analysts.",
 			want: "Structured design exploration via parallel specialized analysts.",
 		},
 		{
-			name: "truncates_long_line",
-			desc: strings.Repeat("x", 100),
-			want: strings.Repeat("x", 77) + "...",
+			name: "truncates_at_128",
+			desc: strings.Repeat("x", 150),
+			want: strings.Repeat("x", 125) + "...",
 		},
 		{
-			name: "skips_blank_lines",
-			desc: "\n\n## Overview\n\nThe real description.",
-			want: "The real description.",
+			name: "skips_blank_lines_joins_remainder",
+			desc: "\n\n## Overview\n\nFirst line.\nSecond line.",
+			want: "First line. Second line.",
 		},
 	}
 	for _, tt := range tests {
