@@ -130,6 +130,9 @@ func primeAgent(ctx context.Context, out io.Writer, factoryRoot, role, workDir s
 	tmpl := templates.New()
 	templateRole := role
 	if !tmpl.HasRole(templateRole) {
+		if agentEntry.Formula != "" {
+			fmt.Fprintf(os.Stderr, "WARNING: agent %q is formula-generated but its template is not embedded in the binary. Agent will function via workspace CLAUDE.md but af prime will inject a generic template.\n", role)
+		}
 		templateRole = agentEntry.Type
 		if templateRole == "interactive" {
 			templateRole = "manager"

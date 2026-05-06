@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -479,6 +480,9 @@ func runFormulaAgentGenInDir(t *testing.T, dir string, args ...string) (stdout, 
 	agentGenName = ""
 	agentGenType = "autonomous"
 	agentGenDelete = false
+	agentGenAFSrc = ""
+	agentGenBuild = false
+	compiledSourceRoot = ""
 
 	var outBuf, errBuf bytes.Buffer
 	rootCmd.SetOut(&outBuf)
@@ -1861,6 +1865,291 @@ func TestGenerateAgentTemplate_OptionalOnlyFormula(t *testing.T) {
 	}
 	if !strings.Contains(content, "# Optional: --var limit=") {
 		t.Error("missing commented '# Optional: --var limit=' line for optional input")
+	}
+}
+
+// --- AF Source Resolution tests ---
+
+func setupFormulaFactoryWithAFSource(t *testing.T) (factoryRoot, afSourceRoot string) {
+	t.Helper()
+	factoryRoot = setupFormulaFactory(t)
+
+	// Remove go.mod from factory root if it exists (force resolution away from fallback)
+	os.Remove(filepath.Join(factoryRoot, "go.mod"))
+
+	// Create separate AF source tree
+	afSourceRoot = t.TempDir()
+	if err := os.WriteFile(filepath.Join(afSourceRoot, "go.mod"), []byte("module github.com/stempeck/agentfactory\n\ngo 1.24\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	afTmplDir := filepath.Join(afSourceRoot, "internal", "templates", "roles")
+	if err := os.MkdirAll(afTmplDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	return factoryRoot, afSourceRoot
+}
+
+func TestValidateAFSource(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/stempeck/agentfactory\n"), 0644)
+		if !validateAFSource(dir) {
+			t.Error("validateAFSource should return true for dir with agentfactory go.mod")
+		}
+	})
+	t.Run("missing_gomod", func(t *testing.T) {
+		dir := t.TempDir()
+		if validateAFSource(dir) {
+			t.Error("validateAFSource should return false for dir without go.mod")
+		}
+	})
+	t.Run("wrong_module", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/other/project\n"), 0644)
+		if validateAFSource(dir) {
+			t.Error("validateAFSource should return false for go.mod without agentfactory")
+		}
+	})
+}
+
+func TestResolveAFSource(t *testing.T) {
+	// Create valid AF source dirs for each tier
+	makeValidAFDir := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/stempeck/agentfactory\n"), 0644)
+		return dir
+	}
+
+	factoryRoot := t.TempDir() // no go.mod — will be fallback only
+
+	t.Run("flag_wins", func(t *testing.T) {
+		flagDir := makeValidAFDir(t)
+		envDir := makeValidAFDir(t)
+		srcDir := makeValidAFDir(t)
+
+		agentGenAFSrc = flagDir
+		compiledSourceRoot = srcDir
+		t.Setenv("AF_SOURCE_ROOT", envDir)
+		t.Cleanup(func() {
+			agentGenAFSrc = ""
+			compiledSourceRoot = ""
+		})
+
+		resolved, fb := resolveAFSource(factoryRoot)
+		if resolved != flagDir {
+			t.Errorf("expected flag dir %q, got %q", flagDir, resolved)
+		}
+		if fb {
+			t.Error("should not be fallback when flag is valid")
+		}
+	})
+
+	t.Run("env_wins_when_no_flag", func(t *testing.T) {
+		envDir := makeValidAFDir(t)
+		srcDir := makeValidAFDir(t)
+
+		agentGenAFSrc = ""
+		compiledSourceRoot = srcDir
+		t.Setenv("AF_SOURCE_ROOT", envDir)
+		t.Cleanup(func() { compiledSourceRoot = "" })
+
+		resolved, fb := resolveAFSource(factoryRoot)
+		if resolved != envDir {
+			t.Errorf("expected env dir %q, got %q", envDir, resolved)
+		}
+		if fb {
+			t.Error("should not be fallback when env is valid")
+		}
+	})
+
+	t.Run("sourceRoot_wins_when_no_flag_or_env", func(t *testing.T) {
+		srcDir := makeValidAFDir(t)
+
+		agentGenAFSrc = ""
+		compiledSourceRoot = srcDir
+		t.Setenv("AF_SOURCE_ROOT", "")
+		t.Cleanup(func() { compiledSourceRoot = "" })
+
+		resolved, fb := resolveAFSource(factoryRoot)
+		if resolved != srcDir {
+			t.Errorf("expected sourceRoot dir %q, got %q", srcDir, resolved)
+		}
+		if fb {
+			t.Error("should not be fallback when sourceRoot is valid")
+		}
+	})
+
+	t.Run("fallback_to_factory_root", func(t *testing.T) {
+		agentGenAFSrc = ""
+		compiledSourceRoot = ""
+		t.Setenv("AF_SOURCE_ROOT", "")
+
+		resolved, fb := resolveAFSource(factoryRoot)
+		if resolved != factoryRoot {
+			t.Errorf("expected factory root %q, got %q", factoryRoot, resolved)
+		}
+		if !fb {
+			t.Error("should be fallback when all candidates empty")
+		}
+	})
+
+	t.Run("invalid_flag_skipped", func(t *testing.T) {
+		invalidDir := t.TempDir() // no go.mod
+		envDir := makeValidAFDir(t)
+
+		agentGenAFSrc = invalidDir
+		compiledSourceRoot = ""
+		t.Setenv("AF_SOURCE_ROOT", envDir)
+		t.Cleanup(func() { agentGenAFSrc = "" })
+
+		resolved, fb := resolveAFSource(factoryRoot)
+		if resolved != envDir {
+			t.Errorf("expected env dir %q after invalid flag skip, got %q", envDir, resolved)
+		}
+		if fb {
+			t.Error("should not be fallback when env is valid")
+		}
+	})
+}
+
+func TestAgentGenWritesToAFSource(t *testing.T) {
+	factoryRoot, afSourceRoot := setupFormulaFactoryWithAFSource(t)
+
+	// Use AF_SOURCE_ROOT env to test resolution (compiledSourceRoot is reset by runFormulaAgentGenInDir)
+	t.Setenv("AF_SOURCE_ROOT", afSourceRoot)
+
+	_, stderr, err := runFormulaAgentGenInDir(t, factoryRoot, "investigate")
+	if err != nil {
+		t.Fatalf("agent-gen failed: %v\nstderr: %s", err, stderr)
+	}
+
+	// Template should be in AF source tree
+	tmplPath := filepath.Join(afSourceRoot, "internal", "templates", "roles", "investigate.md.tmpl")
+	if _, err := os.Stat(tmplPath); err != nil {
+		t.Fatalf("template not written to AF source tree: %v", err)
+	}
+
+	// Template should NOT be in factory root
+	factoryTmplPath := filepath.Join(factoryRoot, "internal", "templates", "roles", "investigate.md.tmpl")
+	if _, err := os.Stat(factoryTmplPath); !os.IsNotExist(err) {
+		t.Error("template should NOT be written to factory root when AF source is resolved")
+	}
+
+	// CLAUDE.md should still be in factory root
+	claudePath := filepath.Join(factoryRoot, ".agentfactory", "agents", "investigate", "CLAUDE.md")
+	if _, err := os.Stat(claudePath); err != nil {
+		t.Fatalf("CLAUDE.md should be in factory root: %v", err)
+	}
+
+	// agents.json should still be in factory root
+	agentsData, err := os.ReadFile(filepath.Join(factoryRoot, ".agentfactory", "agents.json"))
+	if err != nil {
+		t.Fatalf("agents.json should be in factory root: %v", err)
+	}
+	if !strings.Contains(string(agentsData), `"investigate"`) {
+		t.Error("agents.json should contain investigate entry")
+	}
+
+	// Stderr should mention the AF source path
+	if !strings.Contains(stderr, afSourceRoot) {
+		t.Errorf("stderr should mention AF source path %q, got: %s", afSourceRoot, stderr)
+	}
+}
+
+func TestAgentGenAFSrcFlag(t *testing.T) {
+	factoryRoot, afSourceRoot := setupFormulaFactoryWithAFSource(t)
+
+	_, stderr, err := runFormulaAgentGenInDir(t, factoryRoot, "investigate", "--af-src", afSourceRoot)
+	if err != nil {
+		t.Fatalf("agent-gen with --af-src failed: %v\nstderr: %s", err, stderr)
+	}
+
+	// Template should be in the --af-src path
+	tmplPath := filepath.Join(afSourceRoot, "internal", "templates", "roles", "investigate.md.tmpl")
+	if _, err := os.Stat(tmplPath); err != nil {
+		t.Fatalf("template not written to --af-src path: %v", err)
+	}
+
+	// Template should NOT be in factory root
+	factoryTmplPath := filepath.Join(factoryRoot, "internal", "templates", "roles", "investigate.md.tmpl")
+	if _, err := os.Stat(factoryTmplPath); !os.IsNotExist(err) {
+		t.Error("template should NOT be in factory root when --af-src is used")
+	}
+}
+
+func TestAgentGenBuildFlag(t *testing.T) {
+	factoryRoot, afSourceRoot := setupFormulaFactoryWithAFSource(t)
+
+	// Create a fake Makefile that creates a marker file instead of actually building
+	markerPath := filepath.Join(afSourceRoot, "build-marker")
+	makefileContent := fmt.Sprintf("install:\n\ttouch %s\n", markerPath)
+	os.WriteFile(filepath.Join(afSourceRoot, "Makefile"), []byte(makefileContent), 0644)
+
+	_, stderr, err := runFormulaAgentGenInDir(t, factoryRoot, "investigate", "--af-src", afSourceRoot, "--build")
+	if err != nil {
+		t.Fatalf("agent-gen with --build failed: %v\nstderr: %s", err, stderr)
+	}
+
+	// Verify build was attempted (marker file exists)
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Error("--build should have executed make install (marker file not found)")
+	}
+
+	// Stderr should mention binary rebuilt
+	if !strings.Contains(stderr, "Binary rebuilt") {
+		t.Errorf("stderr should mention 'Binary rebuilt', got: %s", stderr)
+	}
+}
+
+func TestAgentGenBuildFlag_FailureIsWarning(t *testing.T) {
+	factoryRoot, afSourceRoot := setupFormulaFactoryWithAFSource(t)
+
+	// Create a Makefile that fails
+	os.WriteFile(filepath.Join(afSourceRoot, "Makefile"), []byte("install:\n\tfalse\n"), 0644)
+
+	_, stderr, err := runFormulaAgentGenInDir(t, factoryRoot, "investigate", "--af-src", afSourceRoot, "--build")
+	if err != nil {
+		t.Fatalf("agent-gen should not fail when --build fails: %v\nstderr: %s", err, stderr)
+	}
+
+	// Stderr should contain WARNING
+	if !strings.Contains(stderr, "WARNING") {
+		t.Errorf("stderr should contain WARNING about build failure, got: %s", stderr)
+	}
+
+	// Template should still be written despite build failure
+	tmplPath := filepath.Join(afSourceRoot, "internal", "templates", "roles", "investigate.md.tmpl")
+	if _, err := os.Stat(tmplPath); err != nil {
+		t.Error("template should still be written when --build fails")
+	}
+}
+
+func TestAgentGenFallbackWarning(t *testing.T) {
+	factoryRoot := setupFormulaFactory(t)
+
+	// Remove go.mod from factory root to ensure it's not a valid AF source
+	os.Remove(filepath.Join(factoryRoot, "go.mod"))
+
+	// Clear all resolution sources
+	agentGenAFSrc = ""
+	compiledSourceRoot = ""
+	t.Setenv("AF_SOURCE_ROOT", "")
+
+	_, stderr, err := runFormulaAgentGenInDir(t, factoryRoot, "investigate")
+	if err != nil {
+		t.Fatalf("agent-gen failed: %v\nstderr: %s", err, stderr)
+	}
+
+	// Stderr should contain WARNING about fallback
+	if !strings.Contains(stderr, "WARNING") {
+		t.Errorf("stderr should contain WARNING about fallback, got: %s", stderr)
+	}
+
+	// Template should still be written (to factory root as fallback)
+	tmplPath := filepath.Join(factoryRoot, "internal", "templates", "roles", "investigate.md.tmpl")
+	if _, err := os.Stat(tmplPath); err != nil {
+		t.Error("template should be written to factory root as fallback")
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/formula"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/session"
+	"github.com/stempeck/agentfactory/internal/templates"
 	"github.com/stempeck/agentfactory/internal/tmux"
 	"github.com/stempeck/agentfactory/internal/worktree"
 )
@@ -199,6 +200,10 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 	}
 	if !slingPersistent {
 		writeDispatchedMarker(agentDir, callerIdentity)
+	}
+
+	if !templates.New().HasRole(agentName) {
+		fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: agent %q template not embedded in binary. Agent will function via workspace CLAUDE.md.\n", agentName)
 	}
 
 	// 3. Instantiate the agent's formula with the task as a synthetic CLI var

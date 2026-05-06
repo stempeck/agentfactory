@@ -25,7 +25,15 @@ var (
 	agentGenName   string
 	agentGenType   string
 	agentGenDelete bool
+	agentGenAFSrc  string
+	agentGenBuild  bool
 )
+
+var compiledSourceRoot string
+
+func SetSourceRoot(root string) {
+	compiledSourceRoot = root
+}
 
 var formulaCmd = &cobra.Command{
 	Use:   "formula",
@@ -54,8 +62,38 @@ func init() {
 	agentGenCmd.Flags().StringVar(&agentGenName, "name", "", "Override agent name (default: formula name)")
 	agentGenCmd.Flags().StringVar(&agentGenType, "type", "autonomous", "Agent type")
 	agentGenCmd.Flags().BoolVar(&agentGenDelete, "delete", false, "Remove formula-generated agent and its artifacts")
+	agentGenCmd.Flags().StringVar(&agentGenAFSrc, "af-src", "", "Path to agentfactory source tree (overrides auto-detection)")
+	agentGenCmd.Flags().BoolVar(&agentGenBuild, "build", false, "Run 'make install' after writing template")
 	formulaCmd.AddCommand(agentGenCmd)
 	rootCmd.AddCommand(formulaCmd)
+}
+
+func resolveAFSource(factoryRoot string) (resolved string, fallback bool) {
+	candidates := []struct {
+		label string
+		path  string
+	}{
+		{"--af-src flag", agentGenAFSrc},
+		{"AF_SOURCE_ROOT env", os.Getenv("AF_SOURCE_ROOT")},
+		{"compiled sourceRoot", compiledSourceRoot},
+	}
+	for _, c := range candidates {
+		if c.path == "" {
+			continue
+		}
+		if validateAFSource(c.path) {
+			return c.path, false
+		}
+	}
+	return factoryRoot, true
+}
+
+func validateAFSource(path string) bool {
+	data, err := os.ReadFile(filepath.Join(path, "go.mod"))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "agentfactory")
 }
 
 func runFormulaAgentGen(cmd *cobra.Command, args []string) error {
@@ -196,8 +234,12 @@ func runFormulaAgentGen(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "✓ Agent entry added to .agentfactory/agents.json (formula: %s)\n", f.Name)
 	}
 
+	afSrc, isFallback := resolveAFSource(root)
+	if isFallback {
+		fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: could not locate AF source tree; writing template to factory root. Template will not be embedded until you copy it to the AF source tree and rebuild.\n")
+	}
 	// Write role template to source tree
-	tmplDir := filepath.Join(root, "internal", "templates", "roles")
+	tmplDir := filepath.Join(afSrc, "internal", "templates", "roles")
 	if err := os.MkdirAll(tmplDir, 0755); err != nil {
 		return fmt.Errorf("creating template directory: %w", err)
 	}
@@ -257,7 +299,20 @@ func runFormulaAgentGen(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Fprintf(cmd.ErrOrStderr(), "\nAgent %q is ready. Start with: af up %s\n", agentName, agentName)
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "Run 'make build' to compile the new template into the af binary.\n")
+	if agentGenBuild {
+		makeCmd := exec.Command("make", "-C", afSrc, "install")
+		makeCmd.Stdout = cmd.OutOrStdout()
+		makeCmd.Stderr = cmd.ErrOrStderr()
+		if err := makeCmd.Run(); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: make install failed: %v\nTemplate and workspace are written — agent is functional. Fix your Go environment and run 'make -C %s install' later.\n", err, afSrc)
+		} else {
+			fmt.Fprintf(cmd.ErrOrStderr(), "✓ Binary rebuilt with new template.\n")
+		}
+	} else if afSrc != root {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Template written to %s. Run 'make -C %s install' to embed, or re-run with --build.\n", afSrc, afSrc)
+	} else {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Run 'make build' to compile the new template into the af binary.\n")
+	}
 
 	return nil
 }
@@ -304,7 +359,14 @@ func runFormulaAgentGenDelete(cmd *cobra.Command, agentName string) error {
 	}
 
 	// Paths
-	tmplPath := filepath.Join(root, "internal", "templates", "roles", agentName+".md.tmpl")
+	afSrc, _ := resolveAFSource(root)
+	tmplPath := filepath.Join(afSrc, "internal", "templates", "roles", agentName+".md.tmpl")
+	if afSrc != root {
+		fallbackPath := filepath.Join(root, "internal", "templates", "roles", agentName+".md.tmpl")
+		if _, err := os.Stat(fallbackPath); err == nil {
+			os.Remove(fallbackPath)
+		}
+	}
 	wsDir := config.AgentDir(root, agentName)
 
 	// Check workspace for uncommitted changes (warn only)

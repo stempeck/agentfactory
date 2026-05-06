@@ -264,6 +264,9 @@ func runInstallRole(cmd *cobra.Command, role string) error {
 	tmpl := templates.New()
 	templateRole := role
 	if !tmpl.HasRole(templateRole) {
+		if entry.Formula != "" {
+			fmt.Fprintf(os.Stderr, "WARNING: agent %q is formula-generated but its template is not embedded in the binary. Agent will function via workspace CLAUDE.md but af prime will inject a generic template.\n", role)
+		}
 		templateRole = entry.Type
 		if templateRole == "interactive" {
 			templateRole = "manager"

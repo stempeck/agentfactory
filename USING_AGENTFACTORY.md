@@ -430,6 +430,13 @@ make build
 af up investigate
 ```
 
+Or, generate and rebuild in one step with `--build`:
+
+```bash
+af formula agent-gen investigate --build
+af up investigate
+```
+
 Step 1 does four things:
 - Writes a Go template to `internal/templates/roles/investigate.md.tmpl` — the formula's identity baked into the template system
 - Renders that template to `.agentfactory/agents/investigate/CLAUDE.md` — the workspace is immediately usable
@@ -469,6 +476,22 @@ af formula agent-gen investigate --name detective
 
 This creates `.agentfactory/agents/detective/` workspace and `detective.md.tmpl` template, but the sling command still references the `investigate` formula.
 
+### Source tree and build flags
+
+`--af-src` overrides where the template `.md.tmpl` file is written. Resolution chain: `--af-src` flag > `AF_SOURCE_ROOT` environment variable > compiled source root > factory root fallback.
+
+```bash
+af formula agent-gen my-agent --af-src ~/projects/agentfactory
+```
+
+`--build` runs `make install` after writing the template, so the new template is compiled into the binary immediately.
+
+```bash
+af formula agent-gen my-agent --build
+```
+
+Neither flag is needed with `agent-gen-all.sh`, which handles source resolution and does a single build at the end.
+
 ### Creating a new agent
 
 Paths assume: AF source at `~/projects/agentfactory`, target project at `~/af/myproject`.
@@ -478,22 +501,19 @@ Paths assume: AF source at `~/projects/agentfactory`, target project at `~/af/my
 cd ~/af/myproject
 claude -p "/formula-create /path/to/my-agent-SKILL.md"
 
-# 2. Generate the agent (workspace, CLAUDE.md, settings, agents.json entry)
-af formula agent-gen my-agent
+# 2. Generate the agent and rebuild in one step
+af formula agent-gen my-agent --af-src ~/projects/agentfactory --build
 
-# 3. Promote formula + template to the AF source
+# 3. Promote the formula TOML to ship with agentfactory
 cp .beads/formulas/my-agent.formula.toml ~/projects/agentfactory/internal/cmd/install_formulas/
-cp internal/templates/roles/my-agent.md.tmpl ~/projects/agentfactory/internal/templates/roles/
 
-# 4. Rebuild af with the new template embedded
-cd ~/projects/agentfactory
-./quickstart.sh
-
-# 5. Start the agent (quickstart put you in ~/af/myproject)
+# 4. Start the agent
 af up my-agent
 ```
 
-Steps 3–4 are the reverse flow (ADR-015): promoting a project-local formula to ship with agentfactory. Without them, the agent runs but `af prime` falls back to the generic supervisor template on context compression.
+Step 2 writes the template directly to the AF source tree (`--af-src`) and rebuilds the binary (`--build`). The agent functions immediately via its workspace CLAUDE.md even before the rebuild completes — `--build` ensures `af prime` uses the specialist template instead of falling back to `supervisor.md.tmpl` on context compression.
+
+Step 3 is the reverse flow (ADR-015): promoting the formula TOML to ship with agentfactory. The template is already in the AF source tree from step 2 thanks to `--af-src`.
 
 ### Batch regeneration with agent-gen-all.sh
 

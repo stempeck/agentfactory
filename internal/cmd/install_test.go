@@ -433,3 +433,42 @@ func TestInstallInitFormulas_SkipWhenEqual(t *testing.T) {
 		t.Errorf("mutated formula %s was not restored to embedded content", sampleName)
 	}
 }
+
+func TestInstallRoleFallbackWarning(t *testing.T) {
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".agentfactory")
+	if err := os.MkdirAll(filepath.Join(configDir, "agents"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	configs := map[string]string{
+		"factory.json":   `{"type":"factory","version":1,"name":"test"}`,
+		"agents.json":    `{"agents":{"phantom-agent":{"type":"autonomous","description":"Formula agent without template","formula":"phantom-formula"}}}`,
+		"messaging.json": `{"groups":{}}`,
+	}
+	for name, content := range configs {
+		if err := os.WriteFile(filepath.Join(configDir, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, installErr := runInstallInDir(t, dir, "phantom-agent")
+
+	w.Close()
+	var stderrBuf bytes.Buffer
+	stderrBuf.ReadFrom(r)
+	os.Stderr = origStderr
+
+	if installErr != nil {
+		t.Fatalf("install should succeed with fallback: %v", installErr)
+	}
+	if !strings.Contains(stderrBuf.String(), "WARNING") {
+		t.Errorf("expected WARNING on stderr for formula agent without embedded template, got stderr: %q", stderrBuf.String())
+	}
+}
