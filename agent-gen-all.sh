@@ -61,7 +61,12 @@ af down --all 2>/dev/null || true
 echo "syncing formulas from source..."
 updated=0
 is_source_repo=false
-if [ "$PROJECT" = "$AF_SRC" ] || { [ -f "$PROJECT/go.mod" ] && grep -q agentfactory "$PROJECT/go.mod" 2>/dev/null; }; then
+# Only treat as source repo when PROJECT is literally the same directory as AF_SRC.
+# The go.mod heuristic was too broad — it matched any agentfactory fork/checkout,
+# causing customer-created formulas and templates to be deleted as "orphans."
+proj_real="$(cd "$PROJECT" && pwd -P)"
+afsrc_real="$(cd "$AF_SRC" && pwd -P)"
+if [ "$proj_real" = "$afsrc_real" ]; then
     is_source_repo=true
 fi
 for f in "$AF_SRC"/internal/cmd/install_formulas/*.formula.toml; do

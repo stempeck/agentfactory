@@ -109,7 +109,7 @@ func runInstallInit(cmd *cobra.Command) error {
 
 	// 5. Initialize the issue store (mcpstore lazy-starts the Python MCP
 	//    server under py/issuestore/; the first call opens/creates the SQLite
-	//    database at <factoryRoot>/.beads/beads.db). This is the ONE consumer
+	//    database at <factoryRoot>/.beads/issues.sqlite). This is the ONE consumer
 	//    that uses mcpstore.New directly (not via the newIssueStore seam)
 	//    because the install flow needs the user-visible side effect —
 	//    database bootstrap — to print a confirmation banner. An empty actor
@@ -126,7 +126,7 @@ func runInstallInit(cmd *cobra.Command) error {
 	fmt.Fprintln(cmd.OutOrStdout(), "Issue store initialized (SQLite + MCP server)")
 
 	// 6. Create hooks/ directory and write quality gate files
-	hooksDir := filepath.Join(cwd, "hooks")
+	hooksDir := config.HooksDir(cwd)
 	if err := os.MkdirAll(hooksDir, 0755); err != nil {
 		return fmt.Errorf("creating hooks directory: %w", err)
 	}
@@ -173,14 +173,19 @@ func runInstallInit(cmd *cobra.Command) error {
 	}
 
 	// Enable fidelity gate by default for new factories
-	fidelityToggle := filepath.Join(cwd, ".fidelity-gate")
+	fidelityToggle := filepath.Join(configDir, ".fidelity-gate")
 	if _, err := os.Stat(fidelityToggle); os.IsNotExist(err) {
 		if err := os.WriteFile(fidelityToggle, []byte("on\n"), 0644); err != nil {
 			return fmt.Errorf("writing .fidelity-gate: %w", err)
 		}
 	}
 
-	// 7. Write default formula files to .beads/formulas/ (skip if content matches)
+	// 7b. Re-provision agent settings with current templates
+	if err := reprovisionAgentSettings(cwd, cmd.OutOrStdout()); err != nil {
+		return err
+	}
+
+	// 8. Write default formula files to .beads/formulas/ (skip if content matches)
 	formulasDir := filepath.Join(beadsDir, "formulas")
 	if err := os.MkdirAll(formulasDir, 0755); err != nil {
 		return fmt.Errorf("creating formulas directory: %w", err)
@@ -401,5 +406,30 @@ func checkPython312() error {
 	if !strings.Contains(ver, "Python 3.12") {
 		return fmt.Errorf("python3 is %q, need Python 3.12.x (install via `uv python install 3.12` or your system package manager)", ver)
 	}
+	return nil
+}
+
+func reprovisionAgentSettings(cwd string, out io.Writer) error {
+	agents, err := config.LoadAgentConfig(config.AgentsConfigPath(cwd))
+	if err != nil {
+		return nil
+	}
+
+	entries, err := os.ReadDir(config.AgentsDir(cwd))
+	if err != nil {
+		return nil
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		roleType := claude.RoleTypeFor(name, agents)
+		if err := claude.EnsureSettings(config.AgentDir(cwd, name), roleType); err != nil {
+			fmt.Fprintf(out, "warning: could not re-provision settings for agent %s: %v\n", name, err)
+		}
+	}
+
 	return nil
 }

@@ -417,7 +417,7 @@ configure_factory() {
     # when factoryRoot (the target project) doesn't contain py/.
     export AF_SOURCE_ROOT="$SCRIPT_DIR"
 
-    # Initialize factory (creates .agentfactory/, hooks/, .beads/)
+    # Initialize factory (creates .agentfactory/, .agentfactory/hooks/, .beads/)
     # Always run: configs are write-if-absent, hooks always update
     log_info "Running af install --init..."
     af install --init || {

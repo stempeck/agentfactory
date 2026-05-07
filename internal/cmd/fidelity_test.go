@@ -45,7 +45,7 @@ func TestFidelity_OnByDefaultAfterInstall(t *testing.T) {
 	t.Chdir(dir)
 
 	// Simulate what af install --init does: create .fidelity-gate with "on"
-	if err := os.WriteFile(filepath.Join(dir, ".fidelity-gate"), []byte("on\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".agentfactory", ".fidelity-gate"), []byte("on\n"), 0o644); err != nil {
 		t.Fatalf("write .fidelity-gate: %v", err)
 	}
 
@@ -69,7 +69,7 @@ func TestFidelity_TurnOn(t *testing.T) {
 		}
 	})
 
-	data, err := os.ReadFile(filepath.Join(dir, ".fidelity-gate"))
+	data, err := os.ReadFile(filepath.Join(dir, ".agentfactory", ".fidelity-gate"))
 	if err != nil {
 		t.Fatalf("read .fidelity-gate: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestFidelity_TurnOff(t *testing.T) {
 		}
 	})
 
-	data, err := os.ReadFile(filepath.Join(dir, ".fidelity-gate"))
+	data, err := os.ReadFile(filepath.Join(dir, ".agentfactory", ".fidelity-gate"))
 	if err != nil {
 		t.Fatalf("read .fidelity-gate: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestFidelity_StatusOnReport(t *testing.T) {
 	t.Chdir(dir)
 
 	if err := os.WriteFile(
-		filepath.Join(dir, ".fidelity-gate"),
+		filepath.Join(dir, ".agentfactory", ".fidelity-gate"),
 		[]byte("on\n"),
 		0o644,
 	); err != nil {
@@ -124,7 +124,7 @@ func TestFidelity_StatusOffReport(t *testing.T) {
 	t.Chdir(dir)
 
 	if err := os.WriteFile(
-		filepath.Join(dir, ".fidelity-gate"),
+		filepath.Join(dir, ".agentfactory", ".fidelity-gate"),
 		[]byte("off\n"),
 		0o644,
 	); err != nil {

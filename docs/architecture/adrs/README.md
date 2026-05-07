@@ -31,6 +31,7 @@ anchored to file:line or commit SHA.
 | [014](ADR-014-no-interactive-prompting.md) | No interactive prompting in agent-runtime code paths | Accepted | Near-miss: `internal/cmd/sling.go:389-401` (#126 staged); permitted shape: `internal/cmd/prime.go:232-253` |
 | [015](ADR-015-formula-three-location-lifecycle.md) | Three-location formula lifecycle with ordered sync | Accepted | Extends ADR-008; `discover.go:18-42`, `install.go:22-23`, issue #139 |
 | [016](ADR-016-no-skill-provenance-in-formulas.md) | No skill provenance annotations in formulas | Accepted | `formula-create/skillmd-mode.md:79,137`; 60 annotations across 8 formulas |
+| [017](ADR-017-no-customer-repo-mutations.md) | af infrastructure commands must not delete customer data | Accepted | `internal/cmd/formula.go:102-108`; designs 170/173 incident history |
 
 ---
 

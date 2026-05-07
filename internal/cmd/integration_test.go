@@ -398,7 +398,7 @@ func TestE2EWorkflow(t *testing.T) {
 	}
 
 	// 9. Verify quality gate hook
-	qgPath := filepath.Join(workspace, "hooks", "quality-gate.sh")
+	qgPath := filepath.Join(workspace, ".agentfactory", "hooks", "quality-gate.sh")
 	info, err := os.Stat(qgPath)
 	if err != nil {
 		t.Fatalf("quality-gate.sh should exist: %v", err)
@@ -408,7 +408,7 @@ func TestE2EWorkflow(t *testing.T) {
 	}
 
 	// 10. Verify fidelity gate hook
-	fgPath := filepath.Join(workspace, "hooks", "fidelity-gate.sh")
+	fgPath := filepath.Join(workspace, ".agentfactory", "hooks", "fidelity-gate.sh")
 	fgInfo, err := os.Stat(fgPath)
 	if err != nil {
 		t.Fatalf("fidelity-gate.sh should exist: %v", err)

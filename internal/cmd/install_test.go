@@ -592,3 +592,4 @@ func TestInstallRoleFallbackWarning(t *testing.T) {
 		t.Errorf("expected WARNING on stderr for formula agent without embedded template, got stderr: %q", stderrBuf.String())
 	}
 }
+

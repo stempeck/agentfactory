@@ -99,6 +99,15 @@ func validateAFSource(path string) bool {
 	return strings.Contains(string(data), "agentfactory")
 }
 
+func sameDir(a, b string) bool {
+	infoA, errA := os.Stat(a)
+	infoB, errB := os.Stat(b)
+	if errA != nil || errB != nil {
+		return a == b
+	}
+	return os.SameFile(infoA, infoB)
+}
+
 func runFormulaAgentGen(cmd *cobra.Command, args []string) error {
 	// --delete: treat args[0] as agent name and branch to delete path
 	if agentGenDelete {
@@ -311,7 +320,7 @@ func runFormulaAgentGen(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "✓ Binary rebuilt with new template.\n")
 		}
-	} else if afSrc != root {
+	} else if !sameDir(afSrc, root) {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Template written to %s. Run 'make -C %s install' to embed, or re-run with --build.\n", afSrc, afSrc)
 	} else {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Run 'make build' to compile the new template into the af binary.\n")
@@ -391,12 +400,6 @@ func runFormulaAgentGenDelete(cmd *cobra.Command, agentName string) error {
 			}
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "✓ Role template removed: internal/templates/roles/%s.md.tmpl\n", agentName)
-		}
-		if afSrc != root {
-			fallbackPath := filepath.Join(root, "internal", "templates", "roles", agentName+".md.tmpl")
-			if _, err := os.Stat(fallbackPath); err == nil {
-				os.Remove(fallbackPath)
-			}
 		}
 	} else {
 		fmt.Fprintf(cmd.ErrOrStderr(), "✓ Skipping template removal (not in AF source tree)\n")

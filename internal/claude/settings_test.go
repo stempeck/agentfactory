@@ -75,6 +75,9 @@ func TestEnsureSettings_Autonomous(t *testing.T) {
 	if !strings.Contains(content, "quality-gate.sh") {
 		t.Error("autonomous settings.json missing quality-gate.sh in Stop hook")
 	}
+	if !strings.Contains(content, ".agentfactory/hooks/quality-gate.sh") {
+		t.Error("autonomous settings.json Stop hook should use .agentfactory/hooks/ path for quality-gate.sh")
+	}
 
 	// Stop hooks must use ${AF_ROOT} for worktree-safe path resolution (C12)
 	if strings.Contains(content, "$(af root)") {
@@ -126,6 +129,9 @@ func TestEnsureSettings_Interactive(t *testing.T) {
 	// Stop hook must reference quality-gate.sh
 	if !strings.Contains(content, "quality-gate.sh") {
 		t.Error("interactive settings.json missing quality-gate.sh in Stop hook")
+	}
+	if !strings.Contains(content, ".agentfactory/hooks/quality-gate.sh") {
+		t.Error("interactive settings.json Stop hook should use .agentfactory/hooks/ path for quality-gate.sh")
 	}
 
 	// Stop hook must use ${AF_ROOT} for worktree-safe path resolution (C12)
