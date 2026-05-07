@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -99,23 +100,11 @@ func runInstallInit(cmd *cobra.Command) error {
 		}
 	}
 
-	// 4. Write AGENTS.md (only if it doesn't exist — preempts bd init's version)
-	agentsMd := filepath.Join(cwd, "AGENTS.md")
-	if _, err := os.Stat(agentsMd); os.IsNotExist(err) {
-		const agentsMdContent = `# Agent Commands
-
-- ` + "`af prime`" + ` — Re-inject identity and formula step context
-- ` + "`af done`" + ` — Close current step and advance
-- ` + "`af mail send <to> -s <subject> -m <message>`" + ` — Send a message
-- ` + "`af mail inbox`" + ` — List unread messages
-- ` + "`af mail read <id>`" + ` — Read a message
-- ` + "`af mail check`" + ` — Check for new mail
-- ` + "`af mail reply <id> -m <message>`" + ` — Reply to a message
-- ` + "`af root`" + ` — Print factory root path
-`
-		if err := os.WriteFile(agentsMd, []byte(agentsMdContent), 0644); err != nil {
-			return fmt.Errorf("writing AGENTS.md: %w", err)
-		}
+	// 4. Write/update AGENTS.md with available agents from agents.json.
+	// Uses HTML comment markers for block-replace: existing content outside
+	// the block is preserved; the block is regenerated on every init.
+	if err := writeAgentsMd(cwd); err != nil {
+		return fmt.Errorf("writing AGENTS.md: %w", err)
 	}
 
 	// 5. Initialize the issue store (mcpstore lazy-starts the Python MCP
@@ -264,6 +253,9 @@ func runInstallRole(cmd *cobra.Command, role string) error {
 	tmpl := templates.New()
 	templateRole := role
 	if !tmpl.HasRole(templateRole) {
+		if entry.Formula != "" {
+			fmt.Fprintf(os.Stderr, "WARNING: agent %q is formula-generated but its template is not embedded in the binary. Agent will function via workspace CLAUDE.md but af prime will inject a generic template.\n", role)
+		}
 		templateRole = entry.Type
 		if templateRole == "interactive" {
 			templateRole = "manager"
@@ -294,6 +286,84 @@ func runInstallRole(cmd *cobra.Command, role string) error {
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Agent %q provisioned successfully.\n", role)
 	return nil
+}
+
+const (
+	agentsMdBegin = "## BEGIN AgentFactory Agents"
+	agentsMdEnd   = "## END AgentFactory Agents"
+)
+
+func writeAgentsMd(cwd string) error {
+	agentsPath := config.AgentsConfigPath(cwd)
+	agents, err := config.LoadAgentConfig(agentsPath)
+	if err != nil {
+		return nil
+	}
+
+	names := make([]string, 0, len(agents.Agents))
+	for name := range agents.Agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var buf strings.Builder
+	buf.WriteString(agentsMdBegin + "\n\n")
+	buf.WriteString("Dispatch work to a specialist agent:\n")
+	buf.WriteString("```\naf sling --agent <name> \"task description\"\n```\n\n")
+	buf.WriteString("| Agent | Type | Description |\n")
+	buf.WriteString("|-------|------|-------------|\n")
+	for _, name := range names {
+		entry := agents.Agents[name]
+		desc := agentDescriptionLine(entry.Description)
+		buf.WriteString(fmt.Sprintf("| `%s` | %s | %s |\n", name, entry.Type, desc))
+	}
+	buf.WriteString(agentsMdEnd + "\n")
+
+	block := buf.String()
+
+	agentsMdPath := filepath.Join(cwd, "AGENTS.md")
+	existing, err := os.ReadFile(agentsMdPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return os.WriteFile(agentsMdPath, []byte(block), 0644)
+		}
+		return fmt.Errorf("reading AGENTS.md: %w", err)
+	}
+
+	content := string(existing)
+	beginIdx := strings.Index(content, agentsMdBegin)
+	endIdx := strings.Index(content, agentsMdEnd)
+
+	if beginIdx >= 0 && endIdx >= 0 {
+		after := endIdx + len(agentsMdEnd)
+		if after < len(content) && content[after] == '\n' {
+			after++
+		}
+		newContent := content[:beginIdx] + block + content[after:]
+		return os.WriteFile(agentsMdPath, []byte(newContent), 0644)
+	}
+
+	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	content += "\n" + block
+	return os.WriteFile(agentsMdPath, []byte(content), 0644)
+}
+
+func agentDescriptionLine(desc string) string {
+	var parts []string
+	for _, line := range strings.Split(desc, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		parts = append(parts, trimmed)
+	}
+	result := strings.Join(parts, " ")
+	if len(result) > 128 {
+		return result[:125] + "..."
+	}
+	return result
 }
 
 func checkPythonMCPDeps(factoryRoot string, out io.Writer) error {

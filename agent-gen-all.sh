@@ -74,9 +74,22 @@ for f in "$FORMULA_DIR"/*.formula.toml; do
     [ -f "$f" ] || continue
     name=$(basename "$f")
     if [ ! -f "$AF_SRC/internal/cmd/install_formulas/$name" ]; then
+        echo "WARNING: removing local formula not in source tree: $name"
+        echo "  (To preserve, promote it: cp $FORMULA_DIR/$name $AF_SRC/internal/cmd/install_formulas/)"
         rm "$f"
         echo "  removed orphan: $name"
         updated=$((updated + 1))
+    fi
+done
+# Remove orphan role templates (no corresponding formula)
+for tmpl_file in "$AF_SRC/internal/templates/roles/"*.md.tmpl; do
+    [ -f "$tmpl_file" ] || continue
+    tmpl_name="$(basename "$tmpl_file" .md.tmpl)"
+    # Skip built-in templates
+    case "$tmpl_name" in manager|supervisor) continue ;; esac
+    if [ ! -f "$AF_SRC/internal/cmd/install_formulas/${tmpl_name}.formula.toml" ]; then
+        echo "WARNING: removing orphan template: $tmpl_file (no matching formula)"
+        rm "$tmpl_file"
     fi
 done
 if [ "$updated" -eq 0 ]; then
@@ -101,12 +114,12 @@ for f in "$FORMULA_DIR"/*.formula.toml; do
     echo "[$name]"
 
     # Delete existing agent artifacts (fails gracefully if agent doesn't exist)
-    if ! af formula agent-gen "$name" --delete 2>&1; then
+    if ! af formula agent-gen "$name" --delete --af-src "$AF_SRC" 2>&1; then
         echo "  (no existing agent to delete)"
     fi
 
     # Generate fresh
-    if af formula agent-gen "$name"; then
+    if af formula agent-gen "$name" --af-src "$AF_SRC"; then
         count=$((count + 1))
     else
         echo "  FAILED: $name" >&2

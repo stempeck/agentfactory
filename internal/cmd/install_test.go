@@ -433,3 +433,162 @@ func TestInstallInitFormulas_SkipWhenEqual(t *testing.T) {
 		t.Errorf("mutated formula %s was not restored to embedded content", sampleName)
 	}
 }
+
+func TestWriteAgentsMd_CreatesNewFile(t *testing.T) {
+	dir := setupFactoryDir(t)
+
+	if err := writeAgentsMd(dir); err != nil {
+		t.Fatalf("writeAgentsMd: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("reading AGENTS.md: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "## BEGIN AgentFactory Agents") {
+		t.Error("missing begin marker")
+	}
+	if !strings.Contains(content, "## END AgentFactory Agents") {
+		t.Error("missing end marker")
+	}
+	if !strings.Contains(content, "| `manager` |") {
+		t.Error("missing manager agent row")
+	}
+	if !strings.Contains(content, "| `supervisor` |") {
+		t.Error("missing supervisor agent row")
+	}
+	if !strings.Contains(content, "af sling --agent") {
+		t.Error("missing dispatch syntax")
+	}
+}
+
+func TestWriteAgentsMd_BlockReplace(t *testing.T) {
+	dir := setupFactoryDir(t)
+
+	prelude := "# My Project Notes\n\nSome existing content.\n\n"
+	agentsMdPath := filepath.Join(dir, "AGENTS.md")
+	if err := os.WriteFile(agentsMdPath, []byte(prelude), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeAgentsMd(dir); err != nil {
+		t.Fatalf("first writeAgentsMd: %v", err)
+	}
+
+	data, err := os.ReadFile(agentsMdPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if !strings.HasPrefix(content, prelude) {
+		t.Error("existing content was not preserved")
+	}
+	if strings.Count(content, agentsMdBegin) != 1 {
+		t.Error("expected exactly one begin marker")
+	}
+
+	// Modify agents.json — add an agent, re-run, verify block updated
+	agentsCfg := filepath.Join(dir, ".agentfactory", "agents.json")
+	if err := os.WriteFile(agentsCfg, []byte(`{"agents":{"manager":{"type":"interactive","description":"Interactive agent"},"supervisor":{"type":"autonomous","description":"Autonomous agent"},"worker":{"type":"autonomous","description":"Worker agent"}}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeAgentsMd(dir); err != nil {
+		t.Fatalf("second writeAgentsMd: %v", err)
+	}
+
+	data, err = os.ReadFile(agentsMdPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content = string(data)
+
+	if !strings.HasPrefix(content, prelude) {
+		t.Error("existing content lost after block replace")
+	}
+	if !strings.Contains(content, "| `worker` |") {
+		t.Error("new worker agent not in updated block")
+	}
+	if strings.Count(content, agentsMdBegin) != 1 {
+		t.Error("duplicate begin markers after replace")
+	}
+}
+
+func TestAgentDescriptionLine(t *testing.T) {
+	tests := []struct {
+		name string
+		desc string
+		want string
+	}{
+		{
+			name: "simple",
+			desc: "Interactive agent for human-supervised work",
+			want: "Interactive agent for human-supervised work",
+		},
+		{
+			name: "strips_overview_joins_lines",
+			desc: "## Overview\nStructured design exploration via\nparallel specialized analysts.",
+			want: "Structured design exploration via parallel specialized analysts.",
+		},
+		{
+			name: "truncates_at_128",
+			desc: strings.Repeat("x", 150),
+			want: strings.Repeat("x", 125) + "...",
+		},
+		{
+			name: "skips_blank_lines_joins_remainder",
+			desc: "\n\n## Overview\n\nFirst line.\nSecond line.",
+			want: "First line. Second line.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := agentDescriptionLine(tt.desc)
+			if got != tt.want {
+				t.Errorf("agentDescriptionLine(%q) = %q, want %q", tt.desc, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInstallRoleFallbackWarning(t *testing.T) {
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".agentfactory")
+	if err := os.MkdirAll(filepath.Join(configDir, "agents"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	configs := map[string]string{
+		"factory.json":   `{"type":"factory","version":1,"name":"test"}`,
+		"agents.json":    `{"agents":{"phantom-agent":{"type":"autonomous","description":"Formula agent without template","formula":"phantom-formula"}}}`,
+		"messaging.json": `{"groups":{}}`,
+	}
+	for name, content := range configs {
+		if err := os.WriteFile(filepath.Join(configDir, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, installErr := runInstallInDir(t, dir, "phantom-agent")
+
+	w.Close()
+	var stderrBuf bytes.Buffer
+	stderrBuf.ReadFrom(r)
+	os.Stderr = origStderr
+
+	if installErr != nil {
+		t.Fatalf("install should succeed with fallback: %v", installErr)
+	}
+	if !strings.Contains(stderrBuf.String(), "WARNING") {
+		t.Errorf("expected WARNING on stderr for formula agent without embedded template, got stderr: %q", stderrBuf.String())
+	}
+}

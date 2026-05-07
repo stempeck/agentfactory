@@ -2490,6 +2490,7 @@ title = "Step 1"
 // must error before any bead is created. The error message must mention the
 // --agent flag so the user knows how to fix it.
 func TestSling_RequiresNonEmptyAgent(t *testing.T) {
+	t.Setenv("AF_ROLE", "")
 	installMemStore(t)
 	toml := `
 formula = "test-no-agent-no-cli"
@@ -3003,5 +3004,52 @@ description = "Working on it"
 
 	if err != nil && strings.Contains(err.Error(), "required inputs not provided") {
 		t.Errorf("convoy should NOT trigger input bridge, got bridge error: %v", err)
+	}
+}
+
+func TestSlingAdvisesOnMissingTemplate(t *testing.T) {
+	killStaleTmuxSession(t, "af-notemplate-agent")
+	installMemStore(t)
+	installNoopLaunchSession(t)
+
+	root, _ := createTestFormulaFactory(t, "notemplate-formula", "notemplate-agent")
+
+	agents := map[string]interface{}{
+		"agents": map[string]interface{}{
+			"notemplate-agent": map[string]interface{}{
+				"type":        "autonomous",
+				"description": "Agent without embedded template",
+				"formula":     "notemplate-formula",
+			},
+		},
+	}
+	data, _ := json.Marshal(agents)
+	os.WriteFile(filepath.Join(root, ".agentfactory", "agents.json"), data, 0o644)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	callerWd := filepath.Join(root, ".agentfactory", "agents", "caller-agent")
+	os.MkdirAll(callerWd, 0o755)
+
+	t.Cleanup(func() {
+		exec.Command("tmux", "kill-session", "-t", "af-notemplate-agent").Run()
+	})
+
+	err := dispatchToSpecialist(cmd, root, callerWd, "notemplate-agent", "test task")
+
+	output := buf.String()
+	if !strings.Contains(output, "WARNING") {
+		t.Errorf("expected WARNING about missing template on stderr, got: %s", output)
+	}
+
+	if err != nil {
+		errMsg := err.Error()
+		if !strings.Contains(errMsg, "formula") && !strings.Contains(errMsg, "bead") {
+			t.Errorf("expected dispatch to succeed or fail at formula path, got: %s", errMsg)
+		}
 	}
 }
