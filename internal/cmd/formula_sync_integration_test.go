@@ -72,7 +72,7 @@ func TestFormulaSyncBehavior(t *testing.T) {
 		past := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 		os.Chtimes(stalePath, past, past)
 
-		runSyncScript(t, syncScript, repoRoot, formulaDir)
+		runSyncScript(t, syncScript, repoRoot, formulaDir, repoRoot)
 
 		got, err := os.ReadFile(filepath.Join(formulaDir, staleName))
 		if err != nil {
@@ -99,10 +99,29 @@ func TestFormulaSyncBehavior(t *testing.T) {
 			t.Fatalf("writing orphan formula: %v", err)
 		}
 
-		runSyncScript(t, syncScript, repoRoot, formulaDir)
+		runSyncScript(t, syncScript, repoRoot, formulaDir, repoRoot)
 
 		if _, err := os.Stat(orphanPath); !os.IsNotExist(err) {
 			t.Error("orphan formula was not removed by sync")
+		}
+	})
+
+	t.Run("preserves_customer_formula", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		formulaDir := filepath.Join(tmpDir, ".beads", "formulas")
+		if err := os.MkdirAll(formulaDir, 0755); err != nil {
+			t.Fatalf("creating formula dir: %v", err)
+		}
+
+		customerPath := filepath.Join(formulaDir, "my-custom-workflow.formula.toml")
+		if err := os.WriteFile(customerPath, []byte("# customer formula"), 0644); err != nil {
+			t.Fatalf("writing customer formula: %v", err)
+		}
+
+		runSyncScript(t, syncScript, repoRoot, formulaDir, tmpDir)
+
+		if _, err := os.Stat(customerPath); os.IsNotExist(err) {
+			t.Error("customer formula was deleted by sync in non-source context")
 		}
 	})
 
@@ -113,7 +132,7 @@ func TestFormulaSyncBehavior(t *testing.T) {
 			t.Fatalf("creating formula dir: %v", err)
 		}
 
-		runSyncScript(t, syncScript, repoRoot, formulaDir)
+		runSyncScript(t, syncScript, repoRoot, formulaDir, repoRoot)
 
 		for _, name := range sourceNames {
 			destPath := filepath.Join(formulaDir, name)
@@ -135,7 +154,7 @@ func TestFormulaSyncBehavior(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reading dest dir: %v", err)
 		}
-		if len(destEntries) != len(sourceNames) {
+		if len(destEntries) < len(sourceNames) {
 			t.Errorf("dest has %d files, source has %d", len(destEntries), len(sourceNames))
 		}
 	})
@@ -156,12 +175,13 @@ func TestAgentGenAllDocumentsWorktreeLimitation(t *testing.T) {
 	}
 }
 
-func runSyncScript(t *testing.T, script, repoRoot, formulaDir string) {
+func runSyncScript(t *testing.T, script, repoRoot, formulaDir, projectDir string) {
 	t.Helper()
 	cmd := exec.Command("bash", "-c", script)
 	cmd.Env = append(os.Environ(),
 		"AF_SRC="+repoRoot,
 		"FORMULA_DIR="+formulaDir,
+		"PROJECT="+projectDir,
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

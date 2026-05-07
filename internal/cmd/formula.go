@@ -236,18 +236,18 @@ func runFormulaAgentGen(cmd *cobra.Command, args []string) error {
 
 	afSrc, isFallback := resolveAFSource(root)
 	if isFallback {
-		fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: could not locate AF source tree; writing template to factory root. Template will not be embedded until you copy it to the AF source tree and rebuild.\n")
+		fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: could not locate AF source tree; skipping template write. Template will not be embedded.\n")
+	} else {
+		tmplDir := filepath.Join(afSrc, "internal", "templates", "roles")
+		if err := os.MkdirAll(tmplDir, 0755); err != nil {
+			return fmt.Errorf("creating template directory: %w", err)
+		}
+		tmplPath := filepath.Join(tmplDir, agentName+".md.tmpl")
+		if err := os.WriteFile(tmplPath, []byte(tmplContent), 0644); err != nil {
+			return fmt.Errorf("writing role template: %w", err)
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "✓ Role template written: internal/templates/roles/%s.md.tmpl\n", agentName)
 	}
-	// Write role template to source tree
-	tmplDir := filepath.Join(afSrc, "internal", "templates", "roles")
-	if err := os.MkdirAll(tmplDir, 0755); err != nil {
-		return fmt.Errorf("creating template directory: %w", err)
-	}
-	tmplPath := filepath.Join(tmplDir, agentName+".md.tmpl")
-	if err := os.WriteFile(tmplPath, []byte(tmplContent), 0644); err != nil {
-		return fmt.Errorf("writing role template: %w", err)
-	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "✓ Role template written: internal/templates/roles/%s.md.tmpl\n", agentName)
 
 	// Create workspace directory
 	wsDirCreated := false
@@ -359,14 +359,7 @@ func runFormulaAgentGenDelete(cmd *cobra.Command, agentName string) error {
 	}
 
 	// Paths
-	afSrc, _ := resolveAFSource(root)
-	tmplPath := filepath.Join(afSrc, "internal", "templates", "roles", agentName+".md.tmpl")
-	if afSrc != root {
-		fallbackPath := filepath.Join(root, "internal", "templates", "roles", agentName+".md.tmpl")
-		if _, err := os.Stat(fallbackPath); err == nil {
-			os.Remove(fallbackPath)
-		}
-	}
+	afSrc, isFallback := resolveAFSource(root)
 	wsDir := config.AgentDir(root, agentName)
 
 	// Check workspace for uncommitted changes (warn only)
@@ -384,15 +377,26 @@ func runFormulaAgentGenDelete(cmd *cobra.Command, agentName string) error {
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "✓ Agent entry removed from .agentfactory/agents.json\n")
 
-	// Remove template file (tolerate missing)
-	if err := os.Remove(tmplPath); err != nil {
-		if os.IsNotExist(err) {
-			fmt.Fprintf(cmd.ErrOrStderr(), "✓ Role template already absent: internal/templates/roles/%s.md.tmpl\n", agentName)
+	// Remove template file (only when AF source tree is available)
+	if !isFallback {
+		tmplPath := filepath.Join(afSrc, "internal", "templates", "roles", agentName+".md.tmpl")
+		if err := os.Remove(tmplPath); err != nil {
+			if os.IsNotExist(err) {
+				fmt.Fprintf(cmd.ErrOrStderr(), "✓ Role template already absent: internal/templates/roles/%s.md.tmpl\n", agentName)
+			} else {
+				return fmt.Errorf("removing template: %w", err)
+			}
 		} else {
-			return fmt.Errorf("removing template: %w", err)
+			fmt.Fprintf(cmd.ErrOrStderr(), "✓ Role template removed: internal/templates/roles/%s.md.tmpl\n", agentName)
+		}
+		if afSrc != root {
+			fallbackPath := filepath.Join(root, "internal", "templates", "roles", agentName+".md.tmpl")
+			if _, err := os.Stat(fallbackPath); err == nil {
+				os.Remove(fallbackPath)
+			}
 		}
 	} else {
-		fmt.Fprintf(cmd.ErrOrStderr(), "✓ Role template removed: internal/templates/roles/%s.md.tmpl\n", agentName)
+		fmt.Fprintf(cmd.ErrOrStderr(), "✓ Skipping template removal (not in AF source tree)\n")
 	}
 
 	// Remove workspace directory (tolerate missing)

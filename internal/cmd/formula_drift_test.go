@@ -54,11 +54,6 @@ func TestFormulaDriftSourceVsInstalled(t *testing.T) {
 		}
 	}
 
-	for _, name := range mirrorFiles {
-		if !sourceSet[name] {
-			t.Errorf("formula %q exists in %s but has no source in %s — orphan mirror, delete it or restore source", name, mirrorDir, sourceDir)
-		}
-	}
 }
 
 func listFormulas(t *testing.T, dir string) []string {

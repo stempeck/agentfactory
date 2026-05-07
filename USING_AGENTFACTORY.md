@@ -525,7 +525,7 @@ cd ~/af/myproject
 af up
 ```
 
-**Promote new formulas first.** The script syncs formulas from the AF source and removes any in your project that don't exist there. Unpromoted formulas get deleted. Pass `--no-build` to skip the `make install` step.
+**Customer formulas are safe.** The script syncs formulas from the AF source tree but preserves any customer-created formulas (those not in the AF source's `internal/cmd/install_formulas/`). Pass `--no-build` to skip the `make install` step.
 
 ## Important: One Factory Per Repo
 
