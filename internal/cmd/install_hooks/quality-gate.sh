@@ -14,10 +14,10 @@ if [ -z "$FACTORY_ROOT" ]; then
     echo '{"ok": true}'
     exit 0
 fi
-PROMPT_FILE="$FACTORY_ROOT/hooks/quality-gate-prompt.txt"
+PROMPT_FILE="$FACTORY_ROOT/.agentfactory/hooks/quality-gate-prompt.txt"
 
 # Check quality gate toggle (default: off)
-GATE_STATE=$(cat "$FACTORY_ROOT/.quality-gate" 2>/dev/null)
+GATE_STATE=$(cat "$FACTORY_ROOT/.agentfactory/.quality-gate" 2>/dev/null)
 if [ "$GATE_STATE" != "on" ]; then
     echo '{"ok": true}'
     exit 0

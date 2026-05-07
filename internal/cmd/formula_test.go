@@ -1551,6 +1551,42 @@ func TestFormulaAgentGen_DeleteWarnsOnDirtyWorkspace(t *testing.T) {
 	}
 }
 
+func TestFormulaAgentGen_DeleteDoesNotTouchFactoryRootTemplates(t *testing.T) {
+	factoryRoot, afSourceRoot := setupFormulaFactoryWithAFSource(t)
+
+	// Re-add go.mod to factory root so it looks like an AF checkout
+	os.WriteFile(filepath.Join(factoryRoot, "go.mod"),
+		[]byte("module github.com/stempeck/agentfactory\n\ngo 1.24\n"), 0644)
+
+	// Pre-populate template at factory root (simulates git-tracked template)
+	factoryTmplDir := filepath.Join(factoryRoot, "internal", "templates", "roles")
+	os.MkdirAll(factoryTmplDir, 0755)
+	factoryTmpl := filepath.Join(factoryTmplDir, "investigate.md.tmpl")
+	os.WriteFile(factoryTmpl, []byte("factory root template"), 0644)
+
+	// Create agent with --af-src pointing to separate AF source
+	_, _, err := runFormulaAgentGenInDir(t, factoryRoot, "investigate", "--af-src", afSourceRoot)
+	if err != nil {
+		t.Fatalf("agent-gen create failed: %v", err)
+	}
+
+	// Delete with --af-src
+	_, _, err = runFormulaAgentGenInDir(t, factoryRoot, "investigate", "--delete", "--af-src", afSourceRoot)
+	if err != nil {
+		t.Fatalf("agent-gen --delete failed: %v", err)
+	}
+
+	// Template at AF source should be deleted
+	if _, err := os.Stat(filepath.Join(afSourceRoot, "internal", "templates", "roles", "investigate.md.tmpl")); !os.IsNotExist(err) {
+		t.Error("template at AF source should be deleted")
+	}
+
+	// Template at factory root must NOT be deleted
+	if _, err := os.Stat(factoryTmpl); err != nil {
+		t.Errorf("template at factory root must not be deleted: %v", err)
+	}
+}
+
 func TestGenerateAgentTemplate_HandoffBlock(t *testing.T) {
 	f := &formula.Formula{
 		Name: "test-workflow",

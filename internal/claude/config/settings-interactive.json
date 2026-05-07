@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$HOME/bin:$PATH\" && bash \"${AF_ROOT}/hooks/quality-gate.sh\""
+            "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$HOME/bin:$PATH\" && bash \"${AF_ROOT}/.agentfactory/hooks/quality-gate.sh\""
           }
         ]
       }

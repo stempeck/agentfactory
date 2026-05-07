@@ -20,10 +20,10 @@ if [ -z "$FACTORY_ROOT" ]; then
     exit 0
 fi
 # FIDELITY-DELTA 1: prompt file path
-PROMPT_FILE="$FACTORY_ROOT/hooks/fidelity-gate-prompt.txt"
+PROMPT_FILE="$FACTORY_ROOT/.agentfactory/hooks/fidelity-gate-prompt.txt"
 
 # FIDELITY-DELTA 2: fidelity gate toggle (default: on via af install --init)
-GATE_STATE=$(cat "$FACTORY_ROOT/.fidelity-gate" 2>/dev/null)
+GATE_STATE=$(cat "$FACTORY_ROOT/.agentfactory/.fidelity-gate" 2>/dev/null)
 if [ "$GATE_STATE" != "on" ]; then
     echo '{"ok": true}'
     exit 0

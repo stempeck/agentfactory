@@ -23,7 +23,7 @@ func init() {
 }
 
 func qualityGateFile(factoryRoot string) string {
-	return filepath.Join(factoryRoot, ".quality-gate")
+	return filepath.Join(factoryRoot, ".agentfactory", ".quality-gate")
 }
 
 func runQuality(cmd *cobra.Command, args []string) error {

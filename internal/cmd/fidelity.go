@@ -18,8 +18,8 @@ var fidelityCmd = &cobra.Command{
 The fidelity gate is a runtime grader that evaluates each agent turn against
 the current formula step's contract via a Haiku model. It fires after every
 Stop event when a formula is hooked; on by default (af install --init creates
-.fidelity-gate with "on"). Mirrors af quality on the file-toggle side —
-enabling writes "on\n", disabling writes "off\n" to .fidelity-gate.`,
+.agentfactory/.fidelity-gate with "on"). Mirrors af quality on the file-toggle side —
+enabling writes "on\n", disabling writes "off\n" to .agentfactory/.fidelity-gate.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runFidelity,
 }
@@ -29,7 +29,7 @@ func init() {
 }
 
 func fidelityGateFile(factoryRoot string) string {
-	return filepath.Join(factoryRoot, ".fidelity-gate")
+	return filepath.Join(factoryRoot, ".agentfactory", ".fidelity-gate")
 }
 
 func runFidelity(cmd *cobra.Command, args []string) error {

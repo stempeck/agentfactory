@@ -62,6 +62,14 @@ func TestDispatchConfigPath(t *testing.T) {
 	}
 }
 
+func TestHooksDir(t *testing.T) {
+	got := HooksDir("/tmp/myproject")
+	want := filepath.Join("/tmp/myproject", ".agentfactory", "hooks")
+	if got != want {
+		t.Errorf("HooksDir: got %q, want %q", got, want)
+	}
+}
+
 func TestDetectAgentFromCwd_AtAgentRoot(t *testing.T) {
 	root := t.TempDir()
 	cwd := filepath.Join(root, ".agentfactory", "agents", "manager")
