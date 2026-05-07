@@ -4,7 +4,7 @@ description: >
   Create a new agentfactory formula from a description or SKILL.md file. Generates a properly
   structured TOML formula with steps, dependencies, inputs, and iteration mechanisms.
   When given a SKILL.md, preserves phase gates as separate formula steps with enforcement language.
-allowed-tools: "Write(internal/cmd/install_formulas/*.formula.toml),Read,Glob,Grep"
+allowed-tools: "Write(.beads/formulas/*.formula.toml),Read,Glob,Grep"
 version: "1.0.0"
 ---
 
@@ -232,18 +232,18 @@ depends_on = ["perspective-1", "perspective-2"]
 
 Write the formula to:
 ```
-internal/cmd/install_formulas/<formula-name>.formula.toml
+.beads/formulas/<formula-name>.formula.toml
 ```
 
-This is the embedded formula source directory. Formulas here are compiled into the `af` binary
-via `//go:embed` and provisioned to target projects by `af install --init`.
+This is the runtime formula directory for the current project. Formulas here are discoverable
+by `af sling` and the formula system at runtime.
 
 ### 8. Post-Creation
 
 After creating the formula, inform the user:
 
 ```
-Formula created: internal/cmd/install_formulas/<name>.formula.toml
+Formula created: .beads/formulas/<name>.formula.toml
 
 To inspect:
   bd formula show <name>           # View formula details
@@ -262,8 +262,8 @@ To test: Create a sample input and run af sling --formula <name> --var input=pat
 Before creating a new formula, examine existing formulas for patterns:
 
 ```bash
-ls internal/cmd/install_formulas/                    # List available formulas
-cat internal/cmd/install_formulas/*.formula.toml # View molecule formulas
+ls .beads/formulas/                                  # List available formulas
+cat .beads/formulas/*.formula.toml                   # View formula patterns
 ```
 
 **Key reference formulas:**
@@ -286,7 +286,7 @@ and follow the instructions in `skillmd-mode.md` in this skill directory.
 3. **Vague descriptions** - Always include specific actions and exit criteria
 4. **No iteration mechanism** - For review workflows, add a quality gate
 5. **Hardcoded paths** - Use input variables for flexibility
-6. **Writing outside internal/cmd/install_formulas/** - Formulas must be written to `internal/cmd/install_formulas/`
+6. **Writing outside .beads/formulas/** - Formulas must be written to `.beads/formulas/`
 7. **Claiming completion without verification** - Always verify the formula file exists after creation
 8. **Assuming a proposal file exists** - Agents get requirements from beads, which may contain inline text, a file path, or a GitHub issue link. Use source-agnostic language ("requirements" not "proposal")
 9. **Omitting invariant steps** - Every work execution formula MUST include all 10 invariant steps from factoryworker: load-context, branch-setup, validate-contract, preflight-tests, self-review, run-tests, self-verify, cleanup-workspace, prepare-for-review, submit-and-exit. Skills don't know about agentfactory architecture — that's formula-create's job to inject

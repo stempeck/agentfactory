@@ -176,7 +176,7 @@ Before generating, examine BOTH reference formulas:
 
 **1. factoryworker.formula.toml** — the invariant step source:
 ```bash
-cat internal/cmd/install_formulas/factoryworker.formula.toml
+cat .beads/formulas/factoryworker.formula.toml
 ```
 
 This defines all 10 invariant steps. Copy step descriptions for:
@@ -186,7 +186,7 @@ This defines all 10 invariant steps. Copy step descriptions for:
 
 **2. design-v3.formula.toml** — a complete skill-derived formula:
 ```bash
-cat internal/cmd/install_formulas/design-v3.formula.toml
+cat .beads/formulas/design-v3.formula.toml
 ```
 
 Shows the full 18-step structure with all 10 invariant steps, domain phase interleaving,
@@ -254,7 +254,7 @@ not workspace cleanup. Do NOT bundle artifact removal or git push into submit-an
 
 1. **File exists:**
    ```bash
-   ls -la internal/cmd/install_formulas/<formula-name>.formula.toml
+   ls -la .beads/formulas/<formula-name>.formula.toml
    ```
 
 2. **Step count:** Count `[[steps]]` entries. Must equal: pre-work (4) + domain (N) + post-work (6).
@@ -280,7 +280,7 @@ If ANY check fails, fix the formula and re-run the checklist before reporting su
 After creating a skill-derived formula, inform the user:
 
 ```
-Formula created: internal/cmd/install_formulas/<name>.formula.toml
+Formula created: .beads/formulas/<name>.formula.toml
 Derived from: .claude/skills/<name>/SKILL.md
 
 Steps: N domain steps + M skill gates + 10 invariant steps

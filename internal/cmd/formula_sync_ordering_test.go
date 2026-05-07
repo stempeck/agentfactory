@@ -54,7 +54,7 @@ func TestAgentGenAllSyncsBeforeLoop(t *testing.T) {
 	}
 }
 
-func TestSyncFormulasRemovesOrphans(t *testing.T) {
+func TestSyncFormulasIncrementalCopy(t *testing.T) {
 	data, err := os.ReadFile("../../Makefile")
 	if err != nil {
 		t.Fatalf("read Makefile: %v", err)
@@ -72,7 +72,7 @@ func TestSyncFormulasRemovesOrphans(t *testing.T) {
 		targetBody = targetBody[:nextTarget+1]
 	}
 
-	if !strings.Contains(targetBody, "rm -f .beads/formulas/*.formula.toml") {
-		t.Error("sync-formulas target does not remove orphans (missing 'rm -f .beads/formulas/*.formula.toml')")
+	if !strings.Contains(targetBody, "basename") {
+		t.Error("sync-formulas target does not use incremental per-file copy (missing 'basename')")
 	}
 }

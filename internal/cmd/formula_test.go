@@ -421,6 +421,11 @@ func setupFormulaFactory(t *testing.T) string {
 		t.Fatal(err)
 	}
 
+	// Create go.mod so resolveAFSource treats this as a valid AF source tree
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/stempeck/agentfactory\n\ngo 1.24\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	configs := map[string]string{
 		"factory.json": `{"type":"factory","version":1,"name":"agentfactory"}`,
 		// manual-fixture is a synthetic manual agent for tests that must exercise
@@ -482,7 +487,7 @@ func runFormulaAgentGenInDir(t *testing.T, dir string, args ...string) (stdout, 
 	agentGenDelete = false
 	agentGenAFSrc = ""
 	agentGenBuild = false
-	compiledSourceRoot = ""
+	compiledSourceRoot = dir
 
 	var outBuf, errBuf bytes.Buffer
 	rootCmd.SetOut(&outBuf)
@@ -1917,6 +1922,8 @@ func TestResolveAFSource(t *testing.T) {
 	makeValidAFDir := func(t *testing.T) string {
 		t.Helper()
 		dir := t.TempDir()
+		// Resolve symlinks so expected paths match EvalSymlinks in resolveAFSource
+		dir, _ = filepath.EvalSymlinks(dir)
 		os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/stempeck/agentfactory\n"), 0644)
 		return dir
 	}
@@ -2141,15 +2148,18 @@ func TestAgentGenFallbackWarning(t *testing.T) {
 		t.Fatalf("agent-gen failed: %v\nstderr: %s", err, stderr)
 	}
 
-	// Stderr should contain WARNING about fallback
+	// Stderr should contain WARNING about skipping template write
 	if !strings.Contains(stderr, "WARNING") {
 		t.Errorf("stderr should contain WARNING about fallback, got: %s", stderr)
 	}
+	if !strings.Contains(stderr, "skipping template write") {
+		t.Errorf("stderr should mention skipping template write, got: %s", stderr)
+	}
 
-	// Template should still be written (to factory root as fallback)
+	// Template should NOT be written when AF source is unavailable
 	tmplPath := filepath.Join(factoryRoot, "internal", "templates", "roles", "investigate.md.tmpl")
-	if _, err := os.Stat(tmplPath); err != nil {
-		t.Error("template should be written to factory root as fallback")
+	if _, err := os.Stat(tmplPath); err == nil {
+		t.Error("template should NOT be written when AF source tree is unavailable")
 	}
 }
 

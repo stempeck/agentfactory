@@ -69,6 +69,8 @@ check-formulas:
 
 # Used by quickstart.sh install_af() — do not rename without updating quickstart.sh
 sync-formulas:
-	@rm -f .beads/formulas/*.formula.toml
-	@cp internal/cmd/install_formulas/*.formula.toml .beads/formulas/
-	@echo "Formulas synced: source → installed (orphans removed)"
+	@for f in internal/cmd/install_formulas/*.formula.toml; do \
+		name=$$(basename "$$f"); \
+		cp "$$f" ".beads/formulas/$$name"; \
+	done
+	@echo "Formulas synced: source → installed"

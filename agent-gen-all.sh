@@ -60,6 +60,10 @@ af down --all 2>/dev/null || true
 
 echo "syncing formulas from source..."
 updated=0
+is_source_repo=false
+if [ "$PROJECT" = "$AF_SRC" ] || { [ -f "$PROJECT/go.mod" ] && grep -q agentfactory "$PROJECT/go.mod" 2>/dev/null; }; then
+    is_source_repo=true
+fi
 for f in "$AF_SRC"/internal/cmd/install_formulas/*.formula.toml; do
     [ -f "$f" ] || continue
     name=$(basename "$f")
@@ -70,28 +74,44 @@ for f in "$AF_SRC"/internal/cmd/install_formulas/*.formula.toml; do
         updated=$((updated + 1))
     fi
 done
-for f in "$FORMULA_DIR"/*.formula.toml; do
-    [ -f "$f" ] || continue
-    name=$(basename "$f")
-    if [ ! -f "$AF_SRC/internal/cmd/install_formulas/$name" ]; then
-        echo "WARNING: removing local formula not in source tree: $name"
-        echo "  (To preserve, promote it: cp $FORMULA_DIR/$name $AF_SRC/internal/cmd/install_formulas/)"
-        rm "$f"
-        echo "  removed orphan: $name"
-        updated=$((updated + 1))
+if [ "$is_source_repo" = true ]; then
+    for f in "$FORMULA_DIR"/*.formula.toml; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        if [ ! -f "$AF_SRC/internal/cmd/install_formulas/$name" ]; then
+            echo "WARNING: removing local formula not in source tree: $name"
+            echo "  (To preserve, promote it: cp $FORMULA_DIR/$name $AF_SRC/internal/cmd/install_formulas/)"
+            rm "$f"
+            echo "  removed orphan: $name"
+            updated=$((updated + 1))
+        fi
+    done
+else
+    customer_count=0
+    for f in "$FORMULA_DIR"/*.formula.toml; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        if [ ! -f "$AF_SRC/internal/cmd/install_formulas/$name" ]; then
+            customer_count=$((customer_count + 1))
+        fi
+    done
+    if [ "$customer_count" -gt 0 ]; then
+        echo "  preserving $customer_count customer formula(s)"
     fi
-done
-# Remove orphan role templates (no corresponding formula)
-for tmpl_file in "$AF_SRC/internal/templates/roles/"*.md.tmpl; do
-    [ -f "$tmpl_file" ] || continue
-    tmpl_name="$(basename "$tmpl_file" .md.tmpl)"
-    # Skip built-in templates
-    case "$tmpl_name" in manager|supervisor) continue ;; esac
-    if [ ! -f "$AF_SRC/internal/cmd/install_formulas/${tmpl_name}.formula.toml" ]; then
-        echo "WARNING: removing orphan template: $tmpl_file (no matching formula)"
-        rm "$tmpl_file"
-    fi
-done
+fi
+if [ "$is_source_repo" = true ]; then
+    # Remove orphan role templates (no corresponding formula)
+    for tmpl_file in "$AF_SRC/internal/templates/roles/"*.md.tmpl; do
+        [ -f "$tmpl_file" ] || continue
+        tmpl_name="$(basename "$tmpl_file" .md.tmpl)"
+        # Skip built-in templates
+        case "$tmpl_name" in manager|supervisor) continue ;; esac
+        if [ ! -f "$AF_SRC/internal/cmd/install_formulas/${tmpl_name}.formula.toml" ]; then
+            echo "WARNING: removing orphan template: $tmpl_file (no matching formula)"
+            rm "$tmpl_file"
+        fi
+    done
+fi
 if [ "$updated" -eq 0 ]; then
     echo "  formulas already current"
 fi
