@@ -82,6 +82,9 @@ func resolveAFSource(factoryRoot string) (resolved string, fallback bool) {
 			continue
 		}
 		if validateAFSource(c.path) {
+			if real, err := filepath.EvalSymlinks(c.path); err == nil {
+				return real, false
+			}
 			return c.path, false
 		}
 	}

@@ -1922,6 +1922,8 @@ func TestResolveAFSource(t *testing.T) {
 	makeValidAFDir := func(t *testing.T) string {
 		t.Helper()
 		dir := t.TempDir()
+		// Resolve symlinks so expected paths match EvalSymlinks in resolveAFSource
+		dir, _ = filepath.EvalSymlinks(dir)
 		os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/stempeck/agentfactory\n"), 0644)
 		return dir
 	}
