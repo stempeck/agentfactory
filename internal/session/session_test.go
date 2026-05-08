@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -527,5 +528,51 @@ func TestSetWorktree_RejectsEmptyPath(t *testing.T) {
 	want := "/tmp/factory/.agentfactory/agents/agent"
 	if got != want {
 		t.Errorf("WorkDir() after rejected SetWorktree = %q, want %q", got, want)
+	}
+}
+
+func TestSessionStart_RefusesWhenMemoryLow(t *testing.T) {
+	orig := checkAvailableMemoryFunc
+	checkAvailableMemoryFunc = func() (uint64, error) { return 256, nil } // 256MB < 512MB threshold
+	t.Cleanup(func() { checkAvailableMemoryFunc = orig })
+
+	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
+	mgr := NewManager("/tmp/factory", "testmem", entry)
+	_ = mgr.SetWorktree("/tmp/worktree", "wt-abc123")
+
+	// Create the workspace directory so we don't fail on ErrNotProvisioned
+	workDir := mgr.WorkDir()
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("creating workspace: %v", err)
+	}
+
+	// Start requires tmux — if not available, skip
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not available")
+	}
+
+	err := mgr.Start()
+	if err == nil {
+		// Clean up tmux session if it was created
+		mgr.Stop()
+		t.Fatal("expected error for low memory, got nil")
+	}
+	if !strings.Contains(err.Error(), "insufficient memory") {
+		// Could also fail for other reasons (shell not ready, etc.)
+		// Only fail if tmux worked but memory check didn't fire
+		if strings.Contains(err.Error(), "waiting for shell") || strings.Contains(err.Error(), "tmux") {
+			t.Skip("tmux shell readiness issue, cannot test memory gate")
+		}
+		t.Errorf("expected error about insufficient memory, got: %v", err)
+	}
+}
+
+func TestCheckAvailableMemory_ReturnsValue(t *testing.T) {
+	mb, err := checkAvailableMemory()
+	if err != nil {
+		t.Skipf("memory check not supported on this platform: %v", err)
+	}
+	if mb == 0 {
+		t.Error("checkAvailableMemory returned 0MB, expected > 0")
 	}
 }

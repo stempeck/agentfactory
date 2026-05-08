@@ -46,6 +46,11 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	factoryCfg, err := config.LoadFactoryConfig(config.FactoryConfigPath(root))
+	if err != nil {
+		return fmt.Errorf("loading factory config: %w", err)
+	}
+
 	// Resolve agent list
 	agents := args
 	if len(agents) == 0 {
@@ -66,10 +71,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 		envWT := os.Getenv("AF_WORKTREE")
 		envWTID := os.Getenv("AF_WORKTREE_ID")
 		creator, _ := resolveAgentName(wd, root)
-		wtPath, wtID, created, wtErr := worktree.ResolveOrCreate(root, name, creator, envWT, envWTID)
+		wtPath, wtID, created, wtErr := worktree.ResolveOrCreate(root, name, creator, envWT, envWTID, worktree.CreateOpts{MaxWorktrees: factoryCfg.MaxWorktrees})
 		if wtErr != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "warning: worktree resolution for %s: %v\n", name, wtErr)
-			wtPath, wtID = "", ""
+			return fmt.Errorf("worktree creation failed for %s: %w", name, wtErr)
 		}
 		if wtPath != "" {
 			if _, setupErr := worktree.SetupAgent(root, wtPath, name, created); setupErr != nil {

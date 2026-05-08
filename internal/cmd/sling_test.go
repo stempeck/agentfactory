@@ -203,7 +203,7 @@ func TestDetectAgentName_WorktreeAgent(t *testing.T) {
 	// Set up factory config
 	afDir := filepath.Join(factoryRoot, ".agentfactory")
 	os.MkdirAll(afDir, 0o755)
-	os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{}`), 0o644)
+	os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{"type":"factory","version":1,"name":"test"}`), 0o644)
 	// agents.json with "solver" so resolveAgentName can validate membership.
 	os.WriteFile(filepath.Join(afDir, "agents.json"),
 		[]byte(`{"agents":{"solver":{"type":"autonomous","description":"test agent"}}}`), 0o644)
@@ -686,9 +686,12 @@ func TestInstantiateFormulaWorkflow_NoGlobals(t *testing.T) {
 func createTestFormulaFactory(t *testing.T, formulaName, agentName string) (string, string) {
 	t.Helper()
 	root := t.TempDir()
+	initTestGitRepo(t, root)
+	t.Setenv("AF_WORKTREE", root)
+	t.Setenv("AF_WORKTREE_ID", "wt-test00")
 	afDir := filepath.Join(root, ".agentfactory")
 	os.MkdirAll(filepath.Join(afDir, "agents"), 0o755)
-	os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{"name":"test"}`), 0o644)
+	os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{"type":"factory","version":1,"name":"test"}`), 0o644)
 	// agents.json so resolveAgentName can validate the path-derived name
 	// (GitHub issue #89 — membership gate treats unloadable config as failure).
 	os.WriteFile(filepath.Join(afDir, "agents.json"),
@@ -928,9 +931,12 @@ func TestDispatchToSpecialist_TaskDescriptionEmpty(t *testing.T) {
 func createTestFormulaFactoryWithTOML(t *testing.T, formulaName, agentName, toml string) (string, string) {
 	t.Helper()
 	root := t.TempDir()
+	initTestGitRepo(t, root)
+	t.Setenv("AF_WORKTREE", root)
+	t.Setenv("AF_WORKTREE_ID", "wt-test00")
 	afDir := filepath.Join(root, ".agentfactory")
 	os.MkdirAll(filepath.Join(afDir, "agents"), 0o755)
-	os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{"name":"test"}`), 0o644)
+	os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{"type":"factory","version":1,"name":"test"}`), 0o644)
 	// agents.json so resolveAgentName can validate the path-derived name
 	// (GitHub issue #89 — membership gate treats unloadable config as failure).
 	os.WriteFile(filepath.Join(afDir, "agents.json"),
@@ -3004,6 +3010,42 @@ description = "Working on it"
 
 	if err != nil && strings.Contains(err.Error(), "required inputs not provided") {
 		t.Errorf("convoy should NOT trigger input bridge, got bridge error: %v", err)
+	}
+}
+
+func TestSling_AbortsOnWorktreeFailure(t *testing.T) {
+	root := t.TempDir()
+	afDir := filepath.Join(root, ".agentfactory")
+	os.MkdirAll(filepath.Join(afDir, "agents"), 0o755)
+	os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{"type":"factory","version":1,"name":"test"}`), 0o644)
+	os.WriteFile(filepath.Join(afDir, "agents.json"),
+		[]byte(`{"agents":{"solver":{"type":"autonomous","description":"test","formula":"test-formula"}}}`), 0o644)
+
+	formulaDir := filepath.Join(root, ".beads", "formulas")
+	os.MkdirAll(formulaDir, 0o755)
+	os.WriteFile(filepath.Join(formulaDir, "test-formula.formula.toml"),
+		[]byte("formula = \"test-formula\"\ntype = \"workflow\"\nversion = 1\n\n[[steps]]\nid = \"step1\"\ntitle = \"Step 1\"\n"), 0o644)
+
+	t.Setenv("AF_WORKTREE", "")
+	t.Setenv("AF_WORKTREE_ID", "")
+	killStaleTmuxSession(t, "af-solver")
+
+	origNoLaunch := slingNoLaunch
+	slingNoLaunch = true
+	defer func() { slingNoLaunch = origNoLaunch }()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	err := dispatchToSpecialist(cmd, root, root, "solver", "test task")
+	if err == nil {
+		t.Fatal("dispatchToSpecialist should return error when worktree creation fails")
+	}
+	if !strings.Contains(err.Error(), "worktree creation failed") {
+		t.Errorf("error should contain 'worktree creation failed', got: %v", err)
 	}
 }
 

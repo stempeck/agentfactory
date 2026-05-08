@@ -638,7 +638,7 @@ func TestDown_Reset_PostResetCleanState(t *testing.T) {
 	store := installMemStore(t)
 	ctx := context.Background()
 
-	absPath, meta, err := worktree.Create(realDir, "solver")
+	absPath, meta, err := worktree.Create(realDir, "solver", worktree.CreateOpts{})
 	if err != nil {
 		t.Fatalf("worktree.Create: %v", err)
 	}
@@ -851,7 +851,7 @@ func TestDown_Reset_BehavioralFreshStart(t *testing.T) {
 	store := installMemStore(t)
 	ctx := context.Background()
 
-	_, meta, err := worktree.Create(realDir, "solver")
+	_, meta, err := worktree.Create(realDir, "solver", worktree.CreateOpts{})
 	if err != nil {
 		t.Fatalf("worktree.Create: %v", err)
 	}
@@ -890,7 +890,7 @@ func TestDown_Reset_BehavioralFreshStart(t *testing.T) {
 		t.Errorf("FindByAgent after reset should return nil, got: %+v", postMeta)
 	}
 
-	newPath, newID, created, err := worktree.ResolveOrCreate(realDir, "solver", "", "", "")
+	newPath, newID, created, err := worktree.ResolveOrCreate(realDir, "solver", "", "", "", worktree.CreateOpts{})
 	if err != nil {
 		t.Fatalf("ResolveOrCreate after reset: %v", err)
 	}

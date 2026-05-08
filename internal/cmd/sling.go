@@ -164,14 +164,19 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 		}
 	}
 
+	// Load factory config for MaxWorktrees cap
+	factoryCfg, fcErr := config.LoadFactoryConfig(config.FactoryConfigPath(root))
+	if fcErr != nil {
+		return fmt.Errorf("loading factory config: %w", fcErr)
+	}
+
 	// Worktree resolution — unified start-time check (issue #86).
 	envWT := os.Getenv("AF_WORKTREE")
 	envWTID := os.Getenv("AF_WORKTREE_ID")
 	creator, _ := resolveAgentName(callerWd, root)
-	worktreePath, worktreeID, wtCreated, wtErr := worktree.ResolveOrCreate(root, agentName, creator, envWT, envWTID)
+	worktreePath, worktreeID, wtCreated, wtErr := worktree.ResolveOrCreate(root, agentName, creator, envWT, envWTID, worktree.CreateOpts{MaxWorktrees: factoryCfg.MaxWorktrees})
 	if wtErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "warning: worktree resolution: %v\n", wtErr)
-		worktreePath, worktreeID = "", ""
+		return fmt.Errorf("worktree creation failed for %s: %w", agentName, wtErr)
 	}
 	if worktreePath != "" {
 		wtAgentDir, setupErr := worktree.SetupAgent(root, worktreePath, agentName, wtCreated)
@@ -286,13 +291,17 @@ func runFormulaInstantiation(cmd *cobra.Command, root, wd string, args []string)
 		return nil
 	}
 
+	fmFactoryCfg, fmFcErr := config.LoadFactoryConfig(config.FactoryConfigPath(root))
+	if fmFcErr != nil {
+		return fmt.Errorf("loading factory config: %w", fmFcErr)
+	}
+
 	envWT := os.Getenv("AF_WORKTREE")
 	envWTID := os.Getenv("AF_WORKTREE_ID")
 	creator, _ := resolveAgentName(wd, root)
-	worktreePath, worktreeID, wtCreated, wtErr := worktree.ResolveOrCreate(root, agentName, creator, envWT, envWTID)
+	worktreePath, worktreeID, wtCreated, wtErr := worktree.ResolveOrCreate(root, agentName, creator, envWT, envWTID, worktree.CreateOpts{MaxWorktrees: fmFactoryCfg.MaxWorktrees})
 	if wtErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "warning: worktree resolution: %v\n", wtErr)
-		worktreePath, worktreeID = "", ""
+		return fmt.Errorf("worktree creation failed for %s: %w", agentName, wtErr)
 	}
 	if worktreePath != "" {
 		if _, setupErr := worktree.SetupAgent(root, worktreePath, agentName, wtCreated); setupErr != nil {

@@ -741,3 +741,58 @@ func TestValidateAgentConfig_RejectsMetachars(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadFactoryConfig_MaxWorktreesField(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "factory.json")
+	data := `{"type":"factory","version":1,"name":"test","max_worktrees":4}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadFactoryConfig(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.MaxWorktrees != 4 {
+		t.Errorf("MaxWorktrees = %d, want 4", cfg.MaxWorktrees)
+	}
+}
+
+func TestLoadFactoryConfig_MaxWorktreesMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "factory.json")
+	data := `{"type":"factory","version":1,"name":"test"}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadFactoryConfig(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.MaxWorktrees != 0 {
+		t.Errorf("MaxWorktrees = %d, want 0 (default)", cfg.MaxWorktrees)
+	}
+}
+
+func TestLoadAgentConfig_SparsePaths(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents.json")
+	data := `{"agents":{"solver":{"type":"autonomous","description":"Solver","sparse_paths":["src/","docs/"]}}}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadAgentConfig(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	entry := cfg.Agents["solver"]
+	if len(entry.SparsePaths) != 2 {
+		t.Fatalf("SparsePaths length = %d, want 2", len(entry.SparsePaths))
+	}
+	if entry.SparsePaths[0] != "src/" || entry.SparsePaths[1] != "docs/" {
+		t.Errorf("SparsePaths = %v, want [src/ docs/]", entry.SparsePaths)
+	}
+}
