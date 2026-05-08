@@ -34,25 +34,6 @@ func setupFactoryRootMultiAgent(t *testing.T, dir string, agents map[string]stri
 	}
 }
 
-// addGitignore adds .agentfactory/ to .gitignore and commits it.
-// Required for clean worktree removal (git worktree remove fails on untracked files).
-func addGitignore(t *testing.T, dir string) {
-	t.Helper()
-	gitignorePath := filepath.Join(dir, ".gitignore")
-	if err := os.WriteFile(gitignorePath, []byte(".agentfactory/\n"), 0o644); err != nil {
-		t.Fatalf("write .gitignore: %v", err)
-	}
-	for _, args := range [][]string{
-		{"add", ".gitignore"},
-		{"commit", "-m", "add gitignore"},
-	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-}
 
 func TestWorktreeLifecycle_FullDispatchChain(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
