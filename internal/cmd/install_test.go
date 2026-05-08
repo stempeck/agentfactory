@@ -600,6 +600,7 @@ func TestSkillsFS_ContainsAllFiles(t *testing.T) {
 		"install_skills/formula-create/SKILL.md":        false,
 		"install_skills/formula-create/skillmd-mode.md": false,
 		"install_skills/github-issue/SKILL.md":          false,
+		"install_skills/rapid-implement/SKILL.md":       false,
 	}
 
 	err := fs.WalkDir(skillsFS, "install_skills", func(path string, d fs.DirEntry, err error) error {
