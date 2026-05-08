@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -590,6 +591,155 @@ func TestInstallRoleFallbackWarning(t *testing.T) {
 	}
 	if !strings.Contains(stderrBuf.String(), "WARNING") {
 		t.Errorf("expected WARNING on stderr for formula agent without embedded template, got stderr: %q", stderrBuf.String())
+	}
+}
+
+func TestSkillsFS_ContainsAllFiles(t *testing.T) {
+	expected := map[string]bool{
+		"install_skills/documentation-update/SKILL.md":  false,
+		"install_skills/formula-create/SKILL.md":        false,
+		"install_skills/formula-create/skillmd-mode.md": false,
+		"install_skills/github-issue/SKILL.md":          false,
+		"install_skills/rapid-implement/SKILL.md":       false,
+	}
+
+	err := fs.WalkDir(skillsFS, "install_skills", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if _, ok := expected[path]; ok {
+			expected[path] = true
+		} else {
+			t.Errorf("unexpected file in skillsFS: %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking skillsFS: %v", err)
+	}
+
+	for path, found := range expected {
+		if !found {
+			t.Errorf("expected file missing from skillsFS: %s", path)
+		}
+	}
+}
+
+func TestWriteSkills_SkipWhenEqual(t *testing.T) {
+	skillsDir := filepath.Join(t.TempDir(), ".claude", "skills")
+	if err := os.MkdirAll(skillsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeSkills(skillsDir); err != nil {
+		t.Fatalf("first writeSkills: %v", err)
+	}
+
+	samplePath := filepath.Join(skillsDir, "documentation-update", "SKILL.md")
+	info1, err := os.Stat(samplePath)
+	if err != nil {
+		t.Fatalf("stat after first write: %v", err)
+	}
+	mtime1 := info1.ModTime()
+
+	time.Sleep(50 * time.Millisecond)
+
+	if err := writeSkills(skillsDir); err != nil {
+		t.Fatalf("second writeSkills: %v", err)
+	}
+
+	info2, err := os.Stat(samplePath)
+	if err != nil {
+		t.Fatalf("stat after second write: %v", err)
+	}
+	if !info2.ModTime().Equal(mtime1) {
+		t.Errorf("skill file was rewritten despite identical content: mtime changed from %v to %v",
+			mtime1, info2.ModTime())
+	}
+
+	if err := os.WriteFile(samplePath, []byte("mutated content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeSkills(skillsDir); err != nil {
+		t.Fatalf("third writeSkills (after mutation): %v", err)
+	}
+
+	got, err := os.ReadFile(samplePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedded, err := skillsFS.ReadFile("install_skills/documentation-update/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, embedded) {
+		t.Errorf("mutated skill was not restored to embedded content")
+	}
+}
+
+func TestWriteSkills_PreservesCustomerSkills(t *testing.T) {
+	skillsDir := filepath.Join(t.TempDir(), ".claude", "skills")
+
+	customerDir := filepath.Join(skillsDir, "my-custom-skill")
+	if err := os.MkdirAll(customerDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	customerFile := filepath.Join(customerDir, "SKILL.md")
+	customerContent := []byte("# My Custom Skill\nCustomer-created content.\n")
+	if err := os.WriteFile(customerFile, customerContent, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeSkills(skillsDir); err != nil {
+		t.Fatalf("writeSkills: %v", err)
+	}
+
+	got, err := os.ReadFile(customerFile)
+	if err != nil {
+		t.Fatalf("customer skill deleted: %v", err)
+	}
+	if !bytes.Equal(got, customerContent) {
+		t.Errorf("customer skill content modified: got %q, want %q", got, customerContent)
+	}
+}
+
+func TestWriteSkills_RecursiveStructure(t *testing.T) {
+	skillsDir := filepath.Join(t.TempDir(), ".claude", "skills")
+	if err := os.MkdirAll(skillsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeSkills(skillsDir); err != nil {
+		t.Fatalf("writeSkills: %v", err)
+	}
+
+	expectedFiles := []string{
+		filepath.Join(skillsDir, "formula-create", "SKILL.md"),
+		filepath.Join(skillsDir, "formula-create", "skillmd-mode.md"),
+		filepath.Join(skillsDir, "documentation-update", "SKILL.md"),
+		filepath.Join(skillsDir, "github-issue", "SKILL.md"),
+	}
+	for _, path := range expectedFiles {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected file missing after extraction: %s", path)
+		}
+	}
+
+	fcDir := filepath.Join(skillsDir, "formula-create")
+	entries, err := os.ReadDir(fcDir)
+	if err != nil {
+		t.Fatalf("reading formula-create dir: %v", err)
+	}
+	if len(entries) != 2 {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("formula-create should have 2 files, got %d: %v", len(entries), names)
 	}
 }
 

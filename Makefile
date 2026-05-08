@@ -1,4 +1,4 @@
-.PHONY: build install clean clean-venv test generate test-integration check-formulas sync-formulas install-hooks
+.PHONY: build install clean clean-venv test generate test-integration check-formulas sync-formulas install-hooks check-skills sync-skills
 
 BINARY := af
 BUILD_DIR := .
@@ -25,7 +25,7 @@ LDFLAGS := -X github.com/stempeck/agentfactory/internal/cmd.Version=$(VERSION) \
 generate:
 	@true
 
-build: check-formulas
+build: check-formulas check-skills
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/af
 
 install: build install-hooks
@@ -66,6 +66,23 @@ check-formulas:
 		fi; \
 	done; \
 	if [ "$$fail" = "0" ]; then echo "Formulas in sync"; else echo "ERROR: Formula drift detected between source and installed copies"; exit 1; fi
+
+check-skills:
+	@fail=0; for d in internal/cmd/install_skills/*/; do \
+		name=$$(basename "$$d"); \
+		if ! diff -rq "$$d" ".claude/skills/$$name" > /dev/null 2>&1; then \
+			echo "DRIFT: skill $$name differs"; fail=1; \
+		fi; \
+	done; \
+	if [ "$$fail" = "0" ]; then echo "Skills in sync"; else echo "ERROR: Skill drift detected between source and installed copies"; exit 1; fi
+
+sync-skills:
+	@for d in internal/cmd/install_skills/*/; do \
+		name=$$(basename "$$d"); \
+		mkdir -p ".claude/skills/$$name"; \
+		cp -r "$$d"* ".claude/skills/$$name/"; \
+	done
+	@echo "Skills synced: source -> installed"
 
 # Used by quickstart.sh install_af() — do not rename without updating quickstart.sh
 sync-formulas:

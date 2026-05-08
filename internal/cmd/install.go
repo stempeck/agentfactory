@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +24,9 @@ var hooksFS embed.FS
 
 //go:embed install_formulas/*
 var formulasFS embed.FS
+
+//go:embed install_skills/*
+var skillsFS embed.FS
 
 var installInitFlag bool
 
@@ -194,6 +198,15 @@ func runInstallInit(cmd *cobra.Command) error {
 		return err
 	}
 
+	// 9. Write built-in skills to .claude/skills/ (recursive, skip-if-unchanged)
+	skillsDir := filepath.Join(cwd, ".claude", "skills")
+	if err := os.MkdirAll(skillsDir, 0755); err != nil {
+		return fmt.Errorf("creating skills directory: %w", err)
+	}
+	if err := writeSkills(skillsDir); err != nil {
+		return err
+	}
+
 	fmt.Fprintln(cmd.OutOrStdout(), "Factory initialized successfully.")
 	return nil
 }
@@ -223,6 +236,31 @@ func writeFormulas(formulasDir string) error {
 		}
 	}
 	return nil
+}
+
+func writeSkills(skillsDir string) error {
+	return fs.WalkDir(skillsFS, "install_skills", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel := strings.TrimPrefix(path, "install_skills/")
+		if rel == "install_skills" || rel == "" {
+			return nil
+		}
+		dest := filepath.Join(skillsDir, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dest, 0755)
+		}
+		data, err := skillsFS.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("reading embedded %s: %w", rel, err)
+		}
+		existing, err := os.ReadFile(dest)
+		if err == nil && bytes.Equal(existing, data) {
+			return nil
+		}
+		return os.WriteFile(dest, data, 0644)
+	})
 }
 
 func runInstallRole(cmd *cobra.Command, role string) error {
