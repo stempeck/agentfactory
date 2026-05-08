@@ -6,7 +6,6 @@ description: >
   When given a SKILL.md, preserves phase gates as separate formula steps with enforcement language.
 allowed-tools: "Write(.beads/formulas/*.formula.toml),Read,Glob,Grep"
 version: "1.0.0"
-author: "Glenn Stempeck"
 ---
 
 # Formula Create - Generate agentfactory Workflow Formulas
