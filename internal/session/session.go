@@ -1,10 +1,14 @@
 package session
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +23,82 @@ var (
 	ErrNotProvisioned = errors.New("agent workspace not provisioned (run af install <role>)")
 	ErrWorktreeNotSet = errors.New("session: Start called before SetWorktree with a non-empty path")
 )
+
+var checkAvailableMemoryFunc = checkAvailableMemory
+
+func checkAvailableMemory() (uint64, error) {
+	switch runtime.GOOS {
+	case "linux":
+		return readLinuxMemAvailableMB()
+	case "darwin":
+		return readDarwinMemAvailableMB()
+	default:
+		return 0, fmt.Errorf("unsupported platform for memory check: %s", runtime.GOOS)
+	}
+}
+
+func readLinuxMemAvailableMB() (uint64, error) {
+	f, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return 0, fmt.Errorf("reading /proc/meminfo: %w", err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "MemAvailable:") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				return 0, fmt.Errorf("unexpected MemAvailable format: %s", line)
+			}
+			kb, err := strconv.ParseUint(fields[1], 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("parsing MemAvailable: %w", err)
+			}
+			return kb / 1024, nil
+		}
+	}
+	return 0, fmt.Errorf("MemAvailable not found in /proc/meminfo")
+}
+
+func readDarwinMemAvailableMB() (uint64, error) {
+	out, err := exec.Command("vm_stat").Output()
+	if err != nil {
+		return 0, fmt.Errorf("running vm_stat: %w", err)
+	}
+
+	var pageSize uint64 = 4096
+	var freePages, inactivePages uint64
+
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "page size of") {
+			parts := strings.Fields(line)
+			for i, p := range parts {
+				if p == "size" && i+2 < len(parts) {
+					if ps, err := strconv.ParseUint(parts[i+2], 10, 64); err == nil {
+						pageSize = ps
+					}
+					break
+				}
+			}
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		val := strings.TrimSuffix(fields[len(fields)-1], ".")
+		n, _ := strconv.ParseUint(val, 10, 64)
+		if strings.HasPrefix(line, "Pages free:") {
+			freePages = n
+		} else if strings.HasPrefix(line, "Pages inactive:") {
+			inactivePages = n
+		}
+	}
+
+	return (freePages + inactivePages) * pageSize / (1024 * 1024), nil
+}
 
 // Manager handles agent session lifecycle operations.
 type Manager struct {
@@ -125,6 +205,13 @@ func (m *Manager) Start() error {
 	if err := m.tmux.WaitForShellReady(sessionID, 5*time.Second); err != nil {
 		_ = m.tmux.KillSession(sessionID)
 		return fmt.Errorf("waiting for shell: %w", err)
+	}
+
+	// Pre-flight memory check before launching Claude
+	availMB, memErr := checkAvailableMemoryFunc()
+	if memErr == nil && availMB < 512 {
+		_ = m.tmux.KillSession(sessionID)
+		return fmt.Errorf("insufficient memory to launch Claude: %dMB available, 512MB required", availMB)
 	}
 
 	// Build startup command with inline exports

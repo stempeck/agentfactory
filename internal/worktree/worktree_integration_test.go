@@ -34,25 +34,6 @@ func setupFactoryRootMultiAgent(t *testing.T, dir string, agents map[string]stri
 	}
 }
 
-// addGitignore adds .agentfactory/ to .gitignore and commits it.
-// Required for clean worktree removal (git worktree remove fails on untracked files).
-func addGitignore(t *testing.T, dir string) {
-	t.Helper()
-	gitignorePath := filepath.Join(dir, ".gitignore")
-	if err := os.WriteFile(gitignorePath, []byte(".agentfactory/\n"), 0o644); err != nil {
-		t.Fatalf("write .gitignore: %v", err)
-	}
-	for _, args := range [][]string{
-		{"add", ".gitignore"},
-		{"commit", "-m", "add gitignore"},
-	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-}
 
 func TestWorktreeLifecycle_FullDispatchChain(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
@@ -70,7 +51,7 @@ func TestWorktreeLifecycle_FullDispatchChain(t *testing.T) {
 	addGitignore(t, realDir)
 
 	// Create worktree
-	absPath, meta, err := Create(realDir, "solver")
+	absPath, meta, err := Create(realDir, "solver", CreateOpts{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -170,7 +151,7 @@ func TestWorktreeLifecycle_ChildInheritsWorktree(t *testing.T) {
 	addGitignore(t, realDir)
 
 	// Create worktree for owner agent
-	absPath, meta, err := Create(realDir, "solver")
+	absPath, meta, err := Create(realDir, "solver", CreateOpts{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -260,8 +241,7 @@ func TestGC_CleansStaleWorktrees(t *testing.T) {
 	addGitignore(t, realDir)
 
 	// Create worktree — no tmux session started, so GC should consider it stale.
-	// GC checks `tmux has-session -t meta.Owner` (bare name, not af-{name}).
-	absPath, meta, err := Create(realDir, "solver")
+	absPath, meta, err := Create(realDir, "solver", CreateOpts{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -316,7 +296,7 @@ func TestRemove_UncommittedChangesBlocksRemoval(t *testing.T) {
 	initGitRepo(t, realDir)
 	setupFactoryRoot(t, realDir)
 
-	absPath, meta, err := Create(realDir, "solver")
+	absPath, meta, err := Create(realDir, "solver", CreateOpts{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -366,7 +346,7 @@ func TestRemove_DeletesBranchAfterRemoval(t *testing.T) {
 	setupFactoryRoot(t, realDir)
 	addGitignore(t, realDir)
 
-	_, meta, err := Create(realDir, "solver")
+	_, meta, err := Create(realDir, "solver", CreateOpts{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

@@ -29,10 +29,11 @@ type AgentConfig struct {
 
 // AgentEntry defines a single agent
 type AgentEntry struct {
-	Type        string `json:"type"`
-	Description string `json:"description"`
-	Directive   string `json:"directive,omitempty"`
-	Formula     string `json:"formula,omitempty"`
+	Type        string   `json:"type"`
+	Description string   `json:"description"`
+	Directive   string   `json:"directive,omitempty"`
+	Formula     string   `json:"formula,omitempty"`
+	SparsePaths []string `json:"sparse_paths,omitempty"`
 }
 
 var validAgentName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
@@ -51,9 +52,10 @@ type MessagingConfig struct {
 
 // FactoryConfig holds the contents of factory.json (root marker)
 type FactoryConfig struct {
-	Type    string `json:"type"`
-	Version int    `json:"version"`
-	Name    string `json:"name"`
+	Type         string `json:"type"`
+	Version      int    `json:"version"`
+	Name         string `json:"name"`
+	MaxWorktrees int    `json:"max_worktrees,omitempty"`
 }
 
 // LoadAgentConfig loads and validates agents.json

@@ -85,7 +85,7 @@ func runInstallInit(cmd *cobra.Command) error {
 
 	// 3. Write starter configs (only if they don't exist — idempotent)
 	starterConfigs := map[string]string{
-		"factory.json": `{"type":"factory","version":1,"name":"agentfactory"}`,
+		"factory.json": `{"type":"factory","version":1,"name":"agentfactory","max_worktrees":4}`,
 		"agents.json":  `{"agents":{"manager":{"type":"interactive","description":"Interactive agent for human-supervised work","directive":"Read your memory and docs, and prove it."},"supervisor":{"type":"autonomous","description":"Autonomous agent for independent task execution","directive":"Read your memory and docs, and prove it."}}}`,
 		"messaging.json": `{"groups":{"all":["manager","supervisor"]}}`,
 		"dispatch.json":  `{"repos":[],"trigger_label":"agentic","notify_on_complete":"manager","mappings":[],"interval_seconds":300,"retry_after_seconds":1800}`,

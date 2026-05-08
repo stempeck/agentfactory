@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -8,12 +9,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/stempeck/agentfactory/internal/claude"
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/fsutil"
+	"github.com/stempeck/agentfactory/internal/lock"
 	"github.com/stempeck/agentfactory/internal/templates"
 )
 
@@ -26,6 +31,123 @@ type Meta struct {
 	Agents       []string `json:"agents"`
 	CreatedAt    string   `json:"created_at"`
 	ParentBranch string   `json:"parent_branch"`
+}
+
+type CreateOpts struct {
+	MaxWorktrees int
+}
+
+var statfsFunc = func(path string, buf *syscall.Statfs_t) error {
+	return syscall.Statfs(path, buf)
+}
+
+var readMemInfoFunc = func() (uint64, error) {
+	return readAvailableMemoryMB()
+}
+
+func readAvailableMemoryMB() (uint64, error) {
+	switch runtime.GOOS {
+	case "linux":
+		return readLinuxMemAvailable()
+	case "darwin":
+		return readDarwinMemAvailable()
+	default:
+		return 0, fmt.Errorf("unsupported platform for memory check: %s", runtime.GOOS)
+	}
+}
+
+func readLinuxMemAvailable() (uint64, error) {
+	f, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return 0, fmt.Errorf("reading /proc/meminfo: %w", err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "MemAvailable:") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				return 0, fmt.Errorf("unexpected MemAvailable format: %s", line)
+			}
+			kb, err := strconv.ParseUint(fields[1], 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("parsing MemAvailable: %w", err)
+			}
+			return kb / 1024, nil
+		}
+	}
+	return 0, fmt.Errorf("MemAvailable not found in /proc/meminfo")
+}
+
+func readDarwinMemAvailable() (uint64, error) {
+	out, err := exec.Command("vm_stat").Output()
+	if err != nil {
+		return 0, fmt.Errorf("running vm_stat: %w", err)
+	}
+
+	var pageSize uint64 = 4096
+	var freePages, inactivePages uint64
+
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "page size of") {
+			parts := strings.Fields(line)
+			for i, p := range parts {
+				if p == "size" && i+2 < len(parts) {
+					if ps, err := strconv.ParseUint(parts[i+2], 10, 64); err == nil {
+						pageSize = ps
+					}
+					break
+				}
+			}
+		} else if strings.HasPrefix(line, "Pages free:") {
+			freePages = parseVMStatValue(line)
+		} else if strings.HasPrefix(line, "Pages inactive:") {
+			inactivePages = parseVMStatValue(line)
+		}
+	}
+
+	return (freePages + inactivePages) * pageSize / (1024 * 1024), nil
+}
+
+func parseVMStatValue(line string) uint64 {
+	parts := strings.Fields(line)
+	if len(parts) < 2 {
+		return 0
+	}
+	val := strings.TrimSuffix(parts[len(parts)-1], ".")
+	n, _ := strconv.ParseUint(val, 10, 64)
+	return n
+}
+
+func checkResources(factoryRoot string) error {
+	var stat syscall.Statfs_t
+	if err := statfsFunc(factoryRoot, &stat); err != nil {
+		return fmt.Errorf("checking disk space: %w", err)
+	}
+
+	availBytes := stat.Bavail * uint64(stat.Bsize)
+	totalBytes := stat.Blocks * uint64(stat.Bsize)
+	availGB := availBytes / (1024 * 1024 * 1024)
+	var pct uint64
+	if totalBytes > 0 {
+		pct = (availBytes * 100) / totalBytes
+	}
+
+	if availGB < 2 || pct < 10 {
+		return fmt.Errorf("insufficient disk to create worktree: %dGB available (%d%% of total). Free space with: af down <agent> --reset", availGB, pct)
+	}
+
+	memMB, err := readMemInfoFunc()
+	if err != nil {
+		return nil
+	}
+	if memMB < 1024 {
+		return fmt.Errorf("insufficient memory to create worktree: %dMB available, 1024MB required. Free memory with: af down <agent> --reset", memMB)
+	}
+
+	return nil
 }
 
 // GenerateID returns a new unique worktree ID: "wt-" + 6 hex chars.
@@ -90,11 +212,35 @@ func ReadMeta(factoryRoot, worktreeID string) (*Meta, error) {
 // Create creates a new git worktree, writes the .factory-root redirect,
 // and creates the .agentfactory/ structure in the worktree.
 // Returns the worktree root path and the Meta.
-func Create(factoryRoot, agentName string) (string, *Meta, error) {
+func Create(factoryRoot, agentName string, opts CreateOpts) (string, *Meta, error) {
 	wtID := GenerateID()
 	branch := BranchName(agentName, wtID)
 	relPath := filepath.Join(".agentfactory", "worktrees", wtID)
 	absPath := filepath.Join(factoryRoot, relPath)
+
+	// Acquire creation lock to serialize concurrent Create calls
+	lockPath := filepath.Join(factoryRoot, ".agentfactory", "worktrees", ".creation-lock")
+	lk := lock.NewWithPath(lockPath)
+	if err := lk.Acquire(fmt.Sprintf("pid-%d", os.Getpid())); err != nil {
+		return "", nil, fmt.Errorf("acquiring creation lock: %w", err)
+	}
+	defer lk.Release()
+
+	// Check max worktrees cap
+	if opts.MaxWorktrees > 0 {
+		count, err := countActiveWorktrees(factoryRoot)
+		if err != nil {
+			return "", nil, fmt.Errorf("counting worktrees: %w", err)
+		}
+		if count >= opts.MaxWorktrees {
+			return "", nil, fmt.Errorf("cannot create worktree: %d/%d active worktrees at capacity. Free with: af down <agent> --reset", count, opts.MaxWorktrees)
+		}
+	}
+
+	// Pre-flight resource check
+	if err := checkResources(factoryRoot); err != nil {
+		return "", nil, err
+	}
 
 	// Determine parent branch
 	parentCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
@@ -326,14 +472,14 @@ func GC(factoryRoot string) (int, error) {
 		}
 
 		// Check if owner's tmux session is running
-		checkCmd := exec.Command("tmux", "has-session", "-t", meta.Owner)
+		checkCmd := exec.Command("tmux", "has-session", "-t", "af-"+meta.Owner)
 		if checkCmd.Run() == nil {
 			// Session is running, skip
 			continue
 		}
 
 		// Session not running — remove worktree
-		if err := Remove(factoryRoot, meta); err != nil {
+		if err := ForceRemove(factoryRoot, meta); err != nil {
 			continue
 		}
 		removed++
@@ -363,7 +509,7 @@ func GC(factoryRoot string) (int, error) {
 // Returned path is absolute; id is "wt-<6hex>". Caller is responsible for
 // calling SetupAgent(root, path, newAgentName, created) and, if launching a
 // tmux session, session.Manager.SetWorktree(path, id).
-func ResolveOrCreate(factoryRoot, newAgentName, creatorAgent, creatorEnvWT, creatorEnvWTID string) (string, string, bool, error) {
+func ResolveOrCreate(factoryRoot, newAgentName, creatorAgent, creatorEnvWT, creatorEnvWTID string, opts CreateOpts) (string, string, bool, error) {
 	if creatorEnvWT != "" {
 		return creatorEnvWT, creatorEnvWTID, false, nil
 	}
@@ -382,7 +528,7 @@ func ResolveOrCreate(factoryRoot, newAgentName, creatorAgent, creatorEnvWT, crea
 		return filepath.Join(factoryRoot, selfMeta.Path), selfMeta.ID, false, nil
 	}
 	_, _ = GC(factoryRoot)
-	wtPath, meta, err := Create(factoryRoot, newAgentName)
+	wtPath, meta, err := Create(factoryRoot, newAgentName, opts)
 	if err != nil {
 		return "", "", false, fmt.Errorf("Create(%q): %w", newAgentName, err)
 	}
@@ -449,4 +595,22 @@ func FindByAgent(factoryRoot, agentName string) (*Meta, error) {
 		}
 	}
 	return nil, nil
+}
+
+func countActiveWorktrees(factoryRoot string) (int, error) {
+	dir := WorktreesDir(factoryRoot)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("reading worktrees dir: %w", err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".meta.json") {
+			count++
+		}
+	}
+	return count, nil
 }

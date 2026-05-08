@@ -172,7 +172,9 @@ fi
 
 docker run -dit \
     --memory="$CONTAINER_MEMORY" \
-    --memory-swap="$CONTAINER_MEMORY" \
+    --memory-swap="24g" \
+    --tmpfs /tmp:size=2g \
+    --shm-size=256m \
     --name "$CONTAINER_NAME" \
     "$BASE_IMAGE" bash --login
 

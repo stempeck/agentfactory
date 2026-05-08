@@ -2,11 +2,14 @@ package worktree
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/stempeck/agentfactory/internal/config"
@@ -195,7 +198,7 @@ func TestCreate(t *testing.T) {
 	initGitRepo(t, realDir)
 	setupFactoryRoot(t, realDir)
 
-	absPath, meta, err := Create(realDir, "solver")
+	absPath, meta, err := Create(realDir, "solver", CreateOpts{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -276,7 +279,7 @@ func TestSetupAgent(t *testing.T) {
 	setupFactoryRoot(t, realDir)
 
 	// Create a worktree first
-	absPath, _, err := Create(realDir, "solver")
+	absPath, _, err := Create(realDir, "solver", CreateOpts{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -347,7 +350,7 @@ func TestSetupAgent_NotOwner(t *testing.T) {
 	initGitRepo(t, realDir)
 	setupFactoryRoot(t, realDir)
 
-	absPath, _, err := Create(realDir, "solver")
+	absPath, _, err := Create(realDir, "solver", CreateOpts{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -467,7 +470,7 @@ func TestRemove_FullLifecycle(t *testing.T) {
 	}
 
 	// Create a worktree
-	absPath, meta, err := Create(realDir, "solver")
+	absPath, meta, err := Create(realDir, "solver", CreateOpts{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -690,7 +693,7 @@ func TestCreate_WorktreeDirAlreadyExists(t *testing.T) {
 }
 
 func TestResolveOrCreate_EnvBranch(t *testing.T) {
-	path, id, created, err := ResolveOrCreate("/unused/root", "solver", "", "/some/worktree", "wt-abc123")
+	path, id, created, err := ResolveOrCreate("/unused/root", "solver", "", "/some/worktree", "wt-abc123", CreateOpts{})
 	if err != nil {
 		t.Fatalf("ResolveOrCreate: %v", err)
 	}
@@ -719,12 +722,12 @@ func TestResolveOrCreate_DiskFallback(t *testing.T) {
 	initGitRepo(t, realDir)
 	setupFactoryRoot(t, realDir)
 
-	wtPath, meta, err := Create(realDir, "manager")
+	wtPath, meta, err := Create(realDir, "manager", CreateOpts{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	path, id, created, err := ResolveOrCreate(realDir, "solver", "manager", "", "")
+	path, id, created, err := ResolveOrCreate(realDir, "solver", "manager", "", "", CreateOpts{})
 	if err != nil {
 		t.Fatalf("ResolveOrCreate: %v", err)
 	}
@@ -753,7 +756,7 @@ func TestResolveOrCreate_CreatesWhenNoContext(t *testing.T) {
 	initGitRepo(t, realDir)
 	setupFactoryRoot(t, realDir)
 
-	path, id, created, err := ResolveOrCreate(realDir, "solver", "", "", "")
+	path, id, created, err := ResolveOrCreate(realDir, "solver", "", "", "", CreateOpts{})
 	if err != nil {
 		t.Fatalf("ResolveOrCreate: %v", err)
 	}
@@ -792,12 +795,12 @@ func TestResolveOrCreate_SelfAdoption(t *testing.T) {
 	initGitRepo(t, realDir)
 	setupFactoryRoot(t, realDir)
 
-	wtPath, meta, err := Create(realDir, "manager")
+	wtPath, meta, err := Create(realDir, "manager", CreateOpts{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	path, id, created, err := ResolveOrCreate(realDir, "manager", "", "", "")
+	path, id, created, err := ResolveOrCreate(realDir, "manager", "", "", "", CreateOpts{})
 	if err != nil {
 		t.Fatalf("ResolveOrCreate: %v", err)
 	}
@@ -855,7 +858,7 @@ func TestForceRemove_FullLifecycle(t *testing.T) {
 		}
 	}
 
-	absPath, meta, err := Create(realDir, "solver")
+	absPath, meta, err := Create(realDir, "solver", CreateOpts{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -917,7 +920,7 @@ func TestForceRemove_DirtyWorktree(t *testing.T) {
 		}
 	}
 
-	absPath, meta, err := Create(realDir, "solver")
+	absPath, meta, err := Create(realDir, "solver", CreateOpts{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -1068,5 +1071,473 @@ func TestFindByAgent_NoWorktreesDir(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("FindByAgent returned %+v, want nil (no worktrees dir)", got)
+	}
+}
+
+func addGitignore(t *testing.T, dir string) {
+	t.Helper()
+	gitignorePath := filepath.Join(dir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(".agentfactory/\n"), 0o644); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
+	for _, args := range [][]string{
+		{"add", ".gitignore"},
+		{"commit", "-m", "add gitignore"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
+func TestGC_DoesNotRemoveRunningSession(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not available")
+	}
+
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+	addGitignore(t, realDir)
+
+	absPath, _, err := Create(realDir, "solver", CreateOpts{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	sessionName := "af-solver"
+	startCmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName)
+	if out, err := startCmd.CombinedOutput(); err != nil {
+		t.Fatalf("tmux new-session: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+	})
+
+	removed, err := GC(realDir)
+	if err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+
+	if removed != 0 {
+		t.Errorf("GC removed %d worktrees, want 0 (session af-solver is running)", removed)
+	}
+
+	if _, err := os.Stat(absPath); err != nil {
+		t.Errorf("worktree dir should still exist when session is running: %v", err)
+	}
+}
+
+func TestGC_ForceRemovesDeadSession(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+	addGitignore(t, realDir)
+
+	absPath, _, err := Create(realDir, "solver", CreateOpts{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	dirtyFile := filepath.Join(absPath, "dirty.txt")
+	if err := os.WriteFile(dirtyFile, []byte("uncommitted"), 0o644); err != nil {
+		t.Fatalf("write dirty file: %v", err)
+	}
+	stageCmd := exec.Command("git", "add", "dirty.txt")
+	stageCmd.Dir = absPath
+	if out, err := stageCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+
+	removed, err := GC(realDir)
+	if err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+
+	if removed != 1 {
+		t.Errorf("GC removed %d worktrees, want 1 (session dead, dirty worktree should be force-removed)", removed)
+	}
+
+	if _, err := os.Stat(absPath); !os.IsNotExist(err) {
+		t.Errorf("worktree dir should not exist after GC force-removes dead session, got err: %v", err)
+	}
+}
+
+func TestGC_ForceRemoveRequiresCorrectSessionName(t *testing.T) {
+	source, err := os.ReadFile("worktree.go")
+	if err != nil {
+		t.Fatalf("reading worktree.go: %v", err)
+	}
+
+	src := string(source)
+
+	gcStart := strings.Index(src, "func GC(")
+	if gcStart < 0 {
+		t.Fatal("GC function not found in source")
+	}
+
+	gcBody := src[gcStart:]
+	nextFunc := strings.Index(gcBody[1:], "\nfunc ")
+	if nextFunc > 0 {
+		gcBody = gcBody[:nextFunc+1]
+	}
+
+	hasAfPrefix := strings.Contains(gcBody, `"af-"+meta.Owner`) ||
+		strings.Contains(gcBody, `"af-" + meta.Owner`)
+	hasForceRemove := strings.Contains(gcBody, "ForceRemove(")
+
+	if !hasAfPrefix {
+		t.Error("GC function must contain \"af-\"+meta.Owner session check")
+	}
+	if !hasForceRemove {
+		t.Error("GC function must contain ForceRemove call (not Remove)")
+	}
+	if hasForceRemove && !hasAfPrefix {
+		t.Fatal("ATOMICITY VIOLATION: ForceRemove is reachable without correct session name check — would destroy all worktrees including live ones")
+	}
+}
+
+func TestCountActiveWorktrees(t *testing.T) {
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+
+	count, err := countActiveWorktrees(realDir)
+	if err != nil {
+		t.Fatalf("countActiveWorktrees on nonexistent dir: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("count on nonexistent dir: got %d, want 0", count)
+	}
+
+	wtDir := WorktreesDir(realDir)
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	count, err = countActiveWorktrees(realDir)
+	if err != nil {
+		t.Fatalf("countActiveWorktrees on empty dir: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("count on empty dir: got %d, want 0", count)
+	}
+
+	for i, name := range []string{"wt-aaa111", "wt-bbb222", "wt-ccc333"} {
+		meta := &Meta{
+			ID:    name,
+			Owner: fmt.Sprintf("agent%d", i),
+		}
+		if err := WriteMeta(realDir, meta); err != nil {
+			t.Fatalf("WriteMeta: %v", err)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(wtDir, "readme.txt"), []byte("not a meta"), 0o644); err != nil {
+		t.Fatalf("write non-meta: %v", err)
+	}
+
+	count, err = countActiveWorktrees(realDir)
+	if err != nil {
+		t.Fatalf("countActiveWorktrees: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("count: got %d, want 3", count)
+	}
+}
+
+// --- Resource Gate Tests ---
+
+func TestCheckResources_RefusesWhenDiskLow(t *testing.T) {
+	orig := statfsFunc
+	statfsFunc = func(path string, buf *syscall.Statfs_t) error {
+		buf.Bsize = 4096
+		buf.Blocks = 100_000_000  // ~381 GB total
+		buf.Bavail = 100_000      // ~390 MB available — below 2GB
+		return nil
+	}
+	t.Cleanup(func() { statfsFunc = orig })
+
+	origMem := readMemInfoFunc
+	readMemInfoFunc = func() (uint64, error) { return 8192, nil }
+	t.Cleanup(func() { readMemInfoFunc = origMem })
+
+	err := checkResources("/tmp")
+	if err == nil {
+		t.Fatal("expected error for low disk, got nil")
+	}
+	if !strings.Contains(err.Error(), "insufficient") || !strings.Contains(err.Error(), "disk") {
+		t.Errorf("error should mention insufficient disk, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "af down") {
+		t.Errorf("error should include remediation guidance, got: %v", err)
+	}
+}
+
+func TestCheckResources_RefusesWhenDiskPercentLow(t *testing.T) {
+	orig := statfsFunc
+	statfsFunc = func(path string, buf *syscall.Statfs_t) error {
+		buf.Bsize = 4096
+		buf.Blocks = 1_000_000_000 // ~3.7 TB total
+		buf.Bavail = 50_000_000    // ~190 GB avail, but only 5% of total
+		return nil
+	}
+	t.Cleanup(func() { statfsFunc = orig })
+
+	origMem := readMemInfoFunc
+	readMemInfoFunc = func() (uint64, error) { return 8192, nil }
+	t.Cleanup(func() { readMemInfoFunc = origMem })
+
+	err := checkResources("/tmp")
+	if err == nil {
+		t.Fatal("expected error for low disk percentage, got nil")
+	}
+	if !strings.Contains(err.Error(), "insufficient") || !strings.Contains(err.Error(), "disk") {
+		t.Errorf("error should mention insufficient disk, got: %v", err)
+	}
+}
+
+func TestCheckResources_PassesWhenDiskOK(t *testing.T) {
+	orig := statfsFunc
+	statfsFunc = func(path string, buf *syscall.Statfs_t) error {
+		buf.Bsize = 4096
+		buf.Blocks = 100_000_000 // ~381 GB total
+		buf.Bavail = 30_000_000  // ~114 GB avail (30%)
+		return nil
+	}
+	t.Cleanup(func() { statfsFunc = orig })
+
+	origMem := readMemInfoFunc
+	readMemInfoFunc = func() (uint64, error) { return 8192, nil }
+	t.Cleanup(func() { readMemInfoFunc = origMem })
+
+	err := checkResources("/tmp")
+	if err != nil {
+		t.Errorf("expected nil for adequate disk, got: %v", err)
+	}
+}
+
+func TestCheckResources_RefusesWhenMemoryLow(t *testing.T) {
+	orig := statfsFunc
+	statfsFunc = func(path string, buf *syscall.Statfs_t) error {
+		buf.Bsize = 4096
+		buf.Blocks = 100_000_000
+		buf.Bavail = 30_000_000
+		return nil
+	}
+	t.Cleanup(func() { statfsFunc = orig })
+
+	origMem := readMemInfoFunc
+	readMemInfoFunc = func() (uint64, error) { return 512, nil } // 512MB < 1024MB threshold
+	t.Cleanup(func() { readMemInfoFunc = origMem })
+
+	err := checkResources("/tmp")
+	if err == nil {
+		t.Fatal("expected error for low memory, got nil")
+	}
+	if !strings.Contains(err.Error(), "insufficient") || !strings.Contains(err.Error(), "memory") {
+		t.Errorf("error should mention insufficient memory, got: %v", err)
+	}
+}
+
+func TestCreate_MaxWorktreesEnforced(t *testing.T) {
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	// Create 2 fake worktrees by writing meta files
+	wtDir := WorktreesDir(realDir)
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		meta := &Meta{ID: fmt.Sprintf("wt-fake%d", i), Owner: fmt.Sprintf("agent%d", i)}
+		if err := WriteMeta(realDir, meta); err != nil {
+			t.Fatalf("WriteMeta: %v", err)
+		}
+	}
+
+	// Mock resources as adequate
+	origStatfs := statfsFunc
+	statfsFunc = func(path string, buf *syscall.Statfs_t) error {
+		buf.Bsize = 4096
+		buf.Blocks = 100_000_000
+		buf.Bavail = 30_000_000
+		return nil
+	}
+	t.Cleanup(func() { statfsFunc = origStatfs })
+
+	origMem := readMemInfoFunc
+	readMemInfoFunc = func() (uint64, error) { return 8192, nil }
+	t.Cleanup(func() { readMemInfoFunc = origMem })
+
+	// Try to create with MaxWorktrees=2 (already at cap)
+	_, _, err = Create(realDir, "newagent", CreateOpts{MaxWorktrees: 2})
+	if err == nil {
+		t.Fatal("expected error when at MaxWorktrees capacity, got nil")
+	}
+	if !strings.Contains(err.Error(), "at capacity") {
+		t.Errorf("error should mention capacity, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "2/2") {
+		t.Errorf("error should mention count/max, got: %v", err)
+	}
+}
+
+func TestCreate_MaxWorktreesZeroIsUncapped(t *testing.T) {
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	// Create several fake worktrees
+	wtDir := WorktreesDir(realDir)
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		meta := &Meta{ID: fmt.Sprintf("wt-fake%d", i), Owner: fmt.Sprintf("agent%d", i)}
+		if err := WriteMeta(realDir, meta); err != nil {
+			t.Fatalf("WriteMeta: %v", err)
+		}
+	}
+
+	// Mock resources as adequate
+	origStatfs := statfsFunc
+	statfsFunc = func(path string, buf *syscall.Statfs_t) error {
+		buf.Bsize = 4096
+		buf.Blocks = 100_000_000
+		buf.Bavail = 30_000_000
+		return nil
+	}
+	t.Cleanup(func() { statfsFunc = origStatfs })
+
+	origMem := readMemInfoFunc
+	readMemInfoFunc = func() (uint64, error) { return 8192, nil }
+	t.Cleanup(func() { readMemInfoFunc = origMem })
+
+	// MaxWorktrees=0 should not cap
+	_, _, err = Create(realDir, "newagent", CreateOpts{MaxWorktrees: 0})
+	if err != nil {
+		t.Fatalf("expected no cap with MaxWorktrees=0, got: %v", err)
+	}
+}
+
+func TestCreate_SerializedViaLock(t *testing.T) {
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	// Mock resources as adequate
+	origStatfs := statfsFunc
+	statfsFunc = func(path string, buf *syscall.Statfs_t) error {
+		buf.Bsize = 4096
+		buf.Blocks = 100_000_000
+		buf.Bavail = 30_000_000
+		return nil
+	}
+	t.Cleanup(func() { statfsFunc = origStatfs })
+
+	origMem := readMemInfoFunc
+	readMemInfoFunc = func() (uint64, error) { return 8192, nil }
+	t.Cleanup(func() { readMemInfoFunc = origMem })
+
+	// Run two creates concurrently. At least one should succeed,
+	// and neither should panic or corrupt state.
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, _, errs[idx] = Create(realDir, fmt.Sprintf("concurrent-%d", idx), CreateOpts{})
+		}(i)
+	}
+	wg.Wait()
+
+	// At least one must succeed
+	successes := 0
+	for _, e := range errs {
+		if e == nil {
+			successes++
+		}
+	}
+	if successes == 0 {
+		t.Fatalf("expected at least 1 success from concurrent Create, got errors: %v, %v", errs[0], errs[1])
+	}
+
+	// Lock file should be cleaned up after both complete
+	lockPath := filepath.Join(realDir, ".agentfactory", "worktrees", ".creation-lock")
+	if _, err := os.Stat(lockPath); err == nil {
+		t.Error("creation lock file should be cleaned up after Create completes")
+	}
+}
+
+func TestCreate_ResourceCheckFailsBeforeGitWorktreeAdd(t *testing.T) {
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	// Mock resources as insufficient
+	origStatfs := statfsFunc
+	statfsFunc = func(path string, buf *syscall.Statfs_t) error {
+		buf.Bsize = 4096
+		buf.Blocks = 100_000_000
+		buf.Bavail = 100_000 // too low
+		return nil
+	}
+	t.Cleanup(func() { statfsFunc = origStatfs })
+
+	origMem := readMemInfoFunc
+	readMemInfoFunc = func() (uint64, error) { return 8192, nil }
+	t.Cleanup(func() { readMemInfoFunc = origMem })
+
+	_, _, err = Create(realDir, "failagent", CreateOpts{})
+	if err == nil {
+		t.Fatal("expected error for insufficient resources")
+	}
+
+	// Verify no worktree directory was created
+	entries, _ := os.ReadDir(WorktreesDir(realDir))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "wt-") && e.IsDir() {
+			t.Errorf("worktree directory %s should not exist after resource check failure", e.Name())
+		}
 	}
 }
