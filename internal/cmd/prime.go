@@ -166,13 +166,12 @@ func primeAgent(ctx context.Context, out io.Writer, factoryRoot, role, workDir s
 	outputStartupDirective(out, agentEntry.Type)
 
 	// Inject formula workflow context if active (self-guarding -- no-op when no formula)
-	beadsDir := filepath.Join(factoryRoot, ".beads")
-	outputFormulaContext(ctx, out, workDir, beadsDir)
+	outputFormulaContext(ctx, out, workDir)
 	outputCheckpointContext(out, workDir)
 
 	// Write checkpoint for crash recovery (skip during hook mode -- session just starting)
 	if !primeHookMode {
-		writeFormulaCheckpoint(ctx, workDir, beadsDir)
+		writeFormulaCheckpoint(ctx, workDir)
 	}
 
 	// Append pending mail (best-effort)
@@ -359,14 +358,14 @@ func readHookedFormulaID(workDir string) string {
 // outputFormulaContext injects formula workflow context into the prime output.
 // Lazy-constructs the issue store via the newIssueStore seam only when a
 // formula is hooked, so non-hooked prime paths don't need bd on PATH.
-func outputFormulaContext(ctx context.Context, out io.Writer, workDir, beadsDir string) {
+func outputFormulaContext(ctx context.Context, out io.Writer, workDir string) {
 	instanceID := readHookedFormulaID(workDir)
 	if instanceID == "" {
 		return
 	}
 
-	actor := os.Getenv("BD_ACTOR")
-	store, err := newIssueStore(workDir, beadsDir, actor)
+	actor := os.Getenv("AF_ACTOR")
+	store, err := newIssueStore(workDir, actor)
 	if err != nil {
 		fmt.Fprintln(out, "")
 		fmt.Fprintln(out, "## Formula Workflow")
@@ -534,7 +533,7 @@ func getCurrentGitBranch(workDir string) string {
 // writeFormulaCheckpoint captures current formula state for crash recovery.
 // Called during PreCompact (--formula without --hook). Lazy-constructs the
 // store via the seam only when a formula is hooked.
-func writeFormulaCheckpoint(ctx context.Context, workDir, beadsDir string) {
+func writeFormulaCheckpoint(ctx context.Context, workDir string) {
 	instanceID := readHookedFormulaID(workDir)
 	if instanceID == "" {
 		return
@@ -543,8 +542,8 @@ func writeFormulaCheckpoint(ctx context.Context, workDir, beadsDir string) {
 	if err != nil {
 		return // best-effort
 	}
-	actor := os.Getenv("BD_ACTOR")
-	store, err := newIssueStore(workDir, beadsDir, actor)
+	actor := os.Getenv("AF_ACTOR")
+	store, err := newIssueStore(workDir, actor)
 	if err != nil {
 		cp.WithFormula(instanceID, "", "")
 		cp.WithHookedBead(instanceID)

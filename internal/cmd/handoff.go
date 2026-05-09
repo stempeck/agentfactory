@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/checkpoint"
@@ -131,9 +130,8 @@ func writeHandoffCheckpoint(ctx context.Context, cwd, factoryRoot, subject strin
 
 	formulaID := readHookedFormulaID(cwd)
 	if formulaID != "" {
-		beadsDir := filepath.Join(factoryRoot, ".beads")
-		actor := os.Getenv("BD_ACTOR")
-		if store, err := newIssueStore(cwd, beadsDir, actor); err == nil {
+		actor := os.Getenv("AF_ACTOR")
+		if store, err := newIssueStore(cwd, actor); err == nil {
 			result, _ := store.Ready(ctx, issuestore.Filter{MoleculeID: formulaID})
 			if len(result.Steps) > 0 {
 				cp.WithFormula(formulaID, result.Steps[0].ID, result.Steps[0].Title)
@@ -174,9 +172,8 @@ func collectHandoffState(ctx context.Context, cwd, factoryRoot string) string {
 	// Formula progress
 	formulaID := readHookedFormulaID(cwd)
 	if formulaID != "" {
-		beadsDir := filepath.Join(factoryRoot, ".beads")
-		actor := os.Getenv("BD_ACTOR")
-		if store, err := newIssueStore(cwd, beadsDir, actor); err == nil {
+		actor := os.Getenv("AF_ACTOR")
+		if store, err := newIssueStore(cwd, actor); err == nil {
 			result, _ := store.Ready(ctx, issuestore.Filter{MoleculeID: formulaID})
 			if len(result.Steps) > 0 {
 				parts = append(parts, fmt.Sprintf("Formula: %s, next step: %s (%s)", formulaID, result.Steps[0].ID, result.Steps[0].Title))

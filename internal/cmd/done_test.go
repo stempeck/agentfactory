@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/stempeck/agentfactory/internal/checkpoint"
+	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/issuestore/memstore"
 )
@@ -420,7 +421,7 @@ func TestDone_NoCallerFile_NoMail(t *testing.T) {
 		Parent:   instance.ID,
 		Type:     issuestore.TypeTask,
 		Labels:   []string{"formula-step"},
-		Assignee: "BD_ACTOR",
+		Assignee: "AF_ACTOR",
 	})
 	if err != nil {
 		t.Fatalf("seed step: %v", err)
@@ -435,7 +436,7 @@ func TestDone_NoCallerFile_NoMail(t *testing.T) {
 	// instead of the production adapter. The seam is the whole point of
 	// AC #17 — without it, the test would need a live mcpstore server.
 	origNewIssueStore := newIssueStore
-	newIssueStore = func(_, _, _ string) (issuestore.Store, error) { return mem, nil }
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
 	defer func() { newIssueStore = origNewIssueStore }()
 
 	// Wire the hooked formula runtime file but NOT formula_caller —
@@ -542,7 +543,7 @@ func TestDone_ListError_Propagated(t *testing.T) {
 		Parent:   instance.ID,
 		Type:     issuestore.TypeTask,
 		Labels:   []string{"formula-step"},
-		Assignee: "BD_ACTOR",
+		Assignee: "AF_ACTOR",
 	})
 	if err != nil {
 		t.Fatalf("seed blocker: %v", err)
@@ -552,7 +553,7 @@ func TestDone_ListError_Propagated(t *testing.T) {
 		Parent:   instance.ID,
 		Type:     issuestore.TypeTask,
 		Labels:   []string{"formula-step"},
-		Assignee: "BD_ACTOR",
+		Assignee: "AF_ACTOR",
 	})
 	if err != nil {
 		t.Fatalf("seed step: %v", err)
@@ -568,7 +569,7 @@ func TestDone_ListError_Propagated(t *testing.T) {
 	}
 
 	origNewIssueStore := newIssueStore
-	newIssueStore = func(_, _, _ string) (issuestore.Store, error) { return failStore, nil }
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return failStore, nil }
 	defer func() { newIssueStore = origNewIssueStore }()
 
 	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
@@ -611,7 +612,7 @@ func TestDone_PrematureCompletionWarning(t *testing.T) {
 			Parent:   instance.ID,
 			Type:     issuestore.TypeTask,
 			Labels:   []string{"formula-step"},
-			Assignee: "BD_ACTOR",
+			Assignee: "AF_ACTOR",
 		})
 		if err != nil {
 			t.Fatalf("seed step %d: %v", i, err)
@@ -662,7 +663,7 @@ func TestDone_NoPrematureWarning_AllClosed(t *testing.T) {
 			Parent:   instance.ID,
 			Type:     issuestore.TypeTask,
 			Labels:   []string{"formula-step"},
-			Assignee: "BD_ACTOR",
+			Assignee: "AF_ACTOR",
 		})
 		if err != nil {
 			t.Fatalf("seed step %d: %v", i, err)
@@ -693,7 +694,7 @@ func TestDone_NoPrematureWarning_AllClosed(t *testing.T) {
 // formula through 3 consecutive runDoneCore calls, verifying step closure,
 // TotalSteps, remaining open count, and hooked_formula lifecycle at each stage.
 func TestDone_LinearChain_3Steps_ProgressesCorrectly(t *testing.T) {
-	t.Setenv("BD_ACTOR", "manager")
+	t.Setenv("AF_ACTOR", "manager")
 	dir := setupTestFactoryForDone(t, "manager")
 	workDir := filepath.Join(dir, ".agentfactory", "agents", "manager")
 	ctx := t.Context()
@@ -749,7 +750,7 @@ func TestDone_LinearChain_3Steps_ProgressesCorrectly(t *testing.T) {
 	}
 
 	origNewIssueStore := newIssueStore
-	newIssueStore = func(_, _, _ string) (issuestore.Store, error) { return mem, nil }
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
 	defer func() { newIssueStore = origNewIssueStore }()
 
 	writeRuntimeFile(t, workDir, "hooked_formula", epic.ID)
@@ -829,7 +830,7 @@ func TestDone_LinearChain_3Steps_ProgressesCorrectly(t *testing.T) {
 func setupTestFactoryForDone(t *testing.T, agentName string) string {
 	t.Helper()
 	dir := setupTestFactoryForPrime(t) // reuse prime's setup
-	os.MkdirAll(filepath.Join(dir, ".beads"), 0o755)
+	os.MkdirAll(config.StoreDir(dir), 0o755)
 	return dir
 }
 

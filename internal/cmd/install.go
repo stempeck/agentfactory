@@ -36,7 +36,7 @@ var installCmd = &cobra.Command{
 	Long: `Initialize a new factory workspace (--init) or provision an agent role.
 
 Factory initialization creates the config directory, starter configs,
-beads database, and hooks directory.
+issue store database, and hooks directory.
 
 Agent provisioning creates the agent directory, renders CLAUDE.md from
 the role template, and writes Claude Code settings.json with hooks.`,
@@ -76,6 +76,10 @@ func runInstallInit(cmd *cobra.Command) error {
 		return err
 	}
 
+	if err := migrateBeadsDir(cwd); err != nil {
+		return fmt.Errorf("migrating legacy store directory: %w", err)
+	}
+
 	// 2. Create .agentfactory/ directory
 	configDir := config.ConfigDir(cwd)
 	if err := os.MkdirAll(configDir, 0755); err != nil {
@@ -113,7 +117,7 @@ func runInstallInit(cmd *cobra.Command) error {
 
 	// 5. Initialize the issue store (mcpstore lazy-starts the Python MCP
 	//    server under py/issuestore/; the first call opens/creates the SQLite
-	//    database at <factoryRoot>/.beads/issues.sqlite). This is the ONE consumer
+	//    database at <factoryRoot>/.agentfactory/store/issues.sqlite). This is the ONE consumer
 	//    that uses mcpstore.New directly (not via the newIssueStore seam)
 	//    because the install flow needs the user-visible side effect —
 	//    database bootstrap — to print a confirmation banner. An empty actor
@@ -121,7 +125,6 @@ func runInstallInit(cmd *cobra.Command) error {
 	//    call List (actor scoping is a List-only concern). mcpstore.New is
 	//    idempotent (the server performs CREATE TABLE IF NOT EXISTS), so no
 	//    metadata.json stat-gate is needed.
-	beadsDir := filepath.Join(cwd, ".beads")
 	store, err := mcpstore.New(cwd, "")
 	if err != nil {
 		return fmt.Errorf("initializing issue store: %w", err)
@@ -189,8 +192,8 @@ func runInstallInit(cmd *cobra.Command) error {
 		return err
 	}
 
-	// 8. Write default formula files to .beads/formulas/ (skip if content matches)
-	formulasDir := filepath.Join(beadsDir, "formulas")
+	// 8. Write default formula files to store/formulas/ (skip if content matches)
+	formulasDir := config.FormulasDir(cwd)
 	if err := os.MkdirAll(formulasDir, 0755); err != nil {
 		return fmt.Errorf("creating formulas directory: %w", err)
 	}
@@ -261,6 +264,73 @@ func writeSkills(skillsDir string) error {
 		}
 		return os.WriteFile(dest, data, 0644)
 	})
+}
+
+func migrateBeadsDir(root string) error {
+	oldDir := filepath.Join(root, ".beads")
+	newDir := config.StoreDir(root)
+	sentinel := filepath.Join(newDir, ".migration-complete")
+
+	if _, err := os.Stat(sentinel); err == nil {
+		if _, err := os.Stat(oldDir); err == nil {
+			return os.RemoveAll(oldDir)
+		}
+		return nil
+	}
+
+	if _, err := os.Stat(oldDir); os.IsNotExist(err) {
+		return nil
+	}
+	if _, err := os.Stat(newDir); err == nil {
+		return nil
+	}
+
+	if err := os.MkdirAll(newDir, 0755); err != nil {
+		return err
+	}
+
+	err := filepath.WalkDir(oldDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(oldDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		dest := filepath.Join(newDir, rel)
+		if d.IsDir() {
+			return os.MkdirAll(dest, 0755)
+		}
+		src, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+		dst, err := os.Create(dest)
+		if err != nil {
+			return err
+		}
+		defer dst.Close()
+		_, err = io.Copy(dst, src)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(sentinel, []byte("migrated\n"), 0644); err != nil {
+		return err
+	}
+
+	if err := os.RemoveAll(oldDir); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "Migrated '.beads/' -> '.agentfactory/store/'\n")
+	return nil
 }
 
 func runInstallRole(cmd *cobra.Command, role string) error {

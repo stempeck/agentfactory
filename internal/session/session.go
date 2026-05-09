@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -191,11 +190,9 @@ func (m *Manager) Start() error {
 	}
 
 	// Set environment variables (best-effort)
-	beadsDir := filepath.Join(m.factoryRoot, ".beads")
 	_ = m.tmux.SetEnvironment(sessionID, "AF_ROOT", m.factoryRoot)
 	_ = m.tmux.SetEnvironment(sessionID, "AF_ROLE", m.agentName)
-	_ = m.tmux.SetEnvironment(sessionID, "BD_ACTOR", m.agentName)
-	_ = m.tmux.SetEnvironment(sessionID, "BEADS_DIR", beadsDir)
+	_ = m.tmux.SetEnvironment(sessionID, "AF_ACTOR", m.agentName)
 	if m.worktreePath != "" {
 		_ = m.tmux.SetEnvironment(sessionID, "AF_WORKTREE", m.worktreePath)
 		_ = m.tmux.SetEnvironment(sessionID, "AF_WORKTREE_ID", m.worktreeID)
@@ -242,9 +239,8 @@ func (m *Manager) Start() error {
 // When an initial prompt is set, it is appended as a positional argument to
 // claude, making it the first user message.
 func (m *Manager) buildStartupCommand() string {
-	beadsDir := filepath.Join(m.factoryRoot, ".beads")
-	exports := fmt.Sprintf("export AF_ROOT=%s AF_ROLE=%s BD_ACTOR=%s BEADS_DIR=%s",
-		shellQuote(m.factoryRoot), shellQuote(m.agentName), shellQuote(m.agentName), shellQuote(beadsDir))
+	exports := fmt.Sprintf("export AF_ROOT=%s AF_ROLE=%s AF_ACTOR=%s",
+		shellQuote(m.factoryRoot), shellQuote(m.agentName), shellQuote(m.agentName))
 	if m.worktreePath != "" {
 		exports += fmt.Sprintf(" AF_WORKTREE=%s AF_WORKTREE_ID=%s",
 			shellQuote(m.worktreePath), shellQuote(m.worktreeID))

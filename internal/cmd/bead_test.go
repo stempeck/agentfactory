@@ -253,7 +253,7 @@ func TestRunBeadCreate_ParentScoped_PopulatesAssignee(t *testing.T) {
 	factoryRoot, agentDir := setupFactoryFixture(t, "alice")
 	store := installMemStore(t)
 	t.Setenv("AF_ROLE", "")
-	t.Setenv("BD_ACTOR", "")
+	t.Setenv("AF_ACTOR", "")
 
 	ctx := context.Background()
 	epic, err := store.Create(ctx, issuestore.CreateParams{
@@ -310,7 +310,7 @@ func TestRunBeadCreate_ParentScoped_NoAgentContext_Errors(t *testing.T) {
 
 	store := installMemStore(t)
 	t.Setenv("AF_ROLE", "")
-	t.Setenv("BD_ACTOR", "")
+	t.Setenv("AF_ACTOR", "")
 	t.Chdir(factoryRoot)
 
 	cmd := newBeadCreateCmd(t)

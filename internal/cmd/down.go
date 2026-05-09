@@ -153,7 +153,7 @@ func preResetScan(cmd *cobra.Command, factoryRoot string, agents []string) {
 		}
 
 		beadLabel := "0 open beads"
-		store, err := newIssueStore(factoryRoot, "", name)
+		store, err := newIssueStore(factoryRoot, name)
 		if err != nil {
 			beadLabel = "beads: unavailable"
 		} else {
@@ -170,7 +170,7 @@ func preResetScan(cmd *cobra.Command, factoryRoot string, agents []string) {
 }
 
 func resetAgent(ctx context.Context, cmd *cobra.Command, factoryRoot, agentName string) error {
-	store, err := newIssueStore(factoryRoot, "", agentName)
+	store, err := newIssueStore(factoryRoot, agentName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: warning: cannot initialize store for bead cleanup: %v\n", agentName, err)
 	} else {

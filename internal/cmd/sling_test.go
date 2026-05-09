@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/formula"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/issuestore/memstore"
@@ -24,7 +25,7 @@ func installMemStore(t *testing.T) *memstore.Store {
 	t.Helper()
 	store := memstore.New()
 	orig := newIssueStore
-	newIssueStore = func(wd, beadsDir, actor string) (issuestore.Store, error) {
+	newIssueStore = func(wd, actor string) (issuestore.Store, error) {
 		return store, nil
 	}
 	t.Cleanup(func() { newIssueStore = orig })
@@ -58,7 +59,7 @@ func installNoopLaunchSession(t *testing.T) {
 func installFailingIssueStore(t *testing.T) {
 	t.Helper()
 	orig := newIssueStore
-	newIssueStore = func(wd, beadsDir, actor string) (issuestore.Store, error) {
+	newIssueStore = func(wd, actor string) (issuestore.Store, error) {
 		return nil, errors.New("issuestore disabled for test")
 	}
 	t.Cleanup(func() { newIssueStore = orig })
@@ -697,7 +698,7 @@ func createTestFormulaFactory(t *testing.T, formulaName, agentName string) (stri
 	os.WriteFile(filepath.Join(afDir, "agents.json"),
 		[]byte(`{"agents":{"`+agentName+`":{"type":"autonomous","description":"test agent"}}}`), 0o644)
 
-	formulaDir := filepath.Join(root, ".beads", "formulas")
+	formulaDir := config.FormulasDir(root)
 	os.MkdirAll(formulaDir, 0o755)
 	toml := `
 formula = "` + formulaName + `"
@@ -942,7 +943,7 @@ func createTestFormulaFactoryWithTOML(t *testing.T, formulaName, agentName, toml
 	os.WriteFile(filepath.Join(afDir, "agents.json"),
 		[]byte(`{"agents":{"`+agentName+`":{"type":"autonomous","description":"test agent"}}}`), 0o644)
 
-	formulaDir := filepath.Join(root, ".beads", "formulas")
+	formulaDir := config.FormulasDir(root)
 	os.MkdirAll(formulaDir, 0o755)
 	os.WriteFile(filepath.Join(formulaDir, formulaName+".formula.toml"), []byte(toml), 0o644)
 
@@ -2324,7 +2325,7 @@ agent = "ghost"
 id = "step1"
 title = "Step 1"
 `
-	formulaPath := filepath.Join(root, ".beads", "formulas", "test.formula.toml")
+	formulaPath := filepath.Join(config.FormulasDir(root), "test.formula.toml")
 	if err := os.WriteFile(formulaPath, []byte(bogusTOML), 0o644); err != nil {
 		t.Fatalf("overwriting bogus formula: %v", err)
 	}
@@ -3021,7 +3022,7 @@ func TestSling_AbortsOnWorktreeFailure(t *testing.T) {
 	os.WriteFile(filepath.Join(afDir, "agents.json"),
 		[]byte(`{"agents":{"solver":{"type":"autonomous","description":"test","formula":"test-formula"}}}`), 0o644)
 
-	formulaDir := filepath.Join(root, ".beads", "formulas")
+	formulaDir := config.FormulasDir(root)
 	os.MkdirAll(formulaDir, 0o755)
 	os.WriteFile(filepath.Join(formulaDir, "test-formula.formula.toml"),
 		[]byte("formula = \"test-formula\"\ntype = \"workflow\"\nversion = 1\n\n[[steps]]\nid = \"step1\"\ntitle = \"Step 1\"\n"), 0o644)

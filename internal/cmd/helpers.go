@@ -14,12 +14,11 @@ import (
 // server; the adapter lazy-starts the server on first use. Tests override
 // this to return memstore.New() (or memstore.NewWithActor for actor-scoped
 // behavior) so they don't require Python 3.12 on the test host.
-var newIssueStore = func(wd, beadsDir, actor string) (issuestore.Store, error) {
+var newIssueStore = func(wd, actor string) (issuestore.Store, error) {
 	root, err := config.FindFactoryRoot(wd)
 	if err != nil {
 		return nil, err
 	}
-	_ = beadsDir // retained for signature stability across callers; mcpstore derives paths from factoryRoot
 	return mcpstore.New(root, actor)
 }
 

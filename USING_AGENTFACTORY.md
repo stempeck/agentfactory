@@ -13,7 +13,7 @@ Create an instruction set workflow (formula) with `/formula-create /path/to/your
 - **tmux** — required for agent session management (`af up`, `af down`, `af attach`, `af sling`)
 - **Python 3.12** — required by the in-tree MCP issue-store server that `af install --init` spawns (`python3.12 --version`)
 - **af** — `make install` from the agentfactory repo (installs to `~/.local/bin/af`)
-- **Formula TOML files** — for formula-driven workflows, place `.formula.toml` files in `.beads/formulas/` (local to the project) or `~/.beads/formulas/` (global)
+- **Formula TOML files** — for formula-driven workflows, place `.formula.toml` files in `.agentfactory/store/formulas/` (local to the project) or `~/.agentfactory/store/formulas/` (global)
 
 ## Setup container and install agentfactory alongside repo (the easy way)
 1. IFF you haven't setup AgentFactory, run: `./quickdocker.sh <github-repo-path>`
@@ -44,8 +44,8 @@ af install supervisor
 ```bash
 cat >> .gitignore << 'EOF'
 .agentfactory/
-hooks/
-.beads/
+.agentfactory/hooks/
+.agentfactory/store/
 EOF
 ```
 
@@ -206,13 +206,13 @@ Then: `af install researcher && af up researcher`
         .claude/settings.json
         .agent-checkpoint.json
         .runtime/
-  hooks/
+  .agentfactory/hooks/
     quality-gate.sh
     quality-gate-prompt.txt
     fidelity-gate.sh
     fidelity-gate-prompt.txt
-  .beads/
-    ...                          # Beads issue store (SQLite)
+  .agentfactory/store/
+    ...                          # Issue store (SQLite)
     formulas/                    # Formula TOML files (17 shipped by default)
       investigate.formula.toml
       factoryworker.formula.toml
@@ -317,8 +317,8 @@ The agent does NOT poll or wait in a loop. The gate mechanism handles the waitin
 
 ### Formula File Locations
 
-- **Project-local:** `.beads/formulas/<name>.formula.toml` (in the project repo)
-- **Global:** `~/.beads/formulas/<name>.formula.toml` (shared across projects)
+- **Project-local:** `.agentfactory/store/formulas/<name>.formula.toml` (in the project repo)
+- **Global:** `~/.agentfactory/store/formulas/<name>.formula.toml` (shared across projects)
 
 The `af sling` command searches both locations.
 
@@ -497,7 +497,7 @@ Neither flag is needed with `agent-gen-all.sh`, which handles source resolution 
 Paths assume: AF source at `~/projects/agentfactory`, target project at `~/af/myproject`.
 
 ```bash
-# 1. Create the formula from a skill (writes to .beads/formulas/my-agent.formula.toml)
+# 1. Create the formula from a skill (writes to .agentfactory/store/formulas/my-agent.formula.toml)
 cd ~/af/myproject
 claude -p "/formula-create /path/to/my-agent-SKILL.md"
 
@@ -505,7 +505,7 @@ claude -p "/formula-create /path/to/my-agent-SKILL.md"
 af formula agent-gen my-agent --af-src ~/projects/agentfactory --build
 
 # 3. Promote the formula TOML to ship with agentfactory
-cp .beads/formulas/my-agent.formula.toml ~/projects/agentfactory/internal/cmd/install_formulas/
+cp .agentfactory/store/formulas/my-agent.formula.toml ~/projects/agentfactory/internal/cmd/install_formulas/
 
 # 4. Start the agent
 af up my-agent

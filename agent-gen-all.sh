@@ -4,7 +4,7 @@ set -euo pipefail
 #
 # agent-gen-all.sh — Regenerate all formula-derived agent templates and rebuild af
 #
-# Run from a project directory that has .beads/formulas/*.formula.toml files.
+# Run from a project directory that has .agentfactory/store/formulas/*.formula.toml files.
 # The agentfactory source repo is auto-detected from this script's location.
 #
 # Usage:
@@ -13,11 +13,11 @@ set -euo pipefail
 #   AF_SRC=/path/to/af agent-gen-all.sh             # override af source location
 #
 # NOTE: Run from the main repo checkout, not a worktree. Worktrees do not share
-# .beads/formulas/ and this script syncs from $AF_SRC which defaults to the
-# script's directory (the main repo root).
+# .agentfactory/store/formulas/ and this script syncs from $AF_SRC which defaults
+# to the script's directory (the main repo root).
 
 AF_SRC="${AF_SRC:-$(cd "$(dirname "$0")" && pwd)}"
-FORMULA_DIR=".beads/formulas"
+FORMULA_DIR=".agentfactory/store/formulas"
 DO_BUILD=true
 
 for arg in "$@"; do
@@ -123,7 +123,7 @@ fi
 echo ""
 
 # --- Regenerate each formula -------------------------------------------------
-# For each formula in .beads/formulas/, delete the existing agent (which removes
+# For each formula in .agentfactory/store/formulas/, delete the existing agent (which removes
 # its template, config entry, and workspace via `af formula agent-gen --delete`)
 # and regenerate. We never touch internal/templates/roles/ directly — manager
 # and supervisor are builtin roles without formulas and must be left alone.

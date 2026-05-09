@@ -17,8 +17,8 @@ func TestFormulaCreateSkill_AllowedToolsTarget(t *testing.T) {
 		if !strings.Contains(line, "allowed-tools") {
 			continue
 		}
-		if !strings.Contains(line, ".beads/formulas/") {
-			t.Errorf("allowed-tools should target .beads/formulas/, got: %s", line)
+		if !strings.Contains(line, ".agentfactory/store/formulas/") {
+			t.Errorf("allowed-tools should target .agentfactory/store/formulas/, got: %s", line)
 		}
 		if strings.Contains(line, "internal/cmd/install_formulas") {
 			t.Errorf("allowed-tools must NOT target internal/cmd/install_formulas, got: %s", line)

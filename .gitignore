@@ -42,6 +42,7 @@ state.json
 .runtime/
 .agentfactory/worktrees/
 .agentfactory/*
+!.agentfactory/store/
 !.agentfactory/agents/
 !.agentfactory/agents.json
 !.agentfactory/dispatch.json
@@ -81,5 +82,16 @@ test_fail_output.txt
 test_results.txt
 
 # Embedded formulas are committed so `go install @latest` works
-# Run `go generate ./...` after modifying .beads/formulas/
+# Run `go generate ./...` after modifying .agentfactory/store/formulas/
 
+# Used by pro-version agents
+!.claude/skills/design-plan-impl
+!.claude/skills/design-plan-impl/SKILL.md
+!.claude/skills/rootcause-review/
+!.claude/skills/rootcause-review/SKILL.md
+!.claude/skills/ultra-implement/
+!.claude/skills/ultra-implement/SKILL.md
+!.claude/skills/improve-skill/
+!.claude/skills/improve-skill/SKILL.md
+!.claude/skills/github-upstreamer/
+!.claude/skills/github-upstreamer/SKILL.md

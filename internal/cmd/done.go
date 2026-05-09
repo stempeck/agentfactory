@@ -62,8 +62,6 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 		return err
 	}
 
-	beadsDir := filepath.Join(factoryRoot, ".beads")
-
 	// Recovery state: .runtime/hooked_formula is the source of truth for the active
 	// formula instance. Checkpoint is NOT consulted here — it's informational only.
 	instanceID := readHookedFormulaID(cwd)
@@ -71,8 +69,8 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 		return fmt.Errorf("no active formula (missing .runtime/hooked_formula)")
 	}
 
-	actor := os.Getenv("BD_ACTOR")
-	store, err := newIssueStore(cwd, beadsDir, actor)
+	actor := os.Getenv("AF_ACTOR")
+	store, err := newIssueStore(cwd, actor)
 	if err != nil {
 		return fmt.Errorf("initializing issue store: %w", err)
 	}

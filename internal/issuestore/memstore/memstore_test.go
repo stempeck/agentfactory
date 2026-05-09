@@ -27,9 +27,9 @@ func TestMemStoreContract(t *testing.T) {
 func TestMemStoreSeed(t *testing.T) {
 	store := memstore.New()
 	err := store.Seed(
-		issuestore.CreateParams{Title: "one", Type: issuestore.TypeTask, Assignee: "BD_ACTOR"},
-		issuestore.CreateParams{Title: "two", Type: issuestore.TypeTask, Assignee: "BD_ACTOR"},
-		issuestore.CreateParams{Title: "three", Type: issuestore.TypeTask, Assignee: "BD_ACTOR"},
+		issuestore.CreateParams{Title: "one", Type: issuestore.TypeTask, Assignee: "AF_ACTOR"},
+		issuestore.CreateParams{Title: "two", Type: issuestore.TypeTask, Assignee: "AF_ACTOR"},
+		issuestore.CreateParams{Title: "three", Type: issuestore.TypeTask, Assignee: "AF_ACTOR"},
 	)
 	if err != nil {
 		t.Fatalf("Seed: %v", err)
@@ -67,7 +67,7 @@ func TestMemStoreConcurrent(t *testing.T) {
 				_, err := store.Create(ctx, issuestore.CreateParams{
 					Title:    "concurrent",
 					Type:     issuestore.TypeTask,
-					Assignee: "BD_ACTOR",
+					Assignee: "AF_ACTOR",
 				})
 				if err != nil {
 					t.Errorf("Create: %v", err)
@@ -101,7 +101,7 @@ func TestMemStoreLabelWireOrder(t *testing.T) {
 		Title:    "wire order",
 		Type:     issuestore.TypeTask,
 		Labels:   in,
-		Assignee: "BD_ACTOR",
+		Assignee: "AF_ACTOR",
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -127,7 +127,7 @@ func TestMemStoreUniqueIDs(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 50; i++ {
 		iss, err := store.Create(ctx, issuestore.CreateParams{
-			Title: "u", Type: issuestore.TypeTask, Assignee: "BD_ACTOR",
+			Title: "u", Type: issuestore.TypeTask, Assignee: "AF_ACTOR",
 		})
 		if err != nil {
 			t.Fatalf("Create: %v", err)

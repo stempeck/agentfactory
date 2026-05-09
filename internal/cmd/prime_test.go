@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 )
 
@@ -316,7 +317,7 @@ func TestRunPrimeAll_IncludesFormulaContextForActiveFormulas(t *testing.T) {
 	runtimeDir := filepath.Join(root, ".agentfactory", "agents", "manager", ".runtime")
 	os.MkdirAll(runtimeDir, 0o755)
 	os.WriteFile(filepath.Join(runtimeDir, "hooked_formula"), []byte("bd-mgr-formula"), 0o644)
-	os.MkdirAll(filepath.Join(root, ".beads"), 0o755)
+	os.MkdirAll(config.StoreDir(root), 0o755)
 
 	var buf strings.Builder
 	err := runPrimeAll(t.Context(), &buf, root)
@@ -403,7 +404,7 @@ func TestSendWorkDoneMail_NoOpUnderGoTest(t *testing.T) {
 
 func TestPrime_DiscriminatesBlockedFromAllComplete(t *testing.T) {
 	root := setupTestFactoryForPrime(t)
-	os.MkdirAll(filepath.Join(root, ".beads"), 0o755)
+	os.MkdirAll(config.StoreDir(root), 0o755)
 	mem := installMemStore(t)
 
 	ctx := t.Context()
@@ -443,7 +444,7 @@ func TestPrime_DiscriminatesBlockedFromAllComplete(t *testing.T) {
 	writeRuntimeFile(t, workDir, "hooked_formula", epic.ID)
 
 	var buf strings.Builder
-	outputFormulaContext(ctx, &buf, workDir, filepath.Join(root, ".beads"))
+	outputFormulaContext(ctx, &buf, workDir)
 	output := buf.String()
 
 	if !strings.Contains(output, "blocked") {

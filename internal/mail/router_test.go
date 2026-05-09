@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore/memstore"
 	"github.com/stempeck/agentfactory/internal/session"
 	"github.com/stempeck/agentfactory/internal/tmux"
@@ -248,8 +249,7 @@ func setupTestFactory(t *testing.T) string {
 		t.Fatal(err)
 	}
 
-	beadsDir := filepath.Join(root, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+	if err := os.MkdirAll(config.StoreDir(root), 0o755); err != nil {
 		t.Fatal(err)
 	}
 

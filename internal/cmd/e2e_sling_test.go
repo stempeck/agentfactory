@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stempeck/agentfactory/internal/config"
 )
 
 // TestE2E_FreshInstall_SlingToCompletion drives: install → sling → done loop →
@@ -48,7 +50,7 @@ func TestE2E_FreshInstall_SlingToCompletion(t *testing.T) {
 		t.Fatalf("writing agents.json: %v", err)
 	}
 
-	formulaDir := filepath.Join(workspace, ".beads", "formulas")
+	formulaDir := config.FormulasDir(workspace)
 	formulaContent := "formula = \"test-e2e\"\ntype = \"workflow\"\nversion = 1\n\n[[steps]]\nid = \"step1\"\ntitle = \"First step\"\n\n[[steps]]\nid = \"step2\"\ntitle = \"Second step\"\nneeds = [\"step1\"]\n"
 	if err := os.WriteFile(filepath.Join(formulaDir, "test-e2e.formula.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatalf("writing formula TOML: %v", err)

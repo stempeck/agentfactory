@@ -70,6 +70,22 @@ func TestHooksDir(t *testing.T) {
 	}
 }
 
+func TestStoreDir(t *testing.T) {
+	got := StoreDir("/tmp/myproject")
+	want := filepath.Join("/tmp/myproject", ".agentfactory", "store")
+	if got != want {
+		t.Errorf("StoreDir: got %q, want %q", got, want)
+	}
+}
+
+func TestFormulasDir(t *testing.T) {
+	got := FormulasDir("/tmp/myproject")
+	want := filepath.Join("/tmp/myproject", ".agentfactory", "store", "formulas")
+	if got != want {
+		t.Errorf("FormulasDir: got %q, want %q", got, want)
+	}
+}
+
 func TestDetectAgentFromCwd_AtAgentRoot(t *testing.T) {
 	root := t.TempDir()
 	cwd := filepath.Join(root, ".agentfactory", "agents", "manager")

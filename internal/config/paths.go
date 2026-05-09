@@ -18,6 +18,8 @@ func AgentsConfigPath(root string) string    { return filepath.Join(root, dotDir
 func MessagingConfigPath(root string) string { return filepath.Join(root, dotDir, "messaging.json") }
 func DispatchConfigPath(root string) string  { return filepath.Join(root, dotDir, "dispatch.json") }
 func HooksDir(root string) string            { return filepath.Join(root, dotDir, "hooks") }
+func StoreDir(root string) string            { return filepath.Join(root, dotDir, "store") }
+func FormulasDir(root string) string         { return filepath.Join(StoreDir(root), "formulas") }
 
 // DetectAgentFromCwd determines the agent name from the working directory
 // relative to the factory root. It expects cwd to be under

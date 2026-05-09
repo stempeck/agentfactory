@@ -366,7 +366,6 @@ func instantiateFormulaWorkflow(params InstantiateParams, w io.Writer) (string, 
 		}
 	}
 
-	beadsDir := filepath.Join(params.Root, ".beads")
 	agentName := params.AgentName
 	if agentName == "" {
 		agentName, _ = detectAgentName(params.WorkDir, params.Root)
@@ -383,8 +382,8 @@ func instantiateFormulaWorkflow(params InstantiateParams, w io.Writer) (string, 
 		)
 	}
 
-	actor := os.Getenv("BD_ACTOR")
-	store, err := newIssueStore(params.WorkDir, beadsDir, actor)
+	actor := os.Getenv("AF_ACTOR")
+	store, err := newIssueStore(params.WorkDir, actor)
 	if err != nil {
 		return "", nil, agentName, fmt.Errorf("initializing issue store: %w", err)
 	}
