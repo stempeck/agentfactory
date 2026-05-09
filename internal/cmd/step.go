@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
-	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 )
 
@@ -97,19 +95,13 @@ func runStepCurrent(cmd *cobra.Command, _ []string) error {
 		return emitError(err)
 	}
 
-	factoryRoot, err := config.FindFactoryRoot(cwd)
-	if err != nil {
-		return emitError(err)
-	}
-
 	instanceID := readHookedFormulaID(cwd)
 	if instanceID == "" {
 		return emitMinimal("no_formula")
 	}
 
-	beadsDir := filepath.Join(factoryRoot, ".beads")
-	actor := os.Getenv("BD_ACTOR")
-	store, err := newIssueStore(cwd, beadsDir, actor)
+	actor := os.Getenv("AF_ACTOR")
+	store, err := newIssueStore(cwd, actor)
 	if err != nil {
 		return emitError(err)
 	}

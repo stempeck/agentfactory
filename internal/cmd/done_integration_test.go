@@ -26,9 +26,9 @@ import (
 // This test deliberately seeds its child tasks with NO Assignee as a
 // residual-coverage fixture: post-#123 sling populates Assignee from
 // the formula's AgentFor, but this scenario still covers the
-// BD_ACTOR="" edge case (empty actor in the store's context) and
+// AF_ACTOR="" edge case (empty actor in the store's context) and
 // formulas with no declared ownership (where f.AgentFor(stepID)
-// returns "" as the documented fallback). Residual BD_ACTOR=""
+// returns "" as the documented fallback). Residual AF_ACTOR=""
 // coverage gap (Risk R-I1) is deferred to Phase 5.
 //
 // The test calls runDoneCore twice. First call must close step 1 and
@@ -110,7 +110,7 @@ func TestDone_MultiStepFormula_ProgressesCorrectly(t *testing.T) {
 		t.Fatalf("first runDoneCore: %v", err)
 	}
 	if _, err := os.Stat(hookedPath); err != nil {
-		t.Fatalf("hooked_formula removed after only one step closed — this is the BD_ACTOR filter regression: %v", err)
+		t.Fatalf("hooked_formula removed after only one step closed — this is the AF_ACTOR filter regression: %v", err)
 	}
 
 	// Verify step1 is closed and step2 is still open, using the same

@@ -351,7 +351,7 @@ func TestFormulaAgentGen_WriteToFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create formula dir and file
-	formulaDir := filepath.Join(tmpDir, ".beads", "formulas")
+	formulaDir := config.FormulasDir(tmpDir)
 	if err := os.MkdirAll(formulaDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +441,7 @@ func setupFormulaFactory(t *testing.T) string {
 	}
 
 	// Create formula
-	formulaDir := filepath.Join(dir, ".beads", "formulas")
+	formulaDir := config.FormulasDir(dir)
 	if err := os.MkdirAll(formulaDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -991,7 +991,7 @@ func TestProvisioningPipeline_DescriptionFirstSentence(t *testing.T) {
 			os.WriteFile(filepath.Join(configDir, "factory.json"), []byte(`{"type":"factory","version":1,"name":"agentfactory"}`), 0644)
 			os.WriteFile(filepath.Join(configDir, "agents.json"), []byte(`{"agents":{"manager":{"type":"interactive","description":"Interactive agent"}}}`), 0644)
 
-			formulaDir := filepath.Join(dir, ".beads", "formulas")
+			formulaDir := config.FormulasDir(dir)
 			os.MkdirAll(formulaDir, 0755)
 
 			// Use raw string quoting to get the multi-line description into TOML

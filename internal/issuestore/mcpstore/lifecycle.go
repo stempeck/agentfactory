@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/stempeck/agentfactory/internal/config"
+
 	"github.com/stempeck/agentfactory/internal/lock"
 )
 
@@ -142,12 +144,12 @@ func startServer(factoryRoot string) (endpointInfo, error) {
 	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
 		return endpointInfo{}, fmt.Errorf("mcpstore: create runtime dir: %w", err)
 	}
-	beadsDir := filepath.Join(factoryRoot, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
-		return endpointInfo{}, fmt.Errorf("mcpstore: create beads dir: %w", err)
+	storeDir := config.StoreDir(factoryRoot)
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		return endpointInfo{}, fmt.Errorf("mcpstore: create store dir: %w", err)
 	}
 
-	dbPath := filepath.Join(beadsDir, "issues.sqlite")
+	dbPath := filepath.Join(storeDir, "issues.sqlite")
 	epFile := filepath.Join(runtimeDir, "mcp_server.json")
 
 	// Remove any stale endpoint file from a dead previous server so we can

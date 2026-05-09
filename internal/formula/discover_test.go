@@ -5,10 +5,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stempeck/agentfactory/internal/config"
 )
 
 func TestFindFormulaFile_FactoryRoot(t *testing.T) {
-	// Create a temp factory structure: root/.agentfactory/factory.json + root/.beads/formulas/test.formula.toml
+	// Create a temp factory structure: root/.agentfactory/factory.json + formulas dir
 	root := t.TempDir()
 	configDir := filepath.Join(root, ".agentfactory")
 	if err := os.MkdirAll(configDir, 0755); err != nil {
@@ -18,7 +20,7 @@ func TestFindFormulaFile_FactoryRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	formulaDir := filepath.Join(root, ".beads", "formulas")
+	formulaDir := config.FormulasDir(root)
 	if err := os.MkdirAll(formulaDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +50,7 @@ func TestFindFormulaFile_HomeDir(t *testing.T) {
 		t.Skip("cannot determine home dir")
 	}
 
-	formulaDir := filepath.Join(home, ".beads", "formulas")
+	formulaDir := config.FormulasDir(home)
 	if err := os.MkdirAll(formulaDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +95,7 @@ func TestFindFormulaFile_JSONFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	formulaDir := filepath.Join(root, ".beads", "formulas")
+	formulaDir := config.FormulasDir(root)
 	if err := os.MkdirAll(formulaDir, 0755); err != nil {
 		t.Fatal(err)
 	}

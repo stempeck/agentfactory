@@ -61,7 +61,7 @@ test-integration: $(VENV_MARKER)
 check-formulas:
 	@fail=0; for f in internal/cmd/install_formulas/*.formula.toml; do \
 		name=$$(basename "$$f"); \
-		if ! diff -q "$$f" ".beads/formulas/$$name" > /dev/null 2>&1; then \
+		if ! diff -q "$$f" ".agentfactory/store/formulas/$$name" > /dev/null 2>&1; then \
 			echo "DRIFT: $$name"; fail=1; \
 		fi; \
 	done; \
@@ -88,6 +88,6 @@ sync-skills:
 sync-formulas:
 	@for f in internal/cmd/install_formulas/*.formula.toml; do \
 		name=$$(basename "$$f"); \
-		cp "$$f" ".beads/formulas/$$name"; \
+		cp "$$f" ".agentfactory/store/formulas/$$name"; \
 	done
 	@echo "Formulas synced: source → installed"

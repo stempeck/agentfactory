@@ -38,11 +38,8 @@ func TestBuildStartupCommand_Interactive(t *testing.T) {
 	if !strings.Contains(cmd, "AF_ROLE='manager'") {
 		t.Error("command should export AF_ROLE")
 	}
-	if !strings.Contains(cmd, "BD_ACTOR='manager'") {
-		t.Error("command should export BD_ACTOR")
-	}
-	if !strings.Contains(cmd, "BEADS_DIR='/tmp/factory/.beads'") {
-		t.Error("command should export BEADS_DIR")
+	if !strings.Contains(cmd, "AF_ACTOR='manager'") {
+		t.Error("command should export AF_ACTOR")
 	}
 }
 
@@ -192,7 +189,7 @@ func TestBuildStartupCommand_WithoutInitialPrompt_Unchanged(t *testing.T) {
 
 	cmd := mgr.BuildStartupCommand()
 
-	expected := "export AF_ROOT='/tmp/factory' AF_ROLE='ultraimplement' BD_ACTOR='ultraimplement' BEADS_DIR='/tmp/factory/.beads' && claude --dangerously-skip-permissions"
+	expected := "export AF_ROOT='/tmp/factory' AF_ROLE='ultraimplement' AF_ACTOR='ultraimplement' && claude --dangerously-skip-permissions"
 	if cmd != expected {
 		t.Errorf("command without prompt should be unchanged.\ngot:  %s\nwant: %s", cmd, expected)
 	}
@@ -340,9 +337,7 @@ func TestBuildStartupCommand_FactoryRootWithSpaces(t *testing.T) {
 	if !strings.Contains(cmd, "AF_ROOT='/tmp/my factory'") {
 		t.Errorf("factory root with spaces should be quoted, got: %s", cmd)
 	}
-	if !strings.Contains(cmd, "BEADS_DIR='/tmp/my factory/.beads'") {
-		t.Errorf("beads dir with spaces should be quoted, got: %s", cmd)
-	}
+	// AF_ACTOR should be present
 }
 
 func TestBuildStartupCommand_AllAgentsGetPermissionsFlag(t *testing.T) {

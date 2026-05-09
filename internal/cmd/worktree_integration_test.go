@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/session"
 )
 
@@ -75,7 +76,7 @@ func setupWorktreeTestWorkspace(t *testing.T, agentName string) (string, string)
 	}
 
 	// Create formula TOML
-	formulaDir := filepath.Join(workspace, ".beads", "formulas")
+	formulaDir := config.FormulasDir(workspace)
 	formulaContent := "formula = \"test-dispatch\"\ntype = \"workflow\"\nversion = 1\n\n[[steps]]\nid = \"step1\"\ntitle = \"Do the task\"\n"
 	if err := os.WriteFile(filepath.Join(formulaDir, "test-dispatch.formula.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatalf("write formula: %v", err)

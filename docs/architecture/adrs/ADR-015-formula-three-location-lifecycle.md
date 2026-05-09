@@ -13,20 +13,20 @@ consumer that cannot be collapsed:
    install_formulas/*` (`internal/cmd/install.go:22-23`). This is the
    source of truth for formulas that ship with agentfactory.
 
-2. **AF repo mirror** (`.beads/formulas/*.formula.toml`) — git-tracked
+2. **AF repo mirror** (`.agentfactory/store/formulas/*.formula.toml`) — git-tracked
    copies in the agentfactory repo. Required because `go install
    github.com/stempeck/agentfactory/cmd/af@latest` users don't have
    the source tree, and shell consumers (`agent-gen-all.sh:65`) use
    filesystem globs that can't access Go's `embed.FS`. Tracked in git
-   (`.gitignore` lines 47-54 exclude other `.beads/` paths but not
-   `.beads/formulas/`).
+   (`.gitignore` lines 44-45 exclude other `.agentfactory/` paths but not
+   `.agentfactory/store/formulas/`).
 
-3. **Target project** (`~/af/myproject/.beads/formulas/*.formula.toml`)
+3. **Target project** (`~/af/myproject/.agentfactory/store/formulas/*.formula.toml`)
    — the runtime copy in each project that uses agentfactory.
    Populated by `af install --init` (`internal/cmd/install.go:186-208`)
    from the binary's embedded formulas. This is the **primary formula
    source at runtime**: `FindFormulaFile()` (`internal/formula/discover.go:18-42`)
-   searches factory root `.beads/formulas/` (line 22-24), and every
+   searches factory root `.agentfactory/store/formulas/` (line 22-24), and every
    formula consumer — `sling.go:315`, `formula.go:84`,
    `agent-gen-all.sh:65` — reads from this location.
 
@@ -50,7 +50,7 @@ does not cover.
 ### Incident that motivated this ADR
 
 Issue #139: `quickstart.sh` called `make build` without first running
-`make sync-formulas`, causing `.beads/formulas/` to go stale relative
+`make sync-formulas`, causing `.agentfactory/store/formulas/` to go stale relative
 to source. Agents generated from stale formulas dispatched `design-v3`
 instead of `design-v7` during issue #136 processing. The root cause was
 undocumented sync ordering requirements.
@@ -65,15 +65,15 @@ The formula data flows in two directions:
 ```
 Source (internal/cmd/install_formulas/)
     ↓  make sync-formulas (Makefile:67-69)
-AF repo mirror (.beads/formulas/)
+AF repo mirror (.agentfactory/store/formulas/)
     ↓  af install --init (install.go:186-208, via //go:embed)
-Target project (.beads/formulas/)
+Target project (.agentfactory/store/formulas/)
     ↓  FindFormulaFile() (discover.go:22-24)
 Runtime consumers (sling.go:315, formula.go:84, agent-gen-all.sh:65)
 ```
 
 **Reverse (target project → source):**
-New formulas authored in a target project (`~/af/myproject/.beads/formulas/new.formula.toml`)
+New formulas authored in a target project (`~/af/myproject/.agentfactory/store/formulas/new.formula.toml`)
 are generated via `af formula agent-gen` (which finds them via
 `FindFormulaFile()`), then manually copied back to
 `internal/cmd/install_formulas/` to become permanent. This reverse flow
@@ -104,9 +104,9 @@ same accepted cost documented in ADR-008.
 
 1. **Target projects don't have `internal/cmd/install_formulas/`.**
    The only formula location available to `FindFormulaFile()` in a
-   target project is `.beads/formulas/` (`discover.go:22-24`).
-2. **New formulas exist only in `.beads/formulas/`.** A formula
-   authored in `~/af/myproject/.beads/formulas/` has no source-tree
+   target project is `.agentfactory/store/formulas/` (`discover.go:22-24`).
+2. **New formulas exist only in `.agentfactory/store/formulas/`.** A formula
+   authored in `~/af/myproject/.agentfactory/store/formulas/` has no source-tree
    counterpart until manually copied.
 3. **Shell consumers can't access `embed.FS`.** `agent-gen-all.sh:65`
    uses a filesystem glob; Go's `embed.FS` is invisible to it.

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stempeck/agentfactory/internal/config"
 )
 
 func extractSyncBlock(t *testing.T, repoRoot string) string {
@@ -58,7 +60,7 @@ func TestFormulaSyncBehavior(t *testing.T) {
 
 	t.Run("replaces_stale_content", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		formulaDir := filepath.Join(tmpDir, ".beads", "formulas")
+		formulaDir := config.FormulasDir(tmpDir)
 		if err := os.MkdirAll(formulaDir, 0755); err != nil {
 			t.Fatalf("creating formula dir: %v", err)
 		}
@@ -89,7 +91,7 @@ func TestFormulaSyncBehavior(t *testing.T) {
 
 	t.Run("removes_orphan", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		formulaDir := filepath.Join(tmpDir, ".beads", "formulas")
+		formulaDir := config.FormulasDir(tmpDir)
 		if err := os.MkdirAll(formulaDir, 0755); err != nil {
 			t.Fatalf("creating formula dir: %v", err)
 		}
@@ -108,7 +110,7 @@ func TestFormulaSyncBehavior(t *testing.T) {
 
 	t.Run("preserves_customer_formula", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		formulaDir := filepath.Join(tmpDir, ".beads", "formulas")
+		formulaDir := config.FormulasDir(tmpDir)
 		if err := os.MkdirAll(formulaDir, 0755); err != nil {
 			t.Fatalf("creating formula dir: %v", err)
 		}
@@ -127,7 +129,7 @@ func TestFormulaSyncBehavior(t *testing.T) {
 
 	t.Run("copies_all_source_formulas", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		formulaDir := filepath.Join(tmpDir, ".beads", "formulas")
+		formulaDir := config.FormulasDir(tmpDir)
 		if err := os.MkdirAll(formulaDir, 0755); err != nil {
 			t.Fatalf("creating formula dir: %v", err)
 		}

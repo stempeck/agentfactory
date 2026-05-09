@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/issuestore/mcpstore"
 )
@@ -132,8 +133,8 @@ func setupTerminationTest(t *testing.T, agentName string) (binary, workspace, ag
 	ensurePySymlink(t, workspace)
 	t.Cleanup(func() { terminateMCPServer(workspace) })
 
-	// git init — needed for worktree and for the .beads subdirectory to live
-	// inside a repo. The MCP server does not require git.
+	// git init — needed for worktree and for the store subdirectory
+	// to live inside a repo. The MCP server does not require git.
 	for _, args := range [][]string{
 		{"init", "-q"},
 		{"config", "user.email", "test@e2e.test"},
@@ -160,7 +161,7 @@ func setupTerminationTest(t *testing.T, agentName string) (binary, workspace, ag
 	}
 
 	// Create 1-step formula TOML
-	formulaDir := filepath.Join(workspace, ".beads", "formulas")
+	formulaDir := config.FormulasDir(workspace)
 	formulaContent := "formula = \"test-terminate\"\ntype = \"workflow\"\nversion = 1\n\n[[steps]]\nid = \"step1\"\ntitle = \"Only step\"\n"
 	if err := os.WriteFile(filepath.Join(formulaDir, "test-terminate.formula.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
@@ -348,7 +349,7 @@ func TestE2EWorkflow(t *testing.T) {
 
 	// 2. Verify init artifacts
 	for _, path := range []string{
-		".beads",
+		".agentfactory/store",
 		".agentfactory/factory.json",
 		".agentfactory/agents.json",
 		".agentfactory/messaging.json",

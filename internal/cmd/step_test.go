@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/issuestore/memstore"
 )
@@ -17,7 +18,7 @@ import (
 
 // setupTestFactoryForStep creates a minimal factory layout sufficient for
 // step.go's runStepCurrent: .agentfactory/factory.json at the tempdir root,
-// plus .beads/ so filepath.Join(factoryRoot, ".beads") resolves. Returns
+// plus .agentfactory/store/ so config.StoreDir(factoryRoot) resolves. Returns
 // the tempdir path; the caller is expected to call installMemStore(t)
 // separately (which creates the memstore AND installs the seam override).
 func setupTestFactoryForStep(t *testing.T) string {
@@ -34,8 +35,8 @@ func setupTestFactoryForStep(t *testing.T) string {
 	); err != nil {
 		t.Fatalf("write factory.json: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
+	if err := os.MkdirAll(config.StoreDir(dir), 0o755); err != nil {
+		t.Fatalf("mkdir store: %v", err)
 	}
 	return dir
 }
@@ -125,7 +126,7 @@ func TestStepCurrent_ReadyStep_NonGate(t *testing.T) {
 		Title:       "Write foo",
 		Description: "do foo",
 		Parent:      instance.ID,
-		Assignee:    "BD_ACTOR",
+		Assignee:    "AF_ACTOR",
 	})
 	if err != nil {
 		t.Fatalf("create step: %v", err)
@@ -180,7 +181,7 @@ func TestStepCurrent_ReadyStep_GateByDescription(t *testing.T) {
 		Title:       "Phase complete",
 		Description: "Complete all work, then run af done --phase-complete --gate g1",
 		Parent:      instance.ID,
-		Assignee:    "BD_ACTOR",
+		Assignee:    "AF_ACTOR",
 	})
 	if err != nil {
 		t.Fatalf("create step: %v", err)
@@ -258,7 +259,7 @@ func TestStepCurrent_ReadyStep_TerminalBlocker(t *testing.T) {
 		Title:       "Step",
 		Description: "plain description",
 		Parent:      instance.ID,
-		Assignee:    "BD_ACTOR",
+		Assignee:    "AF_ACTOR",
 	})
 	blocker, _ := mem.Create(ctx, issuestore.CreateParams{
 		Type:  issuestore.TypeTask,
@@ -304,7 +305,7 @@ func TestStepCurrent_AllComplete(t *testing.T) {
 		Type:     issuestore.TypeTask,
 		Title:    "Step",
 		Parent:   instance.ID,
-		Assignee: "BD_ACTOR",
+		Assignee: "AF_ACTOR",
 	})
 	if err := mem.Close(ctx, step.ID, ""); err != nil {
 		t.Fatalf("Close step: %v", err)
@@ -334,7 +335,7 @@ func TestStepCurrent_Blocked(t *testing.T) {
 		Type:     issuestore.TypeTask,
 		Title:    "Blocked step",
 		Parent:   instance.ID,
-		Assignee: "BD_ACTOR",
+		Assignee: "AF_ACTOR",
 	})
 	// External blocker (no parent → Ready does not return it when
 	// filter.MoleculeID == instance.ID).
@@ -371,7 +372,7 @@ func TestStepCurrent_FormulaTitleFallback(t *testing.T) {
 		Type:     issuestore.TypeTask,
 		Title:    "Step",
 		Parent:   instance.ID,
-		Assignee: "BD_ACTOR",
+		Assignee: "AF_ACTOR",
 	})
 	writeHookedFormula(t, dir, instance.ID)
 
@@ -408,7 +409,7 @@ func TestStepCurrent_DescriptionPassthrough(t *testing.T) {
 		Title:       "Step",
 		Description: payload,
 		Parent:      instance.ID,
-		Assignee:    "BD_ACTOR",
+		Assignee:    "AF_ACTOR",
 	})
 	writeHookedFormula(t, dir, instance.ID)
 
@@ -456,7 +457,7 @@ func TestStepCurrent_SchemaSnapshot(t *testing.T) {
 		Title:       "Gate step",
 		Description: "run af done --phase-complete --gate g",
 		Parent:      instance.ID,
-		Assignee:    "BD_ACTOR",
+		Assignee:    "AF_ACTOR",
 	})
 	writeHookedFormula(t, dir, instance.ID)
 
@@ -572,7 +573,7 @@ func TestStepCurrent_ListError_EmitsErrorNotAllComplete(t *testing.T) {
 		Type:     issuestore.TypeTask,
 		Title:    "Blocked step",
 		Parent:   instance.ID,
-		Assignee: "BD_ACTOR",
+		Assignee: "AF_ACTOR",
 	})
 	if err != nil {
 		t.Fatalf("create step: %v", err)
@@ -593,7 +594,7 @@ func TestStepCurrent_ListError_EmitsErrorNotAllComplete(t *testing.T) {
 		listErr: errors.New("transient MCP server failure"),
 	}
 	origNewIssueStore := newIssueStore
-	newIssueStore = func(_, _, _ string) (issuestore.Store, error) { return failStore, nil }
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return failStore, nil }
 	defer func() { newIssueStore = origNewIssueStore }()
 
 	writeHookedFormula(t, dir, instance.ID)

@@ -10,9 +10,10 @@ import (
 
 // TestFormulaDriftSourceVsInstalled fails if any formula TOML in
 // internal/cmd/install_formulas/ differs from its counterpart in
-// .beads/formulas/, or vice versa. The two locations must stay in lockstep:
-// install_formulas/ is the //go:embed source baked into the af binary,
-// .beads/formulas/ is the on-disk copy installed into factories.
+// .agentfactory/store/formulas/, or vice versa. The two locations must stay
+// in lockstep: install_formulas/ is the //go:embed source baked into the af
+// binary, .agentfactory/store/formulas/ is the on-disk copy installed into
+// factories.
 //
 // Drift here means the running binary and the deployed factory disagree on
 // formula content — silent identity divergence for any agent generated from
@@ -21,7 +22,7 @@ import (
 func TestFormulaDriftSourceVsInstalled(t *testing.T) {
 	const (
 		sourceDir = "install_formulas"
-		mirrorDir = "../../.beads/formulas"
+		mirrorDir = "../../.agentfactory/store/formulas"
 	)
 
 	sourceFiles := listFormulas(t, sourceDir)

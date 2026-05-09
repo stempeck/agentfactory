@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stempeck/agentfactory/internal/checkpoint"
+	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/issuestore/memstore"
 )
@@ -49,7 +50,7 @@ func TestOutputFormulaContext_NoFormula(t *testing.T) {
 	dir := t.TempDir()
 	var buf strings.Builder
 	// No .runtime/hooked_formula → no output
-	outputFormulaContext(t.Context(), &buf, dir, filepath.Join(dir, ".beads"))
+	outputFormulaContext(t.Context(), &buf, dir)
 	if buf.Len() != 0 {
 		t.Errorf("expected no output when no formula active, got %q", buf.String())
 	}
@@ -188,8 +189,8 @@ func TestPrimeAgent_NoFormula_Unchanged(t *testing.T) {
 
 func TestPrimeAgent_NoFormulaFile_NoFormulaContext(t *testing.T) {
 	root := setupTestFactoryForPrime(t)
-	// Create .beads dir
-	os.MkdirAll(filepath.Join(root, ".beads"), 0o755)
+	// Create store dir
+	os.MkdirAll(config.StoreDir(root), 0o755)
 
 	var buf strings.Builder
 
@@ -216,7 +217,7 @@ func TestPrimeAgent_AutoInjectsFormulaContext(t *testing.T) {
 	runtimeDir := filepath.Join(root, ".agentfactory", "agents", "manager", ".runtime")
 	os.MkdirAll(runtimeDir, 0o755)
 	os.WriteFile(filepath.Join(runtimeDir, "hooked_formula"), []byte("bd-test-formula-1"), 0o644)
-	os.MkdirAll(filepath.Join(root, ".beads"), 0o755)
+	os.MkdirAll(config.StoreDir(root), 0o755)
 
 	var buf strings.Builder
 	err := primeAgent(t.Context(), &buf, root, "manager", filepath.Join(root, ".agentfactory", "agents", "manager"))
@@ -247,7 +248,7 @@ func TestPrimeAgent_NoFormulaContext_WhenNoHookedFormula(t *testing.T) {
 	// Create .runtime/ directory but do NOT create hooked_formula file
 	runtimeDir := filepath.Join(root, ".agentfactory", "agents", "manager", ".runtime")
 	os.MkdirAll(runtimeDir, 0o755)
-	os.MkdirAll(filepath.Join(root, ".beads"), 0o755)
+	os.MkdirAll(config.StoreDir(root), 0o755)
 
 	var buf strings.Builder
 	err := primeAgent(t.Context(), &buf, root, "manager", filepath.Join(root, ".agentfactory", "agents", "manager"))
@@ -267,11 +268,10 @@ func TestPrimeAgent_NoFormulaContext_WhenNoHookedFormula(t *testing.T) {
 
 func TestWriteFormulaCheckpoint_NoFormula(t *testing.T) {
 	dir := t.TempDir()
-	beadsDir := filepath.Join(dir, ".beads")
-	os.MkdirAll(beadsDir, 0o755)
+	os.MkdirAll(config.StoreDir(dir), 0o755)
 
 	// No .runtime/hooked_formula → should silently return
-	writeFormulaCheckpoint(t.Context(), dir, beadsDir)
+	writeFormulaCheckpoint(t.Context(), dir)
 
 	cpPath := checkpoint.Path(dir)
 	if _, err := os.Stat(cpPath); !os.IsNotExist(err) {
@@ -317,7 +317,7 @@ func TestOutputFormulaContext_PreflightWiring(t *testing.T) {
 
 func TestOutputFormulaContext_ListError_NoFalseAllComplete(t *testing.T) {
 	root := setupTestFactoryForPrime(t)
-	os.MkdirAll(filepath.Join(root, ".beads"), 0o755)
+	os.MkdirAll(config.StoreDir(root), 0o755)
 	workDir := filepath.Join(root, ".agentfactory", "agents", "manager")
 
 	mem := memstore.New()
@@ -356,13 +356,13 @@ func TestOutputFormulaContext_ListError_NoFalseAllComplete(t *testing.T) {
 		listErr: errors.New("transient MCP server failure"),
 	}
 	origNewIssueStore := newIssueStore
-	newIssueStore = func(_, _, _ string) (issuestore.Store, error) { return failStore, nil }
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return failStore, nil }
 	defer func() { newIssueStore = origNewIssueStore }()
 
 	writeRuntimeFile(t, workDir, "hooked_formula", epic.ID)
 
 	var buf strings.Builder
-	outputFormulaContext(ctx, &buf, workDir, filepath.Join(root, ".beads"))
+	outputFormulaContext(ctx, &buf, workDir)
 	output := buf.String()
 
 	if strings.Contains(output, "all_complete") {
@@ -375,7 +375,7 @@ func TestOutputFormulaContext_ListError_NoFalseAllComplete(t *testing.T) {
 
 func TestOutputFormulaContext_ListError_NoWrongStepNumber(t *testing.T) {
 	root := setupTestFactoryForPrime(t)
-	os.MkdirAll(filepath.Join(root, ".beads"), 0o755)
+	os.MkdirAll(config.StoreDir(root), 0o755)
 	workDir := filepath.Join(root, ".agentfactory", "agents", "manager")
 
 	mem := memstore.New()
@@ -404,13 +404,13 @@ func TestOutputFormulaContext_ListError_NoWrongStepNumber(t *testing.T) {
 		listErr: errors.New("transient MCP server failure"),
 	}
 	origNewIssueStore := newIssueStore
-	newIssueStore = func(_, _, _ string) (issuestore.Store, error) { return failStore, nil }
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return failStore, nil }
 	defer func() { newIssueStore = origNewIssueStore }()
 
 	writeRuntimeFile(t, workDir, "hooked_formula", epic.ID)
 
 	var buf strings.Builder
-	outputFormulaContext(ctx, &buf, workDir, filepath.Join(root, ".beads"))
+	outputFormulaContext(ctx, &buf, workDir)
 	output := buf.String()
 
 	if strings.Contains(output, "Step 2 of 1") {

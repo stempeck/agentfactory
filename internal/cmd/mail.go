@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -410,13 +409,8 @@ func detectSender(wd string) (string, error) {
 // adapter via the newIssueStore seam; tests inject memstore directly into
 // mail.NewMailbox / mail.NewRouter without going through this helper.
 func storeForMail(wd string) (issuestore.Store, error) {
-	root, err := config.FindFactoryRoot(wd)
-	if err != nil {
-		return nil, err
-	}
-	beadsDir := filepath.Join(root, ".beads")
-	actor := os.Getenv("BD_ACTOR")
-	return newIssueStore(wd, beadsDir, actor)
+	actor := os.Getenv("AF_ACTOR")
+	return newIssueStore(wd, actor)
 }
 
 func newMailboxForSender(sender, wd string) (*mail.Mailbox, error) {

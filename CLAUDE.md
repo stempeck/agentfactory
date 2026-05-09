@@ -4,7 +4,7 @@ Agentfactory — standalone multi-agent orchestration CLI.
 
 ## Build Commands
 
-- `make sync-formulas` - sync build formulas from `internal/cmd/install_formulas` to `.beads/formulas`
+- `make sync-formulas` - sync build formulas from `internal/cmd/install_formulas` to `.agentfactory/store/formulas`
 - `make build` — build the `af` binary
 - `make test` — run unit tests
 - `make install` — build and install to `~/.local/bin/af`

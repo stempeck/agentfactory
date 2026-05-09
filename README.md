@@ -73,8 +73,8 @@ Add factory directories to `.gitignore`:
 ```bash
 cat >> .gitignore << 'EOF'
 .agentfactory/
-hooks/
-.beads/
+.agentfactory/hooks/
+.agentfactory/store/
 EOF
 ```
 
@@ -124,7 +124,7 @@ claude
 # e.g. ./.claude/skills/rapid-implement/SKILL.md")
 ```
 
-This generates a `.formula.toml` file in `.beads/formulas/`. Be patient. It can take some time.
+This generates a `.formula.toml` file in `.agentfactory/store/formulas/`. Be patient. It can take some time.
 
 NOTICE: `.claude/skills/rapid-implement/SKILL.md` was provided in case you want to try creating your first coding agent.
 
@@ -202,9 +202,9 @@ Agents don't need to know their full workflow. They run `af prime` to get the cu
   agents/<name>/            # per-agent workspace
     CLAUDE.md               # role template
     .claude/settings.json   # hooks
-.beads/
+.agentfactory/store/
   formulas/                 # formula TOML files
-hooks/                      # quality/fidelity gate scripts
+.agentfactory/hooks/                      # quality/fidelity gate scripts
 ```
 
 ## Command Reference

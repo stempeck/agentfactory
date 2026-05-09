@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -100,14 +99,8 @@ func runBeadShow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	factoryRoot, err := config.FindFactoryRoot(cwd)
-	if err != nil {
-		return err
-	}
-	beadsDir := filepath.Join(factoryRoot, ".beads")
-
-	actor := os.Getenv("BD_ACTOR")
-	store, err := newIssueStore(cwd, beadsDir, actor)
+	actor := os.Getenv("AF_ACTOR")
+	store, err := newIssueStore(cwd, actor)
 	if err != nil {
 		return fmt.Errorf("initializing issue store: %w", err)
 	}
@@ -150,10 +143,8 @@ func runBeadCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	beadsDir := filepath.Join(factoryRoot, ".beads")
-
-	actor := os.Getenv("BD_ACTOR")
-	store, err := newIssueStore(cwd, beadsDir, actor)
+	actor := os.Getenv("AF_ACTOR")
+	store, err := newIssueStore(cwd, actor)
 	if err != nil {
 		return fmt.Errorf("initializing issue store: %w", err)
 	}
@@ -240,14 +231,8 @@ func runBeadUpdate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	factoryRoot, err := config.FindFactoryRoot(cwd)
-	if err != nil {
-		return err
-	}
-	beadsDir := filepath.Join(factoryRoot, ".beads")
-
-	actor := os.Getenv("BD_ACTOR")
-	store, err := newIssueStore(cwd, beadsDir, actor)
+	actor := os.Getenv("AF_ACTOR")
+	store, err := newIssueStore(cwd, actor)
 	if err != nil {
 		return fmt.Errorf("initializing issue store: %w", err)
 	}
@@ -270,10 +255,8 @@ func runBeadList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	beadsDir := filepath.Join(factoryRoot, ".beads")
-
-	actor := os.Getenv("BD_ACTOR")
-	store, err := newIssueStore(cwd, beadsDir, actor)
+	actor := os.Getenv("AF_ACTOR")
+	store, err := newIssueStore(cwd, actor)
 	if err != nil {
 		return fmt.Errorf("initializing issue store: %w", err)
 	}
@@ -339,14 +322,8 @@ func runBeadClose(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	factoryRoot, err := config.FindFactoryRoot(cwd)
-	if err != nil {
-		return err
-	}
-	beadsDir := filepath.Join(factoryRoot, ".beads")
-
-	actor := os.Getenv("BD_ACTOR")
-	store, err := newIssueStore(cwd, beadsDir, actor)
+	actor := os.Getenv("AF_ACTOR")
+	store, err := newIssueStore(cwd, actor)
 	if err != nil {
 		return fmt.Errorf("initializing issue store: %w", err)
 	}
@@ -367,14 +344,8 @@ func runBeadDep(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	factoryRoot, err := config.FindFactoryRoot(cwd)
-	if err != nil {
-		return err
-	}
-	beadsDir := filepath.Join(factoryRoot, ".beads")
-
-	actor := os.Getenv("BD_ACTOR")
-	store, err := newIssueStore(cwd, beadsDir, actor)
+	actor := os.Getenv("AF_ACTOR")
+	store, err := newIssueStore(cwd, actor)
 	if err != nil {
 		return fmt.Errorf("initializing issue store: %w", err)
 	}

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/formula"
 	"github.com/stempeck/agentfactory/internal/issuestore/mcpstore"
 )
@@ -368,7 +369,7 @@ func TestAllEmbeddedFormulasParse(t *testing.T) {
 // the unit test tier. The integration path is covered by
 // TestInstallInit_CreatesDispatchJson in install_integration_test.go.
 func TestInstallInitFormulas_SkipWhenEqual(t *testing.T) {
-	formulasDir := filepath.Join(t.TempDir(), ".beads", "formulas")
+	formulasDir := config.FormulasDir(t.TempDir())
 	if err := os.MkdirAll(formulasDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -740,6 +741,109 @@ func TestWriteSkills_RecursiveStructure(t *testing.T) {
 			names[i] = e.Name()
 		}
 		t.Errorf("formula-create should have 2 files, got %d: %v", len(entries), names)
+	}
+}
+
+func TestMigrateBeadsDir(t *testing.T) {
+	t.Run("beads_exists_store_does_not", func(t *testing.T) {
+		root := t.TempDir()
+		beadsDir := filepath.Join(root, ".beads")
+		os.MkdirAll(filepath.Join(beadsDir, "formulas"), 0755)
+		os.WriteFile(filepath.Join(beadsDir, ".gitignore"), []byte("*.sqlite\n"), 0644)
+		os.WriteFile(filepath.Join(beadsDir, "issues.sqlite"), []byte("fakedb"), 0644)
+		os.WriteFile(filepath.Join(beadsDir, "formulas", "test.toml"), []byte("[formula]"), 0644)
+
+		if err := migrateBeadsDir(root); err != nil {
+			t.Fatalf("migrateBeadsDir: %v", err)
+		}
+
+		storeDir := filepath.Join(root, ".agentfactory", "store")
+		if _, err := os.Stat(filepath.Join(storeDir, ".gitignore")); err != nil {
+			t.Error(".gitignore not migrated")
+		}
+		if _, err := os.Stat(filepath.Join(storeDir, "issues.sqlite")); err != nil {
+			t.Error("issues.sqlite not migrated")
+		}
+		if _, err := os.Stat(filepath.Join(storeDir, "formulas", "test.toml")); err != nil {
+			t.Error("formulas/test.toml not migrated")
+		}
+		if _, err := os.Stat(filepath.Join(storeDir, ".migration-complete")); err != nil {
+			t.Error(".migration-complete sentinel not written")
+		}
+		if _, err := os.Stat(beadsDir); !os.IsNotExist(err) {
+			t.Error(".beads/ should have been deleted after migration")
+		}
+	})
+
+	t.Run("both_exist_skip", func(t *testing.T) {
+		root := t.TempDir()
+		beadsDir := filepath.Join(root, ".beads")
+		storeDir := filepath.Join(root, ".agentfactory", "store")
+		os.MkdirAll(beadsDir, 0755)
+		os.MkdirAll(storeDir, 0755)
+		os.WriteFile(filepath.Join(beadsDir, "old.txt"), []byte("old"), 0644)
+
+		if err := migrateBeadsDir(root); err != nil {
+			t.Fatalf("migrateBeadsDir: %v", err)
+		}
+
+		if _, err := os.Stat(filepath.Join(storeDir, "old.txt")); !os.IsNotExist(err) {
+			t.Error("file should not have been copied when both dirs exist")
+		}
+		if _, err := os.Stat(beadsDir); err != nil {
+			t.Error(".beads/ should still exist when both dirs exist")
+		}
+	})
+
+	t.Run("neither_exists_noop", func(t *testing.T) {
+		root := t.TempDir()
+		if err := migrateBeadsDir(root); err != nil {
+			t.Fatalf("migrateBeadsDir: %v", err)
+		}
+	})
+
+	t.Run("partial_migration_cleanup", func(t *testing.T) {
+		root := t.TempDir()
+		beadsDir := filepath.Join(root, ".beads")
+		storeDir := filepath.Join(root, ".agentfactory", "store")
+		os.MkdirAll(beadsDir, 0755)
+		os.MkdirAll(storeDir, 0755)
+		os.WriteFile(filepath.Join(beadsDir, "leftover.txt"), []byte("old"), 0644)
+		os.WriteFile(filepath.Join(storeDir, ".migration-complete"), []byte("done"), 0644)
+
+		if err := migrateBeadsDir(root); err != nil {
+			t.Fatalf("migrateBeadsDir: %v", err)
+		}
+
+		if _, err := os.Stat(beadsDir); !os.IsNotExist(err) {
+			t.Error(".beads/ should have been deleted (sentinel exists)")
+		}
+	})
+}
+
+func TestMigrateBeadsDir_Idempotent(t *testing.T) {
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	os.MkdirAll(beadsDir, 0755)
+	os.WriteFile(filepath.Join(beadsDir, "test.txt"), []byte("data"), 0644)
+
+	if err := migrateBeadsDir(root); err != nil {
+		t.Fatalf("first migration: %v", err)
+	}
+	if err := migrateBeadsDir(root); err != nil {
+		t.Fatalf("second migration: %v", err)
+	}
+
+	storeDir := filepath.Join(root, ".agentfactory", "store")
+	data, err := os.ReadFile(filepath.Join(storeDir, "test.txt"))
+	if err != nil {
+		t.Fatal("test.txt not in store after idempotent migration")
+	}
+	if string(data) != "data" {
+		t.Errorf("test.txt content = %q, want %q", string(data), "data")
+	}
+	if _, err := os.Stat(beadsDir); !os.IsNotExist(err) {
+		t.Error(".beads/ should not exist after migration")
 	}
 }
 

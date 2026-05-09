@@ -54,7 +54,7 @@ type SetStatusFn func(store Store, id string, status Status) error
 //   - Filter.Statuses=[StatusOpen, StatusInProgress] returns both as an OR
 //     (D14/H-3).
 //   - Filter.IncludeClosed=true admits closed/done.
-//   - Filter.IncludeAllAgents=true admits non-BD_ACTOR assignees.
+//   - Filter.IncludeAllAgents=true admits non-AF_ACTOR assignees.
 //   - Filter.Parent returns only issues whose Parent equals the filter
 //     value (no parents themselves, no unrelated children).
 //   - Labels round-trip with insertion-order preserved: every input label
@@ -103,7 +103,7 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 			Type:        TypeTask,
 			Priority:    PriorityNormal,
 			Labels:      []string{"a", "b"},
-			Assignee:    "BD_ACTOR",
+			Assignee:    "AF_ACTOR",
 		})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -131,7 +131,7 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 			Title:    "label round trip",
 			Type:     TypeTask,
 			Labels:   []string{"alpha", "mu", "zeta"},
-			Assignee: "BD_ACTOR",
+			Assignee: "AF_ACTOR",
 		})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -153,7 +153,7 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 	})
 
 	// seedSixStatuses creates one issue for each of the six lifecycle states.
-	// All assignees are "BD_ACTOR" except one ("other-agent") used by the
+	// All assignees are "AF_ACTOR" except one ("other-agent") used by the
 	// IncludeAllAgents test.
 	type seeded struct {
 		open, hooked, pinned, inProgress, closed, done string
@@ -164,7 +164,7 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 		ctx := context.Background()
 		mk := func(title string) string {
 			iss, err := store.Create(ctx, CreateParams{
-				Title: title, Type: TypeTask, Assignee: "BD_ACTOR",
+				Title: title, Type: TypeTask, Assignee: "AF_ACTOR",
 			})
 			if err != nil {
 				t.Fatalf("seed Create %q: %v", title, err)
@@ -179,7 +179,7 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 		s.closed = mk("closed-fixture")
 		s.done = mk("done-fixture")
 
-		// One non-BD_ACTOR fixture for IncludeAllAgents.
+		// One non-AF_ACTOR fixture for IncludeAllAgents.
 		other, err := store.Create(ctx, CreateParams{
 			Title: "other-agent-fixture", Type: TypeTask, Assignee: "other-agent",
 		})
@@ -337,11 +337,11 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 
 	t.Run("Filter_IncludeAllAgents_false_hides_other_agents", func(t *testing.T) {
 		ctx := context.Background()
-		// Scope the store to "BD_ACTOR" (the Assignee seedSixStatuses uses
+		// Scope the store to "AF_ACTOR" (the Assignee seedSixStatuses uses
 		// for its majority fixtures) so the filter has something to hide
 		// the "other-agent" fixture against. Actor flows in via the factory
 		// parameter; no process env involved.
-		store := factory("BD_ACTOR")
+		store := factory("AF_ACTOR")
 		seedSixStatuses(t, store)
 		got, err := store.List(ctx, Filter{IncludeAllAgents: false})
 		if err != nil {
@@ -368,13 +368,13 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 		// Create two parent epics. Children below reference these IDs, so
 		// the parents must exist first (bd's --parent enforces existence).
 		epic1, err := store.Create(ctx, CreateParams{
-			Title: "epic-one", Type: TypeEpic, Assignee: "BD_ACTOR",
+			Title: "epic-one", Type: TypeEpic, Assignee: "AF_ACTOR",
 		})
 		if err != nil {
 			t.Fatalf("Create epic1: %v", err)
 		}
 		epic2, err := store.Create(ctx, CreateParams{
-			Title: "epic-two", Type: TypeEpic, Assignee: "BD_ACTOR",
+			Title: "epic-two", Type: TypeEpic, Assignee: "AF_ACTOR",
 		})
 		if err != nil {
 			t.Fatalf("Create epic2: %v", err)
@@ -383,13 +383,13 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 		// Two children of epic1, one child of epic2.
 		for _, title := range []string{"child-1a", "child-1b"} {
 			if _, err := store.Create(ctx, CreateParams{
-				Title: title, Type: TypeTask, Parent: epic1.ID, Assignee: "BD_ACTOR",
+				Title: title, Type: TypeTask, Parent: epic1.ID, Assignee: "AF_ACTOR",
 			}); err != nil {
 				t.Fatalf("Create %s: %v", title, err)
 			}
 		}
 		if _, err := store.Create(ctx, CreateParams{
-			Title: "child-2a", Type: TypeTask, Parent: epic2.ID, Assignee: "BD_ACTOR",
+			Title: "child-2a", Type: TypeTask, Parent: epic2.ID, Assignee: "AF_ACTOR",
 		}); err != nil {
 			t.Fatalf("Create child-2a: %v", err)
 		}
@@ -416,11 +416,11 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 		ctx := context.Background()
 		store := factory("")
 		// Create
-		a, err := store.Create(ctx, CreateParams{Title: "a", Type: TypeTask, Assignee: "BD_ACTOR"})
+		a, err := store.Create(ctx, CreateParams{Title: "a", Type: TypeTask, Assignee: "AF_ACTOR"})
 		if err != nil {
 			t.Fatalf("Create a: %v", err)
 		}
-		b, err := store.Create(ctx, CreateParams{Title: "b", Type: TypeTask, Assignee: "BD_ACTOR"})
+		b, err := store.Create(ctx, CreateParams{Title: "b", Type: TypeTask, Assignee: "AF_ACTOR"})
 		if err != nil {
 			t.Fatalf("Create b: %v", err)
 		}
@@ -477,7 +477,7 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 			iss, err := store.Create(ctx, CreateParams{
 				Title:    "ready-order-" + strings.Repeat("x", i),
 				Type:     TypeTask,
-				Assignee: "BD_ACTOR",
+				Assignee: "AF_ACTOR",
 			})
 			if err != nil {
 				t.Fatalf("Create %d: %v", i, err)
@@ -506,7 +506,7 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 			iss, err := store.Create(ctx, CreateParams{
 				Title:    fmt.Sprintf("rapid-%d", i),
 				Type:     TypeTask,
-				Assignee: "BD_ACTOR",
+				Assignee: "AF_ACTOR",
 			})
 			if err != nil {
 				t.Fatalf("Create rapid %d: %v", i, err)
@@ -538,13 +538,13 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 		store := factory("")
 
 		a, err := store.Create(ctx, CreateParams{
-			Title: "dep-blocked", Type: TypeTask, Assignee: "BD_ACTOR",
+			Title: "dep-blocked", Type: TypeTask, Assignee: "AF_ACTOR",
 		})
 		if err != nil {
 			t.Fatalf("Create A: %v", err)
 		}
 		b, err := store.Create(ctx, CreateParams{
-			Title: "dep-target", Type: TypeTask, Assignee: "BD_ACTOR",
+			Title: "dep-target", Type: TypeTask, Assignee: "AF_ACTOR",
 		})
 		if err != nil {
 			t.Fatalf("Create B: %v", err)
@@ -591,13 +591,13 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 		store := factory("")
 
 		a, err := store.Create(ctx, CreateParams{
-			Title: "orphan-dep-issue", Type: TypeTask, Assignee: "BD_ACTOR",
+			Title: "orphan-dep-issue", Type: TypeTask, Assignee: "AF_ACTOR",
 		})
 		if err != nil {
 			t.Fatalf("Create A: %v", err)
 		}
 		b, err := store.Create(ctx, CreateParams{
-			Title: "orphan-dep-target", Type: TypeTask, Assignee: "BD_ACTOR",
+			Title: "orphan-dep-target", Type: TypeTask, Assignee: "AF_ACTOR",
 		})
 		if err != nil {
 			t.Fatalf("Create B: %v", err)
@@ -685,7 +685,7 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 			Title:       "patch-notes-test",
 			Description: "orig",
 			Type:        TypeTask,
-			Assignee:    "BD_ACTOR",
+			Assignee:    "AF_ACTOR",
 		})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -736,7 +736,7 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 			Title:       "close-reason-test",
 			Description: "orig",
 			Type:        TypeTask,
-			Assignee:    "BD_ACTOR",
+			Assignee:    "AF_ACTOR",
 		})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -768,7 +768,7 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 			Title:    "label-order-test",
 			Type:     TypeTask,
 			Labels:   want,
-			Assignee: "BD_ACTOR",
+			Assignee: "AF_ACTOR",
 		})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -799,7 +799,7 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 			Type:        TypeBug,
 			Priority:    PriorityHigh,
 			Labels:      []string{"render-label"},
-			Assignee:    "BD_ACTOR",
+			Assignee:    "AF_ACTOR",
 		})
 		if err != nil {
 			t.Fatalf("Create: %v", err)

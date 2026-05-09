@@ -287,7 +287,7 @@ func TestResetAgent_StoreInitFailure(t *testing.T) {
 
 	// Override newIssueStore to return an error
 	orig := newIssueStore
-	newIssueStore = func(wd, beadsDir, actor string) (issuestore.Store, error) {
+	newIssueStore = func(wd, actor string) (issuestore.Store, error) {
 		return nil, fmt.Errorf("MCP server unavailable")
 	}
 	t.Cleanup(func() { newIssueStore = orig })
@@ -349,7 +349,7 @@ func TestPreResetScan_StoreUnavailable(t *testing.T) {
 	}
 
 	orig := newIssueStore
-	newIssueStore = func(wd, beadsDir, actor string) (issuestore.Store, error) {
+	newIssueStore = func(wd, actor string) (issuestore.Store, error) {
 		return nil, fmt.Errorf("MCP server unavailable")
 	}
 	t.Cleanup(func() { newIssueStore = orig })
@@ -715,7 +715,7 @@ func TestDown_Reset_PartialFailureContinues(t *testing.T) {
 	}
 
 	orig := newIssueStore
-	newIssueStore = func(wd, beadsDir, actor string) (issuestore.Store, error) {
+	newIssueStore = func(wd, actor string) (issuestore.Store, error) {
 		return nil, fmt.Errorf("MCP server unavailable")
 	}
 	t.Cleanup(func() { newIssueStore = orig })

@@ -152,7 +152,14 @@ Step descriptions are **self-contained**:
 ## 10.7 Formula Description
 
 Build the top-level `description` from:
-1. **Mandatory execution directive** (always first, verbatim):
+1. Skill's `description` from frontmatter (first paragraph) — rewrite to be source-agnostic
+   (e.g., "from a proposal document" → "requirements come from the assigned bead — which may
+   contain inline requirements, a path to a proposal document, or a link to a GitHub issue")
+2. Skill's `## Persona` section (if present)
+3. Variables table
+4. Failure modes table (standard: tests fail → fix; stuck → mail Witness; context filling → af handoff)
+5. Anti-patterns section from the skill — rewrite "proposal" references as "requirements"
+6. **Mandatory execution directive** (always last, verbatim):
    ```
    ## MANDATORY: Exact Step Execution
    Execute each formula step EXACTLY as written, in order, with no modifications.
@@ -162,13 +169,6 @@ Build the top-level `description` from:
    would be better." Your job is faithful execution of these steps, not improvement
    of them.
    ```
-2. Skill's `description` from frontmatter (first paragraph) — rewrite to be source-agnostic
-   (e.g., "from a proposal document" → "requirements come from the assigned bead — which may
-   contain inline requirements, a path to a proposal document, or a link to a GitHub issue")
-3. Skill's `## Persona` section (if present)
-4. Variables table
-5. Failure modes table (standard: tests fail → fix; stuck → mail Witness; context filling → af handoff)
-6. Anti-patterns section from the skill — rewrite "proposal" references as "requirements"
 
 ## 10.8 Reference Formulas
 
@@ -176,7 +176,7 @@ Before generating, examine BOTH reference formulas:
 
 **1. factoryworker.formula.toml** — the invariant step source:
 ```bash
-cat .beads/formulas/factoryworker.formula.toml
+cat .agentfactory/store/formulas/factoryworker.formula.toml
 ```
 
 This defines all 10 invariant steps. Copy step descriptions for:
@@ -186,7 +186,7 @@ This defines all 10 invariant steps. Copy step descriptions for:
 
 **2. design-v3.formula.toml** — a complete skill-derived formula:
 ```bash
-cat .beads/formulas/design-v3.formula.toml
+cat .agentfactory/store/formulas/design-v3.formula.toml
 ```
 
 Shows the full 18-step structure with all 10 invariant steps, domain phase interleaving,
@@ -254,7 +254,7 @@ not workspace cleanup. Do NOT bundle artifact removal or git push into submit-an
 
 1. **File exists:**
    ```bash
-   ls -la .beads/formulas/<formula-name>.formula.toml
+   ls -la .agentfactory/store/formulas/<formula-name>.formula.toml
    ```
 
 2. **Step count:** Count `[[steps]]` entries. Must equal: pre-work (4) + domain (N) + post-work (6).
@@ -266,7 +266,7 @@ not workspace cleanup. Do NOT bundle artifact removal or git push into submit-an
 
 4. **Needs chain unbroken:** Every step except `load-context` has a `needs` field.
 
-5. **Mandatory directive:** The `description` field starts with `## MANDATORY: Exact Step Execution`.
+5. **Mandatory directive:** The `description` field ends with `## MANDATORY: Exact Step Execution`.
 
 6. **No hardcoded test commands:** Invariant steps must NOT hardcode stack-specific test
    commands (`go test ./...`, `npm test`, `pytest`, etc.). Instead, instruct the agent to
@@ -280,7 +280,7 @@ If ANY check fails, fix the formula and re-run the checklist before reporting su
 After creating a skill-derived formula, inform the user:
 
 ```
-Formula created: .beads/formulas/<name>.formula.toml
+Formula created: .agentfactory/store/formulas/<name>.formula.toml
 Derived from: .claude/skills/<name>/SKILL.md
 
 Steps: N domain steps + M skill gates + 10 invariant steps
