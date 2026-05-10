@@ -1,0 +1,50 @@
+{
+  "agents": {
+    "design": {
+      "type": "autonomous",
+      "description": "## Overview\nStructured design exploration via parallel specialized analysts.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "design"
+    },
+    "design-v3": {
+      "type": "autonomous",
+      "description": "## Overview\nStructured design exploration with constraint verification, dependency mapping,\nand cross-dimension conflict detection for agents.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "design-v3"
+    },
+    "factoryworker": {
+      "type": "autonomous",
+      "description": "## Overview\nFull agent work lifecycle from assignment through PR submission.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "factoryworker"
+    },
+    "gherkin-breakdown": {
+      "type": "autonomous",
+      "description": "## Overview\nCreate Gherkin scenarios from an English requirements document through iterative\ndrafting, review, and validation until the final `GHERKINSCENARIOS.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "gherkin-breakdown"
+    },
+    "investigate": {
+      "type": "autonomous",
+      "description": "## Overview \nInvestigate a codebase question or bug with structured analysis\n",
+      "directive": "Run af prime to load formula context.",
+      "formula": "investigate"
+    },
+    "manager": {
+      "type": "interactive",
+      "description": "Interactive agent for human-supervised work",
+      "directive": "Read your memory and docs, and prove it."
+    },
+    "mergepatrol": {
+      "type": "autonomous",
+      "description": "## Overview\nPR merge processor patrol loop.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "mergepatrol"
+    },
+    "supervisor": {
+      "type": "autonomous",
+      "description": "Autonomous agent for independent task execution",
+      "directive": "Read your memory and docs, and prove it."
+    }
+  }
+}

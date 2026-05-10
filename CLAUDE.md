@@ -32,7 +32,7 @@ internal/
   lock/              Identity lock with PID-based stale detection
   mail/              Mail system (mailbox, router, issuestore-backed storage)
   session/           Agent session lifecycle (tmux start/stop, Claude launch, zombie detection)
-  templates/         Role templates (manager, supervisor, deacon, refinery, witness)
+  templates/         Role templates (manager, supervisor, and many more specialist roles)
   tmux/              tmux subprocess wrapper (create, attach, send-keys, capture, readiness)
 hooks/               Quality gate scripts (source copies)
 ```
