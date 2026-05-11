@@ -299,9 +299,9 @@ func TestSetupAgent(t *testing.T) {
 	if len(claudeData) == 0 {
 		t.Error("CLAUDE.md is empty")
 	}
-	// The rendered CLAUDE.md should contain the worktree path (RootDir=worktreePath)
-	if !strings.Contains(string(claudeData), absPath) {
-		t.Errorf("CLAUDE.md does not contain worktree path %q — was it rendered or copied?", absPath)
+	// The rendered CLAUDE.md should contain the factory root path (RootDir=factoryRoot)
+	if !strings.Contains(string(claudeData), realDir) {
+		t.Errorf("CLAUDE.md does not contain factory root path %q", realDir)
 	}
 
 	// Verify settings.json exists
@@ -1540,4 +1540,290 @@ func TestCreate_ResourceCheckFailsBeforeGitWorktreeAdd(t *testing.T) {
 			t.Errorf("worktree directory %s should not exist after resource check failure", e.Name())
 		}
 	}
+}
+
+func TestEnsureWorktreeLinks_CreatesSymlinks(t *testing.T) {
+	factoryRoot := t.TempDir()
+	worktreePath := t.TempDir()
+
+	// Create symlink targets at factory root
+	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills"), 0o755)
+	os.MkdirAll(filepath.Join(factoryRoot, ".runtime"), 0o755)
+	os.WriteFile(filepath.Join(factoryRoot, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+
+	err := EnsureWorktreeLinks(factoryRoot, worktreePath)
+	if err != nil {
+		t.Fatalf("EnsureWorktreeLinks: %v", err)
+	}
+
+	// Verify .claude/skills symlink
+	link, err := os.Readlink(filepath.Join(worktreePath, ".claude", "skills"))
+	if err != nil {
+		t.Fatalf("readlink .claude/skills: %v", err)
+	}
+	if link != filepath.Join(factoryRoot, ".claude", "skills") {
+		t.Errorf(".claude/skills symlink: got %q, want %q", link, filepath.Join(factoryRoot, ".claude", "skills"))
+	}
+
+	// Verify .runtime symlink
+	link, err = os.Readlink(filepath.Join(worktreePath, ".runtime"))
+	if err != nil {
+		t.Fatalf("readlink .runtime: %v", err)
+	}
+	if link != filepath.Join(factoryRoot, ".runtime") {
+		t.Errorf(".runtime symlink: got %q, want %q", link, filepath.Join(factoryRoot, ".runtime"))
+	}
+
+	// Verify AGENTS.md symlink
+	link, err = os.Readlink(filepath.Join(worktreePath, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("readlink AGENTS.md: %v", err)
+	}
+	if link != filepath.Join(factoryRoot, "AGENTS.md") {
+		t.Errorf("AGENTS.md symlink: got %q, want %q", link, filepath.Join(factoryRoot, "AGENTS.md"))
+	}
+}
+
+func TestEnsureWorktreeLinks_Idempotent(t *testing.T) {
+	factoryRoot := t.TempDir()
+	worktreePath := t.TempDir()
+
+	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills"), 0o755)
+	os.MkdirAll(filepath.Join(factoryRoot, ".runtime"), 0o755)
+	os.WriteFile(filepath.Join(factoryRoot, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+
+	// Call twice
+	if err := EnsureWorktreeLinks(factoryRoot, worktreePath); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if err := EnsureWorktreeLinks(factoryRoot, worktreePath); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+
+	// Verify symlinks still correct after second call
+	link, err := os.Readlink(filepath.Join(worktreePath, ".claude", "skills"))
+	if err != nil {
+		t.Fatalf("readlink .claude/skills: %v", err)
+	}
+	if link != filepath.Join(factoryRoot, ".claude", "skills") {
+		t.Errorf(".claude/skills symlink: got %q, want %q", link, filepath.Join(factoryRoot, ".claude", "skills"))
+	}
+}
+
+func TestEnsureWorktreeLinks_ExistingRealFile(t *testing.T) {
+	factoryRoot := t.TempDir()
+	worktreePath := t.TempDir()
+
+	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills"), 0o755)
+	os.MkdirAll(filepath.Join(factoryRoot, ".runtime"), 0o755)
+	os.WriteFile(filepath.Join(factoryRoot, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+
+	// Create a real file at AGENTS.md in worktree
+	realContent := []byte("user content\n")
+	os.WriteFile(filepath.Join(worktreePath, "AGENTS.md"), realContent, 0o644)
+
+	err := EnsureWorktreeLinks(factoryRoot, worktreePath)
+	if err != nil {
+		t.Fatalf("EnsureWorktreeLinks: %v", err)
+	}
+
+	// Verify real file is preserved (not a symlink)
+	fi, err := os.Lstat(filepath.Join(worktreePath, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("lstat AGENTS.md: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Error("AGENTS.md should remain a real file, not be replaced with symlink")
+	}
+	data, _ := os.ReadFile(filepath.Join(worktreePath, "AGENTS.md"))
+	if string(data) != string(realContent) {
+		t.Errorf("AGENTS.md content changed: got %q, want %q", data, realContent)
+	}
+}
+
+func TestEnsureWorktreeLinks_CreatesParentDir(t *testing.T) {
+	factoryRoot := t.TempDir()
+	worktreePath := t.TempDir()
+
+	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills"), 0o755)
+	os.MkdirAll(filepath.Join(factoryRoot, ".runtime"), 0o755)
+	os.WriteFile(filepath.Join(factoryRoot, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+
+	// Verify .claude/ does NOT exist in worktree initially
+	if _, err := os.Stat(filepath.Join(worktreePath, ".claude")); !os.IsNotExist(err) {
+		t.Fatal(".claude/ should not exist before EnsureWorktreeLinks")
+	}
+
+	err := EnsureWorktreeLinks(factoryRoot, worktreePath)
+	if err != nil {
+		t.Fatalf("EnsureWorktreeLinks: %v", err)
+	}
+
+	// Verify .claude/ was created and .claude/skills symlink exists
+	fi, err := os.Lstat(filepath.Join(worktreePath, ".claude", "skills"))
+	if err != nil {
+		t.Fatalf("lstat .claude/skills: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Error(".claude/skills should be a symlink")
+	}
+}
+
+func TestSetupAgent_RootDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	absPath, _, err := Create(realDir, "solver", CreateOpts{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	agentDir, err := SetupAgent(realDir, absPath, "solver", true)
+	if err != nil {
+		t.Fatalf("SetupAgent: %v", err)
+	}
+
+	claudeData, err := os.ReadFile(filepath.Join(agentDir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("reading CLAUDE.md: %v", err)
+	}
+
+	// CLAUDE.md must contain "Factory root" line with factory root path, not worktree path
+	if !strings.Contains(string(claudeData), realDir) {
+		t.Errorf("CLAUDE.md does not contain factory root path %q", realDir)
+	}
+	// The "Factory root:" line should reference realDir, not the worktree subpath
+	for _, line := range strings.Split(string(claudeData), "\n") {
+		if strings.Contains(line, "Factory root") && strings.Contains(line, absPath) && !strings.Contains(line, realDir) {
+			t.Errorf("Factory root line references worktree path instead of factory root: %s", line)
+		}
+	}
+}
+
+func TestForceRemove_PreservesFactoryRoot(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+	addGitignore(t, realDir)
+
+	skillsDir := filepath.Join(realDir, ".claude", "skills")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatalf("mkdir .claude/skills: %v", err)
+	}
+	runtimeDir := filepath.Join(realDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatalf("mkdir .runtime: %v", err)
+	}
+	agentsMD := filepath.Join(realDir, "AGENTS.md")
+	agentsContent := []byte("# Agents\ntest content\n")
+	if err := os.WriteFile(agentsMD, agentsContent, 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	absPath, meta, err := Create(realDir, "solver", CreateOpts{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+		p := filepath.Join(absPath, rel)
+		fi, err := os.Lstat(p)
+		if err != nil {
+			t.Fatalf("symlink %s should exist before ForceRemove: %v", rel, err)
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("%s should be a symlink before ForceRemove", rel)
+		}
+	}
+
+	if err := ForceRemove(realDir, meta); err != nil {
+		t.Fatalf("ForceRemove: %v", err)
+	}
+
+	if _, err := os.Stat(absPath); !os.IsNotExist(err) {
+		t.Errorf("worktree dir should not exist after ForceRemove, got err: %v", err)
+	}
+
+	if _, err := os.Stat(skillsDir); err != nil {
+		t.Errorf("factory root .claude/skills should still exist after ForceRemove: %v", err)
+	}
+	if _, err := os.Stat(runtimeDir); err != nil {
+		t.Errorf("factory root .runtime should still exist after ForceRemove: %v", err)
+	}
+	got, err := os.ReadFile(agentsMD)
+	if err != nil {
+		t.Errorf("factory root AGENTS.md should still exist after ForceRemove: %v", err)
+	} else if string(got) != string(agentsContent) {
+		t.Errorf("AGENTS.md content changed: got %q, want %q", got, agentsContent)
+	}
+}
+
+func TestUnlinkBeforeRemove_RemovesSymlinks(t *testing.T) {
+	factoryRoot := t.TempDir()
+	worktreePath := t.TempDir()
+
+	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills"), 0o755)
+	os.MkdirAll(filepath.Join(factoryRoot, ".runtime"), 0o755)
+	agentsContent := []byte("# Agents\n")
+	os.WriteFile(filepath.Join(factoryRoot, "AGENTS.md"), agentsContent, 0o644)
+
+	if err := EnsureWorktreeLinks(factoryRoot, worktreePath); err != nil {
+		t.Fatalf("EnsureWorktreeLinks: %v", err)
+	}
+
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+		fi, err := os.Lstat(filepath.Join(worktreePath, rel))
+		if err != nil {
+			t.Fatalf("symlink %s should exist before unlinkBeforeRemove: %v", rel, err)
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("%s should be a symlink", rel)
+		}
+	}
+
+	unlinkBeforeRemove(worktreePath)
+
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+		_, err := os.Lstat(filepath.Join(worktreePath, rel))
+		if !os.IsNotExist(err) {
+			t.Errorf("symlink %s should not exist after unlinkBeforeRemove, got err: %v", rel, err)
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(factoryRoot, ".claude", "skills")); err != nil {
+		t.Errorf("factory root .claude/skills should still exist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(factoryRoot, ".runtime")); err != nil {
+		t.Errorf("factory root .runtime should still exist: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(factoryRoot, "AGENTS.md"))
+	if err != nil {
+		t.Errorf("factory root AGENTS.md should still exist: %v", err)
+	} else if string(got) != string(agentsContent) {
+		t.Errorf("AGENTS.md content changed: got %q, want %q", got, agentsContent)
+	}
+}
+
+func TestUnlinkBeforeRemove_ToleratesMissing(t *testing.T) {
+	worktreePath := t.TempDir()
+	unlinkBeforeRemove(worktreePath)
 }

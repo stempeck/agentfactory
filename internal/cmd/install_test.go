@@ -847,3 +847,131 @@ func TestMigrateBeadsDir_Idempotent(t *testing.T) {
 	}
 }
 
+func TestEnsureGitExclude_CreatesEntries(t *testing.T) {
+	root := t.TempDir()
+	gitInfoDir := filepath.Join(root, ".git", "info")
+	if err := os.MkdirAll(gitInfoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	excludePath := filepath.Join(gitInfoDir, "exclude")
+	if err := os.WriteFile(excludePath, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureGitExclude(root); err != nil {
+		t.Fatalf("ensureGitExclude: %v", err)
+	}
+
+	data, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("reading exclude: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "# agentfactory managed paths") {
+		t.Error("missing sentinel comment")
+	}
+	for _, pattern := range []string{".agentfactory/", ".runtime/", "AGENTS.md", ".claude/"} {
+		if !strings.Contains(content, pattern) {
+			t.Errorf("missing pattern: %s", pattern)
+		}
+	}
+}
+
+func TestEnsureGitExclude_Idempotent(t *testing.T) {
+	root := t.TempDir()
+	gitInfoDir := filepath.Join(root, ".git", "info")
+	if err := os.MkdirAll(gitInfoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	excludePath := filepath.Join(gitInfoDir, "exclude")
+	if err := os.WriteFile(excludePath, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureGitExclude(root); err != nil {
+		t.Fatalf("first ensureGitExclude: %v", err)
+	}
+	if err := ensureGitExclude(root); err != nil {
+		t.Fatalf("second ensureGitExclude: %v", err)
+	}
+
+	data, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("reading exclude: %v", err)
+	}
+	content := string(data)
+
+	if count := strings.Count(content, "# agentfactory managed paths"); count != 1 {
+		t.Errorf("sentinel count = %d, want 1", count)
+	}
+	for _, pattern := range []string{".agentfactory/", ".runtime/", "AGENTS.md", ".claude/"} {
+		if count := strings.Count(content, pattern); count != 1 {
+			t.Errorf("pattern %q count = %d, want 1", pattern, count)
+		}
+	}
+}
+
+func TestEnsureGitExclude_PreservesExisting(t *testing.T) {
+	root := t.TempDir()
+	gitInfoDir := filepath.Join(root, ".git", "info")
+	if err := os.MkdirAll(gitInfoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	excludePath := filepath.Join(gitInfoDir, "exclude")
+	preExisting := "*.log\nbuild/\n"
+	if err := os.WriteFile(excludePath, []byte(preExisting), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureGitExclude(root); err != nil {
+		t.Fatalf("ensureGitExclude: %v", err)
+	}
+
+	data, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("reading exclude: %v", err)
+	}
+	content := string(data)
+
+	if !strings.HasPrefix(content, preExisting) {
+		t.Error("pre-existing content not preserved at beginning of file")
+	}
+	if !strings.Contains(content, "# agentfactory managed paths") {
+		t.Error("missing sentinel comment")
+	}
+	for _, pattern := range []string{".agentfactory/", ".runtime/", "AGENTS.md", ".claude/"} {
+		if !strings.Contains(content, pattern) {
+			t.Errorf("missing pattern: %s", pattern)
+		}
+	}
+}
+
+func TestEnsureGitExclude_MissingFile(t *testing.T) {
+	root := t.TempDir()
+	gitInfoDir := filepath.Join(root, ".git", "info")
+	if err := os.MkdirAll(gitInfoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureGitExclude(root); err != nil {
+		t.Fatalf("ensureGitExclude: %v", err)
+	}
+
+	excludePath := filepath.Join(gitInfoDir, "exclude")
+	data, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("exclude file not created: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "# agentfactory managed paths") {
+		t.Error("missing sentinel comment")
+	}
+	for _, pattern := range []string{".agentfactory/", ".runtime/", "AGENTS.md", ".claude/"} {
+		if !strings.Contains(content, pattern) {
+			t.Errorf("missing pattern: %s", pattern)
+		}
+	}
+}
+

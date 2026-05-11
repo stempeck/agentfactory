@@ -16,6 +16,7 @@ import (
 
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/session"
+	"github.com/stempeck/agentfactory/internal/worktree"
 )
 
 // setupWorktreeTestWorkspace creates a factory workspace with a specialist agent
@@ -721,5 +722,294 @@ func TestLaunchAgentSession_EmptyWorktreePath(t *testing.T) {
 
 	if err := exec.Command("tmux", "has-session", "-t", "=af-manager").Run(); err == nil {
 		t.Error("tmux session af-manager should NOT exist after ErrWorktreeNotSet")
+	}
+}
+
+func TestInstallInit_RejectsWorktree(t *testing.T) {
+	requirePython3WithServerDeps(t)
+
+	binary := buildAF(t)
+	workspace := t.TempDir()
+	realWorkspace, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatalf("eval symlinks on workspace: %v", err)
+	}
+	ensurePySymlink(t, realWorkspace)
+	t.Cleanup(func() { terminateMCPServer(realWorkspace) })
+
+	// git init with initial commit
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "test@e2e.test"},
+		{"config", "user.name", "E2E Test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = realWorkspace
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %s\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	// .gitignore + commit
+	if err := os.WriteFile(filepath.Join(realWorkspace, ".gitignore"), []byte(".agentfactory/\n"), 0o644); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
+	for _, args := range [][]string{
+		{"add", ".gitignore"},
+		{"commit", "-m", "initial with gitignore"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = realWorkspace
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %s\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	// af install --init at factory root
+	runAF(t, binary, realWorkspace, "install", "--init")
+
+	// Create worktree via Go API (avoids tmux/claude dependency)
+	wtPath, _, err := worktree.Create(realWorkspace, "solver", worktree.CreateOpts{})
+	if err != nil {
+		t.Fatalf("worktree.Create: %v", err)
+	}
+
+	// Run af install --init from inside the worktree — should fail
+	out, cmdErr := runAFMayFail(t, binary, wtPath, "install", "--init")
+	if cmdErr == nil {
+		t.Fatal("expected af install --init to fail inside worktree, but it succeeded")
+	}
+	if !strings.Contains(out, "cannot run") || !strings.Contains(out, "inside a worktree") {
+		t.Errorf("error output should contain 'cannot run' and 'inside a worktree', got: %s", out)
+	}
+}
+
+func TestWorktreeLifecycle_SymlinksAndTeardown(t *testing.T) {
+	requirePython3WithServerDeps(t)
+
+	binary := buildAF(t)
+	workspace := t.TempDir()
+	realWorkspace, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatalf("eval symlinks on workspace: %v", err)
+	}
+	ensurePySymlink(t, realWorkspace)
+	t.Cleanup(func() { terminateMCPServer(realWorkspace) })
+
+	// git init with initial commit
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "test@e2e.test"},
+		{"config", "user.name", "E2E Test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = realWorkspace
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %s\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	// .gitignore with .agentfactory/ (standard)
+	if err := os.WriteFile(filepath.Join(realWorkspace, ".gitignore"), []byte(".agentfactory/\n"), 0o644); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
+	for _, args := range [][]string{
+		{"add", ".gitignore"},
+		{"commit", "-m", "initial with gitignore"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = realWorkspace
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %s\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	// af install --init
+	runAF(t, binary, realWorkspace, "install", "--init")
+
+	// Write agents.json with solver agent
+	agentsPath := filepath.Join(realWorkspace, ".agentfactory", "agents.json")
+	if err := os.WriteFile(agentsPath, []byte(`{"agents":{"manager":{"type":"interactive","description":"manager"},"solver":{"type":"autonomous","description":"solver agent"}}}`), 0o644); err != nil {
+		t.Fatalf("write agents.json: %v", err)
+	}
+
+	// Verify .git/info/exclude contains sentinel
+	excludeData, err := os.ReadFile(filepath.Join(realWorkspace, ".git", "info", "exclude"))
+	if err != nil {
+		t.Fatalf("reading .git/info/exclude: %v", err)
+	}
+	if !strings.Contains(string(excludeData), "agentfactory managed paths") {
+		t.Error(".git/info/exclude missing 'agentfactory managed paths' sentinel")
+	}
+
+	// Create factory-root resources that symlinks will target
+	os.MkdirAll(filepath.Join(realWorkspace, ".claude", "skills"), 0o755)
+	os.MkdirAll(filepath.Join(realWorkspace, ".runtime"), 0o755)
+	if _, err := os.Stat(filepath.Join(realWorkspace, "AGENTS.md")); os.IsNotExist(err) {
+		os.WriteFile(filepath.Join(realWorkspace, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+	}
+
+	// Create worktree via Go API
+	wtPath, meta, err := worktree.Create(realWorkspace, "solver", worktree.CreateOpts{})
+	if err != nil {
+		t.Fatalf("worktree.Create: %v", err)
+	}
+
+	// Verify symlinks
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+		link := filepath.Join(wtPath, rel)
+		target, err := os.Readlink(link)
+		if err != nil {
+			t.Errorf("readlink %s: %v", rel, err)
+			continue
+		}
+		expected := filepath.Join(realWorkspace, rel)
+		if target != expected {
+			t.Errorf("symlink %s: got target %q, want %q", rel, target, expected)
+		}
+	}
+
+	// Verify .agentfactory/ is a real directory (not a symlink)
+	afInfo, err := os.Lstat(filepath.Join(wtPath, ".agentfactory"))
+	if err != nil {
+		t.Fatalf("lstat .agentfactory: %v", err)
+	}
+	if afInfo.Mode()&os.ModeSymlink != 0 {
+		t.Error(".agentfactory should be a real directory, not a symlink")
+	}
+
+	// SetupAgent and verify CLAUDE.md contains factory root path
+	_, err = worktree.SetupAgent(realWorkspace, wtPath, "solver", true)
+	if err != nil {
+		t.Fatalf("worktree.SetupAgent: %v", err)
+	}
+	claudeData, err := os.ReadFile(filepath.Join(wtPath, ".agentfactory", "agents", "solver", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("reading CLAUDE.md: %v", err)
+	}
+	if !strings.Contains(string(claudeData), realWorkspace) {
+		t.Errorf("CLAUDE.md should contain factory root %q", realWorkspace)
+	}
+
+	// Create test file at factory root's .claude/skills/test-skill/ and verify visible via symlink
+	testSkillDir := filepath.Join(realWorkspace, ".claude", "skills", "test-skill")
+	os.MkdirAll(testSkillDir, 0o755)
+	os.WriteFile(filepath.Join(testSkillDir, "SKILL.md"), []byte("# Test Skill\n"), 0o644)
+
+	wtSkillPath := filepath.Join(wtPath, ".claude", "skills", "test-skill", "SKILL.md")
+	if _, err := os.Stat(wtSkillPath); err != nil {
+		t.Errorf("test skill file not visible in worktree via symlink: %v", err)
+	}
+
+	// ForceRemove and verify factory root resources intact
+	if err := worktree.ForceRemove(realWorkspace, meta); err != nil {
+		t.Fatalf("worktree.ForceRemove: %v", err)
+	}
+
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+		if _, err := os.Stat(filepath.Join(realWorkspace, rel)); err != nil {
+			t.Errorf("factory root resource %s missing after teardown: %v", rel, err)
+		}
+	}
+}
+
+func TestWorktreeLifecycle_WithHostGitignore(t *testing.T) {
+	requirePython3WithServerDeps(t)
+
+	binary := buildAF(t)
+	workspace := t.TempDir()
+	realWorkspace, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatalf("eval symlinks on workspace: %v", err)
+	}
+	ensurePySymlink(t, realWorkspace)
+	t.Cleanup(func() { terminateMCPServer(realWorkspace) })
+
+	// git init with initial commit
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "test@e2e.test"},
+		{"config", "user.name", "E2E Test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = realWorkspace
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %s\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	// .gitignore with BOTH .agentfactory/ AND .claude/ (AC-4 scenario)
+	if err := os.WriteFile(filepath.Join(realWorkspace, ".gitignore"), []byte(".agentfactory/\n.claude/\n"), 0o644); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
+	for _, args := range [][]string{
+		{"add", ".gitignore"},
+		{"commit", "-m", "initial with gitignore excluding .claude/"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = realWorkspace
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %s\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	// af install --init
+	runAF(t, binary, realWorkspace, "install", "--init")
+
+	// Write agents.json with solver agent
+	agentsPath := filepath.Join(realWorkspace, ".agentfactory", "agents.json")
+	if err := os.WriteFile(agentsPath, []byte(`{"agents":{"manager":{"type":"interactive","description":"manager"},"solver":{"type":"autonomous","description":"solver agent"}}}`), 0o644); err != nil {
+		t.Fatalf("write agents.json: %v", err)
+	}
+
+	// Create factory-root resources
+	os.MkdirAll(filepath.Join(realWorkspace, ".claude", "skills"), 0o755)
+	os.MkdirAll(filepath.Join(realWorkspace, ".runtime"), 0o755)
+	if _, err := os.Stat(filepath.Join(realWorkspace, "AGENTS.md")); os.IsNotExist(err) {
+		os.WriteFile(filepath.Join(realWorkspace, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+	}
+
+	// Create worktree via Go API
+	wtPath, meta, err := worktree.Create(realWorkspace, "solver", worktree.CreateOpts{})
+	if err != nil {
+		t.Fatalf("worktree.Create: %v", err)
+	}
+
+	// Verify symlinks work despite .claude/ being gitignored
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+		link := filepath.Join(wtPath, rel)
+		target, err := os.Readlink(link)
+		if err != nil {
+			t.Errorf("readlink %s: %v", rel, err)
+			continue
+		}
+		expected := filepath.Join(realWorkspace, rel)
+		if target != expected {
+			t.Errorf("symlink %s: got target %q, want %q", rel, target, expected)
+		}
+	}
+
+	// SetupAgent and verify CLAUDE.md contains factory root
+	_, err = worktree.SetupAgent(realWorkspace, wtPath, "solver", true)
+	if err != nil {
+		t.Fatalf("worktree.SetupAgent: %v", err)
+	}
+	claudeData, err := os.ReadFile(filepath.Join(wtPath, ".agentfactory", "agents", "solver", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("reading CLAUDE.md: %v", err)
+	}
+	if !strings.Contains(string(claudeData), realWorkspace) {
+		t.Errorf("CLAUDE.md should contain factory root %q", realWorkspace)
+	}
+
+	// ForceRemove and verify factory root resources intact
+	if err := worktree.ForceRemove(realWorkspace, meta); err != nil {
+		t.Fatalf("worktree.ForceRemove: %v", err)
+	}
+
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+		if _, err := os.Stat(filepath.Join(realWorkspace, rel)); err != nil {
+			t.Errorf("factory root resource %s missing after teardown: %v", rel, err)
+		}
 	}
 }
