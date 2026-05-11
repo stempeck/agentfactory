@@ -68,7 +68,7 @@ func TestWorktreeLifecycle_FullDispatchChain(t *testing.T) {
 		t.Errorf("agentDir: got %q, want %q", agentDir, expectedDir)
 	}
 
-	// Verify CLAUDE.md rendered with worktree path
+	// Verify CLAUDE.md rendered with factory root path
 	claudeData, err := os.ReadFile(filepath.Join(agentDir, "CLAUDE.md"))
 	if err != nil {
 		t.Fatalf("read CLAUDE.md: %v", err)
@@ -76,8 +76,8 @@ func TestWorktreeLifecycle_FullDispatchChain(t *testing.T) {
 	if len(claudeData) == 0 {
 		t.Error("CLAUDE.md is empty")
 	}
-	if !strings.Contains(string(claudeData), absPath) {
-		t.Errorf("CLAUDE.md does not contain worktree path %q", absPath)
+	if !strings.Contains(string(claudeData), realDir) {
+		t.Errorf("CLAUDE.md does not contain factory root path %q", realDir)
 	}
 
 	// Verify settings.json

@@ -64,6 +64,10 @@ func runInstallInit(cmd *cobra.Command) error {
 		return err
 	}
 
+	if data, err := os.ReadFile(filepath.Join(config.ConfigDir(cwd), ".factory-root")); err == nil {
+		return fmt.Errorf("cannot run af install --init inside a worktree (factory root: %s)", strings.TrimSpace(string(data)))
+	}
+
 	// 1. Verify Python 3.12 before ANY filesystem mutation (C-16).
 	//    af install --init must abort cleanly if Python is missing or wrong
 	//    version — otherwise a mid-run failure leaves partial state that a
@@ -209,6 +213,14 @@ func runInstallInit(cmd *cobra.Command) error {
 	if err := writeSkills(skillsDir); err != nil {
 		return err
 	}
+
+	// 10. Ensure factory-managed paths are in .git/info/exclude
+	if err := ensureGitExclude(cwd); err != nil {
+		return fmt.Errorf("updating .git/info/exclude: %w", err)
+	}
+
+	// 11. Create .runtime/ directory (symlink target for worktrees)
+	os.MkdirAll(filepath.Join(cwd, ".runtime"), 0755)
 
 	fmt.Fprintln(cmd.OutOrStdout(), "Factory initialized successfully.")
 	return nil
@@ -461,6 +473,35 @@ func writeAgentsMd(cwd string) error {
 	}
 	content += "\n" + block
 	return os.WriteFile(agentsMdPath, []byte(content), 0644)
+}
+
+const gitExcludeSentinel = "# agentfactory managed paths"
+
+func ensureGitExclude(root string) error {
+	excludePath := filepath.Join(root, ".git", "info", "exclude")
+
+	existing, err := os.ReadFile(excludePath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reading .git/info/exclude: %w", err)
+	}
+
+	content := string(existing)
+
+	if strings.Contains(content, gitExcludeSentinel) {
+		return nil
+	}
+
+	var buf strings.Builder
+	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
+		buf.WriteString("\n")
+	}
+	buf.WriteString(gitExcludeSentinel + "\n")
+	buf.WriteString(".agentfactory/\n")
+	buf.WriteString(".runtime/\n")
+	buf.WriteString("AGENTS.md\n")
+	buf.WriteString(".claude/\n")
+
+	return os.WriteFile(excludePath, []byte(content+buf.String()), 0644)
 }
 
 func agentDescriptionLine(desc string) string {

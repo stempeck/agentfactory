@@ -45,6 +45,45 @@ var readMemInfoFunc = func() (uint64, error) {
 	return readAvailableMemoryMB()
 }
 
+var worktreeSymlinks = []string{
+	filepath.Join(".claude", "skills"),
+	".runtime",
+	"AGENTS.md",
+}
+
+// EnsureWorktreeLinks creates symlinks from a worktree to factory-root resources.
+// Symlink failures are non-fatal — warnings are emitted to stderr.
+func EnsureWorktreeLinks(factoryRoot, worktreePath string) error {
+	for _, relPath := range worktreeSymlinks {
+		source := filepath.Join(worktreePath, relPath)
+		target := filepath.Join(factoryRoot, relPath)
+
+		if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: creating parent dir for %s: %v\n", relPath, err)
+			continue
+		}
+
+		fi, err := os.Lstat(source)
+		if err == nil {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				existing, _ := os.Readlink(source)
+				if existing == target {
+					continue
+				}
+				os.Remove(source)
+			} else {
+				fmt.Fprintf(os.Stderr, "warning: %s exists as real file/dir, skipping symlink\n", source)
+				continue
+			}
+		}
+
+		if err := os.Symlink(target, source); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: symlink %s -> %s: %v\n", source, target, err)
+		}
+	}
+	return nil
+}
+
 func readAvailableMemoryMB() (uint64, error) {
 	switch runtime.GOOS {
 	case "linux":
@@ -279,6 +318,8 @@ func Create(factoryRoot, agentName string, opts CreateOpts) (string, *Meta, erro
 		return "", nil, fmt.Errorf("creating worktree agents dir: %w", err)
 	}
 
+	EnsureWorktreeLinks(factoryRoot, absPath)
+
 	// Write meta
 	meta := &Meta{
 		ID:           wtID,
@@ -330,7 +371,7 @@ func SetupAgent(factoryRoot, worktreePath, agentName string, isOwner bool) (stri
 	data := templates.RoleData{
 		Role:        agentName,
 		Description: agentEntry.Description,
-		RootDir:     worktreePath,
+		RootDir:     factoryRoot,
 		WorkDir:     agentDir,
 	}
 	claudeContent, err := tmpl.RenderRole(templateRole, data)
@@ -370,10 +411,27 @@ func SetupAgent(factoryRoot, worktreePath, agentName string, isOwner bool) (stri
 	return agentDir, nil
 }
 
+// unlinkBeforeRemove removes worktree symlinks so git worktree remove
+// does not treat them as untracked modifications.
+func unlinkBeforeRemove(worktreePath string) {
+	for _, relPath := range worktreeSymlinks {
+		p := filepath.Join(worktreePath, relPath)
+		fi, err := os.Lstat(p)
+		if err != nil {
+			continue
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			os.Remove(p)
+		}
+	}
+}
+
 // Remove removes a worktree: git worktree remove, delete meta file,
 // delete branch. Returns error if worktree has uncommitted changes.
 func Remove(factoryRoot string, meta *Meta) error {
 	absPath := filepath.Join(factoryRoot, meta.Path)
+
+	unlinkBeforeRemove(absPath)
 
 	// git worktree remove (does NOT force — fails on uncommitted changes)
 	cmd := exec.Command("git", "worktree", "remove", absPath)
@@ -403,6 +461,7 @@ func Remove(factoryRoot string, meta *Meta) error {
 // prune if force-remove fails (file locks, NFS, permissions).
 func ForceRemove(factoryRoot string, meta *Meta) error {
 	absPath := filepath.Join(factoryRoot, meta.Path)
+	unlinkBeforeRemove(absPath)
 	cmd := exec.Command("git", "worktree", "remove", "--force", absPath)
 	cmd.Dir = factoryRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
