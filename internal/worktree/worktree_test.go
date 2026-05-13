@@ -1201,8 +1201,8 @@ func TestGC_ForceRemoveRequiresCorrectSessionName(t *testing.T) {
 		gcBody = gcBody[:nextFunc+1]
 	}
 
-	hasAfPrefix := strings.Contains(gcBody, `"af-"+meta.Owner`) ||
-		strings.Contains(gcBody, `"af-" + meta.Owner`)
+	hasAfPrefix := strings.Contains(gcBody, `"=af-"+meta.Owner`) ||
+		strings.Contains(gcBody, `"=af-" + meta.Owner`)
 	hasForceRemove := strings.Contains(gcBody, "ForceRemove(")
 
 	if !hasAfPrefix {

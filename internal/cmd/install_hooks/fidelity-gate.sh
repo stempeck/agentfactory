@@ -12,6 +12,7 @@
 # (.agentfactory/agents/<name>/). Breaks if cwd is a subdirectory of the agent
 # workspace. See .designs/32/design-doc.md L235.
 ROLE=${AF_ROLE:-$(basename "$(pwd)")}
+AGENT_RUNTIME="$(pwd)/.runtime"
 
 # Find prompt file via af root
 FACTORY_ROOT=${AF_ROOT:-$(af root 2>/dev/null)}
@@ -79,6 +80,17 @@ STEP_TITLE=$(echo "$STEP_JSON" | jq -r .title)
 STEP_DESCRIPTION=$(echo "$STEP_JSON" | jq -r .description | head -c 4096)
 IS_GATE=$(echo "$STEP_JSON" | jq -r '.is_gate // false')
 FORMULA_NAME=$(echo "$STEP_JSON" | jq -r .formula)
+
+# Track evaluation count per step for first-turn bypass guard
+CURRENT_STEP_FILE="$AGENT_RUNTIME/fidelity_eval_step"
+EVAL_COUNT_FILE="$AGENT_RUNTIME/fidelity_eval_count"
+STORED_STEP=$(cat "$CURRENT_STEP_FILE" 2>/dev/null)
+if [ "$STORED_STEP" != "$STEP_ID" ]; then
+    echo 0 > "$EVAL_COUNT_FILE"
+    echo "$STEP_ID" > "$CURRENT_STEP_FILE"
+fi
+EVAL_COUNT=$(cat "$EVAL_COUNT_FILE" 2>/dev/null || echo 0)
+echo $((EVAL_COUNT+1)) > "$EVAL_COUNT_FILE"
 
 # Extract tool call and result summary from transcript (recent turns)
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
@@ -148,9 +160,22 @@ VERDICT=$(claude -p --model haiku --max-turns 1 \
 # Strip markdown code fences if present
 VERDICT=$(echo "$VERDICT" | sed 's/^```json//;s/^```//;/^$/d')
 
-# Mail verdict to self only on failure. FIDELITY-DELTA: subject is STEP_FIDELITY.
+COUNTER_FILE="$AGENT_RUNTIME/fidelity_violations"
 if [ -n "$VERDICT" ] && echo "$VERDICT" | jq -e '.ok == false' &>/dev/null; then
-    af mail send "$ROLE" -s "STEP_FIDELITY" -m "$VERDICT" 2>/dev/null
+    COUNT=$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)
+    echo $((COUNT+1)) > "$COUNTER_FILE"
+    af mail send "$ROLE" -s "STEP_FIDELITY" -m "$VERDICT" --priority urgent 2>/dev/null
+
+    ESCALATION_THRESHOLD=${AF_FIDELITY_ESCALATION_THRESHOLD:-3}
+    if [ "$((COUNT+1))" -ge "$ESCALATION_THRESHOLD" ]; then
+        ESCALATION_MSG="FIDELITY VIOLATION - SESSION WILL BE TERMINATED. You have deviated from the formula step. If you do not re-read the current step instructions and execute them literally on your next action, this session will be killed via af down. All progress will be lost. Run af prime to re-read the step, then execute exactly as written."
+        af mail send "$ROLE" -s "FIDELITY_ESCALATION" -m "$ESCALATION_MSG" --priority urgent 2>/dev/null
+        af mail send supervisor -s "FIDELITY_ESCALATION" -m "Agent $ROLE has $((COUNT+1)) consecutive fidelity violations on step: $STEP_TITLE" --priority urgent 2>/dev/null
+    fi
+else
+    if [ -f "$COUNTER_FILE" ]; then
+        echo 0 > "$COUNTER_FILE"
+    fi
 fi
 
 echo '{"ok": true}'

@@ -531,7 +531,7 @@ func GC(factoryRoot string) (int, error) {
 		}
 
 		// Check if owner's tmux session is running
-		checkCmd := exec.Command("tmux", "has-session", "-t", "af-"+meta.Owner)
+		checkCmd := exec.Command("tmux", "has-session", "-t", "=af-"+meta.Owner)
 		if checkCmd.Run() == nil {
 			// Session is running, skip
 			continue
