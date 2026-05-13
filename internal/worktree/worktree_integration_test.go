@@ -3,12 +3,14 @@
 package worktree
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // setupFactoryRootMultiAgent creates a factory root with multiple agents in agents.json.
@@ -240,8 +242,12 @@ func TestGC_CleansStaleWorktrees(t *testing.T) {
 	setupFactoryRoot(t, realDir)
 	addGitignore(t, realDir)
 
+	// Use a unique owner name to avoid collisions with real or test tmux sessions.
+	gcOwner := fmt.Sprintf("gctest-%d", time.Now().UnixNano())
+	exec.Command("tmux", "kill-session", "-t", "af-"+gcOwner).Run()
+
 	// Create worktree — no tmux session started, so GC should consider it stale.
-	absPath, meta, err := Create(realDir, "solver", CreateOpts{})
+	absPath, meta, err := Create(realDir, gcOwner, CreateOpts{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
