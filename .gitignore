@@ -87,6 +87,10 @@ test_results.txt
 # Used by pro-version agents
 !.claude/skills/design-plan-impl
 !.claude/skills/design-plan-impl/SKILL.md
+!.claude/skills/rootcause-analysis/
+!.claude/skills/rootcause-analysis/SKILL.md
+!.claude/skills/rootcause-implementfix/
+!.claude/skills/rootcause-implementfix/SKILL.md
 !.claude/skills/rootcause-review/
 !.claude/skills/rootcause-review/SKILL.md
 !.claude/skills/ultra-implement/
@@ -95,3 +99,5 @@ test_results.txt
 !.claude/skills/improve-skill/SKILL.md
 !.claude/skills/github-upstreamer/
 !.claude/skills/github-upstreamer/SKILL.md
+!.claude/skills/formula-clean/
+!.claude/skills/formula-clean/SKILL.md

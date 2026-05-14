@@ -102,13 +102,12 @@ Agent                      MergePatrol                    Git
 After successful merge, MergePatrol sends MERGED mail back to the agent so it can
 complete cleanup (remove the agent worktree).
 
-## MANDATORY: Exact Step Execution
+## !IMPORTANT - MANDATORY Exact Step Execution
 Execute each formula step EXACTLY as written, in order, with no modifications.
-Do NOT skip steps, combine steps, or "optimize" the process. Each step exists
-because it is part of a known working process. For example, if a step says to
-restart an agent, restart it — do not reason that "keeping existing context
-would be better." Your job is faithful execution of these steps, not improvement
-of them.
+Every step produces a file artifact at a known path. `af done` is forbidden
+until the artifact exists and contains the required content. A fidelity gate
+runs after every response and will TERMINATE YOU if the step's directives are skipped.
+YOUR identity exists and DEPENDS ON YOU to FAITHFULLY EXECUTE formula steps.
 
 
 ## Mail Protocol
