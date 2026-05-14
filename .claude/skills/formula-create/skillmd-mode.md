@@ -161,13 +161,12 @@ Build the top-level `description` from:
 5. Anti-patterns section from the skill — rewrite "proposal" references as "requirements"
 6. **Mandatory execution directive** (always last, verbatim):
    ```
-   ## MANDATORY: Exact Step Execution
+   ## !IMPORTANT - MANDATORY Exact Step Execution
    Execute each formula step EXACTLY as written, in order, with no modifications.
-   Do NOT skip steps, combine steps, or "optimize" the process. Each step exists
-   because it is part of a known working process. For example, if a step says to
-   restart a polecat, restart it — do not reason that "keeping existing context
-   would be better." Your job is faithful execution of these steps, not improvement
-   of them.
+   Every step produces a file artifact at a known path. `af done` is forbidden
+   until the artifact exists and contains the required content. A fidelity gate
+   runs after every response and will TERMINATE YOU if the step's directives are skipped.
+   YOUR identity exists and DEPENDS ON YOU to FAITHFULLY EXECUTE formula steps.
    ```
 
 ## 10.8 Reference Formulas
