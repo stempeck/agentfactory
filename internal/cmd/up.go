@@ -71,6 +71,16 @@ func runUp(cmd *cobra.Command, args []string) error {
 		envWT := os.Getenv("AF_WORKTREE")
 		envWTID := os.Getenv("AF_WORKTREE_ID")
 		creator, _ := resolveAgentName(wd, root)
+
+		// Issue #188: non-specialist callers should not share worktrees.
+		if creator != "" {
+			if callerEntry, cErr := resolveCallerAgent(root, creator); cErr == nil && callerEntry.Formula == "" {
+				envWT = ""
+				envWTID = ""
+				creator = ""
+			}
+		}
+
 		wtPath, wtID, created, wtErr := worktree.ResolveOrCreate(root, name, creator, envWT, envWTID, worktree.CreateOpts{MaxWorktrees: factoryCfg.MaxWorktrees})
 		if wtErr != nil {
 			return fmt.Errorf("worktree creation failed for %s: %w", name, wtErr)

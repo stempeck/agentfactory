@@ -831,6 +831,7 @@ func TestDispatchToSpecialist_CallerIdentityPreserved(t *testing.T) {
 			"dispatcher-agent": map[string]interface{}{
 				"type":        "autonomous",
 				"description": "Dispatcher",
+				"formula":     "test-specialist-formula",
 			},
 		},
 	}
@@ -1186,6 +1187,7 @@ func TestDispatchToSpecialist_CallerIdentityPassedThrough(t *testing.T) {
 			"dispatcher-agent": map[string]interface{}{
 				"type":        "autonomous",
 				"description": "Dispatcher",
+				"formula":     "test-specialist-formula",
 			},
 		},
 	}
@@ -1894,6 +1896,7 @@ func TestDispatchToSpecialist_CallerFlagEmpty_FallsBack(t *testing.T) {
 			"dispatcher-agent": map[string]interface{}{
 				"type":        "autonomous",
 				"description": "Dispatcher",
+				"formula":     "test-specialist-formula",
 			},
 		},
 	}
@@ -3094,5 +3097,208 @@ func TestSlingAdvisesOnMissingTemplate(t *testing.T) {
 		if !strings.Contains(errMsg, "formula") && !strings.Contains(errMsg, "bead") {
 			t.Errorf("expected dispatch to succeed or fail at formula path, got: %s", errMsg)
 		}
+	}
+}
+
+type launchCapture struct {
+	agentName    string
+	worktreePath string
+	worktreeID   string
+}
+
+func installCapturingLaunchSession(t *testing.T) *launchCapture {
+	t.Helper()
+	cap := &launchCapture{}
+	orig := launchAgentSession
+	launchAgentSession = func(_ *cobra.Command, _, agentName, worktreePath, worktreeID string) error {
+		cap.agentName = agentName
+		cap.worktreePath = worktreePath
+		cap.worktreeID = worktreeID
+		return nil
+	}
+	t.Cleanup(func() { launchAgentSession = orig })
+	return cap
+}
+
+func TestDispatchToSpecialist_NonSpecialistCallerGetsIndependentWorktree(t *testing.T) {
+	installMemStore(t)
+	cap := installCapturingLaunchSession(t)
+
+	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+
+	managerWT := root
+	managerWTID := "wt-mgr000"
+	t.Setenv("AF_WORKTREE", managerWT)
+	t.Setenv("AF_WORKTREE_ID", managerWTID)
+
+	agents := map[string]interface{}{
+		"agents": map[string]interface{}{
+			"manager": map[string]interface{}{
+				"type":        "interactive",
+				"description": "Manager agent",
+			},
+			"specialist-agent": map[string]interface{}{
+				"type":        "autonomous",
+				"description": "Test specialist",
+				"formula":     "test-specialist-formula",
+			},
+		},
+	}
+	data, _ := json.Marshal(agents)
+	os.WriteFile(filepath.Join(root, ".agentfactory", "agents.json"), data, 0o644)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	callerWd := filepath.Join(root, ".agentfactory", "agents", "manager")
+	os.MkdirAll(callerWd, 0o755)
+
+	err := dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "fix issue #188")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cap.worktreePath == managerWT {
+		t.Error("dispatched agent should NOT inherit manager's worktree path")
+	}
+	if cap.worktreeID == managerWTID {
+		t.Error("dispatched agent should NOT inherit manager's worktree ID")
+	}
+}
+
+func TestDispatchToSpecialist_SpecialistCallerInheritsWorktree(t *testing.T) {
+	installMemStore(t)
+	cap := installCapturingLaunchSession(t)
+
+	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+
+	callerWT := root
+	callerWTID := "wt-caller0"
+	t.Setenv("AF_WORKTREE", callerWT)
+	t.Setenv("AF_WORKTREE_ID", callerWTID)
+
+	agents := map[string]interface{}{
+		"agents": map[string]interface{}{
+			"caller-specialist": map[string]interface{}{
+				"type":        "autonomous",
+				"description": "Caller specialist",
+				"formula":     "caller-formula",
+			},
+			"specialist-agent": map[string]interface{}{
+				"type":        "autonomous",
+				"description": "Test specialist",
+				"formula":     "test-specialist-formula",
+			},
+		},
+	}
+	data, _ := json.Marshal(agents)
+	os.WriteFile(filepath.Join(root, ".agentfactory", "agents.json"), data, 0o644)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	callerWd := filepath.Join(root, ".agentfactory", "agents", "caller-specialist")
+	os.MkdirAll(callerWd, 0o755)
+
+	err := dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "fix issue #42")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cap.worktreePath != callerWT {
+		t.Errorf("specialist caller should share worktree; got path %q, want %q", cap.worktreePath, callerWT)
+	}
+	if cap.worktreeID != callerWTID {
+		t.Errorf("specialist caller should share worktree ID; got %q, want %q", cap.worktreeID, callerWTID)
+	}
+}
+
+func TestDispatchToSpecialist_MultipleOrchestratorDispatchesGetSeparateWorktrees(t *testing.T) {
+	installMemStore(t)
+
+	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "agent-a")
+
+	t.Setenv("AF_WORKTREE", root)
+	t.Setenv("AF_WORKTREE_ID", "wt-mgr000")
+
+	formulaDir := config.FormulasDir(root)
+	toml2 := `
+formula = "test-specialist-formula-b"
+type = "workflow"
+version = 1
+[[steps]]
+id = "step1"
+title = "Step 1"
+`
+	os.WriteFile(filepath.Join(formulaDir, "test-specialist-formula-b.formula.toml"), []byte(toml2), 0o644)
+
+	agents := map[string]interface{}{
+		"agents": map[string]interface{}{
+			"manager": map[string]interface{}{
+				"type":        "interactive",
+				"description": "Manager agent",
+			},
+			"agent-a": map[string]interface{}{
+				"type":        "autonomous",
+				"description": "Specialist A",
+				"formula":     "test-specialist-formula",
+			},
+			"agent-b": map[string]interface{}{
+				"type":        "autonomous",
+				"description": "Specialist B",
+				"formula":     "test-specialist-formula-b",
+			},
+		},
+	}
+	data, _ := json.Marshal(agents)
+	os.WriteFile(filepath.Join(root, ".agentfactory", "agents.json"), data, 0o644)
+
+	callerWd := filepath.Join(root, ".agentfactory", "agents", "manager")
+	os.MkdirAll(callerWd, 0o755)
+
+	capA := installCapturingLaunchSession(t)
+	cmd1 := &cobra.Command{}
+	cmd1.SetContext(t.Context())
+	var buf1 bytes.Buffer
+	cmd1.SetOut(&buf1)
+	cmd1.SetErr(&buf1)
+
+	err := dispatchToSpecialist(cmd1, root, callerWd, "agent-a", "fix issue #100")
+	if err != nil {
+		t.Fatalf("dispatch agent-a: %v", err)
+	}
+	wtPathA := capA.worktreePath
+	wtIDA := capA.worktreeID
+
+	os.MkdirAll(filepath.Join(root, ".agentfactory", "agents", "agent-b"), 0o755)
+
+	capB := installCapturingLaunchSession(t)
+	cmd2 := &cobra.Command{}
+	cmd2.SetContext(t.Context())
+	var buf2 bytes.Buffer
+	cmd2.SetOut(&buf2)
+	cmd2.SetErr(&buf2)
+
+	err = dispatchToSpecialist(cmd2, root, callerWd, "agent-b", "fix issue #200")
+	if err != nil {
+		t.Fatalf("dispatch agent-b: %v", err)
+	}
+	wtPathB := capB.worktreePath
+	wtIDB := capB.worktreeID
+
+	if wtPathA == root || wtPathB == root {
+		t.Error("neither agent should inherit manager's worktree (root)")
+	}
+	if wtPathA == wtPathB {
+		t.Errorf("agent-a and agent-b should get distinct worktree paths; both got %q", wtPathA)
+	}
+	if wtIDA == wtIDB {
+		t.Errorf("agent-a and agent-b should get distinct worktree IDs; both got %q", wtIDA)
 	}
 }

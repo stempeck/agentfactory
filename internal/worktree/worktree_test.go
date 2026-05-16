@@ -1116,6 +1116,7 @@ func TestGC_DoesNotRemoveRunningSession(t *testing.T) {
 	}
 
 	sessionName := "af-solver"
+	_ = exec.Command("tmux", "kill-session", "-t", sessionName).Run()
 	startCmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName)
 	if out, err := startCmd.CombinedOutput(); err != nil {
 		t.Fatalf("tmux new-session: %v\n%s", err, out)
@@ -1142,6 +1143,7 @@ func TestGC_ForceRemovesDeadSession(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+	_ = exec.Command("tmux", "kill-session", "-t", "af-solver").Run()
 
 	dir := t.TempDir()
 	realDir, err := filepath.EvalSymlinks(dir)

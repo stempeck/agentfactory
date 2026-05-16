@@ -214,8 +214,16 @@ func TestNotifyRecipient_SkipsWhenClaudeNotRunning(t *testing.T) {
 	sessionName := session.SessionName(agentName)
 
 	_ = tx.KillSession(sessionName)
-	if err := tx.NewSession(sessionName, "/tmp"); err != nil {
-		t.Fatalf("NewSession: %v", err)
+	var sessionErr error
+	for range 3 {
+		sessionErr = tx.NewSession(sessionName, "/tmp")
+		if sessionErr == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if sessionErr != nil {
+		t.Fatalf("NewSession: %v", sessionErr)
 	}
 	defer tx.KillSession(sessionName)
 
