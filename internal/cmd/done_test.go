@@ -945,6 +945,77 @@ func TestDone_WorktreeCleanedUp_WhenTerminating(t *testing.T) {
 	}
 }
 
+// TestSendWorkDoneAndCleanup_WarningIncludesContext verifies the warning message
+// includes caller, formula name, and instance ID when sendWorkDoneMail fails.
+// Derived from Gherkin: "Warning message includes recipient and formula context on mail failure"
+func TestSendWorkDoneAndCleanup_WarningIncludesContext(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".runtime"), 0o755)
+	writeRuntimeFile(t, dir, "formula_caller", "supervisor")
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:  "Formula: context-warning-test",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+
+	s, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step 1",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+	if err := mem.Close(t.Context(), s.ID, ""); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+
+	origSendWorkDoneMail := sendWorkDoneMail
+	sendWorkDoneMail = func(caller, instanceID, formulaName string, stepCount int) error {
+		return fmt.Errorf("mail send to %s failed: exit status 1\nsubprocess stderr: unknown recipient", caller)
+	}
+	defer func() { sendWorkDoneMail = origSendWorkDoneMail }()
+
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID)
+
+	w.Close()
+	os.Stderr = origStderr
+
+	out, _ := io.ReadAll(r)
+	stderr := string(out)
+
+	if !strings.Contains(stderr, "supervisor") {
+		t.Errorf("warning should include caller 'supervisor', got: %q", stderr)
+	}
+	if !strings.Contains(stderr, instance.ID) {
+		t.Errorf("warning should include instance ID %q, got: %q", instance.ID, stderr)
+	}
+	if !strings.Contains(stderr, "context-warning-test") {
+		t.Errorf("warning should include formula name, got: %q", stderr)
+	}
+}
+
+// TestSendWorkDoneMail_SeamReturnsNilUnderTest verifies that the default
+// sendWorkDoneMail seam returns nil under go test (isTestBinary guard).
+// Derived from Gherkin: "sendWorkDoneMail returns nil on subprocess success"
+func TestSendWorkDoneMail_SeamReturnsNilUnderTest(t *testing.T) {
+	err := sendWorkDoneMail("test-caller", "inst-1", "formula-1", 3)
+	if err != nil {
+		t.Errorf("sendWorkDoneMail should return nil under go test, got: %v", err)
+	}
+}
+
 // setupTestFactoryForDone creates a minimal factory structure for done tests.
 func setupTestFactoryForDone(t *testing.T, agentName string) string {
 	t.Helper()

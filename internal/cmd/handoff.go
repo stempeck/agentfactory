@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/checkpoint"
@@ -162,7 +164,17 @@ func sendHandoffMail(agentName, subject, body string) error {
 
 	cmd := exec.Command(afPath, "mail", "send", agentName, "-s", subject, "-m", body)
 	cmd.Env = os.Environ()
-	return cmd.Run()
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if stderr.Len() > 0 {
+			return fmt.Errorf("mail send to %s failed: %w\nsubprocess stderr: %s", agentName, err, strings.TrimSpace(stderr.String()))
+		}
+		return fmt.Errorf("mail send to %s: %w", agentName, err)
+	}
+	return nil
 }
 
 // collectHandoffState gathers formula progress, inbox count, and modified files.

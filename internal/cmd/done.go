@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -179,7 +180,8 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 	if caller != "" {
 		mailErr = sendWorkDoneMail(caller, instanceID, formulaName, totalSteps)
 		if mailErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to send WORK_DONE mail: %v\n", mailErr)
+			fmt.Fprintf(os.Stderr, "warning: failed to send WORK_DONE mail to %s for formula %s (%s): %v\n",
+				caller, formulaName, instanceID, mailErr)
 		}
 	}
 
@@ -253,9 +255,10 @@ func readFormulaCaller(workDir string) string {
 }
 
 // sendWorkDoneMail shells out to `af mail send` to notify the dispatcher.
-func sendWorkDoneMail(caller, instanceID, formulaName string, stepCount int) error {
+// Declared as a var so tests can override it to inject failures (seam pattern).
+var sendWorkDoneMail = func(caller, instanceID, formulaName string, stepCount int) error {
 	if isTestBinary() {
-		return nil // no-op under go test to prevent fork bomb
+		return nil
 	}
 
 	afPath, err := os.Executable()
@@ -269,7 +272,17 @@ func sendWorkDoneMail(caller, instanceID, formulaName string, stepCount int) err
 	body := fmt.Sprintf("All %d steps complete for formula %s.", stepCount, formulaName)
 	cmd := exec.Command(afPath, "mail", "send", caller, "-s", subject, "-m", body)
 	cmd.Env = os.Environ()
-	return cmd.Run()
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if stderr.Len() > 0 {
+			return fmt.Errorf("mail send to %s failed: %w\nsubprocess stderr: %s", caller, err, strings.TrimSpace(stderr.String()))
+		}
+		return fmt.Errorf("mail send to %s: %w", caller, err)
+	}
+	return nil
 }
 
 // cleanupRuntimeArtifacts removes stale formula runtime files after completion.
