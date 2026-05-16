@@ -51,6 +51,65 @@ func TestRunUp_HandlesNotProvisioned(t *testing.T) {
 	}
 }
 
+func TestRunUp_NonSpecialistCallerGetsIndependentWorktree(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not available")
+	}
+
+	const agentName = "uptest-wt"
+	sessionName := "af-" + agentName
+	killStaleTmuxSession(t, sessionName)
+	t.Cleanup(func() {
+		killStaleTmuxSession(t, sessionName)
+	})
+
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	afDir := filepath.Join(root, ".agentfactory")
+	os.MkdirAll(afDir, 0o755)
+	os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{"type":"factory","version":1,"name":"test"}`), 0o644)
+	os.WriteFile(filepath.Join(afDir, "agents.json"),
+		[]byte(`{"agents":{"`+agentName+`":{"type":"autonomous","description":"test","formula":"uptest-formula"},"manager":{"type":"interactive","description":"orchestrator"}}}`), 0o644)
+
+	formulaDir := filepath.Join(afDir, "store", "formulas")
+	os.MkdirAll(formulaDir, 0o755)
+	toml := `
+formula = "uptest-formula"
+type = "workflow"
+version = 1
+[[steps]]
+id = "step1"
+title = "Step 1"
+`
+	os.WriteFile(filepath.Join(formulaDir, "uptest-formula.formula.toml"), []byte(toml), 0o644)
+
+	managerWT := root
+	managerWTID := "wt-mgr000"
+	t.Setenv("AF_WORKTREE", managerWT)
+	t.Setenv("AF_WORKTREE_ID", managerWTID)
+	t.Setenv("AF_ROLE", "manager")
+
+	os.MkdirAll(filepath.Join(root, ".agentfactory", "agents", agentName), 0o755)
+	t.Chdir(filepath.Join(root, ".agentfactory", "agents"))
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	err := runUp(cmd, []string{agentName})
+	output := buf.String()
+	if err == nil {
+		if !strings.Contains(output, "Created worktree") {
+			t.Error("runUp from non-specialist caller should create a new worktree, not inherit")
+		}
+	} else {
+		if !strings.Contains(output, "Created worktree") && !strings.Contains(err.Error(), "not provisioned") {
+			t.Errorf("expected new worktree creation or provisioning error; got output=%q err=%v", output, err)
+		}
+	}
+}
+
 func TestRunUp_AbortsOnWorktreeFailure(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not available")

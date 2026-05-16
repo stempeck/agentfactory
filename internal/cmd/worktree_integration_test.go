@@ -205,6 +205,7 @@ func TestDownAgent_CleansUpWorktree(t *testing.T) {
 
 	// Create tmux session matching af-{name} pattern
 	sessionName := "af-solver"
+	killStaleTmuxSession(t, sessionName)
 	tmuxCmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", agentDir)
 	if out, err := tmuxCmd.CombinedOutput(); err != nil {
 		t.Fatalf("tmux new-session: %s\n%s", err, out)

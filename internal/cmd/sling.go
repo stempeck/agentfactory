@@ -174,6 +174,19 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 	envWT := os.Getenv("AF_WORKTREE")
 	envWTID := os.Getenv("AF_WORKTREE_ID")
 	creator, _ := resolveAgentName(callerWd, root)
+
+	// Issue #188: non-specialist callers (orchestrators like manager/supervisor)
+	// dispatch independent work — each agent needs its own worktree. Only
+	// specialists (formula-bearing agents) do collaborative dispatch where
+	// worktree sharing is correct.
+	if creator != "" {
+		if callerEntry, err := resolveCallerAgent(root, creator); err == nil && callerEntry.Formula == "" {
+			envWT = ""
+			envWTID = ""
+			creator = ""
+		}
+	}
+
 	worktreePath, worktreeID, wtCreated, wtErr := worktree.ResolveOrCreate(root, agentName, creator, envWT, envWTID, worktree.CreateOpts{MaxWorktrees: factoryCfg.MaxWorktrees})
 	if wtErr != nil {
 		return fmt.Errorf("worktree creation failed for %s: %w", agentName, wtErr)
@@ -255,6 +268,19 @@ func resolveSpecialistAgent(root, agentName string) (config.AgentEntry, error) {
 		return config.AgentEntry{}, fmt.Errorf("agent %q is not a specialist (no formula field in agents.json)", agentName)
 	}
 
+	return entry, nil
+}
+
+// resolveCallerAgent loads agents.json and returns the entry for the named agent.
+func resolveCallerAgent(root, agentName string) (config.AgentEntry, error) {
+	agentsCfg, err := config.LoadAgentConfig(config.AgentsConfigPath(root))
+	if err != nil {
+		return config.AgentEntry{}, err
+	}
+	entry, ok := agentsCfg.Agents[agentName]
+	if !ok {
+		return config.AgentEntry{}, fmt.Errorf("agent %q not found", agentName)
+	}
 	return entry, nil
 }
 
