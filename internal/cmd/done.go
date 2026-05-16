@@ -201,26 +201,28 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 	// not af done; Release() simply deletes the file regardless of PID)
 	_ = lock.New(cwd).Release()
 
-	// Clean up worktree if this agent was running in one.
-	// Must run AFTER cleanupRuntimeArtifacts (which preserves worktree_id/worktree_owner)
-	// and BEFORE selfTerminate (which kills the process).
-	if wtID := readWorktreeID(cwd); wtID != "" {
-		agentName := os.Getenv("AF_ROLE")
-		if agentName == "" {
-			fmt.Fprintf(os.Stderr, "warning: AF_ROLE not set, skipping worktree cleanup\n")
-		} else {
-			if isWorktreeOwner(cwd) {
-				meta, empty, err := worktree.RemoveAgent(factoryRoot, wtID, agentName)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "warning: worktree RemoveAgent: %v\n", err)
-				} else if empty {
-					if rmErr := worktree.Remove(factoryRoot, meta); rmErr != nil {
-						fmt.Fprintf(os.Stderr, "warning: worktree cleanup: %v\n", rmErr)
-					}
-				}
+	// Clean up worktree if this agent was running in one AND the session
+	// will be terminated. If the session survives (not dispatched, or mail
+	// failed), preserve the worktree so the shell CWD remains valid.
+	if shouldTerminate {
+		if wtID := readWorktreeID(cwd); wtID != "" {
+			agentName := os.Getenv("AF_ROLE")
+			if agentName == "" {
+				fmt.Fprintf(os.Stderr, "warning: AF_ROLE not set, skipping worktree cleanup\n")
 			} else {
-				if _, _, err := worktree.RemoveAgent(factoryRoot, wtID, agentName); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: worktree RemoveAgent: %v\n", err)
+				if isWorktreeOwner(cwd) {
+					meta, empty, err := worktree.RemoveAgent(factoryRoot, wtID, agentName)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "warning: worktree RemoveAgent: %v\n", err)
+					} else if empty {
+						if rmErr := worktree.Remove(factoryRoot, meta); rmErr != nil {
+							fmt.Fprintf(os.Stderr, "warning: worktree cleanup: %v\n", rmErr)
+						}
+					}
+				} else {
+					if _, _, err := worktree.RemoveAgent(factoryRoot, wtID, agentName); err != nil {
+						fmt.Fprintf(os.Stderr, "warning: worktree RemoveAgent: %v\n", err)
+					}
 				}
 			}
 		}

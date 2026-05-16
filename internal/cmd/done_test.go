@@ -826,6 +826,125 @@ func TestDone_LinearChain_3Steps_ProgressesCorrectly(t *testing.T) {
 	}
 }
 
+// TestDone_WorktreePreserved_WhenNotDispatched verifies that when shouldTerminate
+// is false (non-dispatched session), the worktree removal block is skipped.
+func TestDone_WorktreePreserved_WhenNotDispatched(t *testing.T) {
+	t.Setenv("AF_ROLE", "test-agent")
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".runtime"), 0o755)
+
+	writeRuntimeFile(t, dir, "worktree_id", "wt-test-preserve")
+	writeRuntimeFile(t, dir, "worktree_owner", "true")
+	// No dispatched marker → shouldTerminate = false
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:  "Formula: wt-preserve-nodispatch",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	s, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step 1",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+	if err := mem.Close(t.Context(), s.ID, ""); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID)
+
+	w.Close()
+	os.Stderr = origStderr
+	out, _ := io.ReadAll(r)
+	stderr := string(out)
+
+	if strings.Contains(stderr, "worktree RemoveAgent") || strings.Contains(stderr, "worktree cleanup") || strings.Contains(stderr, "AF_ROLE not set") {
+		t.Errorf("worktree block should be skipped when shouldTerminate=false (not dispatched), but stderr shows worktree activity: %q", stderr)
+	}
+}
+
+// TestDone_WorktreePreserved_DispatchedMailFailed verifies that when dispatched
+// but mail fails, shouldAutoTerminate returns false, which gates the worktree block.
+func TestDone_WorktreePreserved_DispatchedMailFailed(t *testing.T) {
+	// sendWorkDoneMail is a no-op under test (isTestBinary guard), so we can't
+	// inject mail failure through sendWorkDoneAndCleanup. Instead, verify the
+	// guard logic directly: dispatched + mail error → shouldTerminate=false.
+	if shouldAutoTerminate(true, fmt.Errorf("send failed")) {
+		t.Fatal("shouldAutoTerminate(dispatched=true, mailErr=error) should return false")
+	}
+
+	// TestDone_WorktreePreserved_WhenNotDispatched proves that
+	// shouldTerminate=false → worktree block skipped.
+	// TestDone_WorktreeCleanedUp_WhenTerminating proves that
+	// shouldTerminate=true → worktree block runs.
+	// Combined: dispatched + mail failure → shouldTerminate=false → worktree preserved.
+}
+
+// TestDone_WorktreeCleanedUp_WhenTerminating verifies that when shouldTerminate
+// is true (dispatched + mail ok), the worktree removal block executes.
+func TestDone_WorktreeCleanedUp_WhenTerminating(t *testing.T) {
+	t.Setenv("AF_ROLE", "test-agent")
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".runtime"), 0o755)
+
+	writeRuntimeFile(t, dir, "worktree_id", "wt-test-cleanup")
+	writeRuntimeFile(t, dir, "worktree_owner", "true")
+	writeRuntimeFile(t, dir, "dispatched", "true")
+	// No formula_caller → caller="" → mail skipped → mailErr=nil
+	// dispatched=true + mailErr=nil → shouldTerminate=true
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:  "Formula: wt-cleanup-terminate",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	s, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step 1",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+	if err := mem.Close(t.Context(), s.ID, ""); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID)
+
+	w.Close()
+	os.Stderr = origStderr
+	out, _ := io.ReadAll(r)
+	stderr := string(out)
+
+	if !strings.Contains(stderr, "worktree RemoveAgent") {
+		t.Errorf("worktree block should execute when shouldTerminate=true (dispatched), but stderr shows no worktree activity: %q", stderr)
+	}
+}
+
 // setupTestFactoryForDone creates a minimal factory structure for done tests.
 func setupTestFactoryForDone(t *testing.T, agentName string) string {
 	t.Helper()
