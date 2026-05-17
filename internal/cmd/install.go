@@ -282,11 +282,14 @@ func migrateBeadsDir(root string) error {
 	oldDir := filepath.Join(root, ".beads")
 	newDir := config.StoreDir(root)
 	sentinel := filepath.Join(newDir, ".migration-complete")
+	ownedEntries := []string{"issues.sqlite", "formulas", ".gitignore"}
 
 	if _, err := os.Stat(sentinel); err == nil {
-		if _, err := os.Stat(oldDir); err == nil {
-			return os.RemoveAll(oldDir)
+		// Already migrated — clean up only our leftovers from .beads/
+		for _, entry := range ownedEntries {
+			os.RemoveAll(filepath.Join(oldDir, entry))
 		}
+		removeIfEmpty(oldDir)
 		return nil
 	}
 
@@ -301,48 +304,79 @@ func migrateBeadsDir(root string) error {
 		return err
 	}
 
-	err := filepath.WalkDir(oldDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
+	migrated := false
+	for _, entry := range ownedEntries {
+		src := filepath.Join(oldDir, entry)
+		if _, err := os.Stat(src); os.IsNotExist(err) {
+			continue
+		}
+		dst := filepath.Join(newDir, entry)
+		if err := copyEntry(src, dst); err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(oldDir, path)
-		if err != nil {
+		if err := os.RemoveAll(src); err != nil {
 			return err
 		}
-		if rel == "." {
-			return nil
-		}
-		dest := filepath.Join(newDir, rel)
-		if d.IsDir() {
-			return os.MkdirAll(dest, 0755)
-		}
-		src, err := os.Open(path)
-		if err != nil {
+		migrated = true
+	}
+
+	if migrated {
+		if err := os.WriteFile(sentinel, []byte("migrated\n"), 0644); err != nil {
 			return err
 		}
-		defer src.Close()
-		dst, err := os.Create(dest)
-		if err != nil {
-			return err
-		}
-		defer dst.Close()
-		_, err = io.Copy(dst, src)
-		return err
-	})
+		fmt.Fprintf(os.Stderr, "Migrated agentfactory files from '.beads/' -> '.agentfactory/store/'\n")
+	}
+
+	removeIfEmpty(oldDir)
+	return nil
+}
+
+func copyEntry(src, dst string) error {
+	info, err := os.Stat(src)
 	if err != nil {
 		return err
 	}
+	if info.IsDir() {
+		return copyDir(src, dst)
+	}
+	return copyFile(src, dst)
+}
 
-	if err := os.WriteFile(sentinel, []byte("migrated\n"), 0644); err != nil {
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
 		return err
 	}
-
-	if err := os.RemoveAll(oldDir); err != nil {
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
 		return err
 	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
 
-	fmt.Fprintf(os.Stderr, "Migrated '.beads/' -> '.agentfactory/store/'\n")
-	return nil
+func copyDir(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0755)
+		}
+		return copyFile(path, target)
+	})
+}
+
+func removeIfEmpty(dir string) {
+	// os.Remove fails on non-empty directories — safe by design
+	os.Remove(dir)
 }
 
 func runInstallRole(cmd *cobra.Command, role string) error {

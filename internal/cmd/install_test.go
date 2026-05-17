@@ -809,14 +809,21 @@ func TestMigrateBeadsDir(t *testing.T) {
 		os.MkdirAll(beadsDir, 0755)
 		os.MkdirAll(storeDir, 0755)
 		os.WriteFile(filepath.Join(beadsDir, "leftover.txt"), []byte("old"), 0644)
+		os.WriteFile(filepath.Join(beadsDir, ".gitignore"), []byte("*.sqlite\n"), 0644)
 		os.WriteFile(filepath.Join(storeDir, ".migration-complete"), []byte("done"), 0644)
 
 		if err := migrateBeadsDir(root); err != nil {
 			t.Fatalf("migrateBeadsDir: %v", err)
 		}
 
-		if _, err := os.Stat(beadsDir); !os.IsNotExist(err) {
-			t.Error(".beads/ should have been deleted (sentinel exists)")
+		if _, err := os.Stat(filepath.Join(beadsDir, ".gitignore")); !os.IsNotExist(err) {
+			t.Error("AF-owned .gitignore should have been removed from .beads/")
+		}
+		if _, err := os.Stat(filepath.Join(beadsDir, "leftover.txt")); err != nil {
+			t.Error("non-AF leftover.txt should still exist in .beads/")
+		}
+		if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+			t.Error(".beads/ should NOT have been deleted — non-AF files remain")
 		}
 	})
 }
@@ -825,7 +832,7 @@ func TestMigrateBeadsDir_Idempotent(t *testing.T) {
 	root := t.TempDir()
 	beadsDir := filepath.Join(root, ".beads")
 	os.MkdirAll(beadsDir, 0755)
-	os.WriteFile(filepath.Join(beadsDir, "test.txt"), []byte("data"), 0644)
+	os.WriteFile(filepath.Join(beadsDir, "issues.sqlite"), []byte("data"), 0644)
 
 	if err := migrateBeadsDir(root); err != nil {
 		t.Fatalf("first migration: %v", err)
@@ -835,15 +842,102 @@ func TestMigrateBeadsDir_Idempotent(t *testing.T) {
 	}
 
 	storeDir := filepath.Join(root, ".agentfactory", "store")
-	data, err := os.ReadFile(filepath.Join(storeDir, "test.txt"))
+	data, err := os.ReadFile(filepath.Join(storeDir, "issues.sqlite"))
 	if err != nil {
-		t.Fatal("test.txt not in store after idempotent migration")
+		t.Fatal("issues.sqlite not in store after idempotent migration")
 	}
 	if string(data) != "data" {
-		t.Errorf("test.txt content = %q, want %q", string(data), "data")
+		t.Errorf("issues.sqlite content = %q, want %q", string(data), "data")
 	}
 	if _, err := os.Stat(beadsDir); !os.IsNotExist(err) {
-		t.Error(".beads/ should not exist after migration")
+		t.Error(".beads/ should not exist after migration (was empty)")
+	}
+}
+
+func TestMigrateBeadsDir_NonAFFilesPreserved(t *testing.T) {
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	os.MkdirAll(beadsDir, 0755)
+	os.WriteFile(filepath.Join(beadsDir, "issues.sqlite"), []byte("fakedb"), 0644)
+	os.WriteFile(filepath.Join(beadsDir, "gastown-data.json"), []byte(`{"gastown": true}`), 0644)
+
+	if err := migrateBeadsDir(root); err != nil {
+		t.Fatalf("migrateBeadsDir: %v", err)
+	}
+
+	storeDir := filepath.Join(root, ".agentfactory", "store")
+	if _, err := os.Stat(filepath.Join(storeDir, "issues.sqlite")); err != nil {
+		t.Error("issues.sqlite should have been migrated to store")
+	}
+
+	data, err := os.ReadFile(filepath.Join(beadsDir, "gastown-data.json"))
+	if err != nil {
+		t.Fatal("gastown-data.json should still exist in .beads/")
+	}
+	if string(data) != `{"gastown": true}` {
+		t.Errorf("gastown-data.json content = %q, want %q", string(data), `{"gastown": true}`)
+	}
+
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+		t.Error(".beads/ should NOT have been deleted — it still contains non-AF files")
+	}
+}
+
+func TestMigrateBeadsDir_BeadsDeletedWhenEmptyAfterMigration(t *testing.T) {
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	os.MkdirAll(filepath.Join(beadsDir, "formulas"), 0755)
+	os.WriteFile(filepath.Join(beadsDir, ".gitignore"), []byte("*.sqlite\n"), 0644)
+	os.WriteFile(filepath.Join(beadsDir, "issues.sqlite"), []byte("fakedb"), 0644)
+	os.WriteFile(filepath.Join(beadsDir, "formulas", "test.toml"), []byte("[formula]"), 0644)
+
+	if err := migrateBeadsDir(root); err != nil {
+		t.Fatalf("migrateBeadsDir: %v", err)
+	}
+
+	storeDir := filepath.Join(root, ".agentfactory", "store")
+	if _, err := os.Stat(filepath.Join(storeDir, "issues.sqlite")); err != nil {
+		t.Error("issues.sqlite not migrated")
+	}
+	if _, err := os.Stat(filepath.Join(storeDir, "formulas", "test.toml")); err != nil {
+		t.Error("formulas/test.toml not migrated")
+	}
+	if _, err := os.Stat(filepath.Join(storeDir, ".gitignore")); err != nil {
+		t.Error(".gitignore not migrated")
+	}
+	if _, err := os.Stat(beadsDir); !os.IsNotExist(err) {
+		t.Error(".beads/ should have been deleted — it was empty after migration")
+	}
+}
+
+func TestMigrateBeadsDir_SentinelCleanupPreservesNonAFFiles(t *testing.T) {
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	storeDir := filepath.Join(root, ".agentfactory", "store")
+	os.MkdirAll(beadsDir, 0755)
+	os.MkdirAll(storeDir, 0755)
+	os.WriteFile(filepath.Join(beadsDir, ".gitignore"), []byte("*.sqlite\n"), 0644)
+	os.WriteFile(filepath.Join(beadsDir, "gastown.db"), []byte("gastown"), 0644)
+	os.WriteFile(filepath.Join(storeDir, ".migration-complete"), []byte("done"), 0644)
+
+	if err := migrateBeadsDir(root); err != nil {
+		t.Fatalf("migrateBeadsDir: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(beadsDir, ".gitignore")); !os.IsNotExist(err) {
+		t.Error(".gitignore should have been removed from .beads/ (AF-owned)")
+	}
+
+	data, err := os.ReadFile(filepath.Join(beadsDir, "gastown.db"))
+	if err != nil {
+		t.Fatal("gastown.db should still exist in .beads/")
+	}
+	if string(data) != "gastown" {
+		t.Errorf("gastown.db content = %q, want %q", string(data), "gastown")
+	}
+
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+		t.Error(".beads/ should NOT have been deleted — it still contains non-AF files")
 	}
 }
 

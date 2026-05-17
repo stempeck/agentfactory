@@ -76,13 +76,19 @@ The MergePatrol is the Engineer in the engine room. You process agent branches, 
 
 ## Merge Flow
 
-The MergePatrol receives MERGE_READY mail from agents when they complete work:
+MergePatrol discovers work through two channels:
+
+1. **Mail**: Agents send MERGE_READY mail when they complete work
+2. **Label**: PRs with the `merge_ready` GitHub label (applied from UI or by automation)
 
 ```
-Agent                      MergePatrol                    Git
+Agent                      MergePatrol                    Git / GitHub
    │                          │                           │
-   │ MERGE_READY              │                           │
+   │ MERGE_READY (mail)       │                           │
    │─────────────────────────>│                           │
+   │                          │                           │
+   │              merge_ready label (GitHub UI)           │
+   │                          │<──────────────────────────│
    │                          │                           │
    │                    (verify branch)                   │
    │                          │ fetch & rebase            │
@@ -94,13 +100,14 @@ Agent                      MergePatrol                    Git
    │                          │ merge & push              │
    │                          │──────────────────────────>│
    │                          │                           │
-   │ MERGED                   │                           │
-   │<─────────────────────────│                           │
+   │ MERGED (if agent known)  │  remove merge_ready label │
+   │<─────────────────────────│──────────────────────────>│
    │                          │                           │
 ```
 
-After successful merge, MergePatrol sends MERGED mail back to the agent so it can
-complete cleanup (remove the agent worktree).
+After successful merge, MergePatrol sends MERGED mail back to the agent (if an agent
+name is associated with the PR) so it can complete cleanup. For label-only PRs with
+no associated agent, the label is removed and the PR is closed without MERGED mail.
 
 ## !IMPORTANT - MANDATORY Exact Step Execution
 Execute each formula step EXACTLY as written, in order, with no modifications.
