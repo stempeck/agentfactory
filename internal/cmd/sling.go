@@ -70,7 +70,7 @@ func init() {
 	slingCmd.Flags().StringSliceVar(&slingVars, "var", nil, "Variable in key=val format (repeatable)")
 	slingCmd.Flags().StringVar(&slingAgent, "agent", "", "Agent to dispatch to or launch")
 	slingCmd.Flags().BoolVar(&slingNoLaunch, "no-launch", false, "Create beads only, skip tmux session launch")
-	slingCmd.Flags().BoolVar(&slingReset, "reset", false, "Stop target agent, clean stale runtime state, and re-dispatch. Use when a prior formula was abandoned or you want a clean start.")
+	slingCmd.Flags().BoolVar(&slingReset, "reset", false, "Force-reset target agent: close beads, remove worktree (even if dirty), clean all runtime state")
 	slingCmd.Flags().StringVar(&slingCaller, "caller", "", "Explicit caller identity for WORK_DONE mail (used by dispatch)")
 	slingCmd.Flags().MarkHidden("caller")
 	slingCmd.Flags().BoolVar(&slingPersistent, "persistent", false, "Keep session alive after formula completion (do not auto-terminate). !IMPORTANT! ONLY used in formulas instructions, not ad-hoc specialist dispatch. Use with caution: the session will not auto-terminate on formula completion.")
@@ -132,27 +132,11 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 	// Pre-flight: check if agent is already running BEFORE creating beads
 	mgr := session.NewManager(root, agentName, entry)
 	if slingReset {
-		// Reset target agent — stop session and clean stale runtime files
 		if err := mgr.Stop(); err != nil && err != session.ErrNotRunning {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to stop %s: %v\n", agentName, err)
 		}
-		// Clean up agent's worktree if one exists
-		if meta, wtErr := worktree.FindByOwner(root, agentName); wtErr == nil && meta != nil {
-			if rmErr := worktree.Remove(root, meta); rmErr != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to remove worktree for %s: %v\n", agentName, rmErr)
-			} else {
-				fmt.Fprintf(cmd.ErrOrStderr(), "cleaned up worktree %s for %s\n", meta.ID, agentName)
-			}
-		}
-		for _, f := range []string{
-			filepath.Join(agentDir, ".runtime", "session_id"),
-			filepath.Join(agentDir, ".runtime", "hooked_formula"),
-			filepath.Join(agentDir, ".runtime", "dispatched"),
-			filepath.Join(agentDir, ".agent-checkpoint.json"),
-		} {
-			if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to remove %s: %v\n", f, err)
-			}
+		if err := resetAgentState(cmd.Context(), cmd.OutOrStdout(), root, agentName, "reset by af sling --reset"); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: reset incomplete for %s: %v\n", agentName, err)
 		}
 	} else if !slingNoLaunch {
 		// Not resetting — check if agent is running and fail early
@@ -289,8 +273,19 @@ func resolveCallerAgent(root, agentName string) (config.AgentEntry, error) {
 // to instantiateFormulaWorkflow. The launch decision stays here.
 func runFormulaInstantiation(cmd *cobra.Command, root, wd string, args []string) error {
 	if slingReset {
-		cleanupPriorRuntime(wd)
-		os.Remove(filepath.Join(wd, ".runtime", "hooked_formula"))
+		if slingAgent != "" {
+			store, err := newIssueStore(root, slingAgent)
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "%s: warning: cannot initialize store for bead cleanup: %v\n", slingAgent, err)
+			} else {
+				closedCount := closeAgentBeads(cmd.Context(), store, slingAgent, "reset by af sling --formula --reset")
+				if closedCount > 0 {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s: closed %d formula beads\n", slingAgent, closedCount)
+				}
+			}
+		}
+		os.RemoveAll(filepath.Join(wd, ".runtime"))
+		checkpoint.Remove(wd)
 	}
 
 	params := InstantiateParams{
@@ -792,22 +787,6 @@ func findUnsatisfiedRequiredInputs(inputs map[string]formula.Input, cliVars map[
 	}
 	sort.Strings(unsatisfied)
 	return unsatisfied
-}
-
-func cleanupPriorRuntime(workDir string) {
-	runtimeDir := filepath.Join(workDir, ".runtime")
-	os.Remove(filepath.Join(runtimeDir, "formula_caller"))
-	os.Remove(filepath.Join(runtimeDir, "dispatched"))
-	resetCheckpointFormulaID(workDir)
-}
-
-func resetCheckpointFormulaID(workDir string) {
-	cp, err := checkpoint.Read(workDir)
-	if err != nil || cp == nil {
-		return
-	}
-	cp.FormulaID = ""
-	_ = checkpoint.Write(workDir, cp)
 }
 
 // writeDispatchedMarker writes the dispatch marker to <agentDir>/.runtime/dispatched.

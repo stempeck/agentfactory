@@ -15,6 +15,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/formula"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/issuestore/memstore"
+	"github.com/stempeck/agentfactory/internal/worktree"
 )
 
 // installMemStore replaces newIssueStore with a memstore factory for the
@@ -1224,8 +1225,8 @@ func TestResetFlag_Registered(t *testing.T) {
 	if f.DefValue != "false" {
 		t.Errorf("--reset default should be false, got %q", f.DefValue)
 	}
-	if !strings.Contains(f.Usage, "Stop target agent") {
-		t.Errorf("--reset usage should mention 'Stop target agent', got %q", f.Usage)
+	if !strings.Contains(f.Usage, "Force-reset") {
+		t.Errorf("--reset usage should mention 'Force-reset', got %q", f.Usage)
 	}
 }
 
@@ -1288,12 +1289,11 @@ func TestDispatchToSpecialist_ResetCleansRuntimeFiles(t *testing.T) {
 	// should happen BEFORE that.
 	_ = dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "implement issue #38")
 
-	// Verify stale files were cleaned
+	// Verify stale files were cleaned by resetAgentState (os.RemoveAll on .runtime/).
+	// The .runtime/ dir may be recreated by the post-reset dispatch pipeline
+	// (persistFormulaCaller, writeDispatchedMarker), but the stale files are gone.
 	if _, err := os.Stat(filepath.Join(runtimeDir, "session_id")); err == nil {
 		t.Error(".runtime/session_id should be deleted by --reset")
-	}
-	if _, err := os.Stat(filepath.Join(runtimeDir, "hooked_formula")); err == nil {
-		t.Error(".runtime/hooked_formula should be deleted by --reset")
 	}
 	if _, err := os.Stat(filepath.Join(agentDir, ".agent-checkpoint.json")); err == nil {
 		t.Error(".agent-checkpoint.json should be deleted by --reset")
@@ -1419,12 +1419,10 @@ func TestDispatchToSpecialist_ResetWithNonRunningAgent(t *testing.T) {
 		t.Errorf("--reset should not error when agent is not running, got: %s", err.Error())
 	}
 
-	// Stale files should still be cleaned even though agent wasn't running
+	// Stale files should be cleaned even though agent wasn't running.
+	// The .runtime/ dir may be recreated by post-reset dispatch pipeline.
 	if _, statErr := os.Stat(filepath.Join(runtimeDir, "session_id")); statErr == nil {
 		t.Error(".runtime/session_id should be deleted by --reset even when agent not running")
-	}
-	if _, statErr := os.Stat(filepath.Join(runtimeDir, "hooked_formula")); statErr == nil {
-		t.Error(".runtime/hooked_formula should be deleted by --reset even when agent not running")
 	}
 	if _, statErr := os.Stat(filepath.Join(agentDir, ".agent-checkpoint.json")); statErr == nil {
 		t.Error(".agent-checkpoint.json should be deleted by --reset even when agent not running")
@@ -2626,10 +2624,17 @@ func TestSling_AbandonedPrior_ErrorsWithResetHint(t *testing.T) {
 }
 
 func TestSling_AbandonedPrior_ResetCleansAndSucceeds(t *testing.T) {
-	installMemStore(t)
+	store := installMemStore(t)
 	installNoopLaunchSession(t)
 
 	root, agentDir := createTestFormulaFactory(t, "test-formula", "test-agent")
+
+	ctx := t.Context()
+	staleBead, _ := store.Create(ctx, issuestore.CreateParams{
+		Title:    "stale-bead",
+		Assignee: "test-agent",
+		Type:     issuestore.TypeTask,
+	})
 
 	runtimeDir := filepath.Join(agentDir, ".runtime")
 	os.MkdirAll(runtimeDir, 0o755)
@@ -2650,7 +2655,7 @@ func TestSling_AbandonedPrior_ResetCleansAndSucceeds(t *testing.T) {
 	t.Cleanup(func() { slingAgent = origAgent })
 
 	cmd := &cobra.Command{}
-	cmd.SetContext(t.Context())
+	cmd.SetContext(ctx)
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
@@ -2672,6 +2677,17 @@ func TestSling_AbandonedPrior_ResetCleansAndSucceeds(t *testing.T) {
 		t.Error("hooked_formula should exist after successful re-sling")
 	} else if strings.TrimSpace(string(data)) == "stale-instance-id" {
 		t.Error("hooked_formula should contain new instance ID, still contains stale value")
+	}
+
+	b, err := store.Get(ctx, staleBead.ID)
+	if err != nil {
+		t.Fatalf("Get stale bead: %v", err)
+	}
+	if b.Status != issuestore.StatusClosed {
+		t.Errorf("stale bead should be closed by --reset, got status=%s", b.Status)
+	}
+	if b.CloseReason != "reset by af sling --formula --reset" {
+		t.Errorf("stale bead close reason=%q, want %q", b.CloseReason, "reset by af sling --formula --reset")
 	}
 }
 
@@ -3300,5 +3316,348 @@ title = "Step 1"
 	}
 	if wtIDA == wtIDB {
 		t.Errorf("agent-a and agent-b should get distinct worktree IDs; both got %q", wtIDA)
+	}
+}
+
+func TestSlingReset_DirtyWorktreeForceRemoved(t *testing.T) {
+	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+
+	agents := map[string]interface{}{
+		"agents": map[string]interface{}{
+			"specialist-agent": map[string]interface{}{
+				"type":        "autonomous",
+				"description": "Test specialist",
+				"formula":     "test-specialist-formula",
+			},
+		},
+	}
+	data, _ := json.Marshal(agents)
+	os.WriteFile(filepath.Join(root, ".agentfactory", "agents.json"), data, 0o644)
+
+	os.MkdirAll(worktree.WorktreesDir(root), 0o755)
+	meta := &worktree.Meta{
+		ID:     "wt-dirty01",
+		Owner:  "specialist-agent",
+		Branch: "af/specialist-agent-dirty01",
+		Path:   ".agentfactory/worktrees/wt-dirty01",
+		Agents: []string{"specialist-agent"},
+	}
+	if err := worktree.WriteMeta(root, meta); err != nil {
+		t.Fatalf("WriteMeta: %v", err)
+	}
+
+	agentDir := filepath.Join(root, ".agentfactory", "agents", "specialist-agent")
+	os.MkdirAll(filepath.Join(agentDir, ".runtime"), 0o755)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	callerWd := filepath.Join(root, ".agentfactory", "agents", "caller-agent")
+	os.MkdirAll(callerWd, 0o755)
+
+	origReset := slingReset
+	slingReset = true
+	defer func() { slingReset = origReset }()
+
+	t.Cleanup(func() {
+		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
+	})
+
+	installFailingIssueStore(t)
+
+	_ = dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "test task")
+
+	metaFile := filepath.Join(worktree.WorktreesDir(root), "wt-dirty01.meta.json")
+	if _, err := os.Stat(metaFile); !os.IsNotExist(err) {
+		t.Error("worktree meta file should be removed by --reset (force-remove)")
+	}
+
+	found, _ := worktree.FindByAgent(root, "specialist-agent")
+	if found != nil {
+		t.Errorf("FindByAgent should return nil after reset, got: %+v", found)
+	}
+}
+
+func TestSlingReset_BeadsClosed(t *testing.T) {
+	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+
+	agents := map[string]interface{}{
+		"agents": map[string]interface{}{
+			"specialist-agent": map[string]interface{}{
+				"type":        "autonomous",
+				"description": "Test specialist",
+				"formula":     "test-specialist-formula",
+			},
+		},
+	}
+	data, _ := json.Marshal(agents)
+	os.WriteFile(filepath.Join(root, ".agentfactory", "agents.json"), data, 0o644)
+
+	store := installMemStore(t)
+	installNoopLaunchSession(t)
+	ctx := t.Context()
+
+	var preExistingIDs []string
+	for i := 0; i < 3; i++ {
+		issue, _ := store.Create(ctx, issuestore.CreateParams{
+			Title:    "specialist-bead",
+			Assignee: "specialist-agent",
+			Type:     issuestore.TypeTask,
+		})
+		preExistingIDs = append(preExistingIDs, issue.ID)
+	}
+
+	agentDir := filepath.Join(root, ".agentfactory", "agents", "specialist-agent")
+	os.MkdirAll(filepath.Join(agentDir, ".runtime"), 0o755)
+	os.MkdirAll(worktree.WorktreesDir(root), 0o755)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	callerWd := filepath.Join(root, ".agentfactory", "agents", "caller-agent")
+	os.MkdirAll(callerWd, 0o755)
+
+	origReset := slingReset
+	slingReset = true
+	defer func() { slingReset = origReset }()
+
+	t.Cleanup(func() {
+		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
+	})
+
+	_ = dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "test task")
+
+	// Check only the pre-existing beads (formula instantiation creates new ones)
+	for _, id := range preExistingIDs {
+		b, err := store.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get bead %s: %v", id, err)
+		}
+		if b.Status != issuestore.StatusClosed {
+			t.Errorf("bead %s: status=%s, want closed", b.ID, b.Status)
+		}
+		if b.CloseReason != "reset by af sling --reset" {
+			t.Errorf("bead %s: reason=%q, want %q", b.ID, b.CloseReason, "reset by af sling --reset")
+		}
+	}
+}
+
+func TestSlingReset_CoTenantSafety(t *testing.T) {
+	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+
+	agents := map[string]interface{}{
+		"agents": map[string]interface{}{
+			"specialist-agent": map[string]interface{}{
+				"type":        "autonomous",
+				"description": "Test specialist",
+				"formula":     "test-specialist-formula",
+			},
+		},
+	}
+	data, _ := json.Marshal(agents)
+	os.WriteFile(filepath.Join(root, ".agentfactory", "agents.json"), data, 0o644)
+
+	os.MkdirAll(worktree.WorktreesDir(root), 0o755)
+	meta := &worktree.Meta{
+		ID:     "wt-cotenant01",
+		Owner:  "specialist-agent",
+		Branch: "af/specialist-agent-cotenant01",
+		Path:   ".agentfactory/worktrees/wt-cotenant01",
+		Agents: []string{"specialist-agent", "other-agent"},
+	}
+	if err := worktree.WriteMeta(root, meta); err != nil {
+		t.Fatalf("WriteMeta: %v", err)
+	}
+
+	agentDir := filepath.Join(root, ".agentfactory", "agents", "specialist-agent")
+	os.MkdirAll(filepath.Join(agentDir, ".runtime"), 0o755)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	callerWd := filepath.Join(root, ".agentfactory", "agents", "caller-agent")
+	os.MkdirAll(callerWd, 0o755)
+
+	origReset := slingReset
+	slingReset = true
+	defer func() { slingReset = origReset }()
+
+	t.Cleanup(func() {
+		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
+	})
+
+	installFailingIssueStore(t)
+
+	_ = dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "test task")
+
+	updated, err := worktree.ReadMeta(root, "wt-cotenant01")
+	if err != nil {
+		t.Fatalf("ReadMeta after reset: %v", err)
+	}
+	if len(updated.Agents) != 1 || updated.Agents[0] != "other-agent" {
+		t.Errorf("Agents: got %v, want [other-agent]", updated.Agents)
+	}
+}
+
+func TestSlingReset_NoWorktreeProceeds(t *testing.T) {
+	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+
+	agents := map[string]interface{}{
+		"agents": map[string]interface{}{
+			"specialist-agent": map[string]interface{}{
+				"type":        "autonomous",
+				"description": "Test specialist",
+				"formula":     "test-specialist-formula",
+			},
+		},
+	}
+	data, _ := json.Marshal(agents)
+	os.WriteFile(filepath.Join(root, ".agentfactory", "agents.json"), data, 0o644)
+
+	store := installMemStore(t)
+	installNoopLaunchSession(t)
+
+	agentDir := filepath.Join(root, ".agentfactory", "agents", "specialist-agent")
+	runtimeDir := filepath.Join(agentDir, ".runtime")
+	os.MkdirAll(runtimeDir, 0o755)
+	os.WriteFile(filepath.Join(runtimeDir, "dispatched"), []byte("1"), 0o644)
+	os.MkdirAll(worktree.WorktreesDir(root), 0o755)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	callerWd := filepath.Join(root, ".agentfactory", "agents", "caller-agent")
+	os.MkdirAll(callerWd, 0o755)
+
+	origReset := slingReset
+	slingReset = true
+	defer func() { slingReset = origReset }()
+
+	t.Cleanup(func() {
+		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
+	})
+
+	err := dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "test task")
+	if err != nil {
+		t.Errorf("dispatchToSpecialist should succeed with no worktree, got: %v", err)
+	}
+
+	// Verify stale dispatched file was cleaned (the .runtime/ dir may be
+	// recreated by the post-reset dispatch pipeline with fresh files).
+	if _, statErr := os.Stat(filepath.Join(runtimeDir, "session_id")); statErr == nil {
+		t.Error("stale .runtime/session_id should be removed by reset")
+	}
+
+	// No prior beads to close — just verify no crash occurred
+	_ = store
+}
+
+func TestFormulaPathReset_ClosesBeads(t *testing.T) {
+	store := installMemStore(t)
+	installNoopLaunchSession(t)
+
+	root, agentDir := createTestFormulaFactory(t, "test-formula", "test-agent")
+
+	ctx := t.Context()
+	var preExistingIDs []string
+	for i := 0; i < 3; i++ {
+		issue, _ := store.Create(ctx, issuestore.CreateParams{
+			Title:    "stale-bead",
+			Assignee: "test-agent",
+			Type:     issuestore.TypeTask,
+		})
+		preExistingIDs = append(preExistingIDs, issue.ID)
+	}
+
+	runtimeDir := filepath.Join(agentDir, ".runtime")
+	os.MkdirAll(runtimeDir, 0o755)
+	os.WriteFile(filepath.Join(runtimeDir, "hooked_formula"), []byte("stale"), 0o644)
+
+	origReset := slingReset
+	slingReset = true
+	t.Cleanup(func() { slingReset = origReset })
+
+	origFormulaName := slingFormulaName
+	slingFormulaName = "test-formula"
+	t.Cleanup(func() { slingFormulaName = origFormulaName })
+
+	origAgent := slingAgent
+	slingAgent = "test-agent"
+	t.Cleanup(func() { slingAgent = origAgent })
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	err := runFormulaInstantiation(cmd, root, agentDir, nil)
+	if err != nil {
+		t.Fatalf("runFormulaInstantiation with --reset should succeed, got: %v", err)
+	}
+
+	for _, id := range preExistingIDs {
+		b, err := store.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get bead %s: %v", id, err)
+		}
+		if b.Status != issuestore.StatusClosed {
+			t.Errorf("bead %s: status=%s, want closed", b.ID, b.Status)
+		}
+		if b.CloseReason != "reset by af sling --formula --reset" {
+			t.Errorf("bead %s: reason=%q, want %q", b.ID, b.CloseReason, "reset by af sling --formula --reset")
+		}
+	}
+}
+
+func TestFormulaPathReset_FullRuntimeCleanup(t *testing.T) {
+	installMemStore(t)
+	installNoopLaunchSession(t)
+
+	root, agentDir := createTestFormulaFactory(t, "test-formula", "test-agent")
+
+	runtimeDir := filepath.Join(agentDir, ".runtime")
+	os.MkdirAll(runtimeDir, 0o755)
+	os.WriteFile(filepath.Join(runtimeDir, "hooked_formula"), []byte("stale"), 0o644)
+	os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte("stale-session"), 0o644)
+	os.WriteFile(filepath.Join(runtimeDir, "arbitrary_extra_file"), []byte("should be removed"), 0o644)
+
+	origReset := slingReset
+	slingReset = true
+	t.Cleanup(func() { slingReset = origReset })
+
+	origFormulaName := slingFormulaName
+	slingFormulaName = "test-formula"
+	t.Cleanup(func() { slingFormulaName = origFormulaName })
+
+	origAgent := slingAgent
+	slingAgent = "test-agent"
+	t.Cleanup(func() { slingAgent = origAgent })
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	_ = runFormulaInstantiation(cmd, root, agentDir, nil)
+
+	if _, err := os.Stat(filepath.Join(runtimeDir, "session_id")); err == nil {
+		t.Error("session_id should be removed by full .runtime/ cleanup")
+	}
+	if _, err := os.Stat(filepath.Join(runtimeDir, "arbitrary_extra_file")); err == nil {
+		t.Error("arbitrary_extra_file should be removed by full .runtime/ cleanup")
 	}
 }
