@@ -140,7 +140,7 @@ func TestCloseAgentBeads_ClosesAssignedBeads(t *testing.T) {
 		})
 	}
 
-	closed := closeAgentBeads(ctx, store, "solver")
+	closed := closeAgentBeads(ctx, store, "solver", "reset by af down --reset")
 	if closed != 3 {
 		t.Errorf("closeAgentBeads returned %d, want 3", closed)
 	}
@@ -167,7 +167,7 @@ func TestCloseAgentBeads_NoBeads(t *testing.T) {
 	store := installMemStore(t)
 	ctx := context.Background()
 
-	closed := closeAgentBeads(ctx, store, "solver")
+	closed := closeAgentBeads(ctx, store, "solver", "reset by af down --reset")
 	if closed != 0 {
 		t.Errorf("closeAgentBeads returned %d, want 0", closed)
 	}

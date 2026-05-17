@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
-	"github.com/stempeck/agentfactory/internal/checkpoint"
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/session"
@@ -170,44 +169,10 @@ func preResetScan(cmd *cobra.Command, factoryRoot string, agents []string) {
 }
 
 func resetAgent(ctx context.Context, cmd *cobra.Command, factoryRoot, agentName string) error {
-	store, err := newIssueStore(factoryRoot, agentName)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s: warning: cannot initialize store for bead cleanup: %v\n", agentName, err)
-	} else {
-		closedCount := closeAgentBeads(ctx, store, agentName)
-		if closedCount > 0 {
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s: closed %d formula beads\n", agentName, closedCount)
-		}
-	}
-
-	meta, err := worktree.FindByAgent(factoryRoot, agentName)
-	if err == nil && meta != nil {
-		updated, empty, rmErr := worktree.RemoveAgent(factoryRoot, meta.ID, agentName)
-		if rmErr != nil {
-			fmt.Fprintf(os.Stderr, "%s: warning: worktree RemoveAgent: %v\n", agentName, rmErr)
-		} else if empty {
-			if fErr := worktree.ForceRemove(factoryRoot, updated); fErr != nil {
-				fmt.Fprintf(os.Stderr, "%s: error: force-removing worktree %s: %v\n", agentName, meta.ID, fErr)
-			} else {
-				fmt.Fprintf(cmd.OutOrStdout(), "  %s: force-removed worktree %s\n", agentName, meta.ID)
-			}
-		} else {
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s: deregistered from worktree %s (%d co-tenants remain)\n",
-				agentName, meta.ID, len(updated.Agents))
-		}
-	}
-
-	agentDir := config.AgentDir(factoryRoot, agentName)
-	runtimeDir := filepath.Join(agentDir, ".runtime")
-	os.RemoveAll(runtimeDir)
-	if cpErr := checkpoint.Remove(agentDir); cpErr != nil {
-		fmt.Fprintf(os.Stderr, "%s: warning: removing checkpoint: %v\n", agentName, cpErr)
-	}
-
-	return nil
+	return resetAgentState(ctx, cmd.OutOrStdout(), factoryRoot, agentName, "reset by af down --reset")
 }
 
-func closeAgentBeads(ctx context.Context, store issuestore.Store, agentName string) int {
+func closeAgentBeads(ctx context.Context, store issuestore.Store, agentName, reason string) int {
 	beads, err := store.List(ctx, issuestore.Filter{Assignee: agentName})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: warning: listing beads: %v\n", agentName, err)
@@ -215,7 +180,7 @@ func closeAgentBeads(ctx context.Context, store issuestore.Store, agentName stri
 	}
 	closed := 0
 	for _, bead := range beads {
-		if err := store.Close(ctx, bead.ID, "reset by af down --reset"); err != nil {
+		if err := store.Close(ctx, bead.ID, reason); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: warning: closing bead %s: %v\n", agentName, bead.ID, err)
 			continue
 		}

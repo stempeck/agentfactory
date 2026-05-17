@@ -135,6 +135,9 @@ Configuration lives in `.agentfactory/dispatch.json` (created by `af install --i
 {
   "repos": ["myorg/myrepo"],
   "trigger_label": "agentic",
+  "notify_on_complete": "manager",
+  "interval_seconds": 300,
+  "retry_after_seconds": 1800,
   "remove_trigger_after_dispatch": true,
   "mappings": [
     {
@@ -150,6 +153,18 @@ Configuration lives in `.agentfactory/dispatch.json` (created by `af install --i
   ]
 }
 ```
+
+| Field | Required | Default | Description |
+|-------|:--------:|---------|-------------|
+| `repos` | Yes | — | GitHub repos to poll (e.g. `["owner/repo"]`) |
+| `trigger_label` | Yes | — | Label used to query GitHub; only items with this label are fetched |
+| `notify_on_complete` | No | `"manager"` | Agent to notify (via `--caller`) when dispatched work finishes |
+| `interval_seconds` | No | `300` | Polling interval (seconds) when running `af dispatch start` |
+| `retry_after_seconds` | No | `1800` | Time (seconds) before re-dispatching the same issue if the agent has gone idle |
+| `remove_trigger_after_dispatch` | No | `false` | Remove the `trigger_label` from the issue/PR after dispatching |
+| `mappings[].labels` | Yes | — | Labels the item must have (AND semantics — all must match) |
+| `mappings[].source` | No | `"issue"` | Resource type: `"issue"` or `"pr"` |
+| `mappings[].agent` | Yes | — | Agent to dispatch when labels match |
 
 ### Adding more agents manually (not recommended. use: agent-gen or agent-gen-all.sh)
 
