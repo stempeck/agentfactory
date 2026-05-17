@@ -37,8 +37,17 @@ func TestLoadDispatchConfig_Valid(t *testing.T) {
 	if len(cfg.Mappings) != 1 {
 		t.Fatalf("expected 1 mapping, got %d", len(cfg.Mappings))
 	}
-	if cfg.Mappings[0].Label != "bug-triage" || cfg.Mappings[0].Agent != "debugger" {
-		t.Errorf("mapping = %+v, want {bug-triage debugger}", cfg.Mappings[0])
+	if cfg.Mappings[0].Label != "" {
+		t.Errorf("mapping Label = %q, want empty (migrated to Labels)", cfg.Mappings[0].Label)
+	}
+	if len(cfg.Mappings[0].Labels) != 1 || cfg.Mappings[0].Labels[0] != "bug-triage" {
+		t.Errorf("mapping Labels = %v, want [bug-triage]", cfg.Mappings[0].Labels)
+	}
+	if cfg.Mappings[0].Agent != "debugger" {
+		t.Errorf("mapping Agent = %q, want %q", cfg.Mappings[0].Agent, "debugger")
+	}
+	if cfg.Mappings[0].Source != "issue" {
+		t.Errorf("mapping Source = %q, want %q (default)", cfg.Mappings[0].Source, "issue")
 	}
 	if cfg.IntervalSecs != 600 {
 		t.Errorf("interval_seconds = %d, want 600", cfg.IntervalSecs)
@@ -270,5 +279,140 @@ func TestLoadDispatchConfig_MalformedJSON(t *testing.T) {
 	_, err := LoadDispatchConfig(dir)
 	if err == nil {
 		t.Fatal("expected error for malformed JSON")
+	}
+}
+
+func TestLoadDispatchConfig_LabelsArray(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".agentfactory")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	data := `{
+		"repos": ["owner/repo"],
+		"trigger_label": "agentic",
+		"mappings": [{"labels": ["bug", "triage"], "agent": "debugger"}]
+	}`
+	if err := os.WriteFile(filepath.Join(configDir, "dispatch.json"), []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadDispatchConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Mappings[0].Labels) != 2 {
+		t.Fatalf("expected 2 labels, got %d", len(cfg.Mappings[0].Labels))
+	}
+	if cfg.Mappings[0].Labels[0] != "bug" || cfg.Mappings[0].Labels[1] != "triage" {
+		t.Errorf("labels = %v, want [bug triage]", cfg.Mappings[0].Labels)
+	}
+	if cfg.Mappings[0].Label != "" {
+		t.Errorf("label = %q, want empty (new-style uses labels)", cfg.Mappings[0].Label)
+	}
+	if cfg.Mappings[0].Source != "issue" {
+		t.Errorf("source = %q, want %q (default)", cfg.Mappings[0].Source, "issue")
+	}
+}
+
+func TestLoadDispatchConfig_LabelMigration(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".agentfactory")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	data := `{
+		"repos": ["owner/repo"],
+		"trigger_label": "agentic",
+		"mappings": [{"label": "bug", "agent": "debugger"}]
+	}`
+	if err := os.WriteFile(filepath.Join(configDir, "dispatch.json"), []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadDispatchConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mappings[0].Label != "" {
+		t.Errorf("label = %q, want empty (migrated to labels)", cfg.Mappings[0].Label)
+	}
+	if len(cfg.Mappings[0].Labels) != 1 || cfg.Mappings[0].Labels[0] != "bug" {
+		t.Errorf("labels = %v, want [bug]", cfg.Mappings[0].Labels)
+	}
+	if cfg.Mappings[0].Source != "issue" {
+		t.Errorf("source = %q, want %q (default)", cfg.Mappings[0].Source, "issue")
+	}
+}
+
+func TestLoadDispatchConfig_BothLabelAndLabels(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".agentfactory")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	data := `{
+		"repos": ["owner/repo"],
+		"trigger_label": "agentic",
+		"mappings": [{"label": "bug", "labels": ["triage"], "agent": "debugger"}]
+	}`
+	if err := os.WriteFile(filepath.Join(configDir, "dispatch.json"), []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	_, err := LoadDispatchConfig(dir)
+	if err == nil {
+		t.Fatal("expected error for ambiguous label+labels")
+	}
+	if !errors.Is(err, ErrMissingField) {
+		t.Errorf("expected ErrMissingField, got: %v", err)
+	}
+}
+
+func TestLoadDispatchConfig_SourceValidation(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".agentfactory")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	data := `{
+		"repos": ["owner/repo"],
+		"trigger_label": "agentic",
+		"mappings": [{"labels": ["bug"], "agent": "debugger", "source": "invalid"}]
+	}`
+	if err := os.WriteFile(filepath.Join(configDir, "dispatch.json"), []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	_, err := LoadDispatchConfig(dir)
+	if err == nil {
+		t.Fatal("expected error for invalid source value")
+	}
+	if !errors.Is(err, ErrInvalidType) {
+		t.Errorf("expected ErrInvalidType, got: %v", err)
+	}
+}
+
+func TestLoadDispatchConfig_SourceDefault(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".agentfactory")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	data := `{
+		"repos": ["owner/repo"],
+		"trigger_label": "agentic",
+		"mappings": [{"labels": ["bug"], "agent": "debugger"}]
+	}`
+	if err := os.WriteFile(filepath.Join(configDir, "dispatch.json"), []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadDispatchConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mappings[0].Source != "issue" {
+		t.Errorf("source = %q, want %q (default)", cfg.Mappings[0].Source, "issue")
 	}
 }
