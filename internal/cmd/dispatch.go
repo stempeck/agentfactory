@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/config"
+	"github.com/stempeck/agentfactory/internal/lock"
 	"github.com/stempeck/agentfactory/internal/session"
 	"github.com/stempeck/agentfactory/internal/tmux"
 )
@@ -72,8 +73,8 @@ Use --interval to override the interval_seconds from dispatch.json.`,
 	dispatchCmd.AddCommand(statusCmd)
 }
 
-// ghIssue represents a GitHub issue from gh CLI JSON output.
-type ghIssue struct {
+// ghItem represents a GitHub issue or PR from gh CLI JSON output.
+type ghItem struct {
 	Number int       `json:"number"`
 	Title  string    `json:"title"`
 	URL    string    `json:"url"`
@@ -94,7 +95,8 @@ type dispatchState struct {
 type dispatchEntry struct {
 	Agent        string    `json:"agent"`
 	DispatchedAt time.Time `json:"dispatched_at"`
-	IssueURL     string    `json:"issue_url"`
+	ItemURL      string    `json:"item_url"`
+	Source       string    `json:"source"`
 }
 
 func runDispatch(cmd *cobra.Command, args []string) error {
@@ -132,67 +134,105 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("GitHub CLI not authenticated: %w", err)
 	}
 
+	lk := lock.NewWithPath(filepath.Join(root, ".runtime", "dispatch-cycle.lock"))
+	if err := lk.Acquire(fmt.Sprintf("pid-%d", os.Getpid())); err != nil {
+		return fmt.Errorf("acquiring dispatch lock: %w", err)
+	}
+	defer lk.Release()
+
 	// Load dispatch state
 	state := loadDispatchState(root)
 
-	// For each repo, query open issues with trigger label
+	issueMappings, prMappings := groupMappingsBySource(dispatchCfg.Mappings)
+
 	t := tmux.NewTmux()
 	for _, repo := range dispatchCfg.Repos {
-		issues, err := queryGitHubIssues(repo, dispatchCfg.TriggerLabel)
-		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to query %s: %v\n", repo, err)
-			continue
+		var items []ghItem
+		var itemMappings [][]config.DispatchMapping
+		var itemSources []string
+
+		if len(issueMappings) > 0 {
+			issues, err := queryGitHubIssues(repo, dispatchCfg.TriggerLabel)
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to query issues for %s: %v\n", repo, err)
+			} else {
+				if len(issues) == 50 {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: query returned 50 results (limit reached) for %s — some items may be missed\n", repo)
+				}
+				for range issues {
+					itemMappings = append(itemMappings, issueMappings)
+					itemSources = append(itemSources, "issue")
+				}
+				items = append(items, issues...)
+			}
 		}
 
-		for _, issue := range issues {
-			agent := matchIssueToAgent(issue, dispatchCfg.Mappings)
+		if len(prMappings) > 0 {
+			prs, err := queryGitHubPRs(repo, dispatchCfg.TriggerLabel)
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to query PRs for %s: %v\n", repo, err)
+			} else {
+				if len(prs) == 50 {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: query returned 50 results (limit reached) for %s — some items may be missed\n", repo)
+				}
+				for range prs {
+					itemMappings = append(itemMappings, prMappings)
+					itemSources = append(itemSources, "pr")
+				}
+				items = append(items, prs...)
+			}
+		}
+
+		for i, item := range items {
+			agent := matchItemToAgent(item, itemMappings[i])
 			if agent == "" {
 				continue
 			}
-			issueKey := fmt.Sprintf("%s#%d", repo, issue.Number)
+			itemKey := fmt.Sprintf("%s#%d", repo, item.Number)
 
-			// Check if agent is running
 			sessionID := session.SessionName(agent)
 			agentRunning, _ := t.HasSession(sessionID)
 
-			// Skip if already dispatched (unless agent is idle and retry window elapsed)
-			if entry, ok := state.Dispatched[issueKey]; ok {
+			if entry, ok := state.Dispatched[itemKey]; ok {
 				if agentRunning {
-					fmt.Fprintf(cmd.OutOrStdout(), "skip %s: agent %s is busy\n", issueKey, agent)
+					fmt.Fprintf(cmd.OutOrStdout(), "skip %s: agent %s is busy\n", itemKey, agent)
 					continue
 				}
 				retryAfter := time.Duration(dispatchCfg.RetryAfterSecs) * time.Second
 				if time.Since(entry.DispatchedAt) < retryAfter {
 					continue
 				}
-				// Agent idle + retry window elapsed: remove stale entry, allow re-dispatch
-				delete(state.Dispatched, issueKey)
-				fmt.Fprintf(cmd.OutOrStdout(), "retry %s: agent %s idle, previous dispatch expired\n", issueKey, agent)
+				delete(state.Dispatched, itemKey)
+				fmt.Fprintf(cmd.OutOrStdout(), "retry %s: agent %s idle, previous dispatch expired\n", itemKey, agent)
 			}
 
 			if agentRunning {
-				fmt.Fprintf(cmd.OutOrStdout(), "skip %s: agent %s is busy\n", issueKey, agent)
+				fmt.Fprintf(cmd.OutOrStdout(), "skip %s: agent %s is busy\n", itemKey, agent)
 				continue
 			}
 
 			if dispatchDryRun {
-				fmt.Fprintf(cmd.OutOrStdout(), "would dispatch %s to %s\n", issueKey, agent)
+				fmt.Fprintf(cmd.OutOrStdout(), "would dispatch %s to %s\n", itemKey, agent)
 				continue
 			}
 
-			// Dispatch via af sling
-			if err := dispatchIssue(root, agent, issue.URL, dispatchCfg.NotifyOnComplete); err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "dispatch %s failed: %v\n", issueKey, err)
+			if err := dispatchItem(root, agent, item.URL, dispatchCfg.NotifyOnComplete); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "dispatch %s failed: %v\n", itemKey, err)
 				continue
 			}
 
-			// Record in state
-			state.Dispatched[issueKey] = dispatchEntry{
+			state.Dispatched[itemKey] = dispatchEntry{
 				Agent:        agent,
 				DispatchedAt: time.Now().UTC(),
-				IssueURL:     issue.URL,
+				ItemURL:      item.URL,
+				Source:       itemSources[i],
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "dispatched %s to %s\n", issueKey, agent)
+			if dispatchCfg.RemoveTriggerAfterDispatch {
+				if err := removeTriggerLabel(repo, item.Number, dispatchCfg.TriggerLabel, itemSources[i]); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to remove trigger label from %s: %v\n", itemKey, err)
+				}
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "dispatched %s to %s\n", itemKey, agent)
 		}
 	}
 
@@ -210,7 +250,7 @@ func checkGHAuth() error {
 }
 
 // queryGitHubIssues queries GitHub for open issues with the given label.
-func queryGitHubIssues(repo, triggerLabel string) ([]ghIssue, error) {
+func queryGitHubIssues(repo, triggerLabel string) ([]ghItem, error) {
 	out, err := exec.Command("gh", "issue", "list",
 		"--repo", repo,
 		"--label", triggerLabel,
@@ -221,30 +261,81 @@ func queryGitHubIssues(repo, triggerLabel string) ([]ghIssue, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gh issue list: %w", err)
 	}
-	var issues []ghIssue
-	if err := json.Unmarshal(out, &issues); err != nil {
+	var items []ghItem
+	if err := json.Unmarshal(out, &items); err != nil {
 		return nil, fmt.Errorf("parsing gh output: %w", err)
 	}
-	return issues, nil
+	return items, nil
 }
 
-// matchIssueToAgent returns the agent name for the first matching label,
-// or empty string if no mapping matches.
-func matchIssueToAgent(issue ghIssue, mappings []config.DispatchMapping) string {
-	issueLabels := make(map[string]bool, len(issue.Labels))
-	for _, l := range issue.Labels {
-		issueLabels[l.Name] = true
+// queryGitHubPRs queries GitHub for open PRs with the given label.
+func queryGitHubPRs(repo, triggerLabel string) ([]ghItem, error) {
+	out, err := exec.Command("gh", "pr", "list",
+		"--repo", repo,
+		"--label", triggerLabel,
+		"--state", "open",
+		"--json", "number,title,url,labels",
+		"--limit", "50",
+	).Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh pr list: %w", err)
+	}
+	var items []ghItem
+	if err := json.Unmarshal(out, &items); err != nil {
+		return nil, fmt.Errorf("parsing gh output: %w", err)
+	}
+	return items, nil
+}
+
+// matchItemToAgent returns the agent name for the first mapping whose labels
+// are ALL present on the item (AND semantics), or empty string if no mapping matches.
+func matchItemToAgent(item ghItem, mappings []config.DispatchMapping) string {
+	itemLabels := make(map[string]bool, len(item.Labels))
+	for _, l := range item.Labels {
+		itemLabels[l.Name] = true
 	}
 	for _, m := range mappings {
-		if issueLabels[m.Label] {
+		allMatch := true
+		for _, label := range m.Labels {
+			if !itemLabels[label] {
+				allMatch = false
+				break
+			}
+		}
+		if allMatch && len(m.Labels) > 0 {
 			return m.Agent
 		}
 	}
 	return ""
 }
 
-// dispatchIssue invokes af sling --agent <name> --reset [--caller <caller>] <issueURL>.
-func dispatchIssue(root, agent, issueURL, caller string) error {
+// groupMappingsBySource splits mappings into issue and PR groups based on Source field.
+func groupMappingsBySource(mappings []config.DispatchMapping) (issues, prs []config.DispatchMapping) {
+	for _, m := range mappings {
+		if m.Source == "pr" {
+			prs = append(prs, m)
+		} else {
+			issues = append(issues, m)
+		}
+	}
+	return issues, prs
+}
+
+// removeTriggerLabel removes the trigger label from a GitHub issue or PR.
+func removeTriggerLabel(repo string, number int, label string, source string) error {
+	subcmd := "issue"
+	if source == "pr" {
+		subcmd = "pr"
+	}
+	return exec.Command("gh", subcmd, "edit",
+		"--repo", repo,
+		fmt.Sprintf("%d", number),
+		"--remove-label", label,
+	).Run()
+}
+
+// dispatchItem invokes af sling --agent <name> --reset [--caller <caller>] <itemURL>.
+func dispatchItem(root, agent, itemURL, caller string) error {
 	afBin, err := os.Executable()
 	if err != nil {
 		afBin = "af"
@@ -253,7 +344,7 @@ func dispatchIssue(root, agent, issueURL, caller string) error {
 	if caller != "" {
 		args = append(args, "--caller", caller)
 	}
-	args = append(args, issueURL)
+	args = append(args, itemURL)
 	c := exec.Command(afBin, args...)
 	c.Dir = root
 	c.Stdout = os.Stdout
@@ -435,7 +526,7 @@ func formatDispatchStatus(running bool, entries map[string]dispatchEntry, agentS
 
 	fmt.Fprintln(&buf)
 	w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ISSUE\tAGENT\tSTATUS\tDISPATCHED")
+	fmt.Fprintln(w, "ISSUE\tSOURCE\tAGENT\tSTATUS\tDISPATCHED")
 	for _, key := range keys {
 		entry := entries[key]
 		status := "completed"
@@ -443,7 +534,7 @@ func formatDispatchStatus(running bool, entries map[string]dispatchEntry, agentS
 			status = "running"
 		}
 		age := time.Since(entry.DispatchedAt).Round(time.Minute)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s ago\n", key, entry.Agent, status, age)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s ago\n", key, entry.Source, entry.Agent, status, age)
 	}
 	w.Flush()
 

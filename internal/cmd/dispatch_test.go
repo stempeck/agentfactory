@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,14 +12,15 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/config"
+	"github.com/stempeck/agentfactory/internal/lock"
 )
 
-// --- matchIssueToAgent tests ---
+// --- matchItemToAgent tests ---
 
-func TestMatchIssueToAgent(t *testing.T) {
+func TestMatchItemToAgent(t *testing.T) {
 	mappings := []config.DispatchMapping{
-		{Label: "bug-triage", Agent: "debugger"},
-		{Label: "docs", Agent: "writer"},
+		{Labels: []string{"bug-triage"}, Agent: "debugger"},
+		{Labels: []string{"docs"}, Agent: "writer"},
 	}
 
 	tests := []struct {
@@ -45,18 +47,18 @@ func TestMatchIssueToAgent(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			issue := ghIssue{
+			item := ghItem{
 				Number: 1,
 				Title:  "test",
 				URL:    "https://github.com/owner/repo/issues/1",
 			}
 			for _, l := range tc.labels {
-				issue.Labels = append(issue.Labels, ghLabel{Name: l})
+				item.Labels = append(item.Labels, ghLabel{Name: l})
 			}
 
-			got := matchIssueToAgent(issue, mappings)
+			got := matchItemToAgent(item, mappings)
 			if got != tc.want {
-				t.Errorf("matchIssueToAgent() = %q, want %q", got, tc.want)
+				t.Errorf("matchItemToAgent() = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -140,7 +142,7 @@ func TestLoadDispatchState_ValidFile(t *testing.T) {
 			"owner/repo#42": {
 				Agent:        "debugger",
 				DispatchedAt: ts,
-				IssueURL:     "https://github.com/owner/repo/issues/42",
+				ItemURL:     "https://github.com/owner/repo/issues/42",
 			},
 		},
 	}
@@ -174,7 +176,7 @@ func TestSaveDispatchState_AtomicNoTempRemains(t *testing.T) {
 			"owner/repo#1": {
 				Agent:        "debugger",
 				DispatchedAt: time.Now().UTC(),
-				IssueURL:     "https://github.com/owner/repo/issues/1",
+				ItemURL:     "https://github.com/owner/repo/issues/1",
 			},
 		},
 	}
@@ -234,7 +236,7 @@ func TestCrossValidation_UnknownAgent(t *testing.T) {
 		Repos:        []string{"owner/repo"},
 		TriggerLabel: "agentic",
 		Mappings: []config.DispatchMapping{
-			{Label: "bug", Agent: "nonexistent"},
+			{Labels: []string{"bug"}, Agent: "nonexistent"},
 		},
 	}
 	agentsCfg := &config.AgentConfig{
@@ -258,7 +260,7 @@ func TestCrossValidation_UnknownNotifyAgent(t *testing.T) {
 		TriggerLabel:     "agentic",
 		NotifyOnComplete: "nonexistent",
 		Mappings: []config.DispatchMapping{
-			{Label: "bug", Agent: "manager"},
+			{Labels: []string{"bug"}, Agent: "manager"},
 		},
 	}
 	agentsCfg := &config.AgentConfig{
@@ -276,7 +278,7 @@ func TestCrossValidation_UnknownNotifyAgent(t *testing.T) {
 
 // --- gh JSON parsing tests ---
 
-func TestParseGHIssueJSON_Valid(t *testing.T) {
+func TestParseGHItemJSON_Valid(t *testing.T) {
 	fixture := `[
 		{
 			"number": 42,
@@ -289,31 +291,31 @@ func TestParseGHIssueJSON_Valid(t *testing.T) {
 		}
 	]`
 
-	var issues []ghIssue
-	if err := json.Unmarshal([]byte(fixture), &issues); err != nil {
+	var items []ghItem
+	if err := json.Unmarshal([]byte(fixture), &items); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(issues) != 1 {
-		t.Fatalf("expected 1 issue, got %d", len(issues))
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
 	}
-	if issues[0].Number != 42 {
-		t.Errorf("number = %d, want 42", issues[0].Number)
+	if items[0].Number != 42 {
+		t.Errorf("number = %d, want 42", items[0].Number)
 	}
-	if issues[0].URL != "https://github.com/owner/repo/issues/42" {
-		t.Errorf("url = %q, want github url", issues[0].URL)
+	if items[0].URL != "https://github.com/owner/repo/issues/42" {
+		t.Errorf("url = %q, want github url", items[0].URL)
 	}
-	if len(issues[0].Labels) != 2 {
-		t.Fatalf("expected 2 labels, got %d", len(issues[0].Labels))
+	if len(items[0].Labels) != 2 {
+		t.Fatalf("expected 2 labels, got %d", len(items[0].Labels))
 	}
 }
 
-func TestParseGHIssueJSON_Empty(t *testing.T) {
-	var issues []ghIssue
-	if err := json.Unmarshal([]byte(`[]`), &issues); err != nil {
+func TestParseGHItemJSON_Empty(t *testing.T) {
+	var items []ghItem
+	if err := json.Unmarshal([]byte(`[]`), &items); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(issues) != 0 {
-		t.Errorf("expected 0 issues, got %d", len(issues))
+	if len(items) != 0 {
+		t.Errorf("expected 0 items, got %d", len(items))
 	}
 }
 
@@ -410,19 +412,19 @@ func TestFormatDispatchStatus(t *testing.T) {
 			name:    "running with entries",
 			running: true,
 			entries: map[string]dispatchEntry{
-				"owner/repo#1": {Agent: "debugger", DispatchedAt: now.Add(-10 * time.Minute), IssueURL: "https://github.com/owner/repo/issues/1"},
+				"owner/repo#1": {Agent: "debugger", DispatchedAt: now.Add(-10 * time.Minute), ItemURL: "https://github.com/owner/repo/issues/1", Source: "issue"},
 			},
 			agentState: map[string]bool{"debugger": true},
-			wantHas:    []string{"RUNNING", "owner/repo#1", "debugger", "running"},
+			wantHas:    []string{"RUNNING", "owner/repo#1", "debugger", "running", "SOURCE", "issue"},
 		},
 		{
 			name:    "stopped with entries",
 			running: false,
 			entries: map[string]dispatchEntry{
-				"owner/repo#2": {Agent: "writer", DispatchedAt: now.Add(-30 * time.Minute), IssueURL: "https://github.com/owner/repo/issues/2"},
+				"owner/repo#2": {Agent: "writer", DispatchedAt: now.Add(-30 * time.Minute), ItemURL: "https://github.com/owner/repo/issues/2", Source: "pr"},
 			},
 			agentState: map[string]bool{"writer": false},
-			wantHas:    []string{"STOPPED", "owner/repo#2", "writer", "completed"},
+			wantHas:    []string{"STOPPED", "owner/repo#2", "writer", "completed", "pr"},
 		},
 		{
 			name:       "running with no entries",
@@ -542,4 +544,201 @@ func TestDispatchStop_NotRunning(t *testing.T) {
 	if !strings.Contains(err.Error(), "not running") {
 		t.Errorf("error = %q, want it to contain %q", err.Error(), "not running")
 	}
+}
+
+// --- Phase 4: Multi-label AND matching tests ---
+
+func TestMatchItemToAgent_MultiLabel_AND(t *testing.T) {
+	mappings := []config.DispatchMapping{
+		{Labels: []string{"a", "b"}, Agent: "agent1"},
+	}
+
+	tests := []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{
+			name:   "all required labels present (superset)",
+			labels: []string{"a", "b", "c"},
+			want:   "agent1",
+		},
+		{
+			name:   "missing required label b",
+			labels: []string{"a", "c"},
+			want:   "",
+		},
+		{
+			name:   "exact match all three required",
+			labels: []string{"a", "b", "c"},
+			want:   "agent1",
+		},
+		{
+			name:   "partial - only one of two required",
+			labels: []string{"a"},
+			want:   "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			item := ghItem{
+				Number: 1,
+				Title:  "test",
+				URL:    "https://github.com/owner/repo/issues/1",
+			}
+			for _, l := range tc.labels {
+				item.Labels = append(item.Labels, ghLabel{Name: l})
+			}
+
+			got := matchItemToAgent(item, mappings)
+			if got != tc.want {
+				t.Errorf("matchItemToAgent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	// Additional case: exact 3-label requirement
+	t.Run("exact three labels required", func(t *testing.T) {
+		m := []config.DispatchMapping{
+			{Labels: []string{"a", "b", "c"}, Agent: "agent2"},
+		}
+		item := ghItem{
+			Number: 2,
+			Title:  "test",
+			URL:    "https://github.com/owner/repo/issues/2",
+			Labels: []ghLabel{{Name: "a"}, {Name: "b"}, {Name: "c"}},
+		}
+		got := matchItemToAgent(item, m)
+		if got != "agent2" {
+			t.Errorf("matchItemToAgent() = %q, want %q", got, "agent2")
+		}
+	})
+}
+
+// --- Phase 4: PR JSON parsing test ---
+
+func TestQueryGitHubPRs_JSONParse(t *testing.T) {
+	fixture := `[
+		{
+			"number": 99,
+			"title": "Fix CI pipeline",
+			"url": "https://github.com/owner/repo/pull/99",
+			"labels": [
+				{"name": "agentic"},
+				{"name": "ci-fix"}
+			]
+		}
+	]`
+
+	var items []ghItem
+	if err := json.Unmarshal([]byte(fixture), &items); err != nil {
+		t.Fatalf("unmarshal PR JSON: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].Number != 99 {
+		t.Errorf("number = %d, want 99", items[0].Number)
+	}
+	if items[0].Title != "Fix CI pipeline" {
+		t.Errorf("title = %q, want %q", items[0].Title, "Fix CI pipeline")
+	}
+	if !strings.Contains(items[0].URL, "/pull/") {
+		t.Errorf("url = %q, want it to contain /pull/ (PR format)", items[0].URL)
+	}
+	if len(items[0].Labels) != 2 {
+		t.Fatalf("expected 2 labels, got %d", len(items[0].Labels))
+	}
+	if items[0].Labels[0].Name != "agentic" {
+		t.Errorf("labels[0] = %q, want %q", items[0].Labels[0].Name, "agentic")
+	}
+}
+
+// --- Phase 4: Source grouping test ---
+
+func TestGroupMappingsBySource(t *testing.T) {
+	tests := []struct {
+		name      string
+		mappings  []config.DispatchMapping
+		wantIssue int
+		wantPR    int
+	}{
+		{
+			name: "mixed mappings",
+			mappings: []config.DispatchMapping{
+				{Labels: []string{"bug"}, Source: "issue", Agent: "debugger"},
+				{Labels: []string{"review"}, Source: "pr", Agent: "reviewer"},
+				{Labels: []string{"docs"}, Source: "issue", Agent: "writer"},
+			},
+			wantIssue: 2,
+			wantPR:    1,
+		},
+		{
+			name: "all issue mappings",
+			mappings: []config.DispatchMapping{
+				{Labels: []string{"bug"}, Source: "issue", Agent: "debugger"},
+				{Labels: []string{"docs"}, Source: "issue", Agent: "writer"},
+			},
+			wantIssue: 2,
+			wantPR:    0,
+		},
+		{
+			name: "all pr mappings",
+			mappings: []config.DispatchMapping{
+				{Labels: []string{"review"}, Source: "pr", Agent: "reviewer"},
+				{Labels: []string{"ci"}, Source: "pr", Agent: "devops"},
+			},
+			wantIssue: 0,
+			wantPR:    2,
+		},
+		{
+			name:      "empty mappings",
+			mappings:  nil,
+			wantIssue: 0,
+			wantPR:    0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			issues, prs := groupMappingsBySource(tc.mappings)
+			if len(issues) != tc.wantIssue {
+				t.Errorf("issues count = %d, want %d", len(issues), tc.wantIssue)
+			}
+			if len(prs) != tc.wantPR {
+				t.Errorf("prs count = %d, want %d", len(prs), tc.wantPR)
+			}
+		})
+	}
+}
+
+// --- Phase 4: Dispatch cycle lock test ---
+
+func TestDispatchCycleLock(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "dispatch-cycle.lock")
+
+	lk := lock.NewWithPath(lockPath)
+	if err := lk.Acquire("test-1"); err != nil {
+		t.Fatalf("first acquire failed: %v", err)
+	}
+
+	// Second acquire on same path should fail with ErrLocked
+	lk2 := lock.NewWithPath(lockPath)
+	err := lk2.Acquire("test-2")
+	if !errors.Is(err, lock.ErrLocked) {
+		t.Fatalf("second acquire: got %v, want %v", err, lock.ErrLocked)
+	}
+
+	// Release first lock
+	if err := lk.Release(); err != nil {
+		t.Fatalf("release failed: %v", err)
+	}
+
+	// After release, second acquire should succeed
+	if err := lk2.Acquire("test-2"); err != nil {
+		t.Fatalf("acquire after release failed: %v", err)
+	}
+	defer lk2.Release()
 }

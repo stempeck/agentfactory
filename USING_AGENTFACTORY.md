@@ -135,10 +135,18 @@ Configuration lives in `.agentfactory/dispatch.json` (created by `af install --i
 {
   "repos": ["myorg/myrepo"],
   "trigger_label": "agentic",
-  "notify_on_complete": "manager",
+  "remove_trigger_after_dispatch": true,
   "mappings": [
-    {"label": "bug",     "agent": "factoryworker"},
-    {"label": "feature", "agent": "supervisor"}
+    {
+      "labels": ["bug"],
+      "source": "issue",
+      "agent": "factoryworker"
+    },
+    {
+      "labels": ["reviewer"],
+      "source": "pr",
+      "agent": "reviewer"
+    }
   ]
 }
 ```
@@ -157,7 +165,7 @@ Edit `.agentfactory/agents.json` at the project root:
 }
 ```
 
-Add groups in `.agentfactory/messaging.json`:
+Add mail groups in `.agentfactory/messaging.json`:
 
 ```json
 {

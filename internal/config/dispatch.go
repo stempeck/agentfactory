@@ -8,18 +8,21 @@ import (
 
 // DispatchConfig holds the contents of .agentfactory/dispatch.json
 type DispatchConfig struct {
-	Repos            []string          `json:"repos"`
-	TriggerLabel     string            `json:"trigger_label"`
-	NotifyOnComplete string            `json:"notify_on_complete"`
-	Mappings         []DispatchMapping `json:"mappings"`
-	IntervalSecs     int               `json:"interval_seconds"`
-	RetryAfterSecs   int               `json:"retry_after_seconds"`
+	Repos                      []string          `json:"repos"`
+	TriggerLabel               string            `json:"trigger_label"`
+	NotifyOnComplete           string            `json:"notify_on_complete"`
+	Mappings                   []DispatchMapping `json:"mappings"`
+	IntervalSecs               int               `json:"interval_seconds"`
+	RetryAfterSecs             int               `json:"retry_after_seconds"`
+	RemoveTriggerAfterDispatch bool              `json:"remove_trigger_after_dispatch"`
 }
 
-// DispatchMapping maps a GitHub label to an agent name.
+// DispatchMapping maps GitHub labels to an agent name.
 type DispatchMapping struct {
-	Label string `json:"label"`
-	Agent string `json:"agent"`
+	Label  string   `json:"label,omitempty"`
+	Labels []string `json:"labels,omitempty"`
+	Source string   `json:"source,omitempty"`
+	Agent  string   `json:"agent"`
 }
 
 // LoadDispatchConfig loads and validates .agentfactory/dispatch.json.
@@ -53,9 +56,22 @@ func validateDispatchConfig(cfg *DispatchConfig) error {
 	if len(cfg.Mappings) == 0 {
 		return fmt.Errorf("%w: dispatch config must have at least one mapping", ErrMissingField)
 	}
-	for _, m := range cfg.Mappings {
-		if m.Label == "" {
-			return fmt.Errorf("%w: mapping must have a label", ErrMissingField)
+	for i, m := range cfg.Mappings {
+		if m.Label != "" && len(m.Labels) > 0 {
+			return fmt.Errorf("%w: mapping has both label and labels (ambiguous)", ErrMissingField)
+		}
+		if m.Label != "" && len(m.Labels) == 0 {
+			cfg.Mappings[i].Labels = []string{m.Label}
+			cfg.Mappings[i].Label = ""
+		}
+		if len(cfg.Mappings[i].Labels) == 0 {
+			return fmt.Errorf("%w: mapping must have at least one label", ErrMissingField)
+		}
+		if m.Source != "" && m.Source != "issue" && m.Source != "pr" {
+			return fmt.Errorf("%w: mapping source must be \"issue\" or \"pr\", got %q", ErrInvalidType, m.Source)
+		}
+		if cfg.Mappings[i].Source == "" {
+			cfg.Mappings[i].Source = "issue"
 		}
 		if m.Agent == "" {
 			return fmt.Errorf("%w: mapping must have an agent", ErrMissingField)
