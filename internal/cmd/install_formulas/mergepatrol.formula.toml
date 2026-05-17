@@ -8,13 +8,19 @@ The MergePatrol is the Engineer in the engine room. You process agent branches, 
 
 ## Merge Flow
 
-The MergePatrol receives MERGE_READY mail from agents when they complete work:
+MergePatrol discovers work through two channels:
+
+1. **Mail**: Agents send MERGE_READY mail when they complete work
+2. **Label**: PRs with the `merge_ready` GitHub label (applied from UI or by automation)
 
 ```
-Agent                      MergePatrol                    Git
+Agent                      MergePatrol                    Git / GitHub
    │                          │                           │
-   │ MERGE_READY              │                           │
+   │ MERGE_READY (mail)       │                           │
    │─────────────────────────>│                           │
+   │                          │                           │
+   │              merge_ready label (GitHub UI)           │
+   │                          │<──────────────────────────│
    │                          │                           │
    │                    (verify branch)                   │
    │                          │ fetch & rebase            │
@@ -26,13 +32,14 @@ Agent                      MergePatrol                    Git
    │                          │ merge & push              │
    │                          │──────────────────────────>│
    │                          │                           │
-   │ MERGED                   │                           │
-   │<─────────────────────────│                           │
+   │ MERGED (if agent known)  │  remove merge_ready label │
+   │<─────────────────────────│──────────────────────────>│
    │                          │                           │
 ```
 
-After successful merge, MergePatrol sends MERGED mail back to the agent so it can
-complete cleanup (remove the agent worktree).
+After successful merge, MergePatrol sends MERGED mail back to the agent (if an agent
+name is associated with the PR) so it can complete cleanup. For label-only PRs with
+no associated agent, the label is removed and the PR is closed without MERGED mail.
 
 ## !IMPORTANT - MANDATORY Exact Step Execution
 Execute each formula step EXACTLY as written, in order, with no modifications.
@@ -116,15 +123,33 @@ id = "queue-scan"
 title = "Scan processing queue"
 needs = ["inbox-check"]
 description = """
-Build the processing queue from MERGE_READY messages collected in inbox-check.
+Build the processing queue from two discovery sources: MERGE_READY messages collected
+in inbox-check AND PRs with the merge_ready GitHub label.
 
 ```bash
 git fetch --prune origin
 ```
 
-The MERGE_READY messages from inbox-check are your source of truth for pending merges.
+**Source 1: MERGE_READY mail messages**
+The MERGE_READY messages from inbox-check are one source for pending merges.
 
-If no MERGE_READY messages were found, skip to context-check step.
+**Source 2: GitHub label-based discovery**
+Scan for open PRs with the `merge_ready` label:
+```bash
+gh pr list --label merge_ready --state open --json number,title,url,headRefName
+```
+
+For each label-discovered PR:
+- Extract branch name from `headRefName`
+- Extract PR URL from `url`
+- Extract PR number from `number`
+- Add to processing queue with source marked as "label"
+
+**Deduplication**: If a PR appears in both mail AND label sources (same branch name
+already queued from MERGE_READY mail), skip the duplicate. Deduplicate by branch name
+to prevent double-processing.
+
+If no MERGE_READY messages were found AND no label-discovered PRs exist, skip to context-check step.
 
 For each queued branch, verify it still exists:
 ```bash
@@ -132,7 +157,7 @@ git branch -r | grep <branch>
 ```
 
 If branch doesn't exist for a queued item:
-- Notify the sender that the branch is gone
+- Notify the sender that the branch is gone (if mail-sourced)
 - Remove from processing queue
 
 Track verified branch list for this cycle."""
@@ -268,9 +293,9 @@ git push origin main
 
 ⚠️ **STOP HERE - DO NOT PROCEED UNTIL STEPS 2-3 COMPLETE**
 
-**Step 2: Send MERGED Notification (REQUIRED - DO THIS IMMEDIATELY)**
+**Step 2: Send MERGED Notification (REQUIRED if agent is known)**
 
-RIGHT NOW, before any cleanup, send MERGED mail to the agent:
+If this PR was discovered via mail (an agent sent MERGE_READY), send MERGED mail:
 
 ```bash
 af mail send <agent-name> -s "MERGED <agent-name>" -m "Branch: <branch>
@@ -280,6 +305,9 @@ Merged-At: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 This signals the agent that its work has landed. WITHOUT THIS NOTIFICATION,
 agent worktrees accumulate indefinitely and the lifecycle breaks.
+
+If this PR was discovered via label only (no agent name available — e.g., submitted
+by a human from GitHub UI), skip the MERGED notification. No agent to notify.
 
 **Step 3: Close the PR (REQUIRED - DO THIS IMMEDIATELY)**
 
@@ -298,11 +326,19 @@ The PR was merged via fast-forward, so close it:
 gh pr close <pr-url> --comment "Merged to main at $(git rev-parse --short HEAD)"
 ```
 
-**Step 4: Delete the MERGE_READY mail (REQUIRED)**
+**Step 4: Delete the MERGE_READY mail (REQUIRED if mail-sourced)**
 ```bash
 af mail delete <merge-ready-message-id>
 ```
 The message ID was tracked when you processed inbox-check.
+Skip this step if the PR was discovered via label only (no mail to delete).
+
+**Step 4b: Remove merge_ready label (REQUIRED if label-sourced)**
+If the PR was discovered via the merge_ready label, remove it after merge:
+```bash
+gh pr edit <pr-number> --remove-label merge_ready
+```
+This prevents re-discovery on the next patrol cycle.
 
 **Step 5: Cleanup (only after Steps 2-4 confirmed)**
 ```bash
@@ -311,9 +347,10 @@ git push origin --delete <agent-branch>
 ```
 
 **VERIFICATION GATE**: You CANNOT proceed to loop-check without:
-- [x] MERGED mail sent to agent
+- [x] MERGED mail sent to agent (if agent known; skip for label-only PRs)
 - [x] PR closed
-- [x] MERGE_READY mail deleted
+- [x] MERGE_READY mail deleted (if mail-sourced)
+- [x] merge_ready label removed (if label-sourced)
 - [x] Branch deleted from origin (git push origin --delete <agent-branch>)
 
 If you skipped any of these steps, GO BACK AND DO THEM NOW.
@@ -463,9 +500,16 @@ If queue non-empty AND context LOW:
 
 If queue empty OR context HIGH OR good stopping point:
 - Squash wisp with summary digest
-- Use `af handoff` for clean session transition:
+- Use `af handoff` for clean session transition
+- Pass `--idle` when the queue was empty (no work processed this cycle) to engage
+  incremental back-off (60s per consecutive idle cycle, max 30 min):
 
 ```bash
+# When queue was empty (no work done):
+af handoff --idle -s "Patrol complete (idle)" -m "Queue: empty
+Next: back-off cycle"
+
+# When work was done but context is high:
 af handoff -s "Patrol complete" -m "Merged X branches, Y tests passed.
 Queue: empty/N remaining
 Next: [any notes for successor]"
