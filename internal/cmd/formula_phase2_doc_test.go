@@ -28,6 +28,54 @@ func TestFormulaCreateSkill_AllowedToolsTarget(t *testing.T) {
 	t.Fatal("no allowed-tools line found in SKILL.md")
 }
 
+func TestFormulaCreateSkill_SkillsArrayInTemplate(t *testing.T) {
+	data, err := os.ReadFile("../../.claude/skills/formula-create/SKILL.md")
+	if err != nil {
+		t.Fatalf("reading SKILL.md: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, `skills = ["skill-a", "skill-b"]`) {
+		t.Error("SKILL.md TOML template must include skills = [...] field after version = 1")
+	}
+}
+
+func TestFormulaCreateSkillmdMode_SkillsPopulationGuidance(t *testing.T) {
+	data, err := os.ReadFile("../../.claude/skills/formula-create/skillmd-mode.md")
+	if err != nil {
+		t.Fatalf("reading skillmd-mode.md: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "Skills array population") {
+		t.Error("skillmd-mode.md must contain skills array population guidance between Section 10.2 and 10.3")
+	}
+}
+
+func TestFormulaCreateSkillmdMode_SkillInvocationPattern(t *testing.T) {
+	data, err := os.ReadFile("../../.claude/skills/formula-create/skillmd-mode.md")
+	if err != nil {
+		t.Fatalf("reading skillmd-mode.md: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, `Skill(skill: "name", args: "...")`) {
+		t.Error("skillmd-mode.md must document the Skill() invocation pattern")
+	}
+}
+
+func TestFormulaCreateSkillmdMode_SkillsArrayCompletenessCheck(t *testing.T) {
+	data, err := os.ReadFile("../../.claude/skills/formula-create/skillmd-mode.md")
+	if err != nil {
+		t.Fatalf("reading skillmd-mode.md: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "Skills array completeness") {
+		t.Error("skillmd-mode.md Section 10.10 must include check #7 for skills array completeness")
+	}
+}
+
 func TestUsingAgentfactoryDoc_SyncBehavior(t *testing.T) {
 	data, err := os.ReadFile("../../USING_AGENTFACTORY.md")
 	if err != nil {

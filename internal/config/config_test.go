@@ -533,6 +533,98 @@ func TestLoadAgentConfig_NoFormulaFieldStillLoads(t *testing.T) {
 	}
 }
 
+// --- Model field backward compatibility ---
+
+func TestLoadAgentConfig_ModelFieldLoads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents.json")
+	data := `{
+		"agents": {
+			"gen-agent": {"type": "autonomous", "description": "Generated", "model": "sonnet"}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadAgentConfig(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agents["gen-agent"].Model != "sonnet" {
+		t.Errorf("model = %q, want %q", cfg.Agents["gen-agent"].Model, "sonnet")
+	}
+}
+
+func TestLoadAgentConfig_NoModelFieldStillLoads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents.json")
+	data := `{
+		"agents": {
+			"manager": {"type": "interactive", "description": "Manager"}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadAgentConfig(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agents["manager"].Model != "" {
+		t.Errorf("model = %q, want empty string", cfg.Agents["manager"].Model)
+	}
+}
+
+func TestSaveAgentConfig_OmitsEmptyModel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents.json")
+
+	cfg := &AgentConfig{
+		Agents: map[string]AgentEntry{
+			"manager": {Type: "interactive", Description: "Manager"},
+		},
+	}
+
+	if err := SaveAgentConfig(path, cfg); err != nil {
+		t.Fatalf("SaveAgentConfig: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	if strings.Contains(string(data), "model") {
+		t.Errorf("expected no 'model' key in JSON output for empty model, got: %s", data)
+	}
+}
+
+func TestSaveAgentConfig_IncludesModel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents.json")
+
+	cfg := &AgentConfig{
+		Agents: map[string]AgentEntry{
+			"gen-agent": {Type: "autonomous", Description: "Generated", Model: "sonnet"},
+		},
+	}
+
+	if err := SaveAgentConfig(path, cfg); err != nil {
+		t.Fatalf("SaveAgentConfig: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	if !strings.Contains(string(data), `"model": "sonnet"`) {
+		t.Errorf("expected 'model': 'sonnet' in JSON output, got: %s", data)
+	}
+}
+
 // --- Phase 4 tests ---
 
 func TestSaveAgentConfig_AtomicNoTempFileRemains(t *testing.T) {
@@ -794,5 +886,148 @@ func TestLoadAgentConfig_SparsePaths(t *testing.T) {
 	}
 	if entry.SparsePaths[0] != "src/" || entry.SparsePaths[1] != "docs/" {
 		t.Errorf("SparsePaths = %v, want [src/ docs/]", entry.SparsePaths)
+	}
+}
+
+// --- Endpoint field tests (BaseURL, AuthToken) ---
+
+func TestLoadAgentConfig_EndpointFieldsLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents.json")
+	data := `{
+		"agents": {
+			"gen-agent": {"type": "autonomous", "description": "Generated", "base_url": "http://localhost:1234/v1/messages", "auth_token": "my-token"}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadAgentConfig(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agents["gen-agent"].BaseURL != "http://localhost:1234/v1/messages" {
+		t.Errorf("base_url = %q, want %q", cfg.Agents["gen-agent"].BaseURL, "http://localhost:1234/v1/messages")
+	}
+	if cfg.Agents["gen-agent"].AuthToken != "my-token" {
+		t.Errorf("auth_token = %q, want %q", cfg.Agents["gen-agent"].AuthToken, "my-token")
+	}
+}
+
+func TestLoadAgentConfig_NoEndpointFieldStillLoads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents.json")
+	data := `{
+		"agents": {
+			"manager": {"type": "interactive", "description": "Manager"}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadAgentConfig(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agents["manager"].BaseURL != "" {
+		t.Errorf("base_url = %q, want empty string", cfg.Agents["manager"].BaseURL)
+	}
+	if cfg.Agents["manager"].AuthToken != "" {
+		t.Errorf("auth_token = %q, want empty string", cfg.Agents["manager"].AuthToken)
+	}
+}
+
+func TestSaveAgentConfig_OmitsEmptyEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents.json")
+
+	cfg := &AgentConfig{
+		Agents: map[string]AgentEntry{
+			"manager": {Type: "interactive", Description: "Manager"},
+		},
+	}
+
+	if err := SaveAgentConfig(path, cfg); err != nil {
+		t.Fatalf("SaveAgentConfig: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	if strings.Contains(string(data), "base_url") {
+		t.Errorf("expected no 'base_url' key in JSON output for empty base_url, got: %s", data)
+	}
+	if strings.Contains(string(data), "auth_token") {
+		t.Errorf("expected no 'auth_token' key in JSON output for empty auth_token, got: %s", data)
+	}
+}
+
+func TestSaveAgentConfig_IncludesEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents.json")
+
+	cfg := &AgentConfig{
+		Agents: map[string]AgentEntry{
+			"gen-agent": {Type: "autonomous", Description: "Generated", BaseURL: "http://localhost:1234/v1/messages", AuthToken: "my-token"},
+		},
+	}
+
+	if err := SaveAgentConfig(path, cfg); err != nil {
+		t.Fatalf("SaveAgentConfig: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	if !strings.Contains(string(data), `"base_url": "http://localhost:1234/v1/messages"`) {
+		t.Errorf("expected base_url in JSON output, got: %s", data)
+	}
+	if !strings.Contains(string(data), `"auth_token": "my-token"`) {
+		t.Errorf("expected auth_token in JSON output, got: %s", data)
+	}
+}
+
+func TestValidateAgentConfig_InvalidBaseURL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents.json")
+	data := `{
+		"agents": {
+			"local-agent": {"type": "autonomous", "description": "Local", "base_url": "localhost:1234"}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	_, err := LoadAgentConfig(path)
+	if err == nil {
+		t.Fatal("expected error for base_url without http/https scheme, got nil")
+	}
+	if !strings.Contains(err.Error(), "base_url") {
+		t.Errorf("error should mention base_url, got: %v", err)
+	}
+}
+
+func TestValidateAgentConfig_ValidBaseURL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents.json")
+	data := `{
+		"agents": {
+			"local-agent": {"type": "autonomous", "description": "Local", "base_url": "http://localhost:1234/v1/messages"}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	_, err := LoadAgentConfig(path)
+	if err != nil {
+		t.Fatalf("unexpected error for valid base_url: %v", err)
 	}
 }

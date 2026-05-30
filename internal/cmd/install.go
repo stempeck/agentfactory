@@ -84,6 +84,10 @@ func runInstallInit(cmd *cobra.Command) error {
 		return fmt.Errorf("migrating legacy store directory: %w", err)
 	}
 
+	if err := cleanLegacyGateLocks(); err != nil {
+		return fmt.Errorf("cleaning legacy gate locks: %w", err)
+	}
+
 	// 2. Create .agentfactory/ directory
 	configDir := config.ConfigDir(cwd)
 	if err := os.MkdirAll(configDir, 0755); err != nil {
@@ -377,6 +381,23 @@ func copyDir(src, dst string) error {
 func removeIfEmpty(dir string) {
 	// os.Remove fails on non-empty directories — safe by design
 	os.Remove(dir)
+}
+
+func cleanLegacyGateLocks() error {
+	patterns := []string{
+		"/tmp/af-fidelity-gate-*.lock",
+		"/tmp/af-quality-gate-*.lock",
+	}
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return fmt.Errorf("globbing %s: %w", pattern, err)
+		}
+		for _, match := range matches {
+			os.RemoveAll(match)
+		}
+	}
+	return nil
 }
 
 func runInstallRole(cmd *cobra.Command, role string) error {

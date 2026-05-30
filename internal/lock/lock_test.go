@@ -108,6 +108,44 @@ func TestProcessExists_Dead(t *testing.T) {
 	}
 }
 
+func TestRelease_NonExistentFile(t *testing.T) {
+	l := NewWithPath(filepath.Join(t.TempDir(), "nonexistent.lock"))
+	if err := l.Release(); err != nil {
+		t.Errorf("Release on non-existent file should succeed (no-op), got: %v", err)
+	}
+}
+
+func TestNewWithPath_GateLockRelease(t *testing.T) {
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatalf("creating runtime dir: %v", err)
+	}
+
+	gateLocks := []string{"fidelity-gate.lock", "quality-gate.lock"}
+	for _, name := range gateLocks {
+		path := filepath.Join(runtimeDir, name)
+		if err := os.WriteFile(path, []byte(`{"pid":99999999,"acquired_at":"2026-01-01T00:00:00Z"}`), 0o644); err != nil {
+			t.Fatalf("creating %s: %v", name, err)
+		}
+	}
+
+	for _, name := range gateLocks {
+		path := filepath.Join(runtimeDir, name)
+		l := NewWithPath(path)
+		if err := l.Release(); err != nil {
+			t.Errorf("Release %s: %v", name, err)
+		}
+	}
+
+	for _, name := range gateLocks {
+		path := filepath.Join(runtimeDir, name)
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s should be removed after Release(), but still exists", name)
+		}
+	}
+}
+
 func TestAcquire_ActiveLock(t *testing.T) {
 	dir := t.TempDir()
 

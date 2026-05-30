@@ -1,13 +1,16 @@
 package cmd
 
 import (
-	"context"
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -25,6 +28,7 @@ import (
 var (
 	donePhaseComplete bool
 	doneGate          string
+	doneSkip          string
 )
 
 var doneCmd = &cobra.Command{
@@ -43,6 +47,7 @@ The session ends and a fresh agent is dispatched when the gate resolves.`,
 func init() {
 	doneCmd.Flags().BoolVar(&donePhaseComplete, "phase-complete", false, "Signal phase complete, await gate")
 	doneCmd.Flags().StringVar(&doneGate, "gate", "", "Gate bead ID (required with --phase-complete)")
+	doneCmd.Flags().StringVar(&doneSkip, "skip", "", "Close step with explicit skip reason (requires af prime)")
 	rootCmd.AddCommand(doneCmd)
 }
 
@@ -100,11 +105,31 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 
 	step := result.Steps[0]
 
+	// 2a. Write last_closed_step identity BEFORE closing (for fidelity gate hook)
+	if err := writeLastClosedStep(ctx, cwd, step, instanceID, store); err != nil {
+		return fmt.Errorf("writing last closed step: %w", err)
+	}
+
+	// 2b. Check close velocity for suspicious rapid-fire patterns (before prime
+	// check so accumulated unprimed attempts eventually escalate)
+	if err := checkDoneVelocity(cwd); err != nil {
+		return err
+	}
+
+	// 2c. Verify step was primed (agent read instructions via af prime)
+	if err := checkStepPrimed(ctx, cwd, step.ID, store); err != nil {
+		_ = recordDoneTimestamp(cwd, step.ID, false, "")
+		return err
+	}
+
 	// 3. Close current step
 	if err := store.Close(ctx, step.ID, ""); err != nil {
 		return fmt.Errorf("closing step %s: %w", step.ID, err)
 	}
 	fmt.Printf("✓ Step closed: %s\n", step.Title)
+
+	// 3a. Record close timestamp for velocity tracking
+	_ = recordDoneTimestamp(cwd, step.ID, true, "full_output")
 
 	// 4. Gate handling
 	if phaseComplete {
@@ -165,6 +190,13 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 	formulaName := instanceID
 	if iss, err := store.Get(ctx, instanceID); err == nil && iss.Title != "" {
 		formulaName = iss.Title
+	}
+
+	if guardTriggered, reason := checkFormulaCompletionVelocity(cwd); guardTriggered {
+		fmt.Fprintf(os.Stderr, "GUARD: Formula completion blocked — %s\n", reason)
+		_ = sendEscalationMail("supervisor", instanceID, formulaName, reason)
+		triggerHandoffRespawn(cwd, factoryRoot)
+		return fmt.Errorf("formula completion guard triggered: %s", reason)
 	}
 
 	// Find the caller/dispatcher.
@@ -285,6 +317,95 @@ var sendWorkDoneMail = func(caller, instanceID, formulaName string, stepCount in
 	return nil
 }
 
+var sendEscalationMail = func(recipient, instanceID, formulaName, reason string) error {
+	if isTestBinary() {
+		return nil
+	}
+
+	afPath, err := os.Executable()
+	if err != nil {
+		afPath, _ = exec.LookPath("af")
+	}
+	if afPath == "" {
+		return fmt.Errorf("cannot find af binary")
+	}
+	subject := fmt.Sprintf("GUARD: Formula completion blocked for %s", formulaName)
+	body := fmt.Sprintf("Formula %s (%s) completion blocked: %s", formulaName, instanceID, reason)
+	cmd := exec.Command(afPath, "mail", "send", recipient, "-s", subject, "-m", body)
+	cmd.Env = os.Environ()
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if stderr.Len() > 0 {
+			return fmt.Errorf("escalation mail to %s failed: %w\nsubprocess stderr: %s", recipient, err, strings.TrimSpace(stderr.String()))
+		}
+		return fmt.Errorf("escalation mail to %s: %w", recipient, err)
+	}
+	return nil
+}
+
+func checkFormulaCompletionVelocity(workDir string) (triggered bool, reason string) {
+	path := filepath.Join(workDir, ".runtime", "done_velocity")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, ""
+	}
+
+	var record doneVelocityRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return false, ""
+	}
+
+	threshold := 3
+	if v := os.Getenv("AF_DONE_VELOCITY_THRESHOLD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			threshold = n
+		}
+	}
+
+	unprimedCount := 0
+	for _, entry := range record.Closes {
+		if !entry.WasPrimed {
+			unprimedCount++
+		}
+	}
+
+	if unprimedCount >= threshold {
+		return true, fmt.Sprintf("%d of %d closes were unprimed (threshold %d) — possible step-skipping detected", unprimedCount, len(record.Closes), threshold)
+	}
+	return false, ""
+}
+
+func triggerHandoffRespawn(cwd, factoryRoot string) {
+	if isTestBinary() {
+		return
+	}
+
+	afPath, err := os.Executable()
+	if err != nil {
+		afPath, _ = exec.LookPath("af")
+	}
+	if afPath == "" {
+		fmt.Fprintf(os.Stderr, "warning: cannot find af binary for handoff respawn\n")
+		return
+	}
+	cmd := exec.Command(afPath, "handoff", "--collect")
+	cmd.Dir = cwd
+	cmd.Env = os.Environ()
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: handoff respawn failed: %v\n", err)
+		if stderr.Len() > 0 {
+			fmt.Fprintf(os.Stderr, "  subprocess stderr: %s\n", strings.TrimSpace(stderr.String()))
+		}
+	}
+}
+
 // cleanupRuntimeArtifacts removes stale formula runtime files after completion.
 // Best-effort removal (ignore errors) matches the existing checkpoint.Remove pattern.
 // NOTE: Does NOT remove worktree_id or worktree_owner — those are needed by the
@@ -293,6 +414,9 @@ func cleanupRuntimeArtifacts(cwd string) {
 	os.Remove(filepath.Join(cwd, ".runtime", "hooked_formula"))
 	os.Remove(filepath.Join(cwd, ".runtime", "formula_caller"))
 	os.Remove(filepath.Join(cwd, ".runtime", "dispatched"))
+	os.Remove(filepath.Join(cwd, ".runtime", "last_closed_step"))
+	os.Remove(filepath.Join(cwd, ".runtime", "step_primed"))
+	os.Remove(filepath.Join(cwd, ".runtime", "done_velocity"))
 }
 
 // readWorktreeID reads the worktree ID from .runtime/worktree_id.
@@ -388,4 +512,157 @@ func countAllChildren(ctx context.Context, store issuestore.Store, parentID stri
 		return 0, fmt.Errorf("counting children: %w", err)
 	}
 	return len(items), nil
+}
+
+type lastClosedStepRecord struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	ClosedAt    string `json:"closed_at"`
+	Formula     string `json:"formula"`
+}
+
+func writeLastClosedStep(ctx context.Context, workDir string, step issuestore.Issue, instanceID string, store issuestore.Store) error {
+	runtimeDir := filepath.Join(workDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		return err
+	}
+
+	var description string
+	if iss, err := store.Get(ctx, step.ID); err == nil {
+		description = iss.Description
+	}
+
+	formulaName := instanceID
+	if iss, err := store.Get(ctx, instanceID); err == nil && iss.Title != "" {
+		formulaName = iss.Title
+	}
+
+	record := lastClosedStepRecord{
+		ID:          step.ID,
+		Title:       step.Title,
+		Description: description,
+		ClosedAt:    time.Now().UTC().Format(time.RFC3339),
+		Formula:     formulaName,
+	}
+
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling last closed step: %w", err)
+	}
+	data = append(data, '\n')
+	return os.WriteFile(filepath.Join(runtimeDir, "last_closed_step"), data, 0o644)
+}
+
+func checkStepPrimed(ctx context.Context, workDir string, stepID string, store issuestore.Store) error {
+	path := filepath.Join(workDir, ".runtime", "step_primed")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("step not primed: run 'af prime' before 'af done' to read step instructions")
+	}
+	content := strings.TrimSpace(string(data))
+	parts := strings.SplitN(content, ":", 2)
+	primedID := parts[0]
+	if primedID != stepID {
+		return fmt.Errorf("step primed for %s but closing %s: run 'af prime' to refresh", primedID, stepID)
+	}
+	if len(parts) == 2 {
+		storedHash := parts[1]
+		if iss, err := store.Get(ctx, stepID); err == nil {
+			h := sha256.Sum256([]byte(iss.Description))
+			expectedHash := fmt.Sprintf("%x", h[:4])
+			if storedHash != expectedHash {
+				return fmt.Errorf("step instructions changed since prime (hash mismatch): run 'af prime' to refresh")
+			}
+		}
+	}
+	return nil
+}
+
+type doneVelocityRecord struct {
+	Closes          []doneVelocityEntry `json:"closes"`
+	LastEvalBetween string              `json:"last_eval_between,omitempty"`
+}
+
+type doneVelocityEntry struct {
+	StepID       string `json:"step_id"`
+	WasPrimed    bool   `json:"was_primed"`
+	EvidenceType string `json:"evidence_type,omitempty"`
+	ClosedAt     string `json:"closed_at"`
+}
+
+func checkDoneVelocity(workDir string) error {
+	path := filepath.Join(workDir, ".runtime", "done_velocity")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	var record doneVelocityRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return nil
+	}
+
+	threshold := 3
+	if v := os.Getenv("AF_DONE_VELOCITY_THRESHOLD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			threshold = n
+		}
+	}
+
+	window := 30
+	if v := os.Getenv("AF_DONE_VELOCITY_WINDOW"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			window = n
+		}
+	}
+
+	cutoff := time.Now().UTC().Add(-time.Duration(window) * time.Second)
+	unprimedCount := 0
+	for _, entry := range record.Closes {
+		if entry.WasPrimed {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, entry.ClosedAt)
+		if err != nil {
+			continue
+		}
+		if t.After(cutoff) {
+			unprimedCount++
+		}
+	}
+
+	if unprimedCount >= threshold {
+		return fmt.Errorf("velocity escalation: %d unprimed closes within %ds exceeds threshold %d — possible step-skipping detected, review agent behavior", unprimedCount, window, threshold)
+	}
+	return nil
+}
+
+func recordDoneTimestamp(workDir string, stepID string, wasPrimed bool, evidenceType string) error {
+	path := filepath.Join(workDir, ".runtime", "done_velocity")
+	runtimeDir := filepath.Join(workDir, ".runtime")
+	_ = os.MkdirAll(runtimeDir, 0o755)
+
+	var record doneVelocityRecord
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &record)
+	}
+
+	record.Closes = append(record.Closes, doneVelocityEntry{
+		StepID:       stepID,
+		WasPrimed:    wasPrimed,
+		EvidenceType: evidenceType,
+		ClosedAt:     time.Now().UTC().Format(time.RFC3339),
+	})
+
+	if len(record.Closes) > 10 {
+		record.Closes = record.Closes[len(record.Closes)-10:]
+	}
+
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o644)
 }

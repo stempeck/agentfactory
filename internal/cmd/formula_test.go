@@ -2199,3 +2199,31 @@ func TestAgentGenFallbackWarning(t *testing.T) {
 	}
 }
 
+func TestAgentGen_MissingSkill(t *testing.T) {
+	dir := setupFormulaFactory(t)
+
+	formulaDir := config.FormulasDir(dir)
+	skillFormula := `formula = "investigate"
+description = "Investigate a codebase question"
+type = "workflow"
+version = 1
+skills = ["missing-skill"]
+
+[[steps]]
+id = "orient"
+title = "Orient and scope"
+description = "Orient yourself"
+`
+	os.WriteFile(filepath.Join(formulaDir, "investigate.formula.toml"), []byte(skillFormula), 0o644)
+
+	os.MkdirAll(filepath.Join(dir, ".claude", "skills"), 0o755)
+
+	_, stderr, err := runFormulaAgentGenInDir(t, dir, "investigate")
+	if err == nil {
+		t.Fatal("expected error from agent-gen with missing skill")
+	}
+	if !strings.Contains(stderr, "missing-skill") && !strings.Contains(err.Error(), "missing-skill") {
+		t.Errorf("error should mention missing-skill; stderr=%q err=%v", stderr, err)
+	}
+}
+

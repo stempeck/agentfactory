@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/config"
+	"github.com/stempeck/agentfactory/internal/lock"
 )
 
 var qualityCmd = &cobra.Command{
@@ -44,7 +45,12 @@ func runQuality(cmd *cobra.Command, args []string) error {
 		if err != nil || strings.TrimSpace(string(data)) != "on" {
 			fmt.Println("quality gate: off")
 		} else {
-			fmt.Println("quality gate: on")
+			lockPath := filepath.Join(cwd, ".runtime", "quality-gate.lock")
+			if info, err := lock.NewWithPath(lockPath).Read(); err == nil && info.IsStale() {
+				fmt.Printf("quality gate: on (WARNING: stale lock at .runtime/quality-gate.lock, PID %d dead)\n", info.PID)
+			} else {
+				fmt.Println("quality gate: on")
+			}
 		}
 		return nil
 	}

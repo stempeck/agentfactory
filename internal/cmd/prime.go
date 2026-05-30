@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -261,6 +262,27 @@ func persistSessionID(dir, sessionID string) {
 	os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte(sessionID), 0o644)
 }
 
+func writeStepPrimed(workDir, stepID, description string) {
+	runtimeDir := filepath.Join(workDir, ".runtime")
+	os.MkdirAll(runtimeDir, 0o755)
+	h := sha256.Sum256([]byte(description))
+	content := fmt.Sprintf("%s:%x", stepID, h[:4])
+	os.WriteFile(filepath.Join(runtimeDir, "step_primed"), []byte(content), 0o644)
+}
+
+type errorTrackingWriter struct {
+	w      io.Writer
+	failed bool
+}
+
+func (e *errorTrackingWriter) Write(p []byte) (int, error) {
+	n, err := e.w.Write(p)
+	if err != nil {
+		e.failed = true
+	}
+	return n, err
+}
+
 // getSessionID reads a persisted session ID or returns a fallback.
 func getSessionID(dir, role string) string {
 	path := filepath.Join(dir, ".runtime", "session_id")
@@ -454,29 +476,36 @@ func outputFormulaContext(ctx context.Context, out io.Writer, workDir string) {
 	if iss, err := store.Get(ctx, step.ID); err == nil {
 		description = iss.Description
 	}
-	outputCommandPreflight(out, description)
+
+	tracker := &errorTrackingWriter{w: out}
+
+	outputCommandPreflight(tracker, description)
 
 	if description != "" {
-		fmt.Fprintln(out, "### Current Step Instructions")
-		fmt.Fprintln(out, "")
-		fmt.Fprintln(out, description)
-		fmt.Fprintln(out, "")
-		outputStandingDirective(out)
+		fmt.Fprintln(tracker, "### Current Step Instructions")
+		fmt.Fprintln(tracker, "")
+		fmt.Fprintln(tracker, description)
+		fmt.Fprintln(tracker, "")
+		outputStandingDirective(tracker)
 	}
 
 	// Check if this is a gate step
 	if isGateStep(ctx, store, step.ID, description) {
-		fmt.Fprintln(out, "**WARNING: This is a GATE step.** Complete all work, then run:")
-		fmt.Fprintf(out, "  af done --phase-complete --gate %s\n", step.ID)
-		fmt.Fprintln(out, "Do NOT skip this gate. Quality gates protect the CEO's time.")
-		fmt.Fprintln(out, "")
+		fmt.Fprintln(tracker, "**WARNING: This is a GATE step.** Complete all work, then run:")
+		fmt.Fprintf(tracker, "  af done --phase-complete --gate %s\n", step.ID)
+		fmt.Fprintln(tracker, "Do NOT skip this gate. Quality gates protect the CEO's time.")
+		fmt.Fprintln(tracker, "")
 	}
 
-	fmt.Fprintln(out, "### Work Loop")
-	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "1. Complete the current step")
-	fmt.Fprintln(out, "2. Run `af done` to close it and advance")
-	fmt.Fprintln(out, "3. If gate step: run `af done --phase-complete --gate <gate-id>`")
+	fmt.Fprintln(tracker, "### Work Loop")
+	fmt.Fprintln(tracker, "")
+	fmt.Fprintln(tracker, "1. Complete the current step")
+	fmt.Fprintln(tracker, "2. Run `af done` to close it and advance")
+	fmt.Fprintln(tracker, "3. If gate step: run `af done --phase-complete --gate <gate-id>`")
+
+	if !tracker.failed {
+		writeStepPrimed(workDir, step.ID, description)
+	}
 }
 
 // outputCheckpointContext injects checkpoint/resume context from a previous session.

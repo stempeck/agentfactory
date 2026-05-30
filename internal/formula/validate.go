@@ -2,11 +2,16 @@ package formula
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/stempeck/agentfactory/internal/config"
 )
+
+var validSkillName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
 
 // Validate checks that the formula has all required fields and valid structure.
 func (f *Formula) Validate() error {
@@ -25,6 +30,10 @@ func (f *Formula) Validate() error {
 	}
 
 	if err := f.validateInputVarCollision(); err != nil {
+		return err
+	}
+
+	if err := f.validateSkillNames(); err != nil {
 		return err
 	}
 
@@ -212,6 +221,31 @@ func (f *Formula) validateInputVarCollision() error {
 	return nil
 }
 
+func (f *Formula) validateSkillNames() error {
+	if len(f.Skills) == 0 {
+		return nil
+	}
+	var problems []string
+	seen := make(map[string]bool)
+	for _, name := range f.Skills {
+		if !validSkillName.MatchString(name) {
+			if name == "" {
+				problems = append(problems, "invalid skill name: (empty string)")
+			} else {
+				problems = append(problems, fmt.Sprintf("invalid skill name: %q", name))
+			}
+		}
+		if seen[name] {
+			problems = append(problems, fmt.Sprintf("duplicate skill: %q", name))
+		}
+		seen[name] = true
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("formula %q skills: %s", f.Name, strings.Join(problems, "; "))
+	}
+	return nil
+}
+
 // ValidateAgents rejects the formula if any declared agent (formula-level
 // or per-unit) is not a key in registry.Agents. An empty declared agent
 // is skipped (AC-4 documented default). A nil registry is rejected —
@@ -251,6 +285,73 @@ func (f *Formula) ValidateAgents(registry *config.AgentConfig) error {
 		}
 	}
 	return nil
+}
+
+func (f *Formula) ValidateSkills(skillsDir string) error {
+	if len(f.Skills) == 0 {
+		return nil
+	}
+	if skillsDir == "" {
+		return fmt.Errorf("ValidateSkills requires a non-empty skills directory path")
+	}
+	var missing []string
+	for _, name := range f.Skills {
+		path := filepath.Join(skillsDir, name, "SKILL.md")
+		if _, err := os.Stat(path); err != nil {
+			missing = append(missing, fmt.Sprintf("%s: %s not found (no SKILL.md)", name, path))
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("%d skills required by formula %q not found:\n  - %s\nhint: copy skill directories to .claude/skills/ or embed them in internal/cmd/install_skills/\navailable skills: %s",
+			len(missing), f.Name, strings.Join(missing, "\n  - "), describeAvailableSkills(skillsDir))
+	}
+	return nil
+}
+
+func describeAvailableSkills(skillsDir string) string {
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		return "(unable to list " + skillsDir + ")"
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) == 0 {
+		return "no skills in " + skillsDir
+	}
+	sort.Strings(names)
+	if len(names) > 10 {
+		return fmt.Sprintf("%d skills in %s", len(names), skillsDir)
+	}
+	return strings.Join(names, ", ")
+}
+
+var (
+	reSkillCall    = regexp.MustCompile(`Skill\(skill:\s*"([^"]+)"`)
+	reClaudePSkill = regexp.MustCompile(`claude\s+-p\s+["']/([a-zA-Z][a-zA-Z0-9_-]*)`)
+)
+
+// DetectSkillInvocations scans step descriptions for structured skill
+// invocation patterns and returns a deduplicated, sorted list of skill names.
+func DetectSkillInvocations(steps []Step) []string {
+	seen := make(map[string]bool)
+	for _, s := range steps {
+		for _, m := range reSkillCall.FindAllStringSubmatch(s.Description, -1) {
+			seen[m[1]] = true
+		}
+		for _, m := range reClaudePSkill.FindAllStringSubmatch(s.Description, -1) {
+			seen[m[1]] = true
+		}
+	}
+	var names []string
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // describeKnown renders a human-readable hint of known agents for error

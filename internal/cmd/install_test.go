@@ -597,11 +597,14 @@ func TestInstallRoleFallbackWarning(t *testing.T) {
 
 func TestSkillsFS_ContainsAllFiles(t *testing.T) {
 	expected := map[string]bool{
-		"install_skills/documentation-update/SKILL.md":  false,
-		"install_skills/formula-create/SKILL.md":        false,
-		"install_skills/formula-create/skillmd-mode.md": false,
-		"install_skills/github-issue/SKILL.md":          false,
-		"install_skills/rapid-implement/SKILL.md":       false,
+		"install_skills/architecture-docs/SKILL.md":          false,
+		"install_skills/architecture-docs/overview-phase.md": false,
+		"install_skills/architecture-docs/validate.sh":       false,
+		"install_skills/documentation-update/SKILL.md":      false,
+		"install_skills/formula-create/SKILL.md":             false,
+		"install_skills/formula-create/skillmd-mode.md":      false,
+		"install_skills/github-issue/SKILL.md":               false,
+		"install_skills/rapid-implement/SKILL.md":            false,
 	}
 
 	err := fs.WalkDir(skillsFS, "install_skills", func(path string, d fs.DirEntry, err error) error {
@@ -1067,5 +1070,60 @@ func TestEnsureGitExclude_MissingFile(t *testing.T) {
 			t.Errorf("missing pattern: %s", pattern)
 		}
 	}
+}
+
+func TestCleanLegacyGateLocks(t *testing.T) {
+	t.Run("removes_fidelity_lock_dirs", func(t *testing.T) {
+		dir := "/tmp/af-fidelity-gate-testunit1.lock"
+		os.MkdirAll(dir, 0755)
+		t.Cleanup(func() { os.RemoveAll(dir) })
+
+		if err := cleanLegacyGateLocks(); err != nil {
+			t.Fatalf("cleanLegacyGateLocks: %v", err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Error("fidelity lock dir should have been removed")
+		}
+	})
+
+	t.Run("removes_quality_lock_dirs", func(t *testing.T) {
+		dir := "/tmp/af-quality-gate-testunit2.lock"
+		os.MkdirAll(dir, 0755)
+		t.Cleanup(func() { os.RemoveAll(dir) })
+
+		if err := cleanLegacyGateLocks(); err != nil {
+			t.Fatalf("cleanLegacyGateLocks: %v", err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Error("quality lock dir should have been removed")
+		}
+	})
+
+	t.Run("removes_multiple_roles", func(t *testing.T) {
+		dirs := []string{
+			"/tmp/af-fidelity-gate-testunit3a.lock",
+			"/tmp/af-fidelity-gate-testunit3b.lock",
+			"/tmp/af-quality-gate-testunit3c.lock",
+		}
+		for _, d := range dirs {
+			os.MkdirAll(d, 0755)
+			t.Cleanup(func() { os.RemoveAll(d) })
+		}
+
+		if err := cleanLegacyGateLocks(); err != nil {
+			t.Fatalf("cleanLegacyGateLocks: %v", err)
+		}
+		for _, d := range dirs {
+			if _, err := os.Stat(d); !os.IsNotExist(err) {
+				t.Errorf("dir %s should have been removed", d)
+			}
+		}
+	})
+
+	t.Run("noop_when_none_exist", func(t *testing.T) {
+		if err := cleanLegacyGateLocks(); err != nil {
+			t.Fatalf("cleanLegacyGateLocks: %v", err)
+		}
+	})
 }
 

@@ -174,6 +174,27 @@ func TestHandoff_NonIdleResetsCounter(t *testing.T) {
 	}
 }
 
+func TestHandoff_TransitiveEndpointDependency(t *testing.T) {
+	src, err := os.ReadFile("handoff.go")
+	if err != nil {
+		t.Fatalf("reading handoff.go: %v", err)
+	}
+	code := string(src)
+
+	if !strings.Contains(code, "BuildStartupCommand()") {
+		t.Error("handoff.go must call BuildStartupCommand() to transitively inherit endpoint exports")
+	}
+	if !strings.Contains(code, "session.NewManager(") {
+		t.Error("handoff.go must use session.NewManager to pass full AgentEntry including endpoint fields")
+	}
+	if !strings.Contains(code, "*agentEntry") {
+		t.Error("handoff.go must dereference agentEntry to pass full struct (including BaseURL/AuthToken)")
+	}
+	if strings.Contains(code, "ANTHROPIC_BASE_URL") || strings.Contains(code, "ANTHROPIC_AUTH_TOKEN") {
+		t.Error("handoff.go must NOT contain hardcoded endpoint env var names — it should use BuildStartupCommand transitively")
+	}
+}
+
 func TestHandoff_IdleDelayComputation(t *testing.T) {
 	tests := []struct {
 		cycles   int

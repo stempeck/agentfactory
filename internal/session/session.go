@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -21,6 +22,11 @@ var (
 	ErrNotRunning     = errors.New("agent session not running")
 	ErrNotProvisioned = errors.New("agent workspace not provisioned (run af install <role>)")
 	ErrWorktreeNotSet = errors.New("session: Start called before SetWorktree with a non-empty path")
+)
+
+const (
+	envBaseURL   = "ANTHROPIC_BASE_URL"
+	envAuthToken = "ANTHROPIC_AUTH_TOKEN"
 )
 
 var checkAvailableMemoryFunc = checkAvailableMemory
@@ -189,6 +195,15 @@ func (m *Manager) Start() error {
 		return fmt.Errorf("creating tmux session: %w", err)
 	}
 
+	if (m.agentEntry.BaseURL != "") != (m.agentEntry.AuthToken != "") {
+		set, unset := "base_url", "auth_token"
+		if m.agentEntry.AuthToken != "" {
+			set, unset = "auth_token", "base_url"
+		}
+		fmt.Fprintf(os.Stderr, "warning: agent %s has %s but not %s — local endpoints typically require both\n",
+			m.agentName, set, unset)
+	}
+
 	// Set environment variables (best-effort)
 	_ = m.tmux.SetEnvironment(sessionID, "AF_ROOT", m.factoryRoot)
 	_ = m.tmux.SetEnvironment(sessionID, "AF_ROLE", m.agentName)
@@ -196,6 +211,19 @@ func (m *Manager) Start() error {
 	if m.worktreePath != "" {
 		_ = m.tmux.SetEnvironment(sessionID, "AF_WORKTREE", m.worktreePath)
 		_ = m.tmux.SetEnvironment(sessionID, "AF_WORKTREE_ID", m.worktreeID)
+	}
+	if m.agentEntry.Model != "" {
+		_ = m.tmux.SetEnvironment(sessionID, "ANTHROPIC_MODEL", m.agentEntry.Model)
+	}
+	if m.agentEntry.BaseURL != "" {
+		if err := m.tmux.SetEnvironment(sessionID, envBaseURL, m.agentEntry.BaseURL); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to set %s for %s: %v\n", envBaseURL, sessionID, err)
+		}
+	}
+	if m.agentEntry.AuthToken != "" {
+		if err := m.tmux.SetEnvironment(sessionID, envAuthToken, m.agentEntry.AuthToken); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to set %s for %s: %v\n", envAuthToken, sessionID, err)
+		}
 	}
 
 	// Wait for shell to be ready
@@ -245,8 +273,17 @@ func (m *Manager) buildStartupCommand() string {
 		exports += fmt.Sprintf(" AF_WORKTREE=%s AF_WORKTREE_ID=%s",
 			shellQuote(m.worktreePath), shellQuote(m.worktreeID))
 	}
+	if m.agentEntry.BaseURL != "" {
+		exports += fmt.Sprintf(" %s=%s", envBaseURL, shellQuote(m.agentEntry.BaseURL))
+	}
+	if m.agentEntry.AuthToken != "" {
+		exports += fmt.Sprintf(" %s=%s", envAuthToken, shellQuote(m.agentEntry.AuthToken))
+	}
 
 	claude := "claude --dangerously-skip-permissions"
+	if m.agentEntry.Model != "" {
+		claude += " --model " + shellQuote(m.agentEntry.Model)
+	}
 	if m.initialPrompt != "" {
 		claude += " " + shellQuote(m.initialPrompt)
 	}
@@ -283,6 +320,8 @@ func (m *Manager) Stop() error {
 
 	// Release lock (best-effort)
 	_ = lock.New(m.workDir()).Release()
+	_ = lock.NewWithPath(filepath.Join(m.workDir(), ".runtime", "fidelity-gate.lock")).Release()
+	_ = lock.NewWithPath(filepath.Join(m.workDir(), ".runtime", "quality-gate.lock")).Release()
 
 	return nil
 }

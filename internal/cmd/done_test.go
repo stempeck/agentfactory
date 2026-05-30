@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stempeck/agentfactory/internal/checkpoint"
 	"github.com/stempeck/agentfactory/internal/config"
@@ -28,6 +31,102 @@ func (s *errOnListStore) List(ctx context.Context, filter issuestore.Filter) ([]
 		return nil, s.listErr
 	}
 	return s.Store.List(ctx, filter)
+}
+
+type errOnGetStore struct {
+	issuestore.Store
+	getErr error
+}
+
+func (s *errOnGetStore) Get(ctx context.Context, id string) (issuestore.Issue, error) {
+	return issuestore.Issue{}, s.getErr
+}
+
+func TestCheckStepPrimed_CompoundFormat(t *testing.T) {
+	dir := t.TempDir()
+	workDir := dir
+
+	mem := memstore.New()
+	ctx := t.Context()
+
+	desc := "do the work for this step"
+	step, err := mem.Create(ctx, issuestore.CreateParams{
+		Title:       "Step: compound test",
+		Description: desc,
+		Type:        issuestore.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create step: %v", err)
+	}
+
+	h := sha256.Sum256([]byte(desc))
+	hash := fmt.Sprintf("%x", h[:4])
+	writeRuntimeFile(t, workDir, "step_primed", step.ID+":"+hash)
+
+	if err := checkStepPrimed(ctx, workDir, step.ID, mem); err != nil {
+		t.Errorf("expected no error for correct compound format, got: %v", err)
+	}
+}
+
+func TestCheckStepPrimed_HashMismatch(t *testing.T) {
+	dir := t.TempDir()
+	workDir := dir
+
+	mem := memstore.New()
+	ctx := t.Context()
+
+	step, err := mem.Create(ctx, issuestore.CreateParams{
+		Title:       "Step: hash mismatch",
+		Description: "original instructions",
+		Type:        issuestore.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create step: %v", err)
+	}
+
+	writeRuntimeFile(t, workDir, "step_primed", step.ID+":deadbeef")
+
+	err = checkStepPrimed(ctx, workDir, step.ID, mem)
+	if err == nil {
+		t.Fatal("expected error for hash mismatch, got nil")
+	}
+	if !strings.Contains(err.Error(), "hash mismatch") {
+		t.Errorf("error should contain 'hash mismatch', got: %v", err)
+	}
+}
+
+func TestCheckStepPrimed_LegacyFormat(t *testing.T) {
+	dir := t.TempDir()
+	workDir := dir
+
+	mem := memstore.New()
+	ctx := t.Context()
+
+	stepID := "legacy-step-42"
+	writeRuntimeFile(t, workDir, "step_primed", stepID)
+
+	if err := checkStepPrimed(ctx, workDir, stepID, mem); err != nil {
+		t.Errorf("expected no error for legacy format, got: %v", err)
+	}
+}
+
+func TestCheckStepPrimed_StoreUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	workDir := dir
+
+	ctx := t.Context()
+
+	stepID := "step-store-fail"
+	writeRuntimeFile(t, workDir, "step_primed", stepID+":abcd1234")
+
+	failStore := &errOnGetStore{
+		Store:  memstore.New(),
+		getErr: errors.New("store unavailable"),
+	}
+
+	if err := checkStepPrimed(ctx, workDir, stepID, failStore); err != nil {
+		t.Errorf("expected graceful degradation when store unavailable, got: %v", err)
+	}
 }
 
 // AC6: TestRunDone_NoFormula — no .runtime/hooked_formula → error
@@ -573,6 +672,7 @@ func TestDone_ListError_Propagated(t *testing.T) {
 	defer func() { newIssueStore = origNewIssueStore }()
 
 	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+	writeRuntimeFile(t, workDir, "step_primed", blocker.ID)
 
 	err = runDoneCore(t.Context(), workDir, false, "")
 	if err == nil {
@@ -757,6 +857,7 @@ func TestDone_LinearChain_3Steps_ProgressesCorrectly(t *testing.T) {
 	hookedPath := filepath.Join(workDir, ".runtime", "hooked_formula")
 
 	// --- Iteration 1: close step1 ---
+	writeRuntimeFile(t, workDir, "step_primed", step1.ID)
 	if err := runDoneCore(ctx, workDir, false, ""); err != nil {
 		t.Fatalf("iteration 1: %v", err)
 	}
@@ -779,6 +880,7 @@ func TestDone_LinearChain_3Steps_ProgressesCorrectly(t *testing.T) {
 	}
 
 	// --- Iteration 2: close step2 ---
+	writeRuntimeFile(t, workDir, "step_primed", step2.ID)
 	if err := runDoneCore(ctx, workDir, false, ""); err != nil {
 		t.Fatalf("iteration 2: %v", err)
 	}
@@ -801,6 +903,7 @@ func TestDone_LinearChain_3Steps_ProgressesCorrectly(t *testing.T) {
 	}
 
 	// --- Iteration 3: close step3, triggers completion ---
+	writeRuntimeFile(t, workDir, "step_primed", step3.ID)
 	if err := runDoneCore(ctx, workDir, false, ""); err != nil {
 		t.Fatalf("iteration 3: %v", err)
 	}
@@ -1016,12 +1119,595 @@ func TestSendWorkDoneMail_SeamReturnsNilUnderTest(t *testing.T) {
 	}
 }
 
+func TestDone_WritesLastClosedStep(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	workDir := filepath.Join(dir, ".agentfactory", "agents", "manager")
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:       "Formula: last-closed-test",
+		Description: "test formula",
+		Type:        issuestore.TypeEpic,
+		Labels:      []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	step1, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:       "Step: verify write",
+		Description: "step description for test",
+		Parent:      instance.ID,
+		Type:        issuestore.TypeTask,
+		Labels:      []string{"formula-step"},
+		Assignee:    "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step1: %v", err)
+	}
+	step2, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step: second",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step2: %v", err)
+	}
+	if err := mem.DepAdd(t.Context(), step2.ID, step1.ID); err != nil {
+		t.Fatalf("dep add: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+	writeRuntimeFile(t, workDir, "step_primed", step1.ID)
+
+	if err := runDoneCore(t.Context(), workDir, false, ""); err != nil {
+		t.Fatalf("runDoneCore: %v", err)
+	}
+
+	lcsPath := filepath.Join(workDir, ".runtime", "last_closed_step")
+	data, err := os.ReadFile(lcsPath)
+	if err != nil {
+		t.Fatalf("last_closed_step not written: %v", err)
+	}
+
+	var record struct {
+		ID          string `json:"id"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		ClosedAt    string `json:"closed_at"`
+		Formula     string `json:"formula"`
+	}
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatalf("invalid JSON in last_closed_step: %v", err)
+	}
+	if record.ID != step1.ID {
+		t.Errorf("last_closed_step.id = %q, want %q", record.ID, step1.ID)
+	}
+	if record.Title != "Step: verify write" {
+		t.Errorf("last_closed_step.title = %q, want %q", record.Title, "Step: verify write")
+	}
+	if record.Description != "step description for test" {
+		t.Errorf("last_closed_step.description = %q, want %q", record.Description, "step description for test")
+	}
+	if record.ClosedAt == "" {
+		t.Error("last_closed_step.closed_at should not be empty")
+	}
+	if record.Formula == "" {
+		t.Error("last_closed_step.formula should not be empty")
+	}
+}
+
+func TestDone_RefusesWithoutPrime(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	workDir := filepath.Join(dir, ".agentfactory", "agents", "manager")
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:  "Formula: refuse-no-prime",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	step, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step: should not close",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+	// Do NOT write step_primed
+
+	err = runDoneCore(t.Context(), workDir, false, "")
+	if err == nil {
+		t.Fatal("expected error when step_primed is missing")
+	}
+	if !strings.Contains(err.Error(), "step not primed") {
+		t.Errorf("error should contain 'step not primed', got: %v", err)
+	}
+
+	// Verify step was NOT closed
+	s, err := mem.Get(t.Context(), step.ID)
+	if err != nil {
+		t.Fatalf("get step: %v", err)
+	}
+	if s.Status.IsTerminal() {
+		t.Error("step should NOT be terminal when prime check fails")
+	}
+}
+
+func TestDone_RefusesWithMismatchedPrime(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	workDir := filepath.Join(dir, ".agentfactory", "agents", "manager")
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:  "Formula: mismatch-prime",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	_, err = mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step: should not close",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+	writeRuntimeFile(t, workDir, "step_primed", "wrong-step-id")
+
+	err = runDoneCore(t.Context(), workDir, false, "")
+	if err == nil {
+		t.Fatal("expected error when step_primed has wrong ID")
+	}
+	if !strings.Contains(err.Error(), "step primed for") {
+		t.Errorf("error should contain 'step primed for', got: %v", err)
+	}
+}
+
+func TestDone_SucceedsWithPrime(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	workDir := filepath.Join(dir, ".agentfactory", "agents", "manager")
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:  "Formula: success-prime",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	step, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step: should close",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+	writeRuntimeFile(t, workDir, "step_primed", step.ID)
+
+	if err := runDoneCore(t.Context(), workDir, false, ""); err != nil {
+		t.Fatalf("runDoneCore should succeed with correct prime, got: %v", err)
+	}
+
+	s, err := mem.Get(t.Context(), step.ID)
+	if err != nil {
+		t.Fatalf("get step: %v", err)
+	}
+	if !s.Status.IsTerminal() {
+		t.Errorf("step should be terminal after successful close, got %s", s.Status)
+	}
+}
+
+func TestDone_SkipRequiresPrime(t *testing.T) {
+	if doneCmd.Flags().Lookup("skip") == nil {
+		t.Fatal("done command should have --skip flag")
+	}
+
+	dir := setupTestFactoryForDone(t, "manager")
+	workDir := filepath.Join(dir, ".agentfactory", "agents", "manager")
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:  "Formula: skip-prime",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	_, err = mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step: skip test",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	origDoneSkip := doneSkip
+	doneSkip = "reason"
+	defer func() { doneSkip = origDoneSkip }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+	// Do NOT write step_primed
+
+	err = runDoneCore(t.Context(), workDir, false, "")
+	if err == nil {
+		t.Fatal("expected error: --skip should NOT bypass prime check")
+	}
+	if !strings.Contains(err.Error(), "step not primed") {
+		t.Errorf("error should contain 'step not primed', got: %v", err)
+	}
+}
+
+func TestDone_VelocityEscalation(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	workDir := filepath.Join(dir, ".agentfactory", "agents", "manager")
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:  "Formula: velocity-test",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	step, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step: velocity check",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+	writeRuntimeFile(t, workDir, "step_primed", step.ID)
+
+	now := time.Now().UTC()
+	velocityJSON := fmt.Sprintf(`{
+  "closes": [
+    {"step_id": "s1", "was_primed": false, "closed_at": %q},
+    {"step_id": "s2", "was_primed": false, "closed_at": %q},
+    {"step_id": "s3", "was_primed": false, "closed_at": %q}
+  ]
+}`, now.Add(-5*time.Second).Format(time.RFC3339),
+		now.Add(-3*time.Second).Format(time.RFC3339),
+		now.Add(-1*time.Second).Format(time.RFC3339))
+
+	writeRuntimeFile(t, workDir, "done_velocity", velocityJSON)
+
+	err = runDoneCore(t.Context(), workDir, false, "")
+	if err == nil {
+		t.Fatal("expected velocity escalation error")
+	}
+	if !strings.Contains(err.Error(), "velocity escalation") {
+		t.Errorf("error should contain 'velocity escalation', got: %v", err)
+	}
+}
+
+func TestDone_CleanupRemovesNewFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	allFiles := []string{
+		"hooked_formula", "formula_caller", "dispatched",
+		"last_closed_step", "step_primed", "done_velocity",
+	}
+	for _, name := range allFiles {
+		writeRuntimeFile(t, dir, name, "test-value")
+	}
+	writeRuntimeFile(t, dir, "worktree_id", "wt-preserve")
+	writeRuntimeFile(t, dir, "worktree_owner", "true")
+
+	cleanupRuntimeArtifacts(dir)
+
+	for _, name := range allFiles {
+		if _, err := os.Stat(filepath.Join(dir, ".runtime", name)); !os.IsNotExist(err) {
+			t.Errorf("%s should be removed after cleanup", name)
+		}
+	}
+
+	for _, name := range []string{"worktree_id", "worktree_owner"} {
+		if _, err := os.Stat(filepath.Join(dir, ".runtime", name)); err != nil {
+			t.Errorf("%s should be preserved after cleanup, got error: %v", name, err)
+		}
+	}
+}
+
+func TestDone_FormulaCompletionGuard_Respawn(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	workDir := filepath.Join(dir, ".agentfactory", "agents", "manager")
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:  "Formula: guard-respawn-test",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	step, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step: done",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+	if err := mem.Close(t.Context(), step.ID, ""); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	var escalationCalled bool
+	var escalationRecipient, escalationInstanceID, escalationFormulaName, escalationReason string
+	origSendEscalation := sendEscalationMail
+	sendEscalationMail = func(recipient, instanceID, formulaName, reason string) error {
+		escalationCalled = true
+		escalationRecipient = recipient
+		escalationInstanceID = instanceID
+		escalationFormulaName = formulaName
+		escalationReason = reason
+		return nil
+	}
+	defer func() { sendEscalationMail = origSendEscalation }()
+
+	var workDoneMailCalled bool
+	origSendWorkDone := sendWorkDoneMail
+	sendWorkDoneMail = func(caller, instanceID, formulaName string, stepCount int) error {
+		workDoneMailCalled = true
+		return nil
+	}
+	defer func() { sendWorkDoneMail = origSendWorkDone }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+
+	velocityJSON := `{
+  "closes": [
+    {"step_id": "s1", "was_primed": false, "closed_at": "2026-05-18T00:00:01Z"},
+    {"step_id": "s2", "was_primed": false, "closed_at": "2026-05-18T00:00:02Z"},
+    {"step_id": "s3", "was_primed": false, "closed_at": "2026-05-18T00:00:03Z"}
+  ]
+}`
+	writeRuntimeFile(t, workDir, "done_velocity", velocityJSON)
+
+	err = runDoneCore(t.Context(), workDir, false, "")
+	if err == nil {
+		t.Fatal("expected error from formula completion guard, got nil")
+	}
+	if !strings.Contains(err.Error(), "formula completion guard triggered") {
+		t.Errorf("error should contain 'formula completion guard triggered', got: %v", err)
+	}
+
+	if !escalationCalled {
+		t.Error("sendEscalationMail should have been called")
+	}
+	if escalationRecipient != "supervisor" {
+		t.Errorf("escalation recipient = %q, want 'supervisor'", escalationRecipient)
+	}
+	if escalationInstanceID != instance.ID {
+		t.Errorf("escalation instanceID = %q, want %q", escalationInstanceID, instance.ID)
+	}
+	if escalationFormulaName != "Formula: guard-respawn-test" {
+		t.Errorf("escalation formulaName = %q, want 'Formula: guard-respawn-test'", escalationFormulaName)
+	}
+	if escalationReason == "" {
+		t.Error("escalation reason should not be empty")
+	}
+
+	if workDoneMailCalled {
+		t.Error("sendWorkDoneMail should NOT have been called when guard triggers")
+	}
+}
+
+func TestDone_FormulaCompletionGuard_NormalCompletion(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	workDir := filepath.Join(dir, ".agentfactory", "agents", "manager")
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:  "Formula: guard-normal-test",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	step, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step: done",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+	if err := mem.Close(t.Context(), step.ID, ""); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+
+	velocityJSON := `{
+  "closes": [
+    {"step_id": "s1", "was_primed": true, "closed_at": "2026-05-18T00:00:01Z"},
+    {"step_id": "s2", "was_primed": true, "closed_at": "2026-05-18T00:00:02Z"},
+    {"step_id": "s3", "was_primed": true, "closed_at": "2026-05-18T00:00:03Z"}
+  ]
+}`
+	writeRuntimeFile(t, workDir, "done_velocity", velocityJSON)
+
+	if err := runDoneCore(t.Context(), workDir, false, ""); err != nil {
+		t.Fatalf("runDoneCore should succeed with all-primed velocity, got: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, ".runtime", "hooked_formula")); !os.IsNotExist(err) {
+		t.Error("hooked_formula should have been cleaned up after normal completion")
+	}
+}
+
 // setupTestFactoryForDone creates a minimal factory structure for done tests.
 func setupTestFactoryForDone(t *testing.T, agentName string) string {
 	t.Helper()
 	dir := setupTestFactoryForPrime(t) // reuse prime's setup
 	os.MkdirAll(config.StoreDir(dir), 0o755)
 	return dir
+}
+
+func TestDoneVelocity_EvidenceTypeRecorded(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := recordDoneTimestamp(dir, "step-1", true, "full_output"); err != nil {
+		t.Fatalf("recordDoneTimestamp (primed): %v", err)
+	}
+	if err := recordDoneTimestamp(dir, "step-2", false, ""); err != nil {
+		t.Fatalf("recordDoneTimestamp (unprimed): %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".runtime", "done_velocity"))
+	if err != nil {
+		t.Fatalf("read done_velocity: %v", err)
+	}
+
+	var record doneVelocityRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(record.Closes) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(record.Closes))
+	}
+
+	if record.Closes[0].EvidenceType != "full_output" {
+		t.Errorf("primed entry: expected EvidenceType=%q, got %q", "full_output", record.Closes[0].EvidenceType)
+	}
+	if record.Closes[1].EvidenceType != "" {
+		t.Errorf("unprimed entry: expected EvidenceType=%q, got %q", "", record.Closes[1].EvidenceType)
+	}
+
+	rawJSON := string(data)
+	if !strings.Contains(rawJSON, `"evidence_type"`) {
+		t.Error("primed entry JSON should contain evidence_type key")
+	}
+
+	var wrapper struct {
+		Closes []json.RawMessage `json:"closes"`
+	}
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	unprimedRaw := string(wrapper.Closes[1])
+	if strings.Contains(unprimedRaw, `"evidence_type"`) {
+		t.Error("unprimed entry JSON should NOT contain evidence_type key (omitempty)")
+	}
+}
+
+func TestDoneVelocity_BackwardCompat(t *testing.T) {
+	dir := t.TempDir()
+
+	now := time.Now().UTC()
+	oldFormatJSON := fmt.Sprintf(`{
+  "closes": [
+    {"step_id": "old-1", "was_primed": false, "closed_at": %q},
+    {"step_id": "old-2", "was_primed": true, "closed_at": %q}
+  ]
+}`, now.Add(-10*time.Second).Format(time.RFC3339),
+		now.Add(-5*time.Second).Format(time.RFC3339))
+
+	writeRuntimeFile(t, dir, "done_velocity", oldFormatJSON)
+
+	if err := recordDoneTimestamp(dir, "new-1", true, "full_output"); err != nil {
+		t.Fatalf("recordDoneTimestamp: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".runtime", "done_velocity"))
+	if err != nil {
+		t.Fatalf("read done_velocity: %v", err)
+	}
+
+	var record doneVelocityRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(record.Closes) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(record.Closes))
+	}
+
+	if record.Closes[0].EvidenceType != "" {
+		t.Errorf("old entry 0: expected EvidenceType=%q, got %q", "", record.Closes[0].EvidenceType)
+	}
+	if record.Closes[1].EvidenceType != "" {
+		t.Errorf("old entry 1: expected EvidenceType=%q, got %q", "", record.Closes[1].EvidenceType)
+	}
+	if record.Closes[2].EvidenceType != "full_output" {
+		t.Errorf("new entry: expected EvidenceType=%q, got %q", "full_output", record.Closes[2].EvidenceType)
+	}
+
+	if err := checkDoneVelocity(dir); err != nil {
+		t.Errorf("checkDoneVelocity should not error with mixed entries: %v", err)
+	}
 }
 
 // writeRuntimeFile writes a value to <dir>/.runtime/<name>.

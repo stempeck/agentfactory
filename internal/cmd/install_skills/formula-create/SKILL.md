@@ -55,6 +55,7 @@ in agents.json — it MUST be a plain sentence, not a heading or markdown.
 """
 formula = "<name>"
 version = 1
+skills = ["skill-a", "skill-b"]  # Skills invoked by Skill() calls in step descriptions
 
 # Inputs - parameters provided at runtime
 [inputs]

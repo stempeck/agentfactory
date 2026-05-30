@@ -7,10 +7,12 @@
 # (.agentfactory/agents/<name>/). Breaks if cwd is a subdirectory of the agent
 # workspace. See .designs/32/design-doc.md L235.
 ROLE=${AF_ROLE:-$(basename "$(pwd)")}
+AGENT_RUNTIME="$(pwd)/.runtime"
 
 # Find prompt file via af root
 FACTORY_ROOT=${AF_ROOT:-$(af root 2>/dev/null)}
 if [ -z "$FACTORY_ROOT" ]; then
+    [ -d "$AGENT_RUNTIME" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT1: no_factory_root" >> "$AGENT_RUNTIME/quality_debug.log" 2>/dev/null
     echo '{"ok": true}'
     exit 0
 fi
@@ -19,6 +21,7 @@ PROMPT_FILE="$FACTORY_ROOT/.agentfactory/hooks/quality-gate-prompt.txt"
 # Check quality gate toggle (default: off)
 GATE_STATE=$(cat "$FACTORY_ROOT/.agentfactory/.quality-gate" 2>/dev/null)
 if [ "$GATE_STATE" != "on" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT2: gate_disabled" >> "$AGENT_RUNTIME/quality_debug.log" 2>/dev/null
     echo '{"ok": true}'
     exit 0
 fi
@@ -29,22 +32,33 @@ INPUT=$(cat)
 # Exit immediately if this is a re-invocation (recursion prevention)
 ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // false')
 if [ "$ACTIVE" = "true" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT3: recursion_guard" >> "$AGENT_RUNTIME/quality_debug.log" 2>/dev/null
     echo '{"ok": true}'
     exit 0
 fi
 
-# Prevent concurrent runs (per-role lock)
-LOCKFILE="/tmp/af-quality-gate-$ROLE.lock"
-if ! mkdir "$LOCKFILE" 2>/dev/null; then
-    echo '{"ok": true}'
-    exit 0
+# Prevent concurrent runs (per-role PID-file lock with stale detection)
+LOCKFILE="$AGENT_RUNTIME/quality-gate.lock"
+
+if [ -f "$LOCKFILE" ]; then
+    STORED_PID=$(jq -r '.pid' "$LOCKFILE" 2>/dev/null || grep -o '"pid":[[:space:]]*[0-9]*' "$LOCKFILE" | grep -o '[0-9]*')
+    if [ -n "$STORED_PID" ] && kill -0 "$STORED_PID" 2>/dev/null; then
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT4a: lock_contention pid=$STORED_PID" >> "$AGENT_RUNTIME/quality_debug.log" 2>/dev/null
+        af mail send "$ROLE" -s "GATE_LOCK_CONTENTION" -m "quality gate lock contention: PID $STORED_PID alive" 2>/dev/null
+        echo '{"ok": true}'
+        exit 0
+    fi
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT4b: stale_lock_recovered pid=$STORED_PID" >> "$AGENT_RUNTIME/quality_debug.log" 2>/dev/null
+    rm -f "$LOCKFILE"
 fi
-trap "rmdir $LOCKFILE 2>/dev/null" EXIT
+echo "{\"pid\": $$}" > "$LOCKFILE"
+trap 'rm -f "$LOCKFILE" 2>/dev/null' EXIT
 
 # Extract last_assistant_message
 MESSAGE=$(echo "$INPUT" | jq -r .last_assistant_message)
 
 if [ -z "$MESSAGE" ] || [ "$MESSAGE" = "null" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT5: no_message" >> "$AGENT_RUNTIME/quality_debug.log" 2>/dev/null
     echo '{"ok": true}'
     exit 0
 fi
@@ -81,6 +95,7 @@ fi
 
 # Check claude CLI is available
 if ! command -v claude &>/dev/null; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT6: no_claude_binary" >> "$AGENT_RUNTIME/quality_debug.log" 2>/dev/null
     echo '{"ok": true}'
     exit 0
 fi
@@ -107,5 +122,6 @@ if [ -n "$VERDICT" ] && echo "$VERDICT" | jq -e '.ok == false' &>/dev/null; then
     af mail send "$ROLE" -s "QUALITY_GATE" -m "$VERDICT" 2>/dev/null
 fi
 
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT7: normal_completion" >> "$AGENT_RUNTIME/quality_debug.log" 2>/dev/null
 echo '{"ok": true}'
 exit 0

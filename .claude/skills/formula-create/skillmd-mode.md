@@ -91,6 +91,13 @@ load-context → branch-setup → validate-contract → preflight-tests
   → cleanup-workspace → prepare-for-review → submit-and-exit
 ```
 
+**Skills array population:** When building steps from a SKILL.md that contains
+`Skill(skill: "name", ...)` invocations or references other skills, extract
+all skill names and populate the `skills = [...]` header field. The skills
+array declares which skill SKILL.md files must exist for the formula to execute.
+Only list actual skills (files under `.claude/skills/<name>/SKILL.md`), not
+formulas. The `skills` field goes after `version = 1` in the formula header.
+
 ## 10.3 Gate Step Template
 
 There are two types of gates in a generated formula:
@@ -188,7 +195,7 @@ This defines all 10 invariant steps. Copy step descriptions for:
 cat .agentfactory/store/formulas/design-v3.formula.toml
 ```
 
-Shows the full 18-step structure with all 10 invariant steps, domain phase interleaving,
+Shows the full 16-step structure with all 10 invariant steps, domain phase interleaving,
 `af handoff` between major phases, and failure mode tables.
 
 Key patterns to follow:
@@ -198,6 +205,11 @@ Key patterns to follow:
 - `[vars.issue]` with `source = "hook_bead"`
 - Graceful degradation in architecture gates (skip if no contract exists)
 - Cleanup separated from submit-and-exit
+
+**Skill invocation pattern:** When the generated formula's steps invoke other skills, use this canonical pattern:
+- Declare `skills = [...]` in the formula header listing all invoked skill names
+- In step descriptions, use `Skill(skill: "name", args: "...")` to invoke them
+- Include the anti-manual directive: "Do NOT read the SKILL.md and follow it manually. Use the Skill tool to invoke it."
 
 ## 10.9 Invariant Step Content
 
@@ -271,6 +283,11 @@ not workspace cleanup. Do NOT bundle artifact removal or git push into submit-an
    commands (`go test ./...`, `npm test`, `pytest`, etc.). Instead, instruct the agent to
    discover the project's test command from its build configuration (CLAUDE.md, Makefile,
    package.json, etc.) and run it.
+
+7. **Skills array completeness**: Grep all generated step descriptions for
+   `Skill(skill:` and `claude -p "/` patterns. Every skill name found MUST
+   appear in the formula's `skills = [...]` array. If invocations exist but
+   `skills` is empty or missing, add the array with all detected skills.
 
 If ANY check fails, fix the formula and re-run the checklist before reporting success.
 

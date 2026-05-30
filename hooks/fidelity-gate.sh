@@ -17,6 +17,7 @@ AGENT_RUNTIME="$(pwd)/.runtime"
 # Find prompt file via af root
 FACTORY_ROOT=${AF_ROOT:-$(af root 2>/dev/null)}
 if [ -z "$FACTORY_ROOT" ]; then
+    [ -d "$AGENT_RUNTIME" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT1: no_factory_root" >> "$AGENT_RUNTIME/fidelity_debug.log" 2>/dev/null
     echo '{"ok": true}'
     exit 0
 fi
@@ -26,6 +27,7 @@ PROMPT_FILE="$FACTORY_ROOT/.agentfactory/hooks/fidelity-gate-prompt.txt"
 # FIDELITY-DELTA 2: fidelity gate toggle (default: on via af install --init)
 GATE_STATE=$(cat "$FACTORY_ROOT/.agentfactory/.fidelity-gate" 2>/dev/null)
 if [ "$GATE_STATE" != "on" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT2: gate_disabled" >> "$AGENT_RUNTIME/fidelity_debug.log" 2>/dev/null
     echo '{"ok": true}'
     exit 0
 fi
@@ -36,23 +38,34 @@ INPUT=$(cat)
 # Exit immediately if this is a re-invocation (recursion prevention)
 ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // false')
 if [ "$ACTIVE" = "true" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT3: recursion_guard" >> "$AGENT_RUNTIME/fidelity_debug.log" 2>/dev/null
     echo '{"ok": true}'
     exit 0
 fi
 
 # FIDELITY-DELTA 3: distinct lock file path (must not collide with quality-gate)
-# Prevent concurrent runs (per-role lock)
-LOCKFILE="/tmp/af-fidelity-gate-$ROLE.lock"
-if ! mkdir "$LOCKFILE" 2>/dev/null; then
-    echo '{"ok": true}'
-    exit 0
+# Prevent concurrent runs (per-role PID-file lock with stale detection)
+LOCKFILE="$AGENT_RUNTIME/fidelity-gate.lock"
+
+if [ -f "$LOCKFILE" ]; then
+    STORED_PID=$(jq -r '.pid' "$LOCKFILE" 2>/dev/null || grep -o '"pid":[[:space:]]*[0-9]*' "$LOCKFILE" | grep -o '[0-9]*')
+    if [ -n "$STORED_PID" ] && kill -0 "$STORED_PID" 2>/dev/null; then
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT4a: lock_contention pid=$STORED_PID" >> "$AGENT_RUNTIME/fidelity_debug.log" 2>/dev/null
+        af mail send "$ROLE" -s "GATE_LOCK_CONTENTION" -m "fidelity gate lock contention: PID $STORED_PID alive" 2>/dev/null
+        echo '{"ok": true}'
+        exit 0
+    fi
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT4b: stale_lock_recovered pid=$STORED_PID" >> "$AGENT_RUNTIME/fidelity_debug.log" 2>/dev/null
+    rm -f "$LOCKFILE"
 fi
-trap "rmdir $LOCKFILE 2>/dev/null" EXIT
+echo "{\"pid\": $$}" > "$LOCKFILE"
+trap 'rm -f "$LOCKFILE" 2>/dev/null' EXIT
 
 # Extract last_assistant_message
 MESSAGE=$(echo "$INPUT" | jq -r .last_assistant_message)
 
 if [ -z "$MESSAGE" ] || [ "$MESSAGE" = "null" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT5: no_message" >> "$AGENT_RUNTIME/fidelity_debug.log" 2>/dev/null
     echo '{"ok": true}'
     exit 0
 fi
@@ -62,14 +75,29 @@ fi
 # active or all steps are complete — generic supervisors should see zero
 # behavior change.
 if ! command -v af &>/dev/null; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT6: no_af_binary" >> "$AGENT_RUNTIME/fidelity_debug.log" 2>/dev/null
     echo '{"ok": true}'
     exit 0
 fi
-STEP_JSON=$(af step current --json 2>/dev/null)
-STATE=$(echo "$STEP_JSON" | jq -r '.state // "error"' 2>/dev/null)
-if [ "$STATE" != "ready" ]; then
-    echo '{"ok": true}'
-    exit 0
+LAST_CLOSED_FILE="$AGENT_RUNTIME/last_closed_step"
+IS_AF_DONE_TURN="false"
+if [ -f "$LAST_CLOSED_FILE" ]; then
+    FILE_AGE=$(( $(date +%s) - $(stat -c %Y "$LAST_CLOSED_FILE" 2>/dev/null || echo 0) ))
+    if [ "$FILE_AGE" -lt 30 ]; then
+        IS_AF_DONE_TURN="true"
+        STEP_JSON=$(cat "$LAST_CLOSED_FILE")
+    fi
+fi
+if [ "$IS_AF_DONE_TURN" != "true" ]; then
+    STEP_JSON=$(af step current --json 2>/dev/null)
+fi
+if [ "$IS_AF_DONE_TURN" != "true" ]; then
+    STATE=$(echo "$STEP_JSON" | jq -r '.state // "error"' 2>/dev/null)
+    if [ "$STATE" != "ready" ]; then
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT7: step_not_ready state=$STATE" >> "$AGENT_RUNTIME/fidelity_debug.log" 2>/dev/null
+        echo '{"ok": true}'
+        exit 0
+    fi
 fi
 # Description is capped at 4KB to keep haiku input size bounded — operators
 # writing essay-length step descriptions should not pay haiku token costs
@@ -85,7 +113,9 @@ FORMULA_NAME=$(echo "$STEP_JSON" | jq -r .formula)
 CURRENT_STEP_FILE="$AGENT_RUNTIME/fidelity_eval_step"
 EVAL_COUNT_FILE="$AGENT_RUNTIME/fidelity_eval_count"
 STORED_STEP=$(cat "$CURRENT_STEP_FILE" 2>/dev/null)
-if [ "$STORED_STEP" != "$STEP_ID" ]; then
+if [ "$IS_AF_DONE_TURN" = "true" ]; then
+    :
+elif [ "$STORED_STEP" != "$STEP_ID" ]; then
     echo 0 > "$EVAL_COUNT_FILE"
     echo "$STEP_ID" > "$CURRENT_STEP_FILE"
 fi
@@ -124,6 +154,7 @@ fi
 
 # Check claude CLI is available
 if ! command -v claude &>/dev/null; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT8: no_claude_binary" >> "$AGENT_RUNTIME/fidelity_debug.log" 2>/dev/null
     echo '{"ok": true}'
     exit 0
 fi
@@ -178,5 +209,12 @@ else
     fi
 fi
 
+VELOCITY_FILE="$AGENT_RUNTIME/done_velocity"
+if [ -f "$VELOCITY_FILE" ]; then
+    UPDATED=$(jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.last_eval_between = $ts' "$VELOCITY_FILE")
+    echo "$UPDATED" > "$VELOCITY_FILE"
+fi
+
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT9: normal_completion" >> "$AGENT_RUNTIME/fidelity_debug.log" 2>/dev/null
 echo '{"ok": true}'
 exit 0

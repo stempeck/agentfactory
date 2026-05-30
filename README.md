@@ -1,4 +1,14 @@
 # Agentfactory
+**Why do I need Agentfactory?**
+1. You can give LLM steps to follow and at times it will use a heuristic and improvise, skipping steps
+2. Recency bias drives every prompt
+3. Improvization and Recency bias lead to bugs the next LLM builds around, compounding false assumptions
+4. No crash recovery for agents doing long-running or multi-agent operations
+
+SKILLs aren't enough on their own to solve this. You need an Agent with a better harness.
+
+Agent Factory can easily harness your existing skills
+
 **Vision:**
 You have SKILLs, now turn your SKILL.md's into your autonomous workforce.
 
