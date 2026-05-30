@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -104,6 +105,9 @@ func TestDone_MultiStepFormula_ProgressesCorrectly(t *testing.T) {
 
 	hookedPath := filepath.Join(workDir, ".runtime", "hooked_formula")
 
+	// Prime step1 (production flow: af prime runs before af done)
+	outputFormulaContext(ctx, io.Discard, workDir)
+
 	// Call 1: should close step1 and leave hooked_formula in place because
 	// step2 is still open. Without the fix this call misfires WORK_DONE.
 	if err := runDoneCore(ctx, workDir, false, ""); err != nil {
@@ -137,6 +141,9 @@ func TestDone_MultiStepFormula_ProgressesCorrectly(t *testing.T) {
 	if !s1.Status.IsTerminal() {
 		t.Errorf("step1 should be closed after call 1, got status %q", s1.Status)
 	}
+
+	// Prime step2
+	outputFormulaContext(ctx, io.Discard, workDir)
 
 	// Call 2: should close step2 and remove hooked_formula (WORK_DONE path,
 	// no-op in test via isTestBinary gate).
@@ -196,6 +203,7 @@ func TestSuccession_NewFormulaIsExecutable(t *testing.T) {
 	writeRuntimeFile(t, workDir, "hooked_formula", epicA.ID)
 	writeRuntimeFile(t, workDir, "formula_caller", "supervisor")
 
+	outputFormulaContext(ctx, io.Discard, workDir)
 	if err := runDoneCore(ctx, workDir, false, ""); err != nil {
 		t.Fatalf("runDoneCore for formula A: %v", err)
 	}
@@ -237,6 +245,7 @@ func TestSuccession_NewFormulaIsExecutable(t *testing.T) {
 		t.Errorf("formula B ready step = %s, want %s", result.Steps[0].ID, stepB1.ID)
 	}
 
+	outputFormulaContext(ctx, io.Discard, workDir)
 	if err := runDoneCore(ctx, workDir, false, ""); err != nil {
 		t.Fatalf("runDoneCore for formula B: %v", err)
 	}

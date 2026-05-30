@@ -198,6 +198,9 @@ func TestAutoTermination_DispatchedSession(t *testing.T) {
 	os.Remove(filepath.Join(runtimeDir, "formula_caller"))
 	os.WriteFile(filepath.Join(runtimeDir, "formula_caller"), []byte("manager"), 0o644)
 
+	// Prime the step (production flow: af prime runs before af done)
+	runAF(t, binary, agentDir, "prime")
+
 	// Run af done — closes the single step, sends WORK_DONE, auto-terminates
 	out, err := runAFMayFail(t, binary, agentDir, "done")
 	if err != nil {
@@ -230,6 +233,9 @@ func TestNoAutoTermination_PersistentSession(t *testing.T) {
 	binary, _, agentDir, sessionName := setupTerminationTest(t, "test-persistent")
 
 	// DO NOT write .runtime/dispatched — this is the key difference
+
+	// Prime the step (production flow: af prime runs before af done)
+	runAF(t, binary, agentDir, "prime")
 
 	// Run af done
 	out, err := runAFMayFail(t, binary, agentDir, "done")
@@ -268,6 +274,9 @@ func TestAutoTermination_MailDeliveredBeforeKill(t *testing.T) {
 	os.WriteFile(filepath.Join(runtimeDir, "dispatched"), []byte("manager"), 0o644)
 	os.Remove(filepath.Join(runtimeDir, "formula_caller"))
 	os.WriteFile(filepath.Join(runtimeDir, "formula_caller"), []byte("manager"), 0o644)
+
+	// Prime the step (production flow: af prime runs before af done)
+	runAF(t, binary, agentDir, "prime")
 
 	// Run af done
 	out, err := runAFMayFail(t, binary, agentDir, "done")

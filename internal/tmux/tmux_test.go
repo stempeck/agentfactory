@@ -136,17 +136,15 @@ func TestSendKeysAndCapture(t *testing.T) {
 		t.Fatalf("SendKeys: %v", err)
 	}
 
-	// Brief wait for command to execute
-	time.Sleep(200 * time.Millisecond)
-
-	// Capture pane
-	content, err := tx.CapturePane(name, 20)
-	if err != nil {
-		t.Fatalf("CapturePane: %v", err)
-	}
-
-	if !strings.Contains(content, "TESTMARKER123") {
-		t.Fatalf("expected pane to contain TESTMARKER123, got: %s", content)
+	for {
+		content, err := tx.CapturePane(name, 20)
+		if err != nil {
+			t.Fatalf("CapturePane: %v", err)
+		}
+		if strings.Contains(content, "TESTMARKER123") {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 

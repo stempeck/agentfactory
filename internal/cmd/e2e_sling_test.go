@@ -4,6 +4,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,6 +75,7 @@ func TestE2E_FreshInstall_SlingToCompletion(t *testing.T) {
 
 	ctx := t.Context()
 
+	outputFormulaContext(ctx, io.Discard, agentDir)
 	if err := runDoneCore(ctx, agentDir, false, ""); err != nil {
 		t.Fatalf("first runDoneCore: %v", err)
 	}
@@ -81,6 +83,7 @@ func TestE2E_FreshInstall_SlingToCompletion(t *testing.T) {
 		t.Fatalf("hooked_formula should persist after step 1 — step 2 still open: %v", err)
 	}
 
+	outputFormulaContext(ctx, io.Discard, agentDir)
 	if err := runDoneCore(ctx, agentDir, false, ""); err != nil {
 		t.Fatalf("second runDoneCore: %v", err)
 	}
