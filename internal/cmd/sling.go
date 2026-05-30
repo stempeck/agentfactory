@@ -14,6 +14,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/formula"
 	"github.com/stempeck/agentfactory/internal/issuestore"
+	"github.com/stempeck/agentfactory/internal/mail"
 	"github.com/stempeck/agentfactory/internal/session"
 	"github.com/stempeck/agentfactory/internal/templates"
 	"github.com/stempeck/agentfactory/internal/tmux"
@@ -221,6 +222,14 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 	}
 
 	if _, _, _, err := instantiateFormulaWorkflow(params, cmd.OutOrStdout()); err != nil {
+		if callerIdentity != "" && callerIdentity != "@cli" {
+			if store, storeErr := storeForMail(root); storeErr == nil {
+				if router, routerErr := mail.NewRouter(root, store); routerErr == nil {
+					msg := mail.NewMessage(agentName, callerIdentity, "SKILL_MISSING: "+agentName, fmt.Sprintf("Dispatch to %s failed: %v", agentName, err))
+					_ = router.Send(cmd.Context(), msg)
+				}
+			}
+		}
 		return err
 	}
 
@@ -369,6 +378,12 @@ func instantiateFormulaWorkflow(params InstantiateParams, w io.Writer) (string, 
 	}
 	if err := f.ValidateAgents(agentsCfg); err != nil {
 		return "", nil, "", fmt.Errorf("validating formula agents: %w", err)
+	}
+
+	// 2.2 Validate declared skills are available (AC-1, AC-2 from GH#241).
+	skillsDir := filepath.Join(params.Root, ".claude", "skills")
+	if err := f.ValidateSkills(skillsDir); err != nil {
+		return "", nil, "", fmt.Errorf("validating formula skills: %w", err)
 	}
 
 	// 3. Resolve variables
@@ -746,7 +761,18 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 		return err
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Launched %s\n", session.SessionName(agentName))
+	var parts []string
+	if entry.Model != "" {
+		parts = append(parts, "model: "+entry.Model)
+	}
+	if entry.BaseURL != "" {
+		parts = append(parts, "endpoint: "+entry.BaseURL)
+	}
+	if len(parts) > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "Launched %s (%s)\n", session.SessionName(agentName), strings.Join(parts, ", "))
+	} else {
+		fmt.Fprintf(cmd.OutOrStdout(), "Launched %s\n", session.SessionName(agentName))
+	}
 	return nil
 }
 

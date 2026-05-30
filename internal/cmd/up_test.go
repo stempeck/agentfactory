@@ -139,3 +139,84 @@ func TestRunUp_AbortsOnWorktreeFailure(t *testing.T) {
 		t.Errorf("error should contain 'worktree creation failed', got: %v", err)
 	}
 }
+
+func TestUp_MissingSkill(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	afDir := filepath.Join(root, ".agentfactory")
+	os.MkdirAll(afDir, 0o755)
+	os.WriteFile(filepath.Join(afDir, "factory.json"),
+		[]byte(`{"type":"factory","version":1,"name":"test"}`), 0o644)
+	os.WriteFile(filepath.Join(afDir, "agents.json"),
+		[]byte(`{"agents":{"skill-agent":{"type":"autonomous","description":"needs skills","formula":"skill-formula"}}}`), 0o644)
+
+	formulaDir := filepath.Join(afDir, "store", "formulas")
+	os.MkdirAll(formulaDir, 0o755)
+	toml := `
+formula = "skill-formula"
+type = "workflow"
+version = 1
+skills = ["missing-skill"]
+
+[[steps]]
+id = "step1"
+title = "Step 1"
+`
+	os.WriteFile(filepath.Join(formulaDir, "skill-formula.formula.toml"), []byte(toml), 0o644)
+
+	os.MkdirAll(filepath.Join(root, ".claude", "skills"), 0o755)
+	os.MkdirAll(filepath.Join(root, ".agentfactory", "agents", "skill-agent"), 0o755)
+
+	t.Setenv("AF_WORKTREE", root)
+	t.Setenv("AF_WORKTREE_ID", "wt-test00")
+	t.Chdir(root)
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	err := runUp(cmd, []string{"skill-agent"})
+	output := buf.String()
+
+	if err == nil {
+		t.Fatal("expected error from runUp when agent has missing skills")
+	}
+	if !strings.Contains(output, "missing-skill") {
+		t.Errorf("output should mention missing-skill, got: %q", output)
+	}
+}
+
+func TestRunUp_ModelInOutput(t *testing.T) {
+	src, err := os.ReadFile("up.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(src)
+	if !strings.Contains(content, `entry.Model != ""`) {
+		t.Error("up.go: runUp must check entry.Model before printing start message")
+	}
+	if !strings.Contains(content, `"model: "`) {
+		t.Error("up.go: runUp must include model label in start message when model is set")
+	}
+	if !strings.Contains(content, `"Started %s\n"`) {
+		t.Error("up.go: runUp must preserve backward-compatible Started format when model is empty")
+	}
+}
+
+func TestUpStartMessage_WithEndpoint(t *testing.T) {
+	src, err := os.ReadFile("up.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(src)
+	if !strings.Contains(content, `entry.BaseURL != ""`) {
+		t.Error("up.go: runUp must check entry.BaseURL before printing start message")
+	}
+	if !strings.Contains(content, `"endpoint: "`) {
+		t.Error("up.go: runUp must include endpoint label in start message when base_url is set")
+	}
+	if !strings.Contains(content, `"Started %s\n"`) {
+		t.Error("up.go: runUp must preserve backward-compatible Started format when no fields set")
+	}
+}

@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/config"
+	"github.com/stempeck/agentfactory/internal/formula"
 	"github.com/stempeck/agentfactory/internal/session"
 	"github.com/stempeck/agentfactory/internal/tmux"
 	"github.com/stempeck/agentfactory/internal/worktree"
@@ -59,6 +61,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	type skippedAgent struct {
+		name   string
+		reason string
+	}
+	var skipped []skippedAgent
+
 	allOK := true
 	for _, name := range agents {
 		entry, ok := agentsCfg.Agents[name]
@@ -66,6 +74,28 @@ func runUp(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "%s: unknown agent\n", name)
 			allOK = false
 			continue
+		}
+
+		if entry.Formula != "" {
+			formulaPath, findErr := formula.FindFormulaFile(entry.Formula, root)
+			if findErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "%s: cannot find formula %s: %v\n", name, entry.Formula, findErr)
+				allOK = false
+				continue
+			}
+			f, parseErr := formula.ParseFile(formulaPath)
+			if parseErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "%s: cannot parse formula %s: %v\n", name, entry.Formula, parseErr)
+				allOK = false
+				continue
+			}
+			skillsDir := filepath.Join(root, ".claude", "skills")
+			if skillErr := f.ValidateSkills(skillsDir); skillErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "%s: %v\n", name, skillErr)
+				skipped = append(skipped, skippedAgent{name: name, reason: skillErr.Error()})
+				allOK = false
+				continue
+			}
 		}
 
 		envWT := os.Getenv("AF_WORKTREE")
@@ -119,7 +149,25 @@ func runUp(cmd *cobra.Command, args []string) error {
 			allOK = false
 			continue
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Started %s\n", session.SessionName(name))
+		var parts []string
+		if entry.Model != "" {
+			parts = append(parts, "model: "+entry.Model)
+		}
+		if entry.BaseURL != "" {
+			parts = append(parts, "endpoint: "+entry.BaseURL)
+		}
+		if len(parts) > 0 {
+			fmt.Fprintf(cmd.OutOrStdout(), "Started %s (%s)\n", session.SessionName(name), strings.Join(parts, ", "))
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "Started %s\n", session.SessionName(name))
+		}
+	}
+
+	if len(skipped) > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: %d agent(s) skipped due to missing skills:\n", len(skipped))
+		for _, s := range skipped {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  - %s: %s\n", s.name, s.reason)
+		}
 	}
 
 	if !allOK {

@@ -3661,3 +3661,79 @@ func TestFormulaPathReset_FullRuntimeCleanup(t *testing.T) {
 		t.Error("arbitrary_extra_file should be removed by full .runtime/ cleanup")
 	}
 }
+
+func TestSling_MissingSkill(t *testing.T) {
+	installMemStore(t)
+	toml := `
+formula = "test-skill-check"
+type = "workflow"
+version = 1
+skills = ["nonexistent-skill"]
+
+[[steps]]
+id = "step1"
+title = "Step 1"
+`
+	root, agentDir := createTestFormulaFactoryWithTOML(t, "test-skill-check", "test-agent", toml)
+
+	os.MkdirAll(filepath.Join(root, ".claude", "skills"), 0o755)
+
+	params := InstantiateParams{
+		Ctx:         t.Context(),
+		FormulaName: "test-skill-check",
+		AgentName:   "test-agent",
+		Root:        root,
+		WorkDir:     agentDir,
+	}
+
+	var buf bytes.Buffer
+	_, _, _, err := instantiateFormulaWorkflow(params, &buf)
+	if err == nil {
+		t.Fatal("expected error from formula with missing skill, got nil")
+	}
+	msg := err.Error()
+	t.Logf("skill validation error: %s", msg)
+	if !strings.Contains(msg, "validating formula skills") {
+		t.Errorf("err = %q, want it to contain %q", msg, "validating formula skills")
+	}
+	if !strings.Contains(msg, "nonexistent-skill") {
+		t.Errorf("err = %q, want it to contain %q", msg, "nonexistent-skill")
+	}
+	if !strings.Contains(msg, "SKILL.md") {
+		t.Errorf("err = %q, want it to contain %q", msg, "SKILL.md")
+	}
+}
+
+func TestLaunchAgentSession_ModelInOutput(t *testing.T) {
+	src, err := os.ReadFile("sling.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(src)
+	if !strings.Contains(content, `entry.Model != ""`) {
+		t.Error("sling.go: launchAgentSession must check entry.Model before printing launch message")
+	}
+	if !strings.Contains(content, `"model: "`) {
+		t.Error("sling.go: launchAgentSession must include model label in launch message when model is set")
+	}
+	if !strings.Contains(content, `"Launched %s\n"`) {
+		t.Error("sling.go: launchAgentSession must preserve backward-compatible Launched format when model is empty")
+	}
+}
+
+func TestLaunchMessage_WithEndpoint(t *testing.T) {
+	src, err := os.ReadFile("sling.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(src)
+	if !strings.Contains(content, `entry.BaseURL != ""`) {
+		t.Error("sling.go: launchAgentSession must check entry.BaseURL before printing launch message")
+	}
+	if !strings.Contains(content, `"endpoint: "`) {
+		t.Error("sling.go: launchAgentSession must include endpoint label in launch message when base_url is set")
+	}
+	if !strings.Contains(content, `"Launched %s\n"`) {
+		t.Error("sling.go: launchAgentSession must preserve backward-compatible Launched format when no fields set")
+	}
+}

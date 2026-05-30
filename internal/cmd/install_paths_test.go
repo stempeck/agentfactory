@@ -39,6 +39,26 @@ func TestInstallInit_UsesConfigHooksDir(t *testing.T) {
 	}
 }
 
+func TestInstallInit_HasLegacyGateLockCleanup(t *testing.T) {
+	data, err := os.ReadFile("install.go")
+	if err != nil {
+		t.Fatalf("read install.go: %v", err)
+	}
+	content := string(data)
+	idx := strings.Index(content, "func runInstallInit")
+	if idx < 0 {
+		t.Fatal("runInstallInit function not found")
+	}
+	initBody := content[idx:]
+	nextFunc := strings.Index(initBody[1:], "\nfunc ")
+	if nextFunc > 0 {
+		initBody = initBody[:nextFunc+1]
+	}
+	if !strings.Contains(initBody, "cleanLegacyGateLocks") {
+		t.Error("runInstallInit does not call cleanLegacyGateLocks — legacy /tmp/ gate locks must be cleaned during init")
+	}
+}
+
 func TestInstallInit_HasAgentReProvisioning(t *testing.T) {
 	data, err := os.ReadFile("install.go")
 	if err != nil {

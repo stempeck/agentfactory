@@ -52,6 +52,9 @@ type Formula struct {
 
 	// Aspect-specific (similar to convoy but for analysis)
 	Aspects []Aspect `toml:"aspects"`
+
+	// Skill dependencies
+	Skills []string `toml:"skills"`
 }
 
 // Aspect represents a parallel analysis aspect in an aspect formula.

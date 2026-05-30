@@ -7,6 +7,27 @@ import (
 	"testing"
 )
 
+func TestFidelity_OffBlockedDuringFormula(t *testing.T) {
+	dir := setupTestFactoryForFidelity(t)
+	t.Chdir(dir)
+
+	writeRuntimeFile(t, dir, "hooked_formula", "bd-test-instance")
+
+	err := runFidelity(fidelityCmd, []string{"off"})
+	if err == nil {
+		t.Fatal("expected error when hooked_formula exists, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot disable fidelity gate") {
+		t.Errorf("error %q does not contain expected message", err.Error())
+	}
+
+	gateFile := filepath.Join(dir, ".agentfactory", ".fidelity-gate")
+	data, err := os.ReadFile(gateFile)
+	if err == nil && strings.TrimSpace(string(data)) == "off" {
+		t.Error(".fidelity-gate was written to 'off' despite active formula — guard did not block")
+	}
+}
+
 // setupTestFactoryForFidelity creates a minimal factory layout so
 // config.FindFactoryRoot succeeds. Returns the tempdir path.
 func setupTestFactoryForFidelity(t *testing.T) string {
@@ -151,5 +172,49 @@ func TestFidelity_BadArg(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "usage") {
 		t.Errorf("error %q does not contain %q", err.Error(), "usage")
+	}
+}
+
+func TestFidelity_StatusWithStaleLock(t *testing.T) {
+	dir := setupTestFactoryForFidelity(t)
+	t.Chdir(dir)
+
+	os.WriteFile(filepath.Join(dir, ".agentfactory", ".fidelity-gate"), []byte("on\n"), 0o644)
+
+	writeRuntimeFile(t, dir, "fidelity-gate.lock",
+		`{"pid":99999999,"acquired_at":"2026-01-01T00:00:00Z","session_id":"dead-session"}`)
+
+	out := captureStdout(t, func() {
+		if err := runFidelity(fidelityCmd, nil); err != nil {
+			t.Fatalf("runFidelity: %v", err)
+		}
+	})
+	if !strings.Contains(out, "WARNING") {
+		t.Errorf("output %q should contain WARNING for stale lock", out)
+	}
+	if !strings.Contains(out, "99999999") {
+		t.Errorf("output %q should contain the dead PID", out)
+	}
+	if !strings.Contains(out, "fidelity gate: on") {
+		t.Errorf("output %q should still show gate on", out)
+	}
+}
+
+func TestFidelity_StatusOnCleanNoWarning(t *testing.T) {
+	dir := setupTestFactoryForFidelity(t)
+	t.Chdir(dir)
+
+	os.WriteFile(filepath.Join(dir, ".agentfactory", ".fidelity-gate"), []byte("on\n"), 0o644)
+
+	out := captureStdout(t, func() {
+		if err := runFidelity(fidelityCmd, nil); err != nil {
+			t.Fatalf("runFidelity: %v", err)
+		}
+	})
+	if strings.Contains(out, "WARNING") {
+		t.Errorf("output %q should NOT contain WARNING when no stale lock", out)
+	}
+	if !strings.Contains(out, "fidelity gate: on") {
+		t.Errorf("output %q should contain clean on status", out)
 	}
 }

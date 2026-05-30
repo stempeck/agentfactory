@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/config"
+	"github.com/stempeck/agentfactory/internal/lock"
 )
 
 var fidelityCmd = &cobra.Command{
@@ -50,7 +51,12 @@ func runFidelity(cmd *cobra.Command, args []string) error {
 		if err != nil || strings.TrimSpace(string(data)) != "on" {
 			fmt.Println("fidelity gate: off")
 		} else {
-			fmt.Println("fidelity gate: on")
+			lockPath := filepath.Join(cwd, ".runtime", "fidelity-gate.lock")
+			if info, err := lock.NewWithPath(lockPath).Read(); err == nil && info.IsStale() {
+				fmt.Printf("fidelity gate: on (WARNING: stale lock at .runtime/fidelity-gate.lock, PID %d dead)\n", info.PID)
+			} else {
+				fmt.Println("fidelity gate: on")
+			}
 		}
 		return nil
 	}
@@ -62,6 +68,10 @@ func runFidelity(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Println("fidelity gate: on")
 	case "off":
+		hookedFormula := filepath.Join(cwd, ".runtime", "hooked_formula")
+		if _, err := os.Stat(hookedFormula); err == nil {
+			return fmt.Errorf("cannot disable fidelity gate while a formula is active (found .runtime/hooked_formula)")
+		}
 		if err := os.WriteFile(gateFile, []byte("off\n"), 0644); err != nil {
 			return fmt.Errorf("disabling fidelity gate: %w", err)
 		}

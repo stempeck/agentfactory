@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -34,6 +35,9 @@ type AgentEntry struct {
 	Directive   string   `json:"directive,omitempty"`
 	Formula     string   `json:"formula,omitempty"`
 	SparsePaths []string `json:"sparse_paths,omitempty"`
+	Model       string   `json:"model,omitempty"`
+	BaseURL     string   `json:"base_url,omitempty"`
+	AuthToken   string   `json:"auth_token,omitempty"`
 }
 
 var validAgentName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
@@ -137,6 +141,12 @@ func validateAgentConfig(c *AgentConfig) error {
 		}
 		if agent.Description == "" {
 			return fmt.Errorf("%w: agent %q has empty description", ErrMissingField, name)
+		}
+		if agent.BaseURL != "" {
+			u, err := url.Parse(agent.BaseURL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return fmt.Errorf("agent %q has invalid base_url %q: must start with http:// or https://", name, agent.BaseURL)
+			}
 		}
 	}
 	return nil

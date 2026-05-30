@@ -305,13 +305,13 @@ func TestOutputFormulaContext_PreflightWiring(t *testing.T) {
 	source := string(src)
 
 	// outputFormulaContext must call outputCommandPreflight
-	if !strings.Contains(source, "outputCommandPreflight(out, description)") {
-		t.Error("prime.go: outputFormulaContext does not call outputCommandPreflight(out, description)")
+	if !strings.Contains(source, "outputCommandPreflight(tracker, description)") {
+		t.Error("prime.go: outputFormulaContext does not call outputCommandPreflight(tracker, description)")
 	}
 
 	// outputFormulaContext must call outputStandingDirective
-	if !strings.Contains(source, "outputStandingDirective(out)") {
-		t.Error("prime.go: outputFormulaContext does not call outputStandingDirective(out)")
+	if !strings.Contains(source, "outputStandingDirective(tracker)") {
+		t.Error("prime.go: outputFormulaContext does not call outputStandingDirective(tracker)")
 	}
 }
 
@@ -503,4 +503,161 @@ func TestStepHasOpenBlockers_Defensive(t *testing.T) {
 			t.Error("one open blocker should yield true")
 		}
 	})
+}
+
+func TestPrime_WritesStepPrimed(t *testing.T) {
+	root := setupTestFactoryForPrime(t)
+	os.MkdirAll(config.StoreDir(root), 0o755)
+	workDir := filepath.Join(root, ".agentfactory", "agents", "manager")
+
+	mem := memstore.New()
+	ctx := t.Context()
+
+	instance, err := mem.Create(ctx, issuestore.CreateParams{
+		Title:    "Formula: prime-writes-marker",
+		Type:     issuestore.TypeEpic,
+		Labels:   []string{"formula-instance"},
+		Assignee: "manager",
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	step, err := mem.Create(ctx, issuestore.CreateParams{
+		Title:    "Step: should be primed",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+
+	var buf strings.Builder
+	outputFormulaContext(ctx, &buf, workDir)
+
+	primedPath := filepath.Join(workDir, ".runtime", "step_primed")
+	data, err := os.ReadFile(primedPath)
+	if err != nil {
+		t.Fatalf("step_primed not written: %v", err)
+	}
+	content := strings.TrimSpace(string(data))
+	parts := strings.SplitN(content, ":", 2)
+	if len(parts) != 2 {
+		t.Fatalf("step_primed should be compound format stepID:hash, got %q", content)
+	}
+	if parts[0] != step.ID {
+		t.Errorf("step_primed ID = %q, want %q", parts[0], step.ID)
+	}
+	if len(parts[1]) != 8 {
+		t.Errorf("step_primed hash should be 8 hex chars, got %q", parts[1])
+	}
+}
+
+type brokenWriter struct{}
+
+func (brokenWriter) Write([]byte) (int, error) {
+	return 0, errors.New("broken pipe")
+}
+
+func TestPrime_BrokenPipe_NoSentinel(t *testing.T) {
+	root := setupTestFactoryForPrime(t)
+	os.MkdirAll(config.StoreDir(root), 0o755)
+	workDir := filepath.Join(root, ".agentfactory", "agents", "manager")
+
+	mem := memstore.New()
+	ctx := t.Context()
+
+	instance, err := mem.Create(ctx, issuestore.CreateParams{
+		Title:    "Formula: broken-pipe-test",
+		Type:     issuestore.TypeEpic,
+		Labels:   []string{"formula-instance"},
+		Assignee: "manager",
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	if _, err := mem.Create(ctx, issuestore.CreateParams{
+		Title:    "Step: should not be primed",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	}); err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+
+	outputFormulaContext(ctx, brokenWriter{}, workDir)
+
+	primedPath := filepath.Join(workDir, ".runtime", "step_primed")
+	if _, err := os.Stat(primedPath); err == nil {
+		t.Fatal("step_primed must not exist when output writer fails, but it was created")
+	}
+}
+
+func TestPrime_NormalOutput_SentinelCreated(t *testing.T) {
+	root := setupTestFactoryForPrime(t)
+	os.MkdirAll(config.StoreDir(root), 0o755)
+	workDir := filepath.Join(root, ".agentfactory", "agents", "manager")
+
+	mem := memstore.New()
+	ctx := t.Context()
+
+	instance, err := mem.Create(ctx, issuestore.CreateParams{
+		Title:    "Formula: normal-output-test",
+		Type:     issuestore.TypeEpic,
+		Labels:   []string{"formula-instance"},
+		Assignee: "manager",
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	step, err := mem.Create(ctx, issuestore.CreateParams{
+		Title:    "Step: should be primed",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+
+	var buf strings.Builder
+	outputFormulaContext(ctx, &buf, workDir)
+
+	primedPath := filepath.Join(workDir, ".runtime", "step_primed")
+	data, err := os.ReadFile(primedPath)
+	if err != nil {
+		t.Fatalf("step_primed not written: %v", err)
+	}
+	content := strings.TrimSpace(string(data))
+	parts := strings.SplitN(content, ":", 2)
+	if len(parts) != 2 {
+		t.Fatalf("step_primed should be compound format stepID:hash, got %q", content)
+	}
+	if parts[0] != step.ID {
+		t.Errorf("step_primed ID = %q, want %q", parts[0], step.ID)
+	}
+	if len(parts[1]) != 8 {
+		t.Errorf("step_primed hash should be 8 hex chars, got %q", parts[1])
+	}
 }

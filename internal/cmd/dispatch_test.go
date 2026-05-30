@@ -332,19 +332,40 @@ func TestBuildDispatchLoopCmd(t *testing.T) {
 			name:     "default interval",
 			afBin:    "/usr/local/bin/af",
 			interval: 300,
-			wantHas:  []string{"while true", "/usr/local/bin/af dispatch", "tee -a .runtime/dispatch.log", "sleep 300", "done"},
+			wantHas: []string{
+				"while true",
+				"/usr/local/bin/af dispatch",
+				"tee -a .runtime/dispatch.log",
+				"sleep 300",
+				"done",
+				"trap",
+				"dispatch loop exiting",
+				"dispatch cycle starting",
+				"rc=$?",
+			},
 		},
 		{
 			name:     "custom interval",
 			afBin:    "/home/user/.local/bin/af",
 			interval: 60,
-			wantHas:  []string{"while true", "/home/user/.local/bin/af dispatch", "sleep 60", "done"},
+			wantHas: []string{
+				"while true",
+				"/home/user/.local/bin/af dispatch",
+				"sleep 60",
+				"done",
+				"trap",
+			},
 		},
 		{
 			name:     "fallback af binary",
 			afBin:    "af",
 			interval: 120,
-			wantHas:  []string{"af dispatch", "sleep 120"},
+			wantHas: []string{
+				"af dispatch",
+				"sleep 120",
+				"trap",
+				"rc=$?",
+			},
 		},
 	}
 
@@ -353,7 +374,7 @@ func TestBuildDispatchLoopCmd(t *testing.T) {
 			cmd := buildDispatchLoopCmd(tc.afBin, tc.interval)
 			for _, want := range tc.wantHas {
 				if !strings.Contains(cmd, want) {
-					t.Errorf("buildDispatchLoopCmd(%q, %d) = %q, missing %q", tc.afBin, tc.interval, cmd, want)
+					t.Errorf("buildDispatchLoopCmd(%q, %d) missing %q\ngot: %s", tc.afBin, tc.interval, want, cmd)
 				}
 			}
 		})
@@ -714,6 +735,79 @@ func TestGroupMappingsBySource(t *testing.T) {
 }
 
 // --- Phase 4: Dispatch cycle lock test ---
+
+// --- Cycle stats tests (from Gherkin scenarios) ---
+
+func TestDispatchCycleStats_ZeroCounts(t *testing.T) {
+	stats := &dispatchCycleStats{
+		start: time.Date(2026, 5, 17, 10, 30, 0, 0, time.UTC),
+	}
+	got := stats.String()
+	if !strings.Contains(got, "dispatch cycle complete") {
+		t.Errorf("stats.String() missing 'dispatch cycle complete'\ngot: %s", got)
+	}
+	if !strings.Contains(got, "dispatched=0") {
+		t.Errorf("stats.String() missing 'dispatched=0'\ngot: %s", got)
+	}
+	if !strings.Contains(got, "skipped=0") {
+		t.Errorf("stats.String() missing 'skipped=0'\ngot: %s", got)
+	}
+	if !strings.Contains(got, "errors=0") {
+		t.Errorf("stats.String() missing 'errors=0'\ngot: %s", got)
+	}
+	if !strings.Contains(got, "2026-05-17 10:30:00") {
+		t.Errorf("stats.String() missing timestamp '2026-05-17 10:30:00'\ngot: %s", got)
+	}
+}
+
+func TestDispatchCycleStats_WithDispatches(t *testing.T) {
+	stats := &dispatchCycleStats{
+		start:      time.Date(2026, 5, 17, 10, 30, 0, 0, time.UTC),
+		queried:    5,
+		dispatched: 3,
+		skipped:    1,
+		errors:     1,
+	}
+	got := stats.String()
+	if !strings.Contains(got, "queried=5") {
+		t.Errorf("stats.String() missing 'queried=5'\ngot: %s", got)
+	}
+	if !strings.Contains(got, "dispatched=3") {
+		t.Errorf("stats.String() missing 'dispatched=3'\ngot: %s", got)
+	}
+	if !strings.Contains(got, "skipped=1") {
+		t.Errorf("stats.String() missing 'skipped=1'\ngot: %s", got)
+	}
+	if !strings.Contains(got, "errors=1") {
+		t.Errorf("stats.String() missing 'errors=1'\ngot: %s", got)
+	}
+	if !strings.Contains(got, "elapsed=") {
+		t.Errorf("stats.String() missing 'elapsed='\ngot: %s", got)
+	}
+}
+
+func TestDispatchCycleStats_Format(t *testing.T) {
+	stats := &dispatchCycleStats{
+		start:      time.Date(2026, 5, 17, 14, 5, 30, 0, time.UTC),
+		queried:    10,
+		dispatched: 2,
+		skipped:    7,
+		errors:     1,
+	}
+	got := stats.String()
+
+	// Must start with bracketed timestamp
+	if !strings.HasPrefix(got, "[2026-05-17 14:05:30]") {
+		t.Errorf("stats.String() should start with '[2026-05-17 14:05:30]'\ngot: %s", got)
+	}
+
+	// Must contain all counter fields
+	for _, field := range []string{"queried=10", "dispatched=2", "skipped=7", "errors=1", "elapsed="} {
+		if !strings.Contains(got, field) {
+			t.Errorf("stats.String() missing %q\ngot: %s", field, got)
+		}
+	}
+}
 
 func TestDispatchCycleLock(t *testing.T) {
 	dir := t.TempDir()

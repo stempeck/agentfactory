@@ -571,3 +571,438 @@ func TestCheckAvailableMemory_ReturnsValue(t *testing.T) {
 		t.Error("checkAvailableMemory returned 0MB, expected > 0")
 	}
 }
+
+func TestBuildStartupCommand_WithModel(t *testing.T) {
+	entry := config.AgentEntry{Type: "autonomous", Description: "test", Model: "sonnet"}
+	mgr := NewManager("/tmp/factory", "testagent", entry)
+
+	cmd := mgr.BuildStartupCommand()
+
+	if !strings.Contains(cmd, "--model 'sonnet'") {
+		t.Errorf("command should contain --model 'sonnet', got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "claude --dangerously-skip-permissions") {
+		t.Error("command should contain claude invocation")
+	}
+}
+
+func TestBuildStartupCommand_WithModelAndPrompt(t *testing.T) {
+	entry := config.AgentEntry{Type: "autonomous", Description: "test", Model: "sonnet"}
+	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr.SetInitialPrompt("do work")
+
+	cmd := mgr.BuildStartupCommand()
+
+	if !strings.Contains(cmd, "--model 'sonnet'") {
+		t.Errorf("command should contain --model 'sonnet', got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "do work") {
+		t.Errorf("command should contain the prompt, got: %s", cmd)
+	}
+	modelIdx := strings.Index(cmd, "--model")
+	promptIdx := strings.Index(cmd, "do work")
+	if modelIdx >= promptIdx {
+		t.Errorf("--model (at %d) must appear before prompt (at %d) in command: %s", modelIdx, promptIdx, cmd)
+	}
+}
+
+func TestBuildStartupCommand_WithoutModel_NoModelFlag(t *testing.T) {
+	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
+	mgr := NewManager("/tmp/factory", "testagent", entry)
+
+	cmd := mgr.BuildStartupCommand()
+
+	if strings.Contains(cmd, "--model") {
+		t.Errorf("command without model should NOT contain --model, got: %s", cmd)
+	}
+}
+
+func TestBuildStartupCommand_ModelWithShellMetachars(t *testing.T) {
+	entry := config.AgentEntry{Type: "autonomous", Description: "test", Model: `"; rm -rf /`}
+	mgr := NewManager("/tmp/factory", "testagent", entry)
+
+	cmd := mgr.BuildStartupCommand()
+
+	if !strings.Contains(cmd, "--model") {
+		t.Errorf("command should contain --model flag, got: %s", cmd)
+	}
+	if strings.Contains(cmd, `--model "; rm`) {
+		t.Error("model value should be quoted, not bare — shell injection possible")
+	}
+	quoted := shellQuote(`"; rm -rf /`)
+	if !strings.Contains(cmd, "--model "+quoted) {
+		t.Errorf("command should contain safely quoted model value, got: %s", cmd)
+	}
+}
+
+func TestStart_SetsAnthropicModelEnv(t *testing.T) {
+	if os.Getenv("AF_INTEGRATION_TEST") == "" {
+		t.Skip("set AF_INTEGRATION_TEST=1 to run integration tests")
+	}
+
+	tmpDir := t.TempDir()
+	wtPath := filepath.Join(tmpDir, ".worktrees", "wt-test")
+
+	// Test with model set
+	t.Run("with_model", func(t *testing.T) {
+		agentDir := filepath.Join(wtPath, ".agentfactory", "agents", "testmodel")
+		if err := os.MkdirAll(agentDir, 0755); err != nil {
+			t.Fatalf("creating agent dir: %v", err)
+		}
+
+		entry := config.AgentEntry{Type: "interactive", Description: "test", Model: "sonnet"}
+		mgr := NewManager(tmpDir, "testmodel", entry)
+		if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
+			t.Fatalf("SetWorktree: %v", err)
+		}
+
+		_ = mgr.Start()
+
+		running, _ := mgr.IsRunning()
+		if !running {
+			t.Skip("session did not start — tmux may not be available")
+		}
+		defer mgr.Stop()
+
+		out, err := exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_MODEL").Output()
+		if err != nil {
+			t.Fatalf("failed to read ANTHROPIC_MODEL from tmux: %v", err)
+		}
+		if !strings.Contains(string(out), "ANTHROPIC_MODEL=sonnet") {
+			t.Errorf("expected ANTHROPIC_MODEL=sonnet, got: %s", string(out))
+		}
+	})
+
+	// Test without model
+	t.Run("without_model", func(t *testing.T) {
+		agentDir := filepath.Join(wtPath, ".agentfactory", "agents", "testnomodel")
+		if err := os.MkdirAll(agentDir, 0755); err != nil {
+			t.Fatalf("creating agent dir: %v", err)
+		}
+
+		entry := config.AgentEntry{Type: "interactive", Description: "test"}
+		mgr := NewManager(tmpDir, "testnomodel", entry)
+		if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
+			t.Fatalf("SetWorktree: %v", err)
+		}
+
+		_ = mgr.Start()
+
+		running, _ := mgr.IsRunning()
+		if !running {
+			t.Skip("session did not start — tmux may not be available")
+		}
+		defer mgr.Stop()
+
+		out, err := exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_MODEL").CombinedOutput()
+		if err == nil && strings.Contains(string(out), "ANTHROPIC_MODEL=") {
+			t.Errorf("ANTHROPIC_MODEL should NOT be set when model is empty, got: %s", string(out))
+		}
+	})
+}
+
+func TestStart_SetsEndpointEnvVars(t *testing.T) {
+	if os.Getenv("AF_INTEGRATION_TEST") == "" {
+		t.Skip("set AF_INTEGRATION_TEST=1 to run integration tests")
+	}
+
+	tmpDir := t.TempDir()
+	wtPath := filepath.Join(tmpDir, ".worktrees", "wt-test")
+
+	t.Run("with_endpoint", func(t *testing.T) {
+		agentDir := filepath.Join(wtPath, ".agentfactory", "agents", "testendpoint")
+		if err := os.MkdirAll(agentDir, 0755); err != nil {
+			t.Fatalf("creating agent dir: %v", err)
+		}
+
+		entry := config.AgentEntry{
+			Type: "interactive", Description: "test",
+			BaseURL: "http://localhost:9999/v1/messages", AuthToken: "endpoint-tok-42",
+		}
+		mgr := NewManager(tmpDir, "testendpoint", entry)
+		if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
+			t.Fatalf("SetWorktree: %v", err)
+		}
+
+		_ = mgr.Start()
+
+		running, _ := mgr.IsRunning()
+		if !running {
+			t.Skip("session did not start — tmux may not be available")
+		}
+		defer mgr.Stop()
+
+		out, err := exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_BASE_URL").Output()
+		if err != nil {
+			t.Fatalf("failed to read ANTHROPIC_BASE_URL from tmux: %v", err)
+		}
+		if !strings.Contains(string(out), "ANTHROPIC_BASE_URL=http://localhost:9999/v1/messages") {
+			t.Errorf("expected ANTHROPIC_BASE_URL=http://localhost:9999/v1/messages, got: %s", string(out))
+		}
+
+		out, err = exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_AUTH_TOKEN").Output()
+		if err != nil {
+			t.Fatalf("failed to read ANTHROPIC_AUTH_TOKEN from tmux: %v", err)
+		}
+		if !strings.Contains(string(out), "ANTHROPIC_AUTH_TOKEN=endpoint-tok-42") {
+			t.Errorf("expected ANTHROPIC_AUTH_TOKEN=endpoint-tok-42, got: %s", string(out))
+		}
+	})
+
+	t.Run("without_endpoint", func(t *testing.T) {
+		agentDir := filepath.Join(wtPath, ".agentfactory", "agents", "testnoendpoint")
+		if err := os.MkdirAll(agentDir, 0755); err != nil {
+			t.Fatalf("creating agent dir: %v", err)
+		}
+
+		entry := config.AgentEntry{Type: "interactive", Description: "test"}
+		mgr := NewManager(tmpDir, "testnoendpoint", entry)
+		if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
+			t.Fatalf("SetWorktree: %v", err)
+		}
+
+		_ = mgr.Start()
+
+		running, _ := mgr.IsRunning()
+		if !running {
+			t.Skip("session did not start — tmux may not be available")
+		}
+		defer mgr.Stop()
+
+		out, err := exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_BASE_URL").CombinedOutput()
+		if err == nil && strings.Contains(string(out), "ANTHROPIC_BASE_URL=") {
+			t.Errorf("ANTHROPIC_BASE_URL should NOT be set when endpoint is empty, got: %s", string(out))
+		}
+
+		out, err = exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_AUTH_TOKEN").CombinedOutput()
+		if err == nil && strings.Contains(string(out), "ANTHROPIC_AUTH_TOKEN=") {
+			t.Errorf("ANTHROPIC_AUTH_TOKEN should NOT be set when endpoint is empty, got: %s", string(out))
+		}
+	})
+}
+
+func TestStop_CleansUpGateLocks(t *testing.T) {
+	if os.Getenv("AF_INTEGRATION_TEST") == "" {
+		t.Skip("set AF_INTEGRATION_TEST=1 to run integration tests")
+	}
+
+	tmpDir := t.TempDir()
+	wtPath := filepath.Join(tmpDir, ".worktrees", "wt-test")
+	agentDir := filepath.Join(wtPath, ".agentfactory", "agents", "testagent")
+	runtimeDir := filepath.Join(agentDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatalf("creating runtime dir: %v", err)
+	}
+
+	gateLocks := []string{"fidelity-gate.lock", "quality-gate.lock"}
+	for _, name := range gateLocks {
+		lockPath := filepath.Join(runtimeDir, name)
+		data := `{"pid":99999999,"acquired_at":"2026-01-01T00:00:00Z"}`
+		if err := os.WriteFile(lockPath, []byte(data), 0o644); err != nil {
+			t.Fatalf("creating %s: %v", name, err)
+		}
+	}
+
+	entry := config.AgentEntry{Type: "interactive", Description: "test"}
+	mgr := NewManager(tmpDir, "testagent", entry)
+	if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
+		t.Fatalf("SetWorktree: %v", err)
+	}
+
+	_ = mgr.Start()
+	running, _ := mgr.IsRunning()
+	if !running {
+		t.Skip("session did not start — tmux may not be available")
+	}
+
+	if err := mgr.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	for _, name := range gateLocks {
+		lockPath := filepath.Join(runtimeDir, name)
+		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+			t.Errorf("%s should be removed after Stop(), but still exists", name)
+		}
+	}
+}
+
+// --- Endpoint configuration tests (BaseURL, AuthToken) ---
+
+func TestBuildStartupCommand_WithEndpoint(t *testing.T) {
+	entry := config.AgentEntry{
+		Type: "autonomous", Description: "test",
+		BaseURL: "http://localhost:1234/v1/messages", AuthToken: "tok123",
+	}
+	mgr := NewManager("/tmp/factory", "testagent", entry)
+	if err := mgr.SetWorktree("/tmp/wt", "wt-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := mgr.BuildStartupCommand()
+
+	if !strings.Contains(cmd, "ANTHROPIC_BASE_URL='http://localhost:1234/v1/messages'") {
+		t.Errorf("command should contain ANTHROPIC_BASE_URL export, got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "ANTHROPIC_AUTH_TOKEN='tok123'") {
+		t.Errorf("command should contain ANTHROPIC_AUTH_TOKEN export, got: %s", cmd)
+	}
+}
+
+func TestBuildStartupCommand_WithEndpointAndModel(t *testing.T) {
+	entry := config.AgentEntry{
+		Type: "autonomous", Description: "test",
+		Model: "sonnet", BaseURL: "http://localhost:1234", AuthToken: "tok",
+	}
+	mgr := NewManager("/tmp/factory", "testagent", entry)
+	if err := mgr.SetWorktree("/tmp/wt", "wt-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := mgr.BuildStartupCommand()
+
+	if !strings.Contains(cmd, "ANTHROPIC_BASE_URL='http://localhost:1234'") {
+		t.Errorf("command should contain ANTHROPIC_BASE_URL, got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "ANTHROPIC_AUTH_TOKEN='tok'") {
+		t.Errorf("command should contain ANTHROPIC_AUTH_TOKEN, got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "--model 'sonnet'") {
+		t.Errorf("command should contain --model flag, got: %s", cmd)
+	}
+	sepIdx := strings.Index(cmd, "&&")
+	baseURLIdx := strings.Index(cmd, "ANTHROPIC_BASE_URL")
+	modelIdx := strings.Index(cmd, "--model")
+	if baseURLIdx > sepIdx {
+		t.Errorf("ANTHROPIC_BASE_URL (at %d) must appear before && (at %d)", baseURLIdx, sepIdx)
+	}
+	if modelIdx < sepIdx {
+		t.Errorf("--model (at %d) must appear after && (at %d)", modelIdx, sepIdx)
+	}
+}
+
+func TestBuildStartupCommand_WithoutEndpoint_Unchanged(t *testing.T) {
+	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
+	mgr := NewManager("/tmp/factory", "ultraimplement", entry)
+
+	cmd := mgr.BuildStartupCommand()
+
+	expected := "export AF_ROOT='/tmp/factory' AF_ROLE='ultraimplement' AF_ACTOR='ultraimplement' && claude --dangerously-skip-permissions"
+	if cmd != expected {
+		t.Errorf("command without endpoint should be unchanged.\ngot:  %s\nwant: %s", cmd, expected)
+	}
+}
+
+func TestBuildStartupCommand_NoEndpoint_NoAuthTokenExport(t *testing.T) {
+	types := []string{"interactive", "autonomous"}
+	for _, agentType := range types {
+		t.Run(agentType, func(t *testing.T) {
+			entry := config.AgentEntry{Type: agentType, Description: "test"}
+			mgr := NewManager("/tmp/factory", "testagent", entry)
+
+			cmd := mgr.BuildStartupCommand()
+
+			if strings.Contains(cmd, "ANTHROPIC_BASE_URL") {
+				t.Errorf("command without endpoint must not contain ANTHROPIC_BASE_URL, got: %s", cmd)
+			}
+			if strings.Contains(cmd, "ANTHROPIC_AUTH_TOKEN") {
+				t.Errorf("command without endpoint must not contain ANTHROPIC_AUTH_TOKEN, got: %s", cmd)
+			}
+		})
+	}
+}
+
+func TestBuildStartupCommand_EndpointWithShellMetachars(t *testing.T) {
+	entry := config.AgentEntry{
+		Type: "autonomous", Description: "test",
+		BaseURL: "http://localhost:1234/v1?key=val&other=yes",
+	}
+	mgr := NewManager("/tmp/factory", "testagent", entry)
+
+	cmd := mgr.BuildStartupCommand()
+
+	quoted := shellQuote("http://localhost:1234/v1?key=val&other=yes")
+	if !strings.Contains(cmd, "ANTHROPIC_BASE_URL="+quoted) {
+		t.Errorf("URL with metacharacters should be shell-quoted, got: %s", cmd)
+	}
+}
+
+func TestBuildStartupCommand_AuthTokenWithShellMetachars(t *testing.T) {
+	entry := config.AgentEntry{
+		Type: "autonomous", Description: "test",
+		AuthToken: `"; rm -rf /`,
+	}
+	mgr := NewManager("/tmp/factory", "testagent", entry)
+
+	cmd := mgr.BuildStartupCommand()
+
+	if strings.Contains(cmd, `ANTHROPIC_AUTH_TOKEN="; rm`) {
+		t.Error("auth token should be quoted, not bare — shell injection possible")
+	}
+	quoted := shellQuote(`"; rm -rf /`)
+	if !strings.Contains(cmd, "ANTHROPIC_AUTH_TOKEN="+quoted) {
+		t.Errorf("auth token with metacharacters should be shell-quoted, got: %s", cmd)
+	}
+}
+
+func TestStart_PartialEndpointWarning(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		token   string
+		wantSet string
+		wantNot string
+	}{
+		{"base_url only", "http://localhost:1234", "", "base_url", "auth_token"},
+		{"auth_token only", "", "tok123", "auth_token", "base_url"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := config.AgentEntry{
+				Type: "autonomous", Description: "test",
+				BaseURL: tc.baseURL, AuthToken: tc.token,
+			}
+			hasBaseURL := entry.BaseURL != ""
+			hasAuthToken := entry.AuthToken != ""
+			if hasBaseURL == hasAuthToken {
+				t.Fatal("test setup error: exactly one field should be set")
+			}
+			if !((hasBaseURL) != (hasAuthToken)) {
+				t.Error("partial config condition should be true when exactly one field is set")
+			}
+		})
+	}
+}
+
+func TestEndpointConstants_NoDuplicateStrings(t *testing.T) {
+	src, err := os.ReadFile("session.go")
+	if err != nil {
+		t.Fatalf("reading session.go: %v", err)
+	}
+	lines := strings.Split(string(src), "\n")
+
+	var constBlockEnd int
+	inConst := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "const (" {
+			inConst = true
+		}
+		if inConst && trimmed == ")" {
+			constBlockEnd = i
+			inConst = false
+		}
+	}
+
+	for i, line := range lines {
+		if i <= constBlockEnd {
+			continue
+		}
+		if strings.Contains(line, "//") || strings.Contains(line, "test") || strings.Contains(line, "Test") {
+			continue
+		}
+		if strings.Contains(line, `"ANTHROPIC_BASE_URL"`) || strings.Contains(line, `"ANTHROPIC_AUTH_TOKEN"`) {
+			t.Errorf("line %d: found hardcoded env var string outside const block: %s", i+1, strings.TrimSpace(line))
+		}
+	}
+}

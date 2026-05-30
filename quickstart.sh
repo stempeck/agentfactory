@@ -287,6 +287,7 @@ install_af() {
     log_info "Building af from local source: $SCRIPT_DIR"
     cd "$SCRIPT_DIR"
     make sync-formulas
+    make sync-skills
     make build
     mkdir -p "$HOME/.local/bin"
     cp "$SCRIPT_DIR/af" "$HOME/.local/bin/af"

@@ -136,9 +136,14 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 	lk := lock.NewWithPath(filepath.Join(root, ".runtime", "dispatch-cycle.lock"))
 	if err := lk.Acquire(fmt.Sprintf("pid-%d", os.Getpid())); err != nil {
-		return fmt.Errorf("acquiring dispatch lock: %w", err)
+		return fmt.Errorf("[%s] acquiring dispatch lock: %w", time.Now().UTC().Format("2006-01-02 15:04:05"), err)
 	}
 	defer lk.Release()
+
+	stats := &dispatchCycleStats{start: time.Now().UTC()}
+	defer func() {
+		fmt.Fprintln(cmd.OutOrStdout(), stats.String())
+	}()
 
 	// Load dispatch state
 	state := loadDispatchState(root)
@@ -183,9 +188,12 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			}
 		}
 
+		stats.queried += len(items)
+
 		for i, item := range items {
 			agent := matchItemToAgent(item, itemMappings[i])
 			if agent == "" {
+				stats.skipped++
 				continue
 			}
 			itemKey := fmt.Sprintf("%s#%d", repo, item.Number)
@@ -196,10 +204,12 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			if entry, ok := state.Dispatched[itemKey]; ok {
 				if agentRunning {
 					fmt.Fprintf(cmd.OutOrStdout(), "skip %s: agent %s is busy\n", itemKey, agent)
+					stats.skipped++
 					continue
 				}
 				retryAfter := time.Duration(dispatchCfg.RetryAfterSecs) * time.Second
 				if time.Since(entry.DispatchedAt) < retryAfter {
+					stats.skipped++
 					continue
 				}
 				delete(state.Dispatched, itemKey)
@@ -208,16 +218,19 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 			if agentRunning {
 				fmt.Fprintf(cmd.OutOrStdout(), "skip %s: agent %s is busy\n", itemKey, agent)
+				stats.skipped++
 				continue
 			}
 
 			if dispatchDryRun {
 				fmt.Fprintf(cmd.OutOrStdout(), "would dispatch %s to %s\n", itemKey, agent)
+				stats.dispatched++
 				continue
 			}
 
 			if err := dispatchItem(root, agent, item.URL, dispatchCfg.NotifyOnComplete); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "dispatch %s failed: %v\n", itemKey, err)
+				stats.errors++
 				continue
 			}
 
@@ -233,6 +246,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 				}
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "dispatched %s to %s\n", itemKey, agent)
+			stats.dispatched++
 		}
 	}
 
@@ -398,6 +412,22 @@ func pruneDispatchState(state *dispatchState) {
 	}
 }
 
+// dispatchCycleStats tracks per-cycle dispatch outcomes for the summary line.
+type dispatchCycleStats struct {
+	start      time.Time
+	queried    int
+	dispatched int
+	skipped    int
+	errors     int
+}
+
+func (s *dispatchCycleStats) String() string {
+	return fmt.Sprintf("[%s] dispatch cycle complete: queried=%d dispatched=%d skipped=%d errors=%d elapsed=%s",
+		s.start.Format("2006-01-02 15:04:05"),
+		s.queried, s.dispatched, s.skipped, s.errors,
+		time.Since(s.start).Round(time.Millisecond))
+}
+
 const dispatchSessionName = "af-dispatch"
 
 func runDispatchStart(cmd *cobra.Command, args []string) error {
@@ -491,7 +521,16 @@ func runDispatchStatus(cmd *cobra.Command, args []string) error {
 
 // buildDispatchLoopCmd constructs the shell loop command for the dispatcher tmux session.
 func buildDispatchLoopCmd(afBin string, interval int) string {
-	return fmt.Sprintf("while true; do %s dispatch 2>&1 | tee -a .runtime/dispatch.log; sleep %d; done", afBin, interval)
+	return fmt.Sprintf(
+		`trap 'echo "[$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)] dispatch loop exiting (signal)" | tee -a .runtime/dispatch.log; exit 1' TERM INT HUP; `+
+			`while true; do `+
+			`echo "[$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)] dispatch cycle starting" >> .runtime/dispatch.log; `+
+			`%s dispatch 2>&1 | tee -a .runtime/dispatch.log; `+
+			`rc=$?; `+
+			`if [ $rc -ne 0 ]; then echo "[$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)] dispatch exited with code $rc" >> .runtime/dispatch.log; fi; `+
+			`sleep %d; `+
+			`done`,
+		afBin, interval)
 }
 
 // resolveDispatchInterval returns the flag value if non-zero, otherwise the config value.

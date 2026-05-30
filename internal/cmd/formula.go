@@ -161,6 +161,11 @@ func runFormulaAgentGen(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	skillsDir := filepath.Join(root, ".claude", "skills")
+	if err := f.ValidateSkills(skillsDir); err != nil {
+		return fmt.Errorf("validating formula skills: %w", err)
+	}
+
 	// Workspace dir (needed for rendering)
 	wsDir := config.AgentDir(root, agentName)
 

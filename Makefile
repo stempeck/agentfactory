@@ -1,4 +1,4 @@
-.PHONY: build install clean clean-venv test generate test-integration check-formulas sync-formulas install-hooks check-skills sync-skills
+.PHONY: build install clean clean-venv test generate test-integration check-formulas sync-formulas install-hooks check-skills sync-skills check-formula-skills
 
 BINARY := af
 BUILD_DIR := .
@@ -25,7 +25,7 @@ LDFLAGS := -X github.com/stempeck/agentfactory/internal/cmd.Version=$(VERSION) \
 generate:
 	@true
 
-build: check-formulas check-skills
+build: check-formulas check-skills check-formula-skills
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/af
 
 install: build install-hooks
@@ -75,6 +75,9 @@ check-skills:
 		fi; \
 	done; \
 	if [ "$$fail" = "0" ]; then echo "Skills in sync"; else echo "ERROR: Skill drift detected between source and installed copies"; exit 1; fi
+
+check-formula-skills:
+	@GOTMPDIR=$$(pwd) go test -run TestEmbeddedFormulaSkillsAvailable ./internal/cmd/
 
 sync-skills:
 	@for d in internal/cmd/install_skills/*/; do \
