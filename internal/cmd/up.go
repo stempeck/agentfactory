@@ -53,6 +53,11 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading factory config: %w", err)
 	}
 
+	buildHostCfg, err := config.LoadBuildHostConfig(config.BuildHostConfigPath(root))
+	if err != nil {
+		return fmt.Errorf("invalid build-host config: %w", err)
+	}
+
 	// Resolve agent list
 	agents := args
 	if len(agents) == 0 {
@@ -125,6 +130,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 
 		mgr := session.NewManager(root, name, entry)
+		if buildHostCfg != nil {
+			mgr.SetBuildHost(buildHostCfg)
+		}
 		if wtPath != "" {
 			if err := mgr.SetWorktree(wtPath, wtID); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: SetWorktree for %s: %v\n", name, err)

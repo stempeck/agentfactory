@@ -1014,3 +1014,97 @@ func TestWorktreeLifecycle_WithHostGitignore(t *testing.T) {
 		}
 	}
 }
+
+func TestWorktreeBuildHostResolution(t *testing.T) {
+	_, workspace := setupWorktreeTestWorkspace(t, "solver")
+
+	bhCfg := &config.BuildHostConfig{
+		Mode:      "ssh",
+		Host:      "mac-mini.local",
+		User:      "builder",
+		KeyPath:   "/home/user/.ssh/id_ed25519",
+		MountPath: "/Volumes/build",
+	}
+	if err := config.SaveBuildHostConfig(config.BuildHostConfigPath(workspace), bhCfg); err != nil {
+		t.Fatalf("SaveBuildHostConfig: %v", err)
+	}
+
+	wtPath, meta, err := worktree.Create(workspace, "solver", worktree.CreateOpts{})
+	if err != nil {
+		t.Fatalf("worktree.Create: %v", err)
+	}
+	if _, err := worktree.SetupAgent(workspace, wtPath, "solver", true); err != nil {
+		t.Fatalf("worktree.SetupAgent: %v", err)
+	}
+
+	loadedCfg, err := config.LoadBuildHostConfig(config.BuildHostConfigPath(workspace))
+	if err != nil {
+		t.Fatalf("LoadBuildHostConfig: %v", err)
+	}
+	if loadedCfg == nil {
+		t.Fatal("expected non-nil BuildHostConfig after save")
+	}
+
+	agentsCfg, err := config.LoadAgentConfig(config.AgentsConfigPath(workspace))
+	if err != nil {
+		t.Fatalf("LoadAgentConfig: %v", err)
+	}
+	entry := agentsCfg.Agents["solver"]
+
+	mgr := session.NewManager(workspace, "solver", entry)
+	mgr.SetBuildHost(loadedCfg)
+	if err := mgr.SetWorktree(wtPath, meta.ID); err != nil {
+		t.Fatalf("SetWorktree: %v", err)
+	}
+
+	cmd := mgr.BuildStartupCommand()
+
+	for _, want := range []string{
+		"AF_BUILD_MODE='ssh'",
+		"AF_BUILD_HOST='mac-mini.local'",
+		"AF_BUILD_USER='builder'",
+		"AF_BUILD_KEY='/home/user/.ssh/id_ed25519'",
+		"AF_HOST_MOUNT='/Volumes/build'",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("startup command should contain %s, got: %s", want, cmd)
+		}
+	}
+}
+
+func TestWorktreeBuildHostResolution_NoConfig(t *testing.T) {
+	_, workspace := setupWorktreeTestWorkspace(t, "solver")
+
+	loadedCfg, err := config.LoadBuildHostConfig(config.BuildHostConfigPath(workspace))
+	if err != nil {
+		t.Fatalf("LoadBuildHostConfig: %v", err)
+	}
+	if loadedCfg != nil {
+		t.Fatal("expected nil BuildHostConfig when no build-host.json exists")
+	}
+
+	wtPath, meta, err := worktree.Create(workspace, "solver", worktree.CreateOpts{})
+	if err != nil {
+		t.Fatalf("worktree.Create: %v", err)
+	}
+	if _, err := worktree.SetupAgent(workspace, wtPath, "solver", true); err != nil {
+		t.Fatalf("worktree.SetupAgent: %v", err)
+	}
+
+	agentsCfg, err := config.LoadAgentConfig(config.AgentsConfigPath(workspace))
+	if err != nil {
+		t.Fatalf("LoadAgentConfig: %v", err)
+	}
+	entry := agentsCfg.Agents["solver"]
+
+	mgr := session.NewManager(workspace, "solver", entry)
+	if err := mgr.SetWorktree(wtPath, meta.ID); err != nil {
+		t.Fatalf("SetWorktree: %v", err)
+	}
+
+	cmd := mgr.BuildStartupCommand()
+
+	if strings.Contains(cmd, "AF_BUILD_") {
+		t.Errorf("startup command without build-host.json should NOT contain AF_BUILD_, got: %s", cmd)
+	}
+}

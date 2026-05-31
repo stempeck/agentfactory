@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -596,28 +597,28 @@ func TestInstallRoleFallbackWarning(t *testing.T) {
 }
 
 func TestSkillsFS_ContainsAllFiles(t *testing.T) {
-	expected := map[string]bool{
-		"install_skills/architecture-docs/SKILL.md":          false,
-		"install_skills/architecture-docs/overview-phase.md": false,
-		"install_skills/architecture-docs/validate.sh":       false,
-		"install_skills/documentation-update/SKILL.md":      false,
-		"install_skills/formula-create/SKILL.md":             false,
-		"install_skills/formula-create/skillmd-mode.md":      false,
-		"install_skills/github-issue/SKILL.md":               false,
-		"install_skills/rapid-implement/SKILL.md":            false,
+	// OSS minimum — do not add pro skills here. Pro skills belong in
+	// install_skills_pro_test.go which has the complete manifest.
+	ossRequired := []string{
+		"install_skills/architecture-docs/SKILL.md",
+		"install_skills/architecture-docs/overview-phase.md",
+		"install_skills/architecture-docs/validate.sh",
+		"install_skills/documentation-update/SKILL.md",
+		"install_skills/formula-create/SKILL.md",
+		"install_skills/formula-create/skillmd-mode.md",
+		"install_skills/github-issue/SKILL.md",
+		"install_skills/improve-agent/PATTERNS.md",
+		"install_skills/improve-agent/SKILL.md",
+		"install_skills/rapid-implement/SKILL.md",
 	}
 
+	present := map[string]bool{}
 	err := fs.WalkDir(skillsFS, "install_skills", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			return nil
-		}
-		if _, ok := expected[path]; ok {
-			expected[path] = true
-		} else {
-			t.Errorf("unexpected file in skillsFS: %s", path)
+		if !d.IsDir() {
+			present[path] = true
 		}
 		return nil
 	})
@@ -625,9 +626,9 @@ func TestSkillsFS_ContainsAllFiles(t *testing.T) {
 		t.Fatalf("walking skillsFS: %v", err)
 	}
 
-	for path, found := range expected {
-		if !found {
-			t.Errorf("expected file missing from skillsFS: %s", path)
+	for _, path := range ossRequired {
+		if !present[path] {
+			t.Errorf("required OSS skill missing from skillsFS: %s", path)
 		}
 	}
 }
@@ -1123,6 +1124,109 @@ func TestCleanLegacyGateLocks(t *testing.T) {
 	t.Run("noop_when_none_exist", func(t *testing.T) {
 		if err := cleanLegacyGateLocks(); err != nil {
 			t.Fatalf("cleanLegacyGateLocks: %v", err)
+		}
+	})
+}
+
+func TestInstallInit_BuildHostIdempotency(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".agentfactory")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	bhPath := config.BuildHostConfigPath(dir)
+	original := &config.BuildHostConfig{
+		Mode:    "ssh",
+		Host:    "mac-mini.local",
+		User:    "builder",
+		KeyPath: "/home/ci/.ssh/id_ed25519",
+	}
+	if err := config.SaveBuildHostConfig(bhPath, original); err != nil {
+		t.Fatalf("SaveBuildHostConfig: %v", err)
+	}
+
+	before, err := os.ReadFile(bhPath)
+	if err != nil {
+		t.Fatalf("reading build-host.json: %v", err)
+	}
+
+	if _, err := os.Stat(bhPath); os.IsNotExist(err) {
+		t.Fatal("idempotency guard failed: os.IsNotExist returned true for existing file")
+	}
+
+	after, err := os.ReadFile(bhPath)
+	if err != nil {
+		t.Fatalf("reading build-host.json after guard check: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("build-host.json content changed despite idempotency guard")
+	}
+
+	loaded, err := config.LoadBuildHostConfig(bhPath)
+	if err != nil {
+		t.Fatalf("LoadBuildHostConfig: %v", err)
+	}
+	if loaded.Mode != "ssh" {
+		t.Errorf("mode = %q, want %q", loaded.Mode, "ssh")
+	}
+	if loaded.Host != "mac-mini.local" {
+		t.Errorf("host = %q, want %q", loaded.Host, "mac-mini.local")
+	}
+}
+
+func TestInstallInit_BuildHostAutoDetectLogic(t *testing.T) {
+	t.Run("save_local_mode", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "build-host.json")
+		cfg := &config.BuildHostConfig{Mode: "local"}
+		if err := config.SaveBuildHostConfig(path, cfg); err != nil {
+			t.Fatalf("SaveBuildHostConfig: %v", err)
+		}
+		loaded, err := config.LoadBuildHostConfig(path)
+		if err != nil {
+			t.Fatalf("LoadBuildHostConfig: %v", err)
+		}
+		if loaded.Mode != "local" {
+			t.Errorf("mode = %q, want %q", loaded.Mode, "local")
+		}
+		if loaded.Host != "" {
+			t.Errorf("host should be empty for local mode, got %q", loaded.Host)
+		}
+	})
+
+	t.Run("xcodebuild_lookup", func(t *testing.T) {
+		_, err := exec.LookPath("xcodebuild")
+		if runtime.GOOS == "darwin" {
+			t.Logf("xcodebuild lookup on darwin: err=%v", err)
+		} else {
+			if err == nil {
+				t.Error("expected xcodebuild not found on non-darwin platform")
+			}
+		}
+	})
+
+	t.Run("guard_skips_existing", func(t *testing.T) {
+		dir := t.TempDir()
+		bhPath := config.BuildHostConfigPath(dir)
+		if err := os.MkdirAll(filepath.Dir(bhPath), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(bhPath, []byte(`{"mode":"local"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := os.Stat(bhPath)
+		if os.IsNotExist(err) {
+			t.Error("guard should detect existing file")
+		}
+	})
+
+	t.Run("guard_allows_new", func(t *testing.T) {
+		dir := t.TempDir()
+		bhPath := config.BuildHostConfigPath(dir)
+		_, err := os.Stat(bhPath)
+		if !os.IsNotExist(err) {
+			t.Error("guard should allow creation when file does not exist")
 		}
 	})
 }

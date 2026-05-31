@@ -201,3 +201,11 @@ func TestDetectAgentFromCwd_WorktreePathFailsWithFactoryRoot(t *testing.T) {
 		t.Errorf("error %q should contain %q", err.Error(), "not in an agent workspace")
 	}
 }
+
+func TestBuildHostConfigPath(t *testing.T) {
+	got := BuildHostConfigPath("/tmp/myproject")
+	want := filepath.Join("/tmp/myproject", ".agentfactory", "build-host.json")
+	if got != want {
+		t.Errorf("BuildHostConfigPath: got %q, want %q", got, want)
+	}
+}

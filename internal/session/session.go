@@ -114,6 +114,7 @@ type Manager struct {
 	initialPrompt  string
 	worktreePath   string
 	worktreeID     string
+	buildHost      *config.BuildHostConfig
 }
 
 // NewManager creates a Manager for the given agent.
@@ -143,6 +144,12 @@ func (m *Manager) SetWorktree(path, id string) error {
 	m.worktreePath = path
 	m.worktreeID = id
 	return nil
+}
+
+// SetBuildHost configures optional build-host settings. When set, AF_BUILD_*
+// environment variables are exported into the tmux session.
+func (m *Manager) SetBuildHost(cfg *config.BuildHostConfig) {
+	m.buildHost = cfg
 }
 
 // SessionID returns the tmux session name for this agent.
@@ -225,6 +232,21 @@ func (m *Manager) Start() error {
 			fmt.Fprintf(os.Stderr, "warning: failed to set %s for %s: %v\n", envAuthToken, sessionID, err)
 		}
 	}
+	if m.buildHost != nil {
+		_ = m.tmux.SetEnvironment(sessionID, "AF_BUILD_MODE", m.buildHost.Mode)
+		if m.buildHost.Host != "" {
+			_ = m.tmux.SetEnvironment(sessionID, "AF_BUILD_HOST", m.buildHost.Host)
+		}
+		if m.buildHost.User != "" {
+			_ = m.tmux.SetEnvironment(sessionID, "AF_BUILD_USER", m.buildHost.User)
+		}
+		if m.buildHost.KeyPath != "" {
+			_ = m.tmux.SetEnvironment(sessionID, "AF_BUILD_KEY", m.buildHost.KeyPath)
+		}
+		if m.buildHost.MountPath != "" {
+			_ = m.tmux.SetEnvironment(sessionID, "AF_HOST_MOUNT", m.buildHost.MountPath)
+		}
+	}
 
 	// Wait for shell to be ready
 	if err := m.tmux.WaitForShellReady(sessionID, 5*time.Second); err != nil {
@@ -278,6 +300,21 @@ func (m *Manager) buildStartupCommand() string {
 	}
 	if m.agentEntry.AuthToken != "" {
 		exports += fmt.Sprintf(" %s=%s", envAuthToken, shellQuote(m.agentEntry.AuthToken))
+	}
+	if m.buildHost != nil {
+		exports += fmt.Sprintf(" AF_BUILD_MODE=%s", shellQuote(m.buildHost.Mode))
+		if m.buildHost.Host != "" {
+			exports += fmt.Sprintf(" AF_BUILD_HOST=%s", shellQuote(m.buildHost.Host))
+		}
+		if m.buildHost.User != "" {
+			exports += fmt.Sprintf(" AF_BUILD_USER=%s", shellQuote(m.buildHost.User))
+		}
+		if m.buildHost.KeyPath != "" {
+			exports += fmt.Sprintf(" AF_BUILD_KEY=%s", shellQuote(m.buildHost.KeyPath))
+		}
+		if m.buildHost.MountPath != "" {
+			exports += fmt.Sprintf(" AF_HOST_MOUNT=%s", shellQuote(m.buildHost.MountPath))
+		}
 	}
 
 	claude := "claude --dangerously-skip-permissions"
