@@ -974,6 +974,101 @@ func TestStart_PartialEndpointWarning(t *testing.T) {
 	}
 }
 
+func TestBuildStartupCommand_WithBuildHost(t *testing.T) {
+	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
+	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr.SetBuildHost(&config.BuildHostConfig{
+		Mode:      "ssh",
+		Host:      "mac-mini.local",
+		User:      "builder",
+		KeyPath:   "/home/user/.ssh/id_ed25519",
+		MountPath: "/Volumes/build",
+	})
+
+	cmd := mgr.BuildStartupCommand()
+
+	if !strings.Contains(cmd, "AF_BUILD_MODE='ssh'") {
+		t.Errorf("command should contain AF_BUILD_MODE='ssh', got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "AF_BUILD_HOST='mac-mini.local'") {
+		t.Errorf("command should contain AF_BUILD_HOST='mac-mini.local', got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "AF_BUILD_USER='builder'") {
+		t.Errorf("command should contain AF_BUILD_USER='builder', got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "AF_BUILD_KEY='/home/user/.ssh/id_ed25519'") {
+		t.Errorf("command should contain AF_BUILD_KEY, got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "AF_HOST_MOUNT='/Volumes/build'") {
+		t.Errorf("command should contain AF_HOST_MOUNT, got: %s", cmd)
+	}
+}
+
+func TestBuildStartupCommand_WithoutBuildHost(t *testing.T) {
+	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
+	mgr := NewManager("/tmp/factory", "testagent", entry)
+
+	cmd := mgr.BuildStartupCommand()
+
+	if strings.Contains(cmd, "AF_BUILD_") {
+		t.Errorf("command without build host should NOT contain AF_BUILD_, got: %s", cmd)
+	}
+}
+
+func TestBuildStartupCommand_BuildHostLocalMode(t *testing.T) {
+	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
+	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr.SetBuildHost(&config.BuildHostConfig{Mode: "local"})
+
+	cmd := mgr.BuildStartupCommand()
+
+	if !strings.Contains(cmd, "AF_BUILD_MODE='local'") {
+		t.Errorf("command should contain AF_BUILD_MODE='local', got: %s", cmd)
+	}
+	if strings.Contains(cmd, "AF_BUILD_HOST") {
+		t.Errorf("local mode should NOT contain AF_BUILD_HOST, got: %s", cmd)
+	}
+	if strings.Contains(cmd, "AF_BUILD_USER") {
+		t.Errorf("local mode should NOT contain AF_BUILD_USER, got: %s", cmd)
+	}
+	if strings.Contains(cmd, "AF_BUILD_KEY") {
+		t.Errorf("local mode should NOT contain AF_BUILD_KEY, got: %s", cmd)
+	}
+	if strings.Contains(cmd, "AF_HOST_MOUNT") {
+		t.Errorf("local mode should NOT contain AF_HOST_MOUNT, got: %s", cmd)
+	}
+}
+
+func TestBuildStartupCommand_BuildHostNonExistentKeyPath(t *testing.T) {
+	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
+	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr.SetBuildHost(&config.BuildHostConfig{
+		Mode:      "ssh",
+		Host:      "mac-mini.local",
+		User:      "builder",
+		KeyPath:   "/nonexistent/path/to/key",
+		MountPath: "/Volumes/build",
+	})
+
+	cmd := mgr.BuildStartupCommand()
+
+	if !strings.Contains(cmd, "AF_BUILD_KEY='/nonexistent/path/to/key'") {
+		t.Errorf("non-existent key path should still be exported, got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "AF_BUILD_MODE='ssh'") {
+		t.Errorf("command should contain AF_BUILD_MODE, got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "AF_BUILD_HOST='mac-mini.local'") {
+		t.Errorf("command should contain AF_BUILD_HOST, got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "AF_BUILD_USER='builder'") {
+		t.Errorf("command should contain AF_BUILD_USER, got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "AF_HOST_MOUNT='/Volumes/build'") {
+		t.Errorf("command should contain AF_HOST_MOUNT, got: %s", cmd)
+	}
+}
+
 func TestEndpointConstants_NoDuplicateStrings(t *testing.T) {
 	src, err := os.ReadFile("session.go")
 	if err != nil {

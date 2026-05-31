@@ -8,6 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
+
+	"github.com/stempeck/agentfactory/internal/fsutil"
 )
 
 var (
@@ -18,6 +21,7 @@ var (
 	ErrAgentExists    = errors.New("agent already exists")
 	ErrAgentNotFound  = errors.New("agent not found")
 	ErrManualAgent    = errors.New("agent was not created by agent-gen")
+	ErrInvalidMode    = errors.New("invalid build host mode")
 )
 
 // CurrentFactoryVersion is the highest supported factory.json schema version.
@@ -60,6 +64,15 @@ type FactoryConfig struct {
 	Version      int    `json:"version"`
 	Name         string `json:"name"`
 	MaxWorktrees int    `json:"max_worktrees,omitempty"`
+}
+
+// BuildHostConfig holds the contents of build-host.json
+type BuildHostConfig struct {
+	Mode      string `json:"mode"`
+	Host      string `json:"host,omitempty"`
+	User      string `json:"user,omitempty"`
+	KeyPath   string `json:"key_path,omitempty"`
+	MountPath string `json:"mount_path,omitempty"`
 }
 
 // LoadAgentConfig loads and validates agents.json
@@ -128,6 +141,29 @@ func LoadFactoryConfig(path string) (*FactoryConfig, error) {
 	return &config, nil
 }
 
+// LoadBuildHostConfig loads and validates build-host.json.
+// Returns (nil, nil) when the file does not exist.
+func LoadBuildHostConfig(path string) (*BuildHostConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading build host config: %w", err)
+	}
+
+	var config BuildHostConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("parsing build host config: %w", err)
+	}
+
+	if err := validateBuildHostConfig(&config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
 func validateAgentConfig(c *AgentConfig) error {
 	if c.Agents == nil {
 		c.Agents = make(map[string]AgentEntry)
@@ -179,6 +215,27 @@ func validateFactoryConfig(c *FactoryConfig) error {
 	return nil
 }
 
+func validateBuildHostConfig(c *BuildHostConfig) error {
+	if c.Mode != "local" && c.Mode != "ssh" {
+		return fmt.Errorf("%w: must be \"local\" or \"ssh\", got %q", ErrInvalidMode, c.Mode)
+	}
+	if c.Mode == "ssh" {
+		if c.Host == "" {
+			return fmt.Errorf("%w: ssh mode requires host", ErrMissingField)
+		}
+		if c.User == "" {
+			return fmt.Errorf("%w: ssh mode requires user", ErrMissingField)
+		}
+		if c.KeyPath == "" {
+			return fmt.Errorf("%w: ssh mode requires key_path", ErrMissingField)
+		}
+	}
+	if strings.HasPrefix(c.KeyPath, "-----BEGIN") {
+		return fmt.Errorf("key_path must be a file path, not inline key content")
+	}
+	return nil
+}
+
 // ValidateAgentName validates an agent name for filesystem and JSON safety.
 func ValidateAgentName(name string) error {
 	if name == "" {
@@ -208,6 +265,16 @@ func SaveAgentConfig(path string, cfg *AgentConfig) error {
 		return fmt.Errorf("writing temp agent config: %w", err)
 	}
 	return os.Rename(tmp, path)
+}
+
+// SaveBuildHostConfig writes build-host.json atomically.
+func SaveBuildHostConfig(path string, cfg *BuildHostConfig) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling build host config: %w", err)
+	}
+	data = append(data, '\n')
+	return fsutil.WriteFileAtomic(path, data, 0644)
 }
 
 // RemoveAgentEntry removes a formula-generated agent from the config.

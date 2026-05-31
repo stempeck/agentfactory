@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -225,6 +226,23 @@ func runInstallInit(cmd *cobra.Command) error {
 
 	// 11. Create .runtime/ directory (symlink target for worktrees)
 	os.MkdirAll(filepath.Join(cwd, ".runtime"), 0755)
+
+	// 12. macOS build-host auto-detection
+	if runtime.GOOS == "darwin" {
+		if _, err := exec.LookPath("xcodebuild"); err == nil {
+			bhPath := config.BuildHostConfigPath(cwd)
+			if _, err := os.Stat(bhPath); os.IsNotExist(err) {
+				cfg := &config.BuildHostConfig{Mode: "local"}
+				if err := config.SaveBuildHostConfig(bhPath, cfg); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not write build-host config: %v\n", err)
+				} else {
+					fmt.Fprintln(cmd.OutOrStdout(), "Build host configured: local macOS (Xcode detected)")
+				}
+			}
+		}
+	} else {
+		fmt.Fprintln(cmd.OutOrStdout(), "Hint: iOS builds available via 'af config build-host --mode ssh --host <mac-host>'")
+	}
 
 	fmt.Fprintln(cmd.OutOrStdout(), "Factory initialized successfully.")
 	return nil
