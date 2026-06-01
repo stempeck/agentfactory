@@ -120,6 +120,9 @@ func runHandoffCore(ctx context.Context, cwd, subject, message string, collect, 
 
 	// 8. Build respawn command
 	mgr := session.NewManager(factoryRoot, agentName, *agentEntry)
+	if v := os.Getenv("SSH_AUTH_SOCK"); v != "" {
+		mgr.SetSSHAuthSock(v)
+	}
 	mgr.SetInitialPrompt("af prime")
 	respawnCmd := sleepPrefix + mgr.BuildStartupCommand()
 

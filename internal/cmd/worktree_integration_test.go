@@ -1015,6 +1015,151 @@ func TestWorktreeLifecycle_WithHostGitignore(t *testing.T) {
 	}
 }
 
+func TestWorktreeLifecycle_GitTrackedSkillsMerge(t *testing.T) {
+	requirePython3WithServerDeps(t)
+
+	binary := buildAF(t)
+	workspace := t.TempDir()
+	realWorkspace, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatalf("eval symlinks on workspace: %v", err)
+	}
+	ensurePySymlink(t, realWorkspace)
+	t.Cleanup(func() { terminateMCPServer(realWorkspace) })
+
+	// git init with user config
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "test@e2e.test"},
+		{"config", "user.name", "E2E Test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = realWorkspace
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %s\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	// .gitignore with .agentfactory/ only — .claude/ must NOT be ignored
+	if err := os.WriteFile(filepath.Join(realWorkspace, ".gitignore"), []byte(".agentfactory/\n"), 0o644); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
+
+	// Create git-tracked .claude/skills/custom-skill/SKILL.md
+	customSkillDir := filepath.Join(realWorkspace, ".claude", "skills", "custom-skill")
+	if err := os.MkdirAll(customSkillDir, 0o755); err != nil {
+		t.Fatalf("mkdir custom-skill: %v", err)
+	}
+	customContent := []byte("# Custom Skill\nGit-tracked content\n")
+	if err := os.WriteFile(filepath.Join(customSkillDir, "SKILL.md"), customContent, 0o644); err != nil {
+		t.Fatalf("write custom-skill SKILL.md: %v", err)
+	}
+
+	// Commit .gitignore and .claude/skills/custom-skill/
+	for _, args := range [][]string{
+		{"add", ".gitignore", filepath.Join(".claude", "skills", "custom-skill", "SKILL.md")},
+		{"commit", "-m", "initial with git-tracked skills"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = realWorkspace
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %s\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	// af install --init
+	runAF(t, binary, realWorkspace, "install", "--init")
+
+	// Write agents.json with solver agent
+	agentsPath := filepath.Join(realWorkspace, ".agentfactory", "agents.json")
+	if err := os.WriteFile(agentsPath, []byte(`{"agents":{"manager":{"type":"interactive","description":"manager"},"solver":{"type":"autonomous","description":"solver agent"}}}`), 0o644); err != nil {
+		t.Fatalf("write agents.json: %v", err)
+	}
+
+	// Create factory-root resources: factory-skill (not git-tracked), .runtime, AGENTS.md
+	factorySkillDir := filepath.Join(realWorkspace, ".claude", "skills", "factory-skill")
+	if err := os.MkdirAll(factorySkillDir, 0o755); err != nil {
+		t.Fatalf("mkdir factory-skill: %v", err)
+	}
+	factoryContent := []byte("# Factory Skill\nFactory-provided content\n")
+	if err := os.WriteFile(filepath.Join(factorySkillDir, "SKILL.md"), factoryContent, 0o644); err != nil {
+		t.Fatalf("write factory-skill SKILL.md: %v", err)
+	}
+	os.MkdirAll(filepath.Join(realWorkspace, ".runtime"), 0o755)
+	if _, err := os.Stat(filepath.Join(realWorkspace, "AGENTS.md")); os.IsNotExist(err) {
+		os.WriteFile(filepath.Join(realWorkspace, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+	}
+
+	// Create worktree via Go API
+	wtPath, meta, err := worktree.Create(realWorkspace, "solver", worktree.CreateOpts{})
+	if err != nil {
+		t.Fatalf("worktree.Create: %v", err)
+	}
+
+	// Verify .claude/skills in worktree is a real directory (NOT a symlink)
+	skillsPath := filepath.Join(wtPath, ".claude", "skills")
+	fi, err := os.Lstat(skillsPath)
+	if err != nil {
+		t.Fatalf("lstat .claude/skills in worktree: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatal(".claude/skills should be a real directory in worktree, not a symlink")
+	}
+	if !fi.IsDir() {
+		t.Fatal(".claude/skills should be a directory in worktree")
+	}
+
+	// Verify git-tracked custom-skill is accessible with correct content
+	wtCustom := filepath.Join(wtPath, ".claude", "skills", "custom-skill", "SKILL.md")
+	gotCustom, err := os.ReadFile(wtCustom)
+	if err != nil {
+		t.Fatalf("reading custom-skill in worktree: %v", err)
+	}
+	if string(gotCustom) != string(customContent) {
+		t.Errorf("custom-skill content: got %q, want %q", gotCustom, customContent)
+	}
+
+	// Verify factory-skill was merged into the worktree
+	wtFactory := filepath.Join(wtPath, ".claude", "skills", "factory-skill", "SKILL.md")
+	if _, err := os.Stat(wtFactory); err != nil {
+		t.Errorf("factory-skill not merged into worktree: %v", err)
+	}
+
+	// Verify .runtime is a symlink to factory root
+	runtimeLink := filepath.Join(wtPath, ".runtime")
+	runtimeTarget, err := os.Readlink(runtimeLink)
+	if err != nil {
+		t.Errorf("readlink .runtime: %v", err)
+	} else if runtimeTarget != filepath.Join(realWorkspace, ".runtime") {
+		t.Errorf(".runtime symlink: got %q, want %q", runtimeTarget, filepath.Join(realWorkspace, ".runtime"))
+	}
+
+	// Verify AGENTS.md is a symlink to factory root
+	agentsLink := filepath.Join(wtPath, "AGENTS.md")
+	agentsTarget, err := os.Readlink(agentsLink)
+	if err != nil {
+		t.Errorf("readlink AGENTS.md: %v", err)
+	} else if agentsTarget != filepath.Join(realWorkspace, "AGENTS.md") {
+		t.Errorf("AGENTS.md symlink: got %q, want %q", agentsTarget, filepath.Join(realWorkspace, "AGENTS.md"))
+	}
+
+	// ForceRemove and verify factory root resources intact
+	if err := worktree.ForceRemove(realWorkspace, meta); err != nil {
+		t.Fatalf("worktree.ForceRemove: %v", err)
+	}
+
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+		if _, err := os.Stat(filepath.Join(realWorkspace, rel)); err != nil {
+			t.Errorf("factory root resource %s missing after teardown: %v", rel, err)
+		}
+	}
+
+	// Verify factory-root factory-skill still exists (cleanup targets worktree, not factory root)
+	if _, err := os.Stat(filepath.Join(realWorkspace, ".claude", "skills", "factory-skill", "SKILL.md")); err != nil {
+		t.Errorf("factory-root factory-skill missing after teardown: %v", err)
+	}
+}
+
 func TestWorktreeBuildHostResolution(t *testing.T) {
 	_, workspace := setupWorktreeTestWorkspace(t, "solver")
 
@@ -1022,7 +1167,6 @@ func TestWorktreeBuildHostResolution(t *testing.T) {
 		Mode:      "ssh",
 		Host:      "mac-mini.local",
 		User:      "builder",
-		KeyPath:   "/home/user/.ssh/id_ed25519",
 		MountPath: "/Volumes/build",
 	}
 	if err := config.SaveBuildHostConfig(config.BuildHostConfigPath(workspace), bhCfg); err != nil {
@@ -1063,7 +1207,6 @@ func TestWorktreeBuildHostResolution(t *testing.T) {
 		"AF_BUILD_MODE='ssh'",
 		"AF_BUILD_HOST='mac-mini.local'",
 		"AF_BUILD_USER='builder'",
-		"AF_BUILD_KEY='/home/user/.ssh/id_ed25519'",
 		"AF_HOST_MOUNT='/Volumes/build'",
 	} {
 		if !strings.Contains(cmd, want) {

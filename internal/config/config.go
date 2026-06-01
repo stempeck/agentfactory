@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 
 	"github.com/stempeck/agentfactory/internal/fsutil"
 )
@@ -71,7 +70,6 @@ type BuildHostConfig struct {
 	Mode      string `json:"mode"`
 	Host      string `json:"host,omitempty"`
 	User      string `json:"user,omitempty"`
-	KeyPath   string `json:"key_path,omitempty"`
 	MountPath string `json:"mount_path,omitempty"`
 }
 
@@ -226,12 +224,6 @@ func validateBuildHostConfig(c *BuildHostConfig) error {
 		if c.User == "" {
 			return fmt.Errorf("%w: ssh mode requires user", ErrMissingField)
 		}
-		if c.KeyPath == "" {
-			return fmt.Errorf("%w: ssh mode requires key_path", ErrMissingField)
-		}
-	}
-	if strings.HasPrefix(c.KeyPath, "-----BEGIN") {
-		return fmt.Errorf("key_path must be a file path, not inline key content")
 	}
 	return nil
 }

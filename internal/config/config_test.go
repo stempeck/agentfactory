@@ -1041,7 +1041,6 @@ func TestLoadBuildHostConfig_Valid(t *testing.T) {
 		"mode": "ssh",
 		"host": "mac-mini.local",
 		"user": "builder",
-		"key_path": "/home/ci/.ssh/id_ed25519",
 		"mount_path": "/Volumes/workspace"
 	}`
 	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
@@ -1060,9 +1059,6 @@ func TestLoadBuildHostConfig_Valid(t *testing.T) {
 	}
 	if cfg.User != "builder" {
 		t.Errorf("user = %q, want %q", cfg.User, "builder")
-	}
-	if cfg.KeyPath != "/home/ci/.ssh/id_ed25519" {
-		t.Errorf("key_path = %q, want %q", cfg.KeyPath, "/home/ci/.ssh/id_ed25519")
 	}
 	if cfg.MountPath != "/Volumes/workspace" {
 		t.Errorf("mount_path = %q, want %q", cfg.MountPath, "/Volumes/workspace")
@@ -1099,7 +1095,7 @@ func TestLoadBuildHostConfig_InvalidMode(t *testing.T) {
 func TestLoadBuildHostConfig_SSHMissingHost(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "build-host.json")
-	data := `{"mode": "ssh", "user": "builder", "key_path": "/tmp/key"}`
+	data := `{"mode": "ssh", "user": "builder"}`
 	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -1116,7 +1112,7 @@ func TestLoadBuildHostConfig_SSHMissingHost(t *testing.T) {
 func TestLoadBuildHostConfig_SSHMissingUser(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "build-host.json")
-	data := `{"mode": "ssh", "host": "mac-mini.local", "key_path": "/tmp/key"}`
+	data := `{"mode": "ssh", "host": "mac-mini.local"}`
 	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -1127,40 +1123,6 @@ func TestLoadBuildHostConfig_SSHMissingUser(t *testing.T) {
 	}
 	if !errors.Is(err, ErrMissingField) {
 		t.Errorf("expected ErrMissingField, got: %v", err)
-	}
-}
-
-func TestLoadBuildHostConfig_SSHMissingKeyPath(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "build-host.json")
-	data := `{"mode": "ssh", "host": "mac-mini.local", "user": "builder"}`
-	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	_, err := LoadBuildHostConfig(path)
-	if err == nil {
-		t.Fatal("expected error for missing key_path")
-	}
-	if !errors.Is(err, ErrMissingField) {
-		t.Errorf("expected ErrMissingField, got: %v", err)
-	}
-}
-
-func TestLoadBuildHostConfig_InlineKeyRejected(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "build-host.json")
-	data := `{"mode": "ssh", "host": "mac-mini.local", "user": "builder", "key_path": "-----BEGIN OPENSSH PRIVATE KEY-----"}`
-	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	_, err := LoadBuildHostConfig(path)
-	if err == nil {
-		t.Fatal("expected error for inline key content")
-	}
-	if !strings.Contains(err.Error(), "file path") {
-		t.Errorf("error should mention file path, got: %v", err)
 	}
 }
 
@@ -1202,7 +1164,6 @@ func TestSaveBuildHostConfig_RoundTrip(t *testing.T) {
 		Mode:      "ssh",
 		Host:      "mac-mini.local",
 		User:      "builder",
-		KeyPath:   "/home/ci/.ssh/id_ed25519",
 		MountPath: "/Volumes/workspace",
 	}
 
@@ -1224,9 +1185,6 @@ func TestSaveBuildHostConfig_RoundTrip(t *testing.T) {
 	if loaded.User != original.User {
 		t.Errorf("user = %q, want %q", loaded.User, original.User)
 	}
-	if loaded.KeyPath != original.KeyPath {
-		t.Errorf("key_path = %q, want %q", loaded.KeyPath, original.KeyPath)
-	}
 	if loaded.MountPath != original.MountPath {
 		t.Errorf("mount_path = %q, want %q", loaded.MountPath, original.MountPath)
 	}
@@ -1235,7 +1193,7 @@ func TestSaveBuildHostConfig_RoundTrip(t *testing.T) {
 func TestValidateBuildHostConfig_ValidSSH(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "build-host.json")
-	data := `{"mode": "ssh", "host": "mac-mini.local", "user": "builder", "key_path": "/home/ci/.ssh/id_ed25519"}`
+	data := `{"mode": "ssh", "host": "mac-mini.local", "user": "builder"}`
 	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -1263,5 +1221,45 @@ func TestValidateBuildHostConfig_ValidLocal(t *testing.T) {
 	}
 	if cfg.Mode != "local" {
 		t.Errorf("mode = %q, want %q", cfg.Mode, "local")
+	}
+}
+
+func TestValidateBuildHostConfig_SSHWithoutKeyPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "build-host.json")
+	data := `{"mode": "ssh", "host": "mac-mini.local", "user": "builder"}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadBuildHostConfig(path)
+	if err != nil {
+		t.Fatalf("SSH mode should not require key_path, got error: %v", err)
+	}
+	if cfg.Mode != "ssh" {
+		t.Errorf("mode = %q, want %q", cfg.Mode, "ssh")
+	}
+	if cfg.Host != "mac-mini.local" {
+		t.Errorf("host = %q, want %q", cfg.Host, "mac-mini.local")
+	}
+	if cfg.User != "builder" {
+		t.Errorf("user = %q, want %q", cfg.User, "builder")
+	}
+}
+
+func TestLoadBuildHostConfig_BackwardsCompatKeyPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "build-host.json")
+	data := `{"mode": "ssh", "host": "mac-mini.local", "user": "builder", "key_path": "/old/key"}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadBuildHostConfig(path)
+	if err != nil {
+		t.Fatalf("old config with key_path should load without error, got: %v", err)
+	}
+	if cfg.Mode != "ssh" {
+		t.Errorf("mode = %q, want %q", cfg.Mode, "ssh")
 	}
 }

@@ -61,15 +61,24 @@ step_done() {
 
 # Parse arguments
 if [[ $# -lt 1 ]] || [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
-    echo "Usage: $0 <github-repo-path>"
+    echo "Usage: $0 <github-repo-path> [--platform ios] [--build-host user@host]"
     echo ""
     echo "  <github-repo-path>   Target project repo (e.g., user/myrepo)"
     echo ""
+    echo "Options:"
+    echo "  --platform ios         Enable iOS build-host support (SSH agent forwarding,"
+    echo "                         build-host.json config, connectivity verification)"
+    echo "  --build-host user@host SSH build host in user@host format"
+    echo "                         (or set AF_BUILD_HOST_USER and AF_BUILD_HOST_HOST)"
+    echo ""
     echo "Example:"
     echo "  $0 stempeck/myproject"
+    echo "  $0 stempeck/myproject --platform ios --build-host admin@macmini.local"
     echo ""
     echo "Environment variables (optional — prompts if not set):"
-    echo "  GH_TOKEN or GITHUB_TOKEN    GitHub Personal Access Token"
+    echo "  GH_TOKEN or GITHUB_TOKEN      GitHub Personal Access Token"
+    echo "  AF_BUILD_HOST_USER             iOS build host SSH username"
+    echo "  AF_BUILD_HOST_HOST             iOS build host hostname/IP"
     if [[ $# -lt 1 ]]; then
         exit 1
     fi
@@ -84,6 +93,17 @@ REPO_PATH="${REPO_PATH#git@github.com:}"
 REPO_PATH="${REPO_PATH#git@github.com/}"
 REPO_PATH="${REPO_PATH#github.com/}"
 REPO_PATH="${REPO_PATH%.git}"
+
+PLATFORM=""
+BUILD_HOST_ARG=""
+[[ $# -gt 0 ]] && shift
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --platform) PLATFORM="$2"; shift 2 ;;
+        --build-host) BUILD_HOST_ARG="$2"; shift 2 ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
 
 REPO_NAME="${REPO_PATH##*/}"
 CONTAINER_NAME="af_$(echo "$REPO_PATH" | sed 's/[^a-zA-Z0-9_.-]/_/g')"
@@ -143,6 +163,38 @@ if [ -z "$GH_TOKEN" ]; then
     exit 1
 fi
 
+if [[ "$PLATFORM" == "ios" ]]; then
+    if [[ "$(uname)" != "Darwin" ]] && [[ -z "${SSH_AUTH_SOCK:-}" ]]; then
+        echo "ERROR: SSH_AUTH_SOCK not set. Start ssh-agent first." >&2
+        exit 1
+    fi
+    if ! ssh-add -l &>/dev/null; then
+        echo "ERROR: No SSH keys loaded in ssh-agent." >&2
+        echo "  Run: ssh-add (loads default key) or ssh-add /path/to/key" >&2
+        echo "  Verify: ssh-add -l must show at least one key that can access the build host." >&2
+        exit 1
+    fi
+    BUILD_USER="${AF_BUILD_HOST_USER:-}"
+    BUILD_HOST="${AF_BUILD_HOST_HOST:-}"
+    if [[ -n "$BUILD_HOST_ARG" ]]; then
+        if [[ "$BUILD_HOST_ARG" != *@* ]]; then
+            echo "ERROR: --build-host must be in user@host format" >&2
+            exit 1
+        fi
+        BUILD_USER="${BUILD_HOST_ARG%%@*}"
+        BUILD_HOST="${BUILD_HOST_ARG#*@}"
+    fi
+    if [[ -z "$BUILD_HOST" ]]; then
+        read -rp "  SSH build host (user@host): " BUILD_HOST_INPUT
+        if [[ "$BUILD_HOST_INPUT" != *@* ]]; then
+            echo "ERROR: Build host must be in user@host format" >&2
+            exit 1
+        fi
+        BUILD_USER="${BUILD_HOST_INPUT%%@*}"
+        BUILD_HOST="${BUILD_HOST_INPUT#*@}"
+    fi
+fi
+
 step_done
 
 # ─── Step 3: Create container ───────────────────────────────────────────────
@@ -170,11 +222,21 @@ if [[ ! -f "$QUICKSTART_SRC" ]]; then
     exit 1
 fi
 
+IOS_DOCKER_ARGS=""
+if [[ "$PLATFORM" == "ios" ]]; then
+    if [[ "$(uname)" == "Darwin" ]]; then
+        IOS_DOCKER_ARGS="-v /run/host-services/ssh-auth.sock:/run/ssh-agent.sock -e SSH_AUTH_SOCK=/run/ssh-agent.sock"
+    else
+        IOS_DOCKER_ARGS="-v $SSH_AUTH_SOCK:/run/ssh-agent.sock -e SSH_AUTH_SOCK=/run/ssh-agent.sock"
+    fi
+fi
+
 docker run -dit \
     --memory="$CONTAINER_MEMORY" \
     --memory-swap="24g" \
     --tmpfs /tmp:size=2g \
     --shm-size=256m \
+    $IOS_DOCKER_ARGS \
     --name "$CONTAINER_NAME" \
     "$BASE_IMAGE" bash --login
 
@@ -240,6 +302,16 @@ if [[ -z \"\$TMUX\" ]]; then
 fi
 BASHRC_EOF"
 
+if [[ "$PLATFORM" == "ios" ]]; then
+    docker exec -u dev "$CONTAINER_NAME" bash -c "cat >> ~/.bashrc << 'BASHRC_EOF'
+
+# SSH agent socket guard (iOS build-host support)
+if [[ -n \"\${SSH_AUTH_SOCK:-}\" ]] && [[ ! -S \"\$SSH_AUTH_SOCK\" ]]; then
+    echo \"WARNING: SSH agent socket not found at \$SSH_AUTH_SOCK. Recreate container with --platform ios for SSH forwarding.\"
+fi
+BASHRC_EOF"
+fi
+
 step_done
 
 # ─── Step 8: Run quickstart.sh ──────────────────────────────────────────────
@@ -250,6 +322,24 @@ docker exec -it -u dev -w "${PROJECTS_DIR}/${AF_DIR}" "$CONTAINER_NAME" \
     ./quickstart.sh
 
 step_done
+
+if [[ "$PLATFORM" == "ios" ]]; then
+    echo ""
+    echo "  Configuring iOS build host..."
+    docker exec -u dev -w "$WORKSPACE_DIR/$REPO_NAME" "$CONTAINER_NAME" af config build-host --mode ssh --host "$BUILD_HOST" --user "$BUILD_USER" --mount-path "$WORKSPACE_DIR/$REPO_NAME" --skip-ssh-check || {
+        echo "ERROR: af config build-host failed inside container" >&2
+        exit 1
+    }
+    echo "  Verifying SSH connectivity..."
+    docker exec -u dev "$CONTAINER_NAME" \
+        ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            "$BUILD_USER@$BUILD_HOST" echo ok || {
+        echo "ERROR: SSH connectivity verification failed from inside container." >&2
+        echo "Check: SSH agent forwarding, network access, host key acceptance." >&2
+        exit 1
+    }
+    echo "  -> iOS build host configured and verified"
+fi
 
 # ─── Success ──────────────────────────────────────────────────────────────
 
@@ -262,6 +352,10 @@ echo "=========================================="
 echo ""
 echo "  Container: $CONTAINER_NAME"
 echo "  Workspace: $WORKSPACE_DIR/$REPO_NAME"
+if [[ "$PLATFORM" == "ios" ]]; then
+    echo "  iOS build host: $BUILD_USER@$BUILD_HOST"
+    echo "  SSH agent forwarding: active"
+fi
 echo ""
 echo "  Connect:"
 echo "    docker exec -it -u dev $CONTAINER_NAME bash"

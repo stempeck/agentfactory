@@ -133,6 +133,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 		if buildHostCfg != nil {
 			mgr.SetBuildHost(buildHostCfg)
 		}
+		if v := os.Getenv("SSH_AUTH_SOCK"); v != "" {
+			mgr.SetSSHAuthSock(v)
+		}
 		if wtPath != "" {
 			if err := mgr.SetWorktree(wtPath, wtID); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: SetWorktree for %s: %v\n", name, err)
