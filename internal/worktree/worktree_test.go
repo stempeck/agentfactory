@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -1828,4 +1829,172 @@ func TestUnlinkBeforeRemove_RemovesSymlinks(t *testing.T) {
 func TestUnlinkBeforeRemove_ToleratesMissing(t *testing.T) {
 	worktreePath := t.TempDir()
 	unlinkBeforeRemove(worktreePath)
+}
+
+func TestEnsureWorktreeLinks_RealSkillsDir_MergesFactorySkills(t *testing.T) {
+	factoryRoot := t.TempDir()
+	worktreePath := t.TempDir()
+
+	// Factory root has skills A and B
+	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills", "factory-skill-A"), 0o755)
+	os.WriteFile(filepath.Join(factoryRoot, ".claude", "skills", "factory-skill-A", "SKILL.md"), []byte("factory A content"), 0o644)
+	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills", "factory-skill-B"), 0o755)
+	os.WriteFile(filepath.Join(factoryRoot, ".claude", "skills", "factory-skill-B", "SKILL.md"), []byte("factory B content"), 0o644)
+
+	os.MkdirAll(filepath.Join(factoryRoot, ".runtime"), 0o755)
+	os.WriteFile(filepath.Join(factoryRoot, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+
+	// Worktree has skill B as a git-tracked real directory (different content)
+	os.MkdirAll(filepath.Join(worktreePath, ".claude", "skills", "factory-skill-B"), 0o755)
+	os.WriteFile(filepath.Join(worktreePath, ".claude", "skills", "factory-skill-B", "SKILL.md"), []byte("git-tracked B content"), 0o644)
+
+	// Capture stderr
+	var buf bytes.Buffer
+	origWriter := stderrWriter
+	stderrWriter = &buf
+	t.Cleanup(func() { stderrWriter = origWriter })
+
+	err := EnsureWorktreeLinks(factoryRoot, worktreePath)
+	if err != nil {
+		t.Fatalf("EnsureWorktreeLinks: %v", err)
+	}
+
+	// Skill A should be merged (copied from factory)
+	dataA, err := os.ReadFile(filepath.Join(worktreePath, ".claude", "skills", "factory-skill-A", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("factory-skill-A should exist in worktree: %v", err)
+	}
+	if string(dataA) != "factory A content" {
+		t.Errorf("factory-skill-A content: got %q, want %q", dataA, "factory A content")
+	}
+
+	// Skill B should retain git-tracked content (not overwritten)
+	dataB, err := os.ReadFile(filepath.Join(worktreePath, ".claude", "skills", "factory-skill-B", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("factory-skill-B should exist: %v", err)
+	}
+	if string(dataB) != "git-tracked B content" {
+		t.Errorf("factory-skill-B should keep git-tracked content: got %q, want %q", dataB, "git-tracked B content")
+	}
+
+	// Info message should mention 1 merged skill
+	output := buf.String()
+	if !strings.Contains(output, "merged 1 factory skill(s)") {
+		t.Errorf("expected info message about merged skills, got: %q", output)
+	}
+
+	// Should NOT contain the old "skipping symlink" warning for .claude/skills
+	if strings.Contains(output, "exists as real file/dir, skipping symlink") && strings.Contains(output, "skills") {
+		t.Errorf("should not warn about skipping .claude/skills, got: %q", output)
+	}
+
+	// .runtime and AGENTS.md should still be symlinks
+	fi, err := os.Lstat(filepath.Join(worktreePath, ".runtime"))
+	if err != nil {
+		t.Fatalf("lstat .runtime: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Error(".runtime should be a symlink")
+	}
+}
+
+func TestCleanupMergedSkills_RemovesFactoryCopiedEntries(t *testing.T) {
+	factoryRoot := t.TempDir()
+	worktreePath := t.TempDir()
+
+	// Factory has skills A and B
+	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills", "skill-A"), 0o755)
+	os.WriteFile(filepath.Join(factoryRoot, ".claude", "skills", "skill-A", "SKILL.md"), []byte("A"), 0o644)
+	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills", "skill-B"), 0o755)
+	os.WriteFile(filepath.Join(factoryRoot, ".claude", "skills", "skill-B", "SKILL.md"), []byte("B"), 0o644)
+
+	// Worktree has skills A, B (merged), and C (git-tracked only)
+	os.MkdirAll(filepath.Join(worktreePath, ".claude", "skills", "skill-A"), 0o755)
+	os.WriteFile(filepath.Join(worktreePath, ".claude", "skills", "skill-A", "SKILL.md"), []byte("A"), 0o644)
+	os.MkdirAll(filepath.Join(worktreePath, ".claude", "skills", "skill-B"), 0o755)
+	os.WriteFile(filepath.Join(worktreePath, ".claude", "skills", "skill-B", "SKILL.md"), []byte("B"), 0o644)
+	os.MkdirAll(filepath.Join(worktreePath, ".claude", "skills", "git-only-skill"), 0o755)
+	os.WriteFile(filepath.Join(worktreePath, ".claude", "skills", "git-only-skill", "SKILL.md"), []byte("git"), 0o644)
+
+	cleanupMergedSkills(factoryRoot, worktreePath)
+
+	// Factory-matching entries (A, B) should be removed
+	if _, err := os.Stat(filepath.Join(worktreePath, ".claude", "skills", "skill-A")); !os.IsNotExist(err) {
+		t.Error("skill-A should have been removed by cleanup")
+	}
+	if _, err := os.Stat(filepath.Join(worktreePath, ".claude", "skills", "skill-B")); !os.IsNotExist(err) {
+		t.Error("skill-B should have been removed by cleanup")
+	}
+
+	// Git-only entry should survive
+	if _, err := os.Stat(filepath.Join(worktreePath, ".claude", "skills", "git-only-skill")); err != nil {
+		t.Error("git-only-skill should survive cleanup")
+	}
+}
+
+func TestCleanupMergedSkills_NoOpOnSymlink(t *testing.T) {
+	factoryRoot := t.TempDir()
+	worktreePath := t.TempDir()
+
+	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills"), 0o755)
+
+	// .claude/skills is a symlink in the worktree (normal case)
+	os.MkdirAll(filepath.Join(worktreePath, ".claude"), 0o755)
+	os.Symlink(
+		filepath.Join(factoryRoot, ".claude", "skills"),
+		filepath.Join(worktreePath, ".claude", "skills"),
+	)
+
+	// Should not panic or remove the symlink
+	cleanupMergedSkills(factoryRoot, worktreePath)
+
+	fi, err := os.Lstat(filepath.Join(worktreePath, ".claude", "skills"))
+	if err != nil {
+		t.Fatalf("symlink should still exist: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Error(".claude/skills should still be a symlink after cleanup")
+	}
+}
+
+func TestMergeSkillsDir_SkipsSymlinksInFactory(t *testing.T) {
+	factoryRoot := t.TempDir()
+	worktreeSkillsDir := t.TempDir()
+
+	// Factory has a real skill and a symlink skill
+	factorySkillsDir := filepath.Join(factoryRoot, "skills")
+	os.MkdirAll(filepath.Join(factorySkillsDir, "real-skill"), 0o755)
+	os.WriteFile(filepath.Join(factorySkillsDir, "real-skill", "SKILL.md"), []byte("real"), 0o644)
+
+	// Create a symlink entry in factory (should be skipped)
+	tmpTarget := t.TempDir()
+	os.Symlink(tmpTarget, filepath.Join(factorySkillsDir, "symlink-skill"))
+
+	var buf bytes.Buffer
+	origWriter := stderrWriter
+	stderrWriter = &buf
+	t.Cleanup(func() { stderrWriter = origWriter })
+
+	merged, err := mergeSkillsDir(factorySkillsDir, worktreeSkillsDir)
+	if err != nil {
+		t.Fatalf("mergeSkillsDir: %v", err)
+	}
+
+	if merged != 1 {
+		t.Errorf("expected 1 merged, got %d", merged)
+	}
+
+	// Real skill should be copied
+	if _, err := os.Stat(filepath.Join(worktreeSkillsDir, "real-skill")); err != nil {
+		t.Error("real-skill should exist in worktree")
+	}
+
+	// Symlink skill should NOT be copied
+	if _, err := os.Stat(filepath.Join(worktreeSkillsDir, "symlink-skill")); !os.IsNotExist(err) {
+		t.Error("symlink-skill should not be copied to worktree")
+	}
+
+	if !strings.Contains(buf.String(), "skipping symlink") {
+		t.Errorf("expected warning about skipping symlink, got: %q", buf.String())
+	}
 }

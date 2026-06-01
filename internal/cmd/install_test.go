@@ -1137,10 +1137,9 @@ func TestInstallInit_BuildHostIdempotency(t *testing.T) {
 
 	bhPath := config.BuildHostConfigPath(dir)
 	original := &config.BuildHostConfig{
-		Mode:    "ssh",
-		Host:    "mac-mini.local",
-		User:    "builder",
-		KeyPath: "/home/ci/.ssh/id_ed25519",
+		Mode: "ssh",
+		Host: "mac-mini.local",
+		User: "builder",
 	}
 	if err := config.SaveBuildHostConfig(bhPath, original); err != nil {
 		t.Fatalf("SaveBuildHostConfig: %v", err)

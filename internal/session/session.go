@@ -115,6 +115,7 @@ type Manager struct {
 	worktreePath   string
 	worktreeID     string
 	buildHost      *config.BuildHostConfig
+	sshAuthSock    string
 }
 
 // NewManager creates a Manager for the given agent.
@@ -150,6 +151,11 @@ func (m *Manager) SetWorktree(path, id string) error {
 // environment variables are exported into the tmux session.
 func (m *Manager) SetBuildHost(cfg *config.BuildHostConfig) {
 	m.buildHost = cfg
+}
+
+// SetSSHAuthSock sets the SSH_AUTH_SOCK value to propagate into the tmux session.
+func (m *Manager) SetSSHAuthSock(v string) {
+	m.sshAuthSock = v
 }
 
 // SessionID returns the tmux session name for this agent.
@@ -240,12 +246,12 @@ func (m *Manager) Start() error {
 		if m.buildHost.User != "" {
 			_ = m.tmux.SetEnvironment(sessionID, "AF_BUILD_USER", m.buildHost.User)
 		}
-		if m.buildHost.KeyPath != "" {
-			_ = m.tmux.SetEnvironment(sessionID, "AF_BUILD_KEY", m.buildHost.KeyPath)
-		}
 		if m.buildHost.MountPath != "" {
 			_ = m.tmux.SetEnvironment(sessionID, "AF_HOST_MOUNT", m.buildHost.MountPath)
 		}
+	}
+	if m.sshAuthSock != "" {
+		_ = m.tmux.SetEnvironment(sessionID, "SSH_AUTH_SOCK", m.sshAuthSock)
 	}
 
 	// Wait for shell to be ready
@@ -309,12 +315,12 @@ func (m *Manager) buildStartupCommand() string {
 		if m.buildHost.User != "" {
 			exports += fmt.Sprintf(" AF_BUILD_USER=%s", shellQuote(m.buildHost.User))
 		}
-		if m.buildHost.KeyPath != "" {
-			exports += fmt.Sprintf(" AF_BUILD_KEY=%s", shellQuote(m.buildHost.KeyPath))
-		}
 		if m.buildHost.MountPath != "" {
 			exports += fmt.Sprintf(" AF_HOST_MOUNT=%s", shellQuote(m.buildHost.MountPath))
 		}
+	}
+	if m.sshAuthSock != "" {
+		exports += fmt.Sprintf(" SSH_AUTH_SOCK=%s", shellQuote(m.sshAuthSock))
 	}
 
 	claude := "claude --dangerously-skip-permissions"

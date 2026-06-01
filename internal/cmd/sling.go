@@ -747,6 +747,9 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 	}
 
 	mgr := session.NewManager(root, agentName, entry)
+	if v := os.Getenv("SSH_AUTH_SOCK"); v != "" {
+		mgr.SetSSHAuthSock(v)
+	}
 	if worktreePath != "" {
 		if err := mgr.SetWorktree(worktreePath, worktreeID); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: SetWorktree for %s: %v\n", agentName, err)

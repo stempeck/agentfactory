@@ -981,7 +981,6 @@ func TestBuildStartupCommand_WithBuildHost(t *testing.T) {
 		Mode:      "ssh",
 		Host:      "mac-mini.local",
 		User:      "builder",
-		KeyPath:   "/home/user/.ssh/id_ed25519",
 		MountPath: "/Volumes/build",
 	})
 
@@ -996,8 +995,8 @@ func TestBuildStartupCommand_WithBuildHost(t *testing.T) {
 	if !strings.Contains(cmd, "AF_BUILD_USER='builder'") {
 		t.Errorf("command should contain AF_BUILD_USER='builder', got: %s", cmd)
 	}
-	if !strings.Contains(cmd, "AF_BUILD_KEY='/home/user/.ssh/id_ed25519'") {
-		t.Errorf("command should contain AF_BUILD_KEY, got: %s", cmd)
+	if strings.Contains(cmd, "AF_BUILD_KEY") {
+		t.Errorf("command should NOT contain AF_BUILD_KEY, got: %s", cmd)
 	}
 	if !strings.Contains(cmd, "AF_HOST_MOUNT='/Volumes/build'") {
 		t.Errorf("command should contain AF_HOST_MOUNT, got: %s", cmd)
@@ -1031,41 +1030,31 @@ func TestBuildStartupCommand_BuildHostLocalMode(t *testing.T) {
 	if strings.Contains(cmd, "AF_BUILD_USER") {
 		t.Errorf("local mode should NOT contain AF_BUILD_USER, got: %s", cmd)
 	}
-	if strings.Contains(cmd, "AF_BUILD_KEY") {
-		t.Errorf("local mode should NOT contain AF_BUILD_KEY, got: %s", cmd)
-	}
 	if strings.Contains(cmd, "AF_HOST_MOUNT") {
 		t.Errorf("local mode should NOT contain AF_HOST_MOUNT, got: %s", cmd)
 	}
 }
 
-func TestBuildStartupCommand_BuildHostNonExistentKeyPath(t *testing.T) {
+func TestBuildStartupCommand_SSHAuthSockPropagated(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
 	mgr := NewManager("/tmp/factory", "testagent", entry)
-	mgr.SetBuildHost(&config.BuildHostConfig{
-		Mode:      "ssh",
-		Host:      "mac-mini.local",
-		User:      "builder",
-		KeyPath:   "/nonexistent/path/to/key",
-		MountPath: "/Volumes/build",
-	})
+	mgr.SetSSHAuthSock("/tmp/ssh-agent.sock")
 
 	cmd := mgr.BuildStartupCommand()
 
-	if !strings.Contains(cmd, "AF_BUILD_KEY='/nonexistent/path/to/key'") {
-		t.Errorf("non-existent key path should still be exported, got: %s", cmd)
+	if !strings.Contains(cmd, "SSH_AUTH_SOCK='/tmp/ssh-agent.sock'") {
+		t.Errorf("command should contain SSH_AUTH_SOCK when set, got: %s", cmd)
 	}
-	if !strings.Contains(cmd, "AF_BUILD_MODE='ssh'") {
-		t.Errorf("command should contain AF_BUILD_MODE, got: %s", cmd)
-	}
-	if !strings.Contains(cmd, "AF_BUILD_HOST='mac-mini.local'") {
-		t.Errorf("command should contain AF_BUILD_HOST, got: %s", cmd)
-	}
-	if !strings.Contains(cmd, "AF_BUILD_USER='builder'") {
-		t.Errorf("command should contain AF_BUILD_USER, got: %s", cmd)
-	}
-	if !strings.Contains(cmd, "AF_HOST_MOUNT='/Volumes/build'") {
-		t.Errorf("command should contain AF_HOST_MOUNT, got: %s", cmd)
+}
+
+func TestBuildStartupCommand_SSHAuthSockEmpty(t *testing.T) {
+	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
+	mgr := NewManager("/tmp/factory", "testagent", entry)
+
+	cmd := mgr.BuildStartupCommand()
+
+	if strings.Contains(cmd, "SSH_AUTH_SOCK") {
+		t.Errorf("command should NOT contain SSH_AUTH_SOCK when not set, got: %s", cmd)
 	}
 }
 

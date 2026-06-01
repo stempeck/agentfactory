@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,6 +46,8 @@ var readMemInfoFunc = func() (uint64, error) {
 	return readAvailableMemoryMB()
 }
 
+var stderrWriter io.Writer = os.Stderr
+
 var worktreeSymlinks = []string{
 	filepath.Join(".claude", "skills"),
 	".runtime",
@@ -59,7 +62,7 @@ func EnsureWorktreeLinks(factoryRoot, worktreePath string) error {
 		target := filepath.Join(factoryRoot, relPath)
 
 		if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: creating parent dir for %s: %v\n", relPath, err)
+			fmt.Fprintf(stderrWriter, "warning: creating parent dir for %s: %v\n", relPath, err)
 			continue
 		}
 
@@ -71,17 +74,92 @@ func EnsureWorktreeLinks(factoryRoot, worktreePath string) error {
 					continue
 				}
 				os.Remove(source)
+			} else if fi.IsDir() && relPath == filepath.Join(".claude", "skills") {
+				merged, err := mergeSkillsDir(target, source)
+				if err != nil {
+					fmt.Fprintf(stderrWriter, "warning: merging factory skills into %s: %v\n", source, err)
+				}
+				if merged > 0 {
+					fmt.Fprintf(stderrWriter, "info: merged %d factory skill(s) into %s\n", merged, source)
+				}
+				continue
 			} else {
-				fmt.Fprintf(os.Stderr, "warning: %s exists as real file/dir, skipping symlink\n", source)
+				fmt.Fprintf(stderrWriter, "warning: %s exists as real file/dir, skipping symlink\n", source)
 				continue
 			}
 		}
 
 		if err := os.Symlink(target, source); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: symlink %s -> %s: %v\n", source, target, err)
+			fmt.Fprintf(stderrWriter, "warning: symlink %s -> %s: %v\n", source, target, err)
 		}
 	}
 	return nil
+}
+
+func mergeSkillsDir(factorySkillsDir, worktreeSkillsDir string) (int, error) {
+	entries, err := os.ReadDir(factorySkillsDir)
+	if err != nil {
+		return 0, fmt.Errorf("reading factory skills dir: %w", err)
+	}
+	merged := 0
+	for _, entry := range entries {
+		destPath := filepath.Join(worktreeSkillsDir, entry.Name())
+		if _, err := os.Stat(destPath); err == nil {
+			continue
+		}
+		srcPath := filepath.Join(factorySkillsDir, entry.Name())
+		srcInfo, err := os.Lstat(srcPath)
+		if err != nil {
+			fmt.Fprintf(stderrWriter, "warning: lstat %s: %v\n", srcPath, err)
+			continue
+		}
+		if srcInfo.Mode()&os.ModeSymlink != 0 {
+			fmt.Fprintf(stderrWriter, "warning: skipping symlink %s in factory skills\n", srcPath)
+			continue
+		}
+		if srcInfo.IsDir() {
+			if err := copyDir(srcPath, destPath); err != nil {
+				fmt.Fprintf(stderrWriter, "warning: copying skill %s: %v\n", entry.Name(), err)
+				continue
+			}
+		} else {
+			if err := copyFile(srcPath, destPath); err != nil {
+				fmt.Fprintf(stderrWriter, "warning: copying skill file %s: %v\n", entry.Name(), err)
+				continue
+			}
+		}
+		merged++
+	}
+	return merged, nil
+}
+
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0644)
+}
+
+func copyDir(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, path)
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0755)
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		return copyFile(path, target)
+	})
 }
 
 func readAvailableMemoryMB() (uint64, error) {
@@ -426,12 +504,30 @@ func unlinkBeforeRemove(worktreePath string) {
 	}
 }
 
+func cleanupMergedSkills(factoryRoot, worktreePath string) {
+	skillsRel := filepath.Join(".claude", "skills")
+	wtSkillsDir := filepath.Join(worktreePath, skillsRel)
+	fi, err := os.Lstat(wtSkillsDir)
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	factorySkillsDir := filepath.Join(factoryRoot, skillsRel)
+	entries, err := os.ReadDir(factorySkillsDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		os.RemoveAll(filepath.Join(wtSkillsDir, entry.Name()))
+	}
+}
+
 // Remove removes a worktree: git worktree remove, delete meta file,
 // delete branch. Returns error if worktree has uncommitted changes.
 func Remove(factoryRoot string, meta *Meta) error {
 	absPath := filepath.Join(factoryRoot, meta.Path)
 
 	unlinkBeforeRemove(absPath)
+	cleanupMergedSkills(factoryRoot, absPath)
 
 	// git worktree remove (does NOT force — fails on uncommitted changes)
 	cmd := exec.Command("git", "worktree", "remove", absPath)
@@ -462,6 +558,7 @@ func Remove(factoryRoot string, meta *Meta) error {
 func ForceRemove(factoryRoot string, meta *Meta) error {
 	absPath := filepath.Join(factoryRoot, meta.Path)
 	unlinkBeforeRemove(absPath)
+	cleanupMergedSkills(factoryRoot, absPath)
 	cmd := exec.Command("git", "worktree", "remove", "--force", absPath)
 	cmd.Dir = factoryRoot
 	if out, err := cmd.CombinedOutput(); err != nil {

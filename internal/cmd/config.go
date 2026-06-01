@@ -13,16 +13,14 @@ var (
 	flagMode         string
 	flagHost         string
 	flagUser         string
-	flagKey          string
 	flagMountPath    string
 	flagStatus       bool
 	flagRemove       bool
 	flagSkipSSHCheck bool
 )
 
-var sshCheckFunc = func(host, user, keyPath string) error {
+var sshCheckFunc = func(host, user string) error {
 	cmd := exec.Command("ssh",
-		"-i", keyPath,
 		"-o", "ConnectTimeout=5",
 		"-o", "StrictHostKeyChecking=accept-new",
 		user+"@"+host,
@@ -55,7 +53,6 @@ func init() {
 	configBuildHostCmd.Flags().StringVar(&flagMode, "mode", "", "Build mode: local or ssh")
 	configBuildHostCmd.Flags().StringVar(&flagHost, "host", "", "SSH host address")
 	configBuildHostCmd.Flags().StringVar(&flagUser, "user", "", "SSH username")
-	configBuildHostCmd.Flags().StringVar(&flagKey, "key", "", "Path to SSH private key")
 	configBuildHostCmd.Flags().StringVar(&flagMountPath, "mount-path", "", "Remote mount path")
 	configBuildHostCmd.Flags().BoolVar(&flagStatus, "status", false, "Show current build-host configuration")
 	configBuildHostCmd.Flags().BoolVar(&flagRemove, "remove", false, "Remove build-host configuration")
@@ -106,9 +103,6 @@ func configBuildHostStatus(cmd *cobra.Command, bhPath string) error {
 	if cfg.User != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "user:       %s\n", cfg.User)
 	}
-	if cfg.KeyPath != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "key_path:   %s\n", cfg.KeyPath)
-	}
 	if cfg.MountPath != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "mount_path: %s\n", cfg.MountPath)
 	}
@@ -148,21 +142,8 @@ func configBuildHostSet(cmd *cobra.Command, bhPath string) error {
 		if flagUser == "" {
 			return fmt.Errorf("--user is required for ssh mode")
 		}
-		if flagKey == "" {
-			return fmt.Errorf("--key is required for ssh mode")
-		}
-		info, err := os.Stat(flagKey)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return fmt.Errorf("key file not found: %s", flagKey)
-			}
-			return fmt.Errorf("checking key file: %w", err)
-		}
-		if info.Mode().Perm()&0077 != 0 {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: key file %s has permissions %04o; recommended 0600.\n", flagKey, info.Mode().Perm())
-		}
 		if !flagSkipSSHCheck {
-			if err := sshCheckFunc(flagHost, flagUser, flagKey); err != nil {
+			if err := sshCheckFunc(flagHost, flagUser); err != nil {
 				return fmt.Errorf("SSH connectivity check failed: %w\nUse --skip-ssh-check to skip this check", err)
 			}
 		}
@@ -170,7 +151,6 @@ func configBuildHostSet(cmd *cobra.Command, bhPath string) error {
 			Mode:      "ssh",
 			Host:      flagHost,
 			User:      flagUser,
-			KeyPath:   flagKey,
 			MountPath: flagMountPath,
 		}
 		if err := config.SaveBuildHostConfig(bhPath, cfg); err != nil {

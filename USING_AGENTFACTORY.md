@@ -21,6 +21,17 @@ Create an instruction set workflow (formula) with `/formula-create /path/to/your
 2. IFF you have AgentFactory setup, run: `docker exec -it -u dev "af_ghusername_repo" bash`, then: `./quickstart.sh`
 3. (optionally) enable the quality gate: `af quality on` (the `fidelity` gate is on by default and only fires when an agent is running a formula to keep it honest)
 
+### iOS Projects
+
+For iOS projects that need remote Mac builds:
+
+    ./quickdocker.sh user/myiosapp --platform ios
+
+You'll be prompted for the SSH build host (user@host). After setup, `af up` automatically configures SSH-based build delegation — no additional commands needed.
+Requirements: SSH agent running with a key that can access the build Mac (`ssh-add -l` shows keys).
+Note: On Linux hosts, if you restart the container, recreate it with `--platform ios` to restore SSH forwarding. macOS Docker Desktop maintains forwarding across restarts.
+For CI/automation, set `AF_BUILD_HOST_USER` and `AF_BUILD_HOST_HOST` environment variables or use `--build-host user@host` flag to skip the interactive prompt.
+
 ## The Flow (per repository)
 
 Every repository you want agents on gets its own factory. Repeat these steps for each repo.

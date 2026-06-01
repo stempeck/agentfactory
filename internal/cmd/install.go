@@ -241,7 +241,7 @@ func runInstallInit(cmd *cobra.Command) error {
 			}
 		}
 	} else {
-		fmt.Fprintln(cmd.OutOrStdout(), "Hint: iOS builds available via 'af config build-host --mode ssh --host <mac-host>'")
+		fmt.Fprintln(cmd.OutOrStdout(), "Hint: iOS builds available via 'af config build-host --mode ssh --host <mac-host> --user <user>'")
 	}
 
 	fmt.Fprintln(cmd.OutOrStdout(), "Factory initialized successfully.")
