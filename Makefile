@@ -41,8 +41,11 @@ clean: clean-venv
 clean-venv:
 	rm -rf $(VENV)
 
+AF_TEST_TMPDIR := $(HOME)/.cache/af-test
+
 test:
-	CGO_ENABLED=0 go test ./...
+	@mkdir -p $(AF_TEST_TMPDIR)
+	TMPDIR=$(AF_TEST_TMPDIR) GOTMPDIR=$(AF_TEST_TMPDIR) CGO_ENABLED=0 go test ./...
 
 # The venv is rebuilt only when py/requirements.txt changes (marker file
 # guards re-install on every test run). Fails fast with a clear message if
@@ -56,7 +59,8 @@ $(VENV_MARKER): $(PY_REQS)
 	@touch $(VENV_MARKER)
 
 test-integration: $(VENV_MARKER)
-	PATH="$(CURDIR)/$(VENV)/bin:$$PATH" CGO_ENABLED=0 go test -tags=integration -timeout=4m ./...
+	@mkdir -p $(AF_TEST_TMPDIR)
+	PATH="$(CURDIR)/$(VENV)/bin:$$PATH" TMPDIR=$(AF_TEST_TMPDIR) GOTMPDIR=$(AF_TEST_TMPDIR) CGO_ENABLED=0 go test -tags=integration -timeout=4m ./...
 
 check-formulas:
 	@fail=0; for f in internal/cmd/install_formulas/*.formula.toml; do \
@@ -77,7 +81,8 @@ check-skills:
 	if [ "$$fail" = "0" ]; then echo "Skills in sync"; else echo "ERROR: Skill drift detected between source and installed copies"; exit 1; fi
 
 check-formula-skills:
-	@GOTMPDIR=$$(pwd) go test -run TestEmbeddedFormulaSkillsAvailable ./internal/cmd/
+	@mkdir -p $(AF_TEST_TMPDIR)
+	@TMPDIR=$(AF_TEST_TMPDIR) GOTMPDIR=$(AF_TEST_TMPDIR) go test -run TestEmbeddedFormulaSkillsAvailable ./internal/cmd/
 
 sync-skills:
 	@for d in internal/cmd/install_skills/*/; do \

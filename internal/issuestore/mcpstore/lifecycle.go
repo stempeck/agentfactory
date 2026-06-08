@@ -72,37 +72,42 @@ const (
 // for the in-tree MCP server rooted at factoryRoot, starting a new Python
 // subprocess if none is running. Concurrent callers serialize on
 // .runtime/mcp_start.lock; the loser polls for the winner's endpoint file.
-func discoverOrStart(factoryRoot string) (string, error) {
+// The returned ownedPID is the pid of a server THIS call spawned (0 when an
+// existing server was discovered or a peer won the start lock). With
+// setProcGroup the spawned pid is also its process-group id, so callers can
+// reap the group via MCPStore.Stop without killing a shared/discovered server.
+func discoverOrStart(factoryRoot string) (url string, ownedPID int, err error) {
 	epFile := filepath.Join(factoryRoot, ".runtime", "mcp_server.json")
 
 	if url, ok := tryLiveEndpoint(epFile); ok {
-		return url, nil
+		return url, 0, nil
 	}
 
 	lockPath := filepath.Join(factoryRoot, ".runtime", "mcp_start.lock")
 	lk := lock.NewWithPath(lockPath)
 	sessionID := fmt.Sprintf("mcpstore-%d", os.Getpid())
 
-	err := lk.Acquire(sessionID)
+	err = lk.Acquire(sessionID)
 	if errors.Is(err, lock.ErrLocked) {
-		return pollForEndpoint(epFile)
+		url, err := pollForEndpoint(epFile)
+		return url, 0, err
 	}
 	if err != nil {
-		return "", fmt.Errorf("mcpstore: acquire start lock: %w", err)
+		return "", 0, fmt.Errorf("mcpstore: acquire start lock: %w", err)
 	}
 	defer lk.Release()
 
 	// Re-check under the lock: a peer may have spawned a healthy server
 	// between our first probe and our lock acquisition.
 	if url, ok := tryLiveEndpoint(epFile); ok {
-		return url, nil
+		return url, 0, nil
 	}
 
 	info, err := startServer(factoryRoot)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return "http://" + info.Address, nil
+	return "http://" + info.Address, info.PID, nil
 }
 
 // tryLiveEndpoint reports whether an endpoint file names a live, healthy
@@ -181,6 +186,9 @@ func startServer(factoryRoot string) (endpointInfo, error) {
 	// `go test` hang from exec.WaitDelay without losing output.
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	// Put the server in its own process group so an interrupted run can reap
+	// it (and any children) as a unit via MCPStore.Stop. Must precede Start().
+	setProcGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
 		return endpointInfo{}, fmt.Errorf("mcpstore: start python server: %w", err)

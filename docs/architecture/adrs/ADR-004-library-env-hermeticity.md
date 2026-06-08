@@ -59,3 +59,30 @@ Specific mechanisms:
   actor scoping)
 - Related ADRs: [ADR-003](ADR-003-no-identity-overrides.md),
   [ADR-009](ADR-009-package-var-seams.md)
+
+## Sanctioned Exemption: Test-Support Socket Isolation (Phase 2b, issue #317)
+
+`internal/testsupport/tmuxisolation` is permitted to read and write the
+`TMUX_TMPDIR` and `TMUX` environment variables **because it is a test-support
+package, not library code**. This does not violate the decision above: those env
+vars are **not read by any `internal/*` library package** (the invariant ADR-004
+protects). They are set once per test-binary startup in a `TestMain` and consumed
+only by the spawned `tmux` subprocess (via environment inheritance on `exec`).
+
+The `TMUX_TMPDIR` mechanism is **unavoidable** for the out-of-process backstop: a
+`-L`/`-S` socket flag would not propagate to a spawned production binary that
+builds its own `tmux` command line, whereas `TMUX_TMPDIR` is inherited across the
+exec boundary. The accompanying `os.Unsetenv("TMUX")` is **load-bearing** (when
+the suite runs inside a tmux session, `$TMUX` would otherwise take precedence over
+`TMUX_TMPDIR` and point a child `tmux` back at the operator's real socket — the
+exact #316 scenario); see the `internal/testsupport/tmuxisolation` package
+doc-comment.
+
+**Audit mechanism:** `TestNoEnvReadsInLibraryPackages`
+(`internal/cmd/env_hermetic_test.go`) skips `internal/testsupport/` via a
+directory exemption, alongside the existing `internal/cmd/` exemption. The scan
+continues to flag any env read/write elsewhere under `internal/`.
+
+**Corpus links:** issue #317 (Phase 2b),
+`internal/testsupport/tmuxisolation/tmuxisolation.go`,
+`internal/cmd/env_hermetic_test.go` (the `testsupportDir` `SkipDir`).

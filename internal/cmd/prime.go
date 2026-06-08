@@ -519,8 +519,24 @@ func outputCheckpointContext(out io.Writer, workDir string) {
 		return
 	}
 
-	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "## Previous Session Checkpoint")
+	if cp.CompactionHandoff {
+		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "## Compaction Recovery — Previous Session Checkpoint")
+		fmt.Fprintln(out, "This session was recycled because context compaction was imminent.")
+		fmt.Fprintln(out, "The previous session's state was checkpointed before recycling.")
+		if !cp.CompactionAt.IsZero() {
+			fmt.Fprintf(out, "  **Compaction at:** %s\n", cp.CompactionAt.Format(time.RFC3339))
+		}
+		lastErrorPath := filepath.Join(workDir, ".runtime", "last_error")
+		if errData, readErr := os.ReadFile(lastErrorPath); readErr == nil && len(errData) > 0 {
+			fmt.Fprintf(out, "  **Last error:** %s\n", strings.TrimSpace(string(errData)))
+		}
+		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "Resume your current task. Your formula step and branch are preserved.")
+	} else {
+		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "## Previous Session Checkpoint")
+	}
 	fmt.Fprintf(out, "A previous session left a checkpoint %s ago.\n\n", cp.Age().Round(time.Minute))
 	if cp.StepTitle != "" {
 		fmt.Fprintf(out, "  **Working on:** %s\n", cp.StepTitle)

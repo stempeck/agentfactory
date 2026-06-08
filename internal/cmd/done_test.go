@@ -396,8 +396,11 @@ func TestTerminateSession_NonExistentSession(t *testing.T) {
 	dir := t.TempDir()
 	os.MkdirAll(filepath.Join(dir, ".runtime"), 0o755)
 
-	// Should not panic or write breadcrumb for non-existent session
-	terminateSession("af-nonexistent-test-session", dir)
+	// Should not panic or write breadcrumb for non-existent session. Uses a
+	// non-production af-test-<hex>- name so the literal is unambiguously outside
+	// the production identity class the GUARD protects (cosmetic; terminateSession
+	// early-returns on the read-only HasSession probe regardless).
+	terminateSession("af-test-deadbeef-nonexistent", dir)
 
 	if _, err := os.Stat(filepath.Join(dir, ".runtime", "last_termination")); !os.IsNotExist(err) {
 		t.Error("terminateSession should not write breadcrumb for non-existent session")
@@ -1517,6 +1520,7 @@ func TestDone_FormulaCompletionGuard_Respawn(t *testing.T) {
 	defer func() { sendWorkDoneMail = origSendWorkDone }()
 
 	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+	writeRuntimeFile(t, workDir, "formula_caller", "test-dispatcher")
 
 	velocityJSON := `{
   "closes": [
@@ -1538,8 +1542,8 @@ func TestDone_FormulaCompletionGuard_Respawn(t *testing.T) {
 	if !escalationCalled {
 		t.Error("sendEscalationMail should have been called")
 	}
-	if escalationRecipient != "supervisor" {
-		t.Errorf("escalation recipient = %q, want 'supervisor'", escalationRecipient)
+	if escalationRecipient != "test-dispatcher" {
+		t.Errorf("escalation recipient = %q, want 'test-dispatcher'", escalationRecipient)
 	}
 	if escalationInstanceID != instance.ID {
 		t.Errorf("escalation instanceID = %q, want %q", escalationInstanceID, instance.ID)
@@ -1553,6 +1557,220 @@ func TestDone_FormulaCompletionGuard_Respawn(t *testing.T) {
 
 	if workDoneMailCalled {
 		t.Error("sendWorkDoneMail should NOT have been called when guard triggers")
+	}
+}
+
+func TestDone_FormulaCompletionGuard_NoCaller_Fallback(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	workDir := filepath.Join(dir, ".agentfactory", "agents", "manager")
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:  "Formula: guard-no-caller-test",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	step, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step: done",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+	if err := mem.Close(t.Context(), step.ID, ""); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	var escalationCalled bool
+	var escalationRecipient string
+	origSendEscalation := sendEscalationMail
+	sendEscalationMail = func(recipient, instanceID, formulaName, reason string) error {
+		escalationCalled = true
+		escalationRecipient = recipient
+		return nil
+	}
+	defer func() { sendEscalationMail = origSendEscalation }()
+
+	origSendWorkDone := sendWorkDoneMail
+	sendWorkDoneMail = func(caller, instanceID, formulaName string, stepCount int) error {
+		return nil
+	}
+	defer func() { sendWorkDoneMail = origSendWorkDone }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+
+	velocityJSON := `{
+  "closes": [
+    {"step_id": "s1", "was_primed": false, "closed_at": "2026-05-18T00:00:01Z"},
+    {"step_id": "s2", "was_primed": false, "closed_at": "2026-05-18T00:00:02Z"},
+    {"step_id": "s3", "was_primed": false, "closed_at": "2026-05-18T00:00:03Z"}
+  ]
+}`
+	writeRuntimeFile(t, workDir, "done_velocity", velocityJSON)
+
+	err = runDoneCore(t.Context(), workDir, false, "")
+	if err == nil {
+		t.Fatal("expected error from formula completion guard, got nil")
+	}
+	if !strings.Contains(err.Error(), "formula completion guard triggered") {
+		t.Errorf("error should contain 'formula completion guard triggered', got: %v", err)
+	}
+	if !escalationCalled {
+		t.Error("sendEscalationMail should have been called")
+	}
+	if escalationRecipient != "supervisor" {
+		t.Errorf("escalation recipient = %q, want 'supervisor' (fallback when no caller)", escalationRecipient)
+	}
+}
+
+func TestDone_FormulaCompletionGuard_CliCaller_Fallback(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	workDir := filepath.Join(dir, ".agentfactory", "agents", "manager")
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:  "Formula: guard-cli-caller-test",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	step, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step: done",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+	if err := mem.Close(t.Context(), step.ID, ""); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	var escalationCalled bool
+	var escalationRecipient string
+	origSendEscalation := sendEscalationMail
+	sendEscalationMail = func(recipient, instanceID, formulaName, reason string) error {
+		escalationCalled = true
+		escalationRecipient = recipient
+		return nil
+	}
+	defer func() { sendEscalationMail = origSendEscalation }()
+
+	origSendWorkDone := sendWorkDoneMail
+	sendWorkDoneMail = func(caller, instanceID, formulaName string, stepCount int) error {
+		return nil
+	}
+	defer func() { sendWorkDoneMail = origSendWorkDone }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+	writeRuntimeFile(t, workDir, "formula_caller", "@cli")
+
+	velocityJSON := `{
+  "closes": [
+    {"step_id": "s1", "was_primed": false, "closed_at": "2026-05-18T00:00:01Z"},
+    {"step_id": "s2", "was_primed": false, "closed_at": "2026-05-18T00:00:02Z"},
+    {"step_id": "s3", "was_primed": false, "closed_at": "2026-05-18T00:00:03Z"}
+  ]
+}`
+	writeRuntimeFile(t, workDir, "done_velocity", velocityJSON)
+
+	err = runDoneCore(t.Context(), workDir, false, "")
+	if err == nil {
+		t.Fatal("expected error from formula completion guard, got nil")
+	}
+	if !strings.Contains(err.Error(), "formula completion guard triggered") {
+		t.Errorf("error should contain 'formula completion guard triggered', got: %v", err)
+	}
+	if !escalationCalled {
+		t.Error("sendEscalationMail should have been called")
+	}
+	if escalationRecipient != "supervisor" {
+		t.Errorf("escalation recipient = %q, want 'supervisor' (fallback when caller is @cli)", escalationRecipient)
+	}
+}
+
+func TestDone_FormulaCompletionGuard_MailFailure_NoRespawn(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	workDir := filepath.Join(dir, ".agentfactory", "agents", "manager")
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:  "Formula: guard-mail-failure-test",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	step, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step: done",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+	if err := mem.Close(t.Context(), step.ID, ""); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	origSendEscalation := sendEscalationMail
+	sendEscalationMail = func(recipient, instanceID, formulaName, reason string) error {
+		return fmt.Errorf("simulated mail failure")
+	}
+	defer func() { sendEscalationMail = origSendEscalation }()
+
+	origSendWorkDone := sendWorkDoneMail
+	sendWorkDoneMail = func(caller, instanceID, formulaName string, stepCount int) error {
+		return nil
+	}
+	defer func() { sendWorkDoneMail = origSendWorkDone }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+	writeRuntimeFile(t, workDir, "formula_caller", "test-dispatcher")
+
+	velocityJSON := `{
+  "closes": [
+    {"step_id": "s1", "was_primed": false, "closed_at": "2026-05-18T00:00:01Z"},
+    {"step_id": "s2", "was_primed": false, "closed_at": "2026-05-18T00:00:02Z"},
+    {"step_id": "s3", "was_primed": false, "closed_at": "2026-05-18T00:00:03Z"}
+  ]
+}`
+	writeRuntimeFile(t, workDir, "done_velocity", velocityJSON)
+
+	err = runDoneCore(t.Context(), workDir, false, "")
+	if err == nil {
+		t.Fatal("expected error from formula completion guard, got nil")
+	}
+	if !strings.Contains(err.Error(), "formula completion guard triggered") {
+		t.Errorf("error should contain 'formula completion guard triggered', got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "escalation mail failed") {
+		t.Errorf("error should contain 'escalation mail failed' (skip-respawn path), got: %v", err)
 	}
 }
 

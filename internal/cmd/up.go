@@ -11,7 +11,6 @@ import (
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/formula"
 	"github.com/stempeck/agentfactory/internal/session"
-	"github.com/stempeck/agentfactory/internal/tmux"
 	"github.com/stempeck/agentfactory/internal/worktree"
 )
 
@@ -37,7 +36,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	t := tmux.NewTmux()
+	t := newCmdTmux()
 	if !t.IsAvailable() {
 		return fmt.Errorf("tmux is not installed or not available")
 	}
@@ -133,9 +132,6 @@ func runUp(cmd *cobra.Command, args []string) error {
 		if buildHostCfg != nil {
 			mgr.SetBuildHost(buildHostCfg)
 		}
-		if v := os.Getenv("SSH_AUTH_SOCK"); v != "" {
-			mgr.SetSSHAuthSock(v)
-		}
 		if wtPath != "" {
 			if err := mgr.SetWorktree(wtPath, wtID); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: SetWorktree for %s: %v\n", name, err)
@@ -181,8 +177,44 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Launch watchdog (best-effort)
+	launchWatchdog(cmd, t, root)
+
 	if !allOK {
 		return fmt.Errorf("some agents failed to start")
 	}
 	return nil
+}
+
+// launchWatchdog health-gates the long-lived af-watchdog session (#309 AC-4). It
+// mirrors session.Manager.Start's zombie gate, but the watchdog pane runs the
+// `af` binary, so liveness is af-pane liveness (IsAgentRunning(ws, "af")), NOT
+// IsClaudeRunning. A confirmed-dead watchdog (session present but `af` not
+// running) is killed and recreated; a healthy one is left undisturbed; an absent
+// one is created. Per design R-5 it is conservative: it kills only a session it
+// has confirmed present-but-not-live, never on an ambiguous read. The (re)created
+// session is given AF_ROOT (W2) so the watchdog can resolve its factory root even
+// if its own cwd is later deleted.
+func launchWatchdog(cmd *cobra.Command, t cmdTmux, root string) {
+	watchdogSession := session.WatchdogSessionName()
+	if running, _ := t.HasSession(watchdogSession); running {
+		if t.IsAgentRunning(watchdogSession, "af") {
+			return // healthy — leave it undisturbed
+		}
+		// Zombie — tmux session alive but `af watchdog` dead. Kill and recreate.
+		if err := t.KillSession(watchdogSession); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to kill stale watchdog: %v\n", err)
+			return
+		}
+	}
+	if err := t.NewSession(watchdogSession, root); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to create watchdog session: %v\n", err)
+		return
+	}
+	_ = t.SetEnvironment(watchdogSession, "AF_ROOT", root)
+	if err := t.SendKeysDelayed(watchdogSession, "af watchdog", 200); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to start watchdog: %v\n", err)
+	} else {
+		fmt.Fprintf(cmd.OutOrStdout(), "Started %s\n", watchdogSession)
+	}
 }

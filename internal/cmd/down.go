@@ -96,6 +96,16 @@ func runDown(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Kill watchdog session when stopping all agents
+	if len(args) == 0 {
+		watchdogSession := session.WatchdogSessionName()
+		tx := newCmdTmux()
+		if running, _ := tx.HasSession(watchdogSession); running {
+			_ = tx.KillSession(watchdogSession)
+			fmt.Fprintf(cmd.OutOrStdout(), "Stopped %s\n", watchdogSession)
+		}
+	}
+
 	if downAll {
 		killOrphanedClaudeProcesses()
 	}

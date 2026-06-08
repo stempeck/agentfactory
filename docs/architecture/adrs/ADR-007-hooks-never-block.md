@@ -47,6 +47,30 @@ mail check; the agent sees it as a new message.
 Autonomous sessions run both gates; interactive sessions run only
 `quality-gate`. Rationale is unanchored — flagged in `gaps.md`.
 
+## PreCompact exception: compaction-boundary recycling
+
+The `af compact-handoff` command replaces `af prime` in the PreCompact hook
+(design #288). When context compaction is imminent, it checkpoints state and
+recycles the session via `tmux respawn-pane -k` to prevent compaction from
+corrupting signed extended-thinking blocks.
+
+This does not violate ADR-007's principle:
+
+- **Not hook-level blocking**: The command never returns a non-zero exit code.
+  It kills the session via process-level termination (`tmux respawn-pane -k`),
+  which is fundamentally different from a hook returning non-zero to block a
+  tool call.
+- **Graceful fallback**: If any step fails (not in tmux, can't find factory
+  root, checkpoint write fails), the command returns exit 0 — compaction
+  proceeds as before. Agent progress is never blocked by infrastructure
+  failure.
+- **The recycling IS agent progress**: Preserving signed thinking blocks and
+  maintaining a working session is itself forward progress, not enforcement of
+  a gate.
+
+Reference: `.designs/288/design-doc.md`, Gap 6 in
+`.designs/288/six_sigma_gaps.md`.
+
 ## Corpus links
 
 - `subsystems/hooks.md` — full hooks shape

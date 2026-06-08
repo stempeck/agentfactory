@@ -13,7 +13,6 @@ import (
 
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/formula"
-	"github.com/stempeck/agentfactory/internal/session"
 	"github.com/stempeck/agentfactory/internal/templates"
 )
 
@@ -432,7 +431,7 @@ func setupFormulaFactory(t *testing.T) string {
 		// the manual-agent guard (no "formula" field) without colliding with a
 		// production-reserved session name (af-manager, af-supervisor) that may
 		// be live in an operator's running factory. See gh-59.
-		"agents.json":  `{"agents":{"manager":{"type":"interactive","description":"Interactive agent"},"supervisor":{"type":"autonomous","description":"Autonomous agent"},"manual-fixture":{"type":"autonomous","description":"Synthetic manual agent for test assertions"}}}`,
+		"agents.json": `{"agents":{"manager":{"type":"interactive","description":"Interactive agent"},"supervisor":{"type":"autonomous","description":"Autonomous agent"},"manual-fixture":{"type":"autonomous","description":"Synthetic manual agent for test assertions"}}}`,
 	}
 	for name, content := range configs {
 		if err := os.WriteFile(filepath.Join(configDir, name), []byte(content), 0644); err != nil {
@@ -1342,18 +1341,12 @@ func TestFormulaAgentGen_DeletePreservesOtherAgents(t *testing.T) {
 func TestFormulaAgentGen_DeleteRefusesManualAgent(t *testing.T) {
 	dir := setupFormulaFactory(t)
 
-	// gh-59: Target a synthetic manual agent whose session name
-	// ("af-manual-fixture") cannot collide with any production-reserved session
-	// that may be live in the operator's factory. Defensive cleanup mirrors the
-	// sibling TestFormulaAgentGen_DeleteRefusesLiveSession pattern to harden
-	// against pathological environments where an af-manual-fixture session
-	// somehow exists.
-	if _, err := exec.LookPath("tmux"); err == nil {
-		exec.Command("tmux", "kill-session", "-t", "af-manual-fixture").Run()
-		t.Cleanup(func() {
-			exec.Command("tmux", "kill-session", "-t", "af-manual-fixture").Run()
-		})
-	}
+	// gh-59 / #309: deleting a manual agent is refused at the config layer
+	// ("not created by agent-gen") before any session check, so no real tmux is
+	// needed. Drive any incidental tmux interaction through the hermetic fake
+	// instead of the former defensive `tmux kill-session af-manual-fixture`.
+	// Installed AFTER setupFormulaFactory's t.TempDir() (design R-7).
+	setupHermeticSessions(t)
 
 	// AC2: Attempt to delete manual agent "manual-fixture" (seeded by
 	// setupFormulaFactory without a formula field).
@@ -1442,51 +1435,10 @@ func TestFormulaAgentGen_DeletePartialState_NoTemplate(t *testing.T) {
 	}
 }
 
-func TestFormulaAgentGen_DeleteRefusesLiveSession(t *testing.T) {
-	// AC3: requires tmux binary
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not available")
-	}
-
-	dir := setupFormulaFactory(t)
-
-	// Create agent
-	_, _, err := runFormulaAgentGenInDir(t, dir, "investigate")
-	if err != nil {
-		t.Fatalf("agent-gen create failed: %v", err)
-	}
-
-	// Start a tmux session matching the agent's session name
-	sessionID := session.SessionName("investigate") // "af-investigate"
-	startCmd := exec.Command("tmux", "new-session", "-d", "-s", sessionID)
-	if err := startCmd.Run(); err != nil {
-		t.Fatalf("creating tmux session: %v", err)
-	}
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", sessionID).Run()
-	})
-
-	// Attempt delete — should refuse
-	_, _, err = runFormulaAgentGenInDir(t, dir, "investigate", "--delete")
-	if err == nil {
-		t.Fatal("expected error when deleting agent with live session")
-	}
-	if !strings.Contains(err.Error(), "live tmux session") {
-		t.Errorf("error should mention 'live tmux session', got: %s", err.Error())
-	}
-	if !strings.Contains(err.Error(), "af down investigate") {
-		t.Errorf("error should mention 'af down investigate', got: %s", err.Error())
-	}
-
-	// Verify artifacts are NOT removed
-	agentsData, err := os.ReadFile(filepath.Join(dir, ".agentfactory", "agents.json"))
-	if err != nil {
-		t.Fatalf("reading agents.json: %v", err)
-	}
-	if !strings.Contains(string(agentsData), `"investigate"`) {
-		t.Error("investigate entry should still be in agents.json after refused delete")
-	}
-}
+// TestFormulaAgentGen_DeleteRefusesLiveSession lives in
+// formula_delete_live_integration_test.go (//go:build integration): it
+// genuinely needs a real tmux session to prove --delete refuses a live agent,
+// so it cannot be faked and must not run in the default suite (#309).
 
 func TestFormulaAgentGen_DeleteWarnsOnDirtyWorkspace(t *testing.T) {
 	// AC4: requires git
@@ -1635,7 +1587,7 @@ func TestCollectRenderVars_InputsAndVars(t *testing.T) {
 		Name: "mixed-formula",
 		Type: formula.TypeWorkflow,
 		Inputs: map[string]formula.Input{
-			"issue_uri": {Description: "GitHub issue URI", Required: true},
+			"issue_uri":     {Description: "GitHub issue URI", Required: true},
 			"optional_flag": {Description: "An optional flag", Required: false},
 		},
 		Vars: map[string]formula.Var{
@@ -1850,7 +1802,6 @@ func TestVarPlaceholder_RenderVar(t *testing.T) {
 		t.Errorf("varPlaceholder should truncate at comma, got %q", result)
 	}
 }
-
 
 func TestGenerateAgentTemplate_InputsOnlyNoVars(t *testing.T) {
 	formulaPath := filepath.Join("install_formulas", "design.formula.toml")
@@ -2226,4 +2177,3 @@ description = "Orient yourself"
 		t.Errorf("error should mention missing-skill; stderr=%q err=%v", stderr, err)
 	}
 }
-

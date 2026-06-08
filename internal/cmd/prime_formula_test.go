@@ -133,6 +133,101 @@ func TestOutputCheckpointContext_StaleCheckpoint(t *testing.T) {
 	}
 }
 
+func TestOutputCheckpointContext_CompactionHandoff(t *testing.T) {
+	dir := t.TempDir()
+
+	compactionTime := time.Now().Add(-5 * time.Minute)
+	cp := &checkpoint.Checkpoint{
+		FormulaID:         "f-compact-123",
+		CurrentStep:       "step-3",
+		StepTitle:         "Run integration tests",
+		Branch:            "feature/compaction",
+		Timestamp:         time.Now().Add(-10 * time.Minute),
+		SessionID:         "sess-compact",
+		CompactionHandoff: true,
+		CompactionAt:      compactionTime,
+	}
+	if err := checkpoint.Write(dir, cp); err != nil {
+		t.Fatalf("checkpoint.Write: %v", err)
+	}
+
+	var buf strings.Builder
+	outputCheckpointContext(&buf, dir)
+	output := buf.String()
+
+	if !strings.Contains(output, "Compaction Recovery") {
+		t.Error("compaction handoff should contain 'Compaction Recovery' header")
+	}
+	if strings.Contains(output, "## Previous Session Checkpoint") {
+		t.Error("compaction handoff should NOT contain standard '## Previous Session Checkpoint' header")
+	}
+	if !strings.Contains(output, compactionTime.Format(time.RFC3339)) {
+		t.Error("compaction handoff should contain CompactionAt timestamp in RFC3339")
+	}
+	if !strings.Contains(output, "Resume your current task") {
+		t.Error("compaction handoff should contain resume instruction")
+	}
+	if !strings.Contains(output, "f-compact-123") {
+		t.Error("compaction handoff should still contain formula ID")
+	}
+	if !strings.Contains(output, "Run integration tests") {
+		t.Error("compaction handoff should still contain step title")
+	}
+}
+
+func TestOutputCheckpointContext_CompactionHandoff_WithLastError(t *testing.T) {
+	dir := t.TempDir()
+
+	cp := &checkpoint.Checkpoint{
+		FormulaID:         "f-err-123",
+		Timestamp:         time.Now().Add(-5 * time.Minute),
+		SessionID:         "sess-err",
+		CompactionHandoff: true,
+		CompactionAt:      time.Now().Add(-3 * time.Minute),
+	}
+	if err := checkpoint.Write(dir, cp); err != nil {
+		t.Fatalf("checkpoint.Write: %v", err)
+	}
+
+	runtimeDir := filepath.Join(dir, ".runtime")
+	os.MkdirAll(runtimeDir, 0o755)
+	os.WriteFile(filepath.Join(runtimeDir, "last_error"), []byte("HTTP 400 Invalid signature in thinking block"), 0o644)
+
+	var buf strings.Builder
+	outputCheckpointContext(&buf, dir)
+	output := buf.String()
+
+	if !strings.Contains(output, "HTTP 400 Invalid signature in thinking block") {
+		t.Error("compaction handoff should include last_error content")
+	}
+}
+
+func TestOutputCheckpointContext_CompactionHandoff_NoLastError(t *testing.T) {
+	dir := t.TempDir()
+
+	cp := &checkpoint.Checkpoint{
+		FormulaID:         "f-noerr-123",
+		Timestamp:         time.Now().Add(-5 * time.Minute),
+		SessionID:         "sess-noerr",
+		CompactionHandoff: true,
+		CompactionAt:      time.Now().Add(-3 * time.Minute),
+	}
+	if err := checkpoint.Write(dir, cp); err != nil {
+		t.Fatalf("checkpoint.Write: %v", err)
+	}
+
+	var buf strings.Builder
+	outputCheckpointContext(&buf, dir)
+	output := buf.String()
+
+	if !strings.Contains(output, "Compaction Recovery") {
+		t.Error("compaction handoff without last_error should still show recovery header")
+	}
+	if strings.Contains(output, "Last error") {
+		t.Error("compaction handoff without last_error file should not mention last error")
+	}
+}
+
 func TestIsGateStep_Heuristic(t *testing.T) {
 	// Should detect gate from description keywords.
 	// Uses an empty memstore so the blocker path returns false (fake-id is
@@ -213,6 +308,17 @@ func TestPrimeAgent_NoFormulaFile_NoFormulaContext(t *testing.T) {
 
 func TestPrimeAgent_AutoInjectsFormulaContext(t *testing.T) {
 	root := setupTestFactoryForPrime(t)
+	// STORE-GUARD makes memstore the default in the default test build, so the
+	// issue store is no longer ambiently unavailable (it used to be the real
+	// mcpstore failing to reach Python). Install a failing store explicitly to
+	// exercise the error-path rendering this test verifies: a hooked formula
+	// whose step query fails must still inject a Formula Workflow section with an
+	// error status (graceful degradation).
+	origStore := newIssueStore
+	newIssueStore = func(wd, actor string) (issuestore.Store, error) {
+		return nil, errors.New("bd unavailable")
+	}
+	t.Cleanup(func() { newIssueStore = origStore })
 	// Create .runtime/hooked_formula with a fake instance ID
 	runtimeDir := filepath.Join(root, ".agentfactory", "agents", "manager", ".runtime")
 	os.MkdirAll(runtimeDir, 0o755)

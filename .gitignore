@@ -5,6 +5,7 @@
 # Build
 /dist/
 /build/
+/.gotmp/
 
 # Go vendor directory (dependencies are managed via go.mod/go.sum, not vendoring)
 # Notice: vendoring is useful for air-gapped environments. 

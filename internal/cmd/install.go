@@ -551,7 +551,18 @@ func writeAgentsMd(cwd string) error {
 const gitExcludeSentinel = "# agentfactory managed paths"
 
 func ensureGitExclude(root string) error {
-	excludePath := filepath.Join(root, ".git", "info", "exclude")
+	gitDir := filepath.Join(root, ".git")
+	info, err := os.Stat(gitDir)
+	if err != nil || !info.IsDir() {
+		return nil
+	}
+
+	infoDir := filepath.Join(gitDir, "info")
+	if err := os.MkdirAll(infoDir, 0755); err != nil {
+		return fmt.Errorf("creating .git/info/: %w", err)
+	}
+
+	excludePath := filepath.Join(infoDir, "exclude")
 
 	existing, err := os.ReadFile(excludePath)
 	if err != nil && !os.IsNotExist(err) {

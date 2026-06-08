@@ -52,6 +52,12 @@ type Checkpoint struct {
 
 	// Notes contains optional context from the session.
 	Notes string `json:"notes,omitempty"`
+
+	// CompactionHandoff marks this checkpoint as written during a compaction-boundary recycle.
+	CompactionHandoff bool `json:"compaction_handoff,omitempty"`
+
+	// CompactionAt is when the compaction event occurred.
+	CompactionAt time.Time `json:"compaction_at,omitempty"`
 }
 
 // Path returns the checkpoint file path for a given agent directory.

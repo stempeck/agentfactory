@@ -86,6 +86,10 @@ func TestEnsureSettings_Autonomous(t *testing.T) {
 	if !strings.Contains(content, "${AF_ROOT}") {
 		t.Error("autonomous settings.json Stop hook must reference ${AF_ROOT} for worktree compatibility")
 	}
+
+	if !strings.Contains(content, "af compact-handoff") {
+		t.Error("autonomous settings.json PreCompact missing 'af compact-handoff'")
+	}
 }
 
 func TestEnsureSettings_Interactive(t *testing.T) {
@@ -140,6 +144,15 @@ func TestEnsureSettings_Interactive(t *testing.T) {
 	}
 	if !strings.Contains(content, "${AF_ROOT}") {
 		t.Error("interactive settings.json Stop hook must reference ${AF_ROOT} for worktree compatibility")
+	}
+
+	preCompact := hooks["PreCompact"].([]interface{})
+	preCompactEntry := preCompact[0].(map[string]interface{})
+	preCompactHooksList := preCompactEntry["hooks"].([]interface{})
+	preCompactHook := preCompactHooksList[0].(map[string]interface{})
+	preCompactCmd := preCompactHook["command"].(string)
+	if !strings.Contains(preCompactCmd, "af compact-handoff --interactive") {
+		t.Errorf("interactive PreCompact command should contain 'af compact-handoff --interactive', got: %s", preCompactCmd)
 	}
 }
 

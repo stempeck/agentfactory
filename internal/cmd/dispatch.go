@@ -15,7 +15,6 @@ import (
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/lock"
 	"github.com/stempeck/agentfactory/internal/session"
-	"github.com/stempeck/agentfactory/internal/tmux"
 )
 
 var dispatchDryRun bool
@@ -150,7 +149,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 	issueMappings, prMappings := groupMappingsBySource(dispatchCfg.Mappings)
 
-	t := tmux.NewTmux()
+	t := newCmdTmux()
 	for _, repo := range dispatchCfg.Repos {
 		var items []ghItem
 		var itemMappings [][]config.DispatchMapping
@@ -428,7 +427,10 @@ func (s *dispatchCycleStats) String() string {
 		time.Since(s.start).Round(time.Millisecond))
 }
 
-const dispatchSessionName = "af-dispatch"
+// dispatchSessionName is sourced from the single naming authority so the literal
+// lives in exactly one place (session.SessionName). In production it is
+// "af-dispatch", matching the config.reservedNames reservation.
+var dispatchSessionName = session.DispatchSessionName()
 
 func runDispatchStart(cmd *cobra.Command, args []string) error {
 	wd, err := getWd()
@@ -440,7 +442,7 @@ func runDispatchStart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	t := tmux.NewTmux()
+	t := newCmdTmux()
 	if running, _ := t.HasSession(dispatchSessionName); running {
 		return fmt.Errorf("dispatcher is already running (session: %s)", dispatchSessionName)
 	}
@@ -477,7 +479,7 @@ func runDispatchStart(cmd *cobra.Command, args []string) error {
 }
 
 func runDispatchStop(cmd *cobra.Command, args []string) error {
-	t := tmux.NewTmux()
+	t := newCmdTmux()
 	if running, _ := t.HasSession(dispatchSessionName); !running {
 		return fmt.Errorf("dispatcher is not running")
 	}
@@ -500,7 +502,7 @@ func runDispatchStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	t := tmux.NewTmux()
+	t := newCmdTmux()
 	running, _ := t.HasSession(dispatchSessionName)
 
 	state := loadDispatchState(root)

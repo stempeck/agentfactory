@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -52,19 +51,17 @@ func TestRunUp_HandlesNotProvisioned(t *testing.T) {
 }
 
 func TestRunUp_NonSpecialistCallerGetsIndependentWorktree(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not available")
-	}
-
 	const agentName = "uptest-wt"
-	sessionName := "af-" + agentName
-	killStaleTmuxSession(t, sessionName)
-	t.Cleanup(func() {
-		killStaleTmuxSession(t, sessionName)
-	})
 
 	root := t.TempDir()
 	initTestGitRepo(t, root)
+
+	// Hermetic: runUp launches the watchdog through newCmdTmux(), so the fake
+	// records those ops instead of leaking a real af-watchdog, and the
+	// namespaced prefix keeps every session name off production (#309). This
+	// replaces the former stale-session kill of af-uptest-wt. Installed AFTER
+	// t.TempDir() so the seam restores run before the temp-dir delete (R-7).
+	setupHermeticSessions(t)
 	afDir := filepath.Join(root, ".agentfactory")
 	os.MkdirAll(afDir, 0o755)
 	os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{"type":"factory","version":1,"name":"test"}`), 0o644)
@@ -111,10 +108,6 @@ title = "Step 1"
 }
 
 func TestRunUp_AbortsOnWorktreeFailure(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not available")
-	}
-
 	root := t.TempDir()
 	afDir := filepath.Join(root, ".agentfactory")
 	os.MkdirAll(afDir, 0o755)
@@ -125,6 +118,11 @@ func TestRunUp_AbortsOnWorktreeFailure(t *testing.T) {
 	t.Setenv("AF_WORKTREE", "")
 	t.Setenv("AF_WORKTREE_ID", "")
 	t.Chdir(root)
+
+	// Hermetic: fake tmux (IsAvailable()==true) + memstore, so runUp proceeds past
+	// the IsAvailable gate to the worktree-creation logic under test instead of
+	// aborting at the default-build GUARD's IsAvailable()==false. #309 substrate.
+	setupHermeticSessions(t)
 
 	cmd := &cobra.Command{}
 	var buf bytes.Buffer
@@ -170,6 +168,11 @@ title = "Step 1"
 	t.Setenv("AF_WORKTREE", root)
 	t.Setenv("AF_WORKTREE_ID", "wt-test00")
 	t.Chdir(root)
+
+	// Hermetic: fake tmux (IsAvailable()==true) + memstore, so runUp proceeds past
+	// the IsAvailable gate to the missing-skill validation under test instead of
+	// aborting at the default-build GUARD's IsAvailable()==false. #309 substrate.
+	setupHermeticSessions(t)
 
 	cmd := &cobra.Command{}
 	var buf bytes.Buffer

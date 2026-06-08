@@ -153,6 +153,9 @@ _engine = None
 _endpoint_file = None
 _shutdown_event = None
 
+# How often the self-exit watcher polls for endpoint/cwd disappearance.
+_WATCH_INTERVAL_SECONDS = 0.5
+
 
 async def handle_jsonrpc(request: web.Request) -> web.Response:
     try:
@@ -251,6 +254,38 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
             signal.signal(sig, lambda *_: _trigger())
 
 
+def _endpoint_disappeared() -> bool:
+    # Primary, race-free signal: the absolute endpoint-file path lives under
+    # <factoryRoot>/.runtime/, so deleting the factory (temp) root makes it
+    # vanish. Secondary: the cwd itself (cmd.Dir == factoryRoot) was removed —
+    # os.getcwd() raises once the directory is unlinked on Linux.
+    if _endpoint_file is not None and not os.path.exists(_endpoint_file):
+        return True
+    try:
+        os.getcwd()
+    except OSError:
+        return True
+    return False
+
+
+async def _watch_endpoint(interval: float = _WATCH_INTERVAL_SECONDS) -> None:
+    """Self-exit backstop: poll for the endpoint file / cwd and trigger a clean
+    shutdown if either disappears (factory temp root deleted, or the parent
+    `go test` SIGKILL'd before it could reap us). Only ever sets the existing
+    _shutdown_event so the single finally-cleanup in _serve runs — it never
+    cleans up or exits on its own, and stops as soon as shutdown begins so it
+    cannot race the clean-shutdown endpoint removal. This is the only teardown
+    path that survives a SIGKILL of the parent process.
+    """
+    while _shutdown_event is not None and not _shutdown_event.is_set():
+        await asyncio.sleep(interval)
+        if _shutdown_event.is_set():
+            return
+        if _endpoint_disappeared():
+            _shutdown_event.set()
+            return
+
+
 async def _serve(db_path: str, endpoint_file: str, port: int) -> int:
     global _engine, _endpoint_file, _shutdown_event
 
@@ -274,9 +309,15 @@ async def _serve(db_path: str, endpoint_file: str, port: int) -> int:
     loop = asyncio.get_running_loop()
     _install_signal_handlers(loop)
 
+    watcher = asyncio.create_task(_watch_endpoint())
     try:
         await _shutdown_event.wait()
     finally:
+        watcher.cancel()
+        try:
+            await watcher
+        except asyncio.CancelledError:
+            pass
         # Drain aiohttp → dispose engine (flushes WAL via last-connection-close) → remove endpoint file.
         await runner.cleanup()
         if _engine is not None:

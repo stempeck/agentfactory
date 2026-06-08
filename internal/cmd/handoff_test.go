@@ -181,17 +181,26 @@ func TestHandoff_TransitiveEndpointDependency(t *testing.T) {
 	}
 	code := string(src)
 
-	if !strings.Contains(code, "BuildStartupCommand()") {
-		t.Error("handoff.go must call BuildStartupCommand() to transitively inherit endpoint exports")
-	}
-	if !strings.Contains(code, "session.NewManager(") {
-		t.Error("handoff.go must use session.NewManager to pass full AgentEntry including endpoint fields")
+	if !strings.Contains(code, "respawnSession(") {
+		t.Error("handoff.go must call respawnSession() which transitively inherits endpoint exports via session.NewManager + BuildStartupCommand")
 	}
 	if !strings.Contains(code, "*agentEntry") {
 		t.Error("handoff.go must dereference agentEntry to pass full struct (including BaseURL/AuthToken)")
 	}
 	if strings.Contains(code, "ANTHROPIC_BASE_URL") || strings.Contains(code, "ANTHROPIC_AUTH_TOKEN") {
 		t.Error("handoff.go must NOT contain hardcoded endpoint env var names — it should use BuildStartupCommand transitively")
+	}
+
+	helperSrc, err := os.ReadFile("helpers.go")
+	if err != nil {
+		t.Fatalf("reading helpers.go: %v", err)
+	}
+	helperCode := string(helperSrc)
+	if !strings.Contains(helperCode, "session.NewManager(") {
+		t.Error("helpers.go respawnSession must use session.NewManager to pass full AgentEntry")
+	}
+	if !strings.Contains(helperCode, "BuildStartupCommand()") {
+		t.Error("helpers.go respawnSession must call BuildStartupCommand() for endpoint transitivity")
 	}
 }
 
