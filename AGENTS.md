@@ -14,5 +14,6 @@ af sling --agent <name> "task description"
 | `investigate` | autonomous | Investigate a codebase question or bug with structured analysis |
 | `manager` | interactive | Interactive agent for human-supervised work |
 | `mergepatrol` | autonomous | PR merge processor patrol loop. |
+| `minimalworker` | autonomous | Minimal directive executor with no competing identity or lifecycle opinions. |
 | `supervisor` | autonomous | Autonomous agent for independent task execution |
 ## END AgentFactory Agents
