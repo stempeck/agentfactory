@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -70,9 +69,9 @@ func TestPruneDispatchState(t *testing.T) {
 	now := time.Now().UTC()
 
 	tests := []struct {
-		name      string
-		entries   map[string]dispatchEntry
-		wantKeys  []string
+		name     string
+		entries  map[string]dispatchEntry
+		wantKeys []string
 	}{
 		{
 			name: "fresh entry kept",
@@ -142,7 +141,7 @@ func TestLoadDispatchState_ValidFile(t *testing.T) {
 			"owner/repo#42": {
 				Agent:        "debugger",
 				DispatchedAt: ts,
-				ItemURL:     "https://github.com/owner/repo/issues/42",
+				ItemURL:      "https://github.com/owner/repo/issues/42",
 			},
 		},
 	}
@@ -176,7 +175,7 @@ func TestSaveDispatchState_AtomicNoTempRemains(t *testing.T) {
 			"owner/repo#1": {
 				Agent:        "debugger",
 				DispatchedAt: time.Now().UTC(),
-				ItemURL:     "https://github.com/owner/repo/issues/1",
+				ItemURL:      "https://github.com/owner/repo/issues/1",
 			},
 		},
 	}
@@ -523,21 +522,21 @@ func TestDispatchStartCmd_IntervalFlag(t *testing.T) {
 }
 
 func TestDispatchStart_AlreadyRunning(t *testing.T) {
-	// Create a real af-dispatch tmux session to simulate "already running"
-	createErr := exec.Command("tmux", "new-session", "-d", "-s", "af-dispatch").Run()
-	if createErr != nil {
-		t.Skip("tmux not available, skipping integration test")
-	}
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", "af-dispatch").Run()
-	})
-
 	// Set up a factory root so FindFactoryRoot succeeds
 	dir := t.TempDir()
 	afDir := filepath.Join(dir, ".agentfactory")
 	os.MkdirAll(afDir, 0755)
 	os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{"type":"factory","version":1}`), 0644)
 	os.WriteFile(filepath.Join(afDir, "dispatch.json"), []byte(`{"repos":["test/repo"],"trigger_label":"agentic","mappings":[{"label":"test","agent":"mgr"}],"interval_seconds":300}`), 0644)
+
+	// Drive the "already running" pre-flight through the hermetic fake instead
+	// of a real af-dispatch session (#309). runDispatchStart checks
+	// newCmdTmux().HasSession(dispatchSessionName); marking that name present in
+	// the fake reproduces the live-dispatcher case with no real tmux op.
+	// Installed AFTER t.TempDir() so the seam restores run before the temp-dir
+	// delete (design R-7).
+	fake, _ := setupHermeticSessions(t)
+	fake.present[dispatchSessionName] = true
 
 	origDir, _ := os.Getwd()
 	os.Chdir(dir)
@@ -554,8 +553,12 @@ func TestDispatchStart_AlreadyRunning(t *testing.T) {
 }
 
 func TestDispatchStop_NotRunning(t *testing.T) {
-	// Ensure no af-dispatch session exists
-	exec.Command("tmux", "kill-session", "-t", "af-dispatch").Run()
+	// Hermetic: the fake reports no dispatch session present by default, so
+	// runDispatchStop's newCmdTmux().HasSession pre-flight takes the "not
+	// running" branch with no real tmux op (#309). This replaces the former
+	// unconditional `tmux kill-session -t af-dispatch` (the clearest C-1
+	// violation) that destroyed a co-tenant's dispatcher.
+	setupHermeticSessions(t)
 
 	cmd := &cobra.Command{}
 	err := runDispatchStop(cmd, nil)

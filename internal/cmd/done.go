@@ -21,7 +21,6 @@ import (
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/lock"
 	"github.com/stempeck/agentfactory/internal/session"
-	"github.com/stempeck/agentfactory/internal/tmux"
 	"github.com/stempeck/agentfactory/internal/worktree"
 )
 
@@ -192,18 +191,30 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 		formulaName = iss.Title
 	}
 
+	caller := readFormulaCaller(cwd)
+
 	if guardTriggered, reason := checkFormulaCompletionVelocity(cwd); guardTriggered {
 		fmt.Fprintf(os.Stderr, "GUARD: Formula completion blocked — %s\n", reason)
-		_ = sendEscalationMail("supervisor", instanceID, formulaName, reason)
+		escalationRecipient := caller
+		if escalationRecipient == "" || escalationRecipient == "@cli" {
+			if escalationRecipient == "@cli" {
+				fmt.Fprintln(os.Stderr, "warning: formula caller is @cli (no agent mailbox); falling back to supervisor")
+			} else {
+				fmt.Fprintln(os.Stderr, "warning: no formula caller identity found; falling back to supervisor")
+			}
+			escalationRecipient = "supervisor"
+		}
+		if err := sendEscalationMail(escalationRecipient, instanceID, formulaName, reason); err != nil {
+			fmt.Fprintf(os.Stderr, "GUARD: escalation mail to %s failed: %v — skipping respawn to preserve debuggable state\n", escalationRecipient, err)
+			return fmt.Errorf("formula completion guard triggered: %s (escalation mail failed: %v)", reason, err)
+		}
 		triggerHandoffRespawn(cwd, factoryRoot)
 		return fmt.Errorf("formula completion guard triggered: %s", reason)
 	}
 
-	// Find the caller/dispatcher.
 	// D1: no fallback. Per H-4/D15, a missing caller file means there is no
 	// dispatcher waiting on WORK_DONE mail. Skip the send entirely. Pinned
 	// by TestDone_NoCallerFile_NoMail.
-	caller := readFormulaCaller(cwd)
 	if caller == "" {
 		fmt.Fprintln(os.Stderr, "no caller identity found; skipping WORK_DONE mail")
 	}
@@ -330,7 +341,11 @@ var sendEscalationMail = func(recipient, instanceID, formulaName, reason string)
 		return fmt.Errorf("cannot find af binary")
 	}
 	subject := fmt.Sprintf("GUARD: Formula completion blocked for %s", formulaName)
-	body := fmt.Sprintf("Formula %s (%s) completion blocked: %s", formulaName, instanceID, reason)
+	body := fmt.Sprintf("Formula %s (%s) completion blocked: %s\n\n"+
+		"Action required: Examine the velocity record at .runtime/done_velocity, "+
+		"review the agent's output artifacts, and decide whether to trust the results. "+
+		"The agent session has been respawned via af handoff --collect and will cycle "+
+		"until this is resolved.", formulaName, instanceID, reason)
 	cmd := exec.Command(afPath, "mail", "send", recipient, "-s", subject, "-m", body)
 	cmd.Env = os.Environ()
 
@@ -486,7 +501,7 @@ func selfTerminate(cwd, factoryRoot string) {
 
 // terminateSession checks if a tmux session exists and kills it.
 func terminateSession(sessionID, cwd string) {
-	t := tmux.NewTmux()
+	t := newCmdTmux()
 
 	has, err := t.HasSession(sessionID)
 	if err != nil || !has {

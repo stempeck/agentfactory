@@ -208,3 +208,36 @@ func TestGateLockFile_GoParseability(t *testing.T) {
 		t.Errorf("Hostname = %q, want empty string", info.Hostname)
 	}
 }
+
+func TestGateHookMailSubjects(t *testing.T) {
+	root := findRepoRoot(t)
+
+	fidelityData, err := os.ReadFile(filepath.Join(root, "hooks", "fidelity-gate.sh"))
+	if err != nil {
+		t.Fatalf("read fidelity-gate.sh: %v", err)
+	}
+	qualityData, err := os.ReadFile(filepath.Join(root, "hooks", "quality-gate.sh"))
+	if err != nil {
+		t.Fatalf("read quality-gate.sh: %v", err)
+	}
+
+	fidelity := string(fidelityData)
+	quality := string(qualityData)
+
+	if strings.Contains(fidelity, "GATE_LOCK_CONTENTION") {
+		t.Error("fidelity-gate.sh still contains GATE_LOCK_CONTENTION mail send")
+	}
+	if strings.Contains(quality, "GATE_LOCK_CONTENTION") {
+		t.Error("quality-gate.sh still contains GATE_LOCK_CONTENTION mail send")
+	}
+
+	if !strings.Contains(fidelity, "STEP_FIDELITY") {
+		t.Error("fidelity-gate.sh missing STEP_FIDELITY mail send")
+	}
+	if !strings.Contains(fidelity, "FIDELITY_ESCALATION") {
+		t.Error("fidelity-gate.sh missing FIDELITY_ESCALATION mail send")
+	}
+	if !strings.Contains(quality, "QUALITY_GATE") {
+		t.Error("quality-gate.sh missing QUALITY_GATE mail send")
+	}
+}

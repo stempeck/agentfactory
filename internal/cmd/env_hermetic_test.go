@@ -34,6 +34,7 @@ func TestNoEnvReadsInLibraryPackages(t *testing.T) {
 
 	internalDir := filepath.Join(root, "internal")
 	cmdDir := filepath.Join(root, "internal", "cmd")
+	testsupportDir := filepath.Join(root, "internal", "testsupport")
 
 	envReadPattern := regexp.MustCompile(`\bos\.(Getenv|LookupEnv|Setenv|Unsetenv)\(`)
 
@@ -45,6 +46,12 @@ func TestNoEnvReadsInLibraryPackages(t *testing.T) {
 		}
 		// Skip internal/cmd/ entirely — command layer is permitted to read env
 		if info.IsDir() && path == cmdDir {
+			return filepath.SkipDir
+		}
+		// Skip internal/testsupport/ entirely — test-support code legitimately
+		// sets TMUX_TMPDIR/TMUX (consumed by spawned tmux subprocesses, never read
+		// by any internal/* library package). Sanctioned in ADR-004 (#317 Phase 2b).
+		if info.IsDir() && path == testsupportDir {
 			return filepath.SkipDir
 		}
 		// Skip non-Go files and test files

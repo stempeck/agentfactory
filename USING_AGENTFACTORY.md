@@ -27,9 +27,9 @@ For iOS projects that need remote Mac builds:
 
     ./quickdocker.sh user/myiosapp --platform ios
 
-You'll be prompted for the SSH build host (user@host). After setup, `af up` automatically configures SSH-based build delegation — no additional commands needed.
-Requirements: SSH agent running with a key that can access the build Mac (`ssh-add -l` shows keys).
-Note: On Linux hosts, if you restart the container, recreate it with `--platform ios` to restore SSH forwarding. macOS Docker Desktop maintains forwarding across restarts.
+You'll be prompted for the SSH build host (user@host). The script generates a dedicated SSH keypair, authorizes it on the build host, and copies it into the container. No pre-loaded keys or agent configuration required.
+After setup, `af up` automatically configures SSH-based build delegation — no additional commands needed.
+Note: Existing iOS containers created before this change must be recreated with `--platform ios` to use key-based auth.
 For CI/automation, set `AF_BUILD_HOST_USER` and `AF_BUILD_HOST_HOST` environment variables or use `--build-host user@host` flag to skip the interactive prompt.
 
 ## The Flow (per repository)

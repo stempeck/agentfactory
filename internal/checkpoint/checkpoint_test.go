@@ -304,3 +304,33 @@ func TestAutoSessionID(t *testing.T) {
 		t.Errorf("SessionID = %q, want %q", cp.SessionID, expected)
 	}
 }
+
+func TestCompactionFieldsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	original := &Checkpoint{
+		CompactionHandoff: true,
+		CompactionAt:      time.Date(2026, 6, 1, 15, 30, 0, 0, time.UTC),
+		Timestamp:         time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC),
+		SessionID:         "test-compaction",
+	}
+
+	if err := Write(dir, original); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	got, err := Read(dir)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got == nil {
+		t.Fatal("Read returned nil")
+	}
+
+	if got.CompactionHandoff != original.CompactionHandoff {
+		t.Errorf("CompactionHandoff = %v, want %v", got.CompactionHandoff, original.CompactionHandoff)
+	}
+	if !got.CompactionAt.Equal(original.CompactionAt) {
+		t.Errorf("CompactionAt = %v, want %v", got.CompactionAt, original.CompactionAt)
+	}
+}

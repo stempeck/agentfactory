@@ -46,8 +46,8 @@ type AgentEntry struct {
 var validAgentName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
 
 // reservedNames are agent names that conflict with agentfactory internals.
-// "dispatch" is reserved because session.SessionName("dispatch") produces
-// "af-dispatch", which collides with the dispatcher's tmux session name.
+// "dispatch" is reserved because session.SessionName("dispatch") produces the
+// af-dispatch session name, which collides with the dispatcher's tmux session.
 var reservedNames = map[string]bool{
 	"dispatch": true,
 }

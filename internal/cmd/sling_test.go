@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -66,15 +65,12 @@ func installFailingIssueStore(t *testing.T) {
 	t.Cleanup(func() { newIssueStore = orig })
 }
 
-// killStaleTmuxSession kills a tmux session that may have leaked from a prior
-// go test process (e.g., a crash mid-test or a real Claude launch that
-// outlived its t.Cleanup). Without this, the pre-flight "already running"
-// guard in dispatchToSpecialist fires before the test can do anything. Safe
-// to call when tmux is absent or the session does not exist.
-func killStaleTmuxSession(t *testing.T, name string) {
-	t.Helper()
-	_ = exec.Command("tmux", "kill-session", "-t", name).Run()
-}
+// killStaleTmuxSession (a real `tmux kill-session` wrapper) now lives in
+// tmux_helpers_integration_test.go (//go:build integration): the default-suite
+// tests were migrated onto setupHermeticSessions and no longer need it, but the
+// integration suite still does. Keeping the wrapper out of the default build is
+// what makes #309's structural ban (TestNoRawDestructiveTmuxInUntaggedTests)
+// pass.
 
 func TestParseCLIVars(t *testing.T) {
 	tests := []struct {
@@ -759,11 +755,13 @@ func TestInstantiateFormulaWorkflow_AgentNameFallback(t *testing.T) {
 }
 
 func TestDispatchToSpecialist_UsesFormulaInstantiation(t *testing.T) {
-	killStaleTmuxSession(t, "af-specialist-agent")
-	installMemStore(t)
 	installNoopLaunchSession(t)
 	// Set up factory with specialist agent + matching formula TOML
 	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+	// Hermetic: the issue store is the memstore and the af-test-<hex>- prefix keeps
+	// dispatch's has-session pre-flight on a hermetic name — never a real or
+	// production session (#309). AFTER createTestFormulaFactory's t.TempDir() (R-7).
+	setupHermeticSessions(t)
 
 	agents := map[string]interface{}{
 		"agents": map[string]interface{}{
@@ -785,11 +783,6 @@ func TestDispatchToSpecialist_UsesFormulaInstantiation(t *testing.T) {
 
 	callerWd := filepath.Join(root, ".agentfactory", "agents", "caller-agent")
 	os.MkdirAll(callerWd, 0o755)
-
-	// Clean up any tmux session that may be created during the test
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
-	})
 
 	err := dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "implement issue #42")
 
@@ -1174,9 +1167,11 @@ func TestDispatchToSpecialist_CallerIdentityPassedThrough(t *testing.T) {
 	// Verify CallerIdentity flows from dispatch to workflow via InstantiateParams.
 	t.Setenv("AF_WORKTREE", "")
 	t.Setenv("AF_WORKTREE_ID", "")
-	killStaleTmuxSession(t, "af-specialist-agent")
 	installNoopLaunchSession(t)
 	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+	// Hermetic: the memstore + the af-test-<hex>- prefix keep this dispatch off real
+	// and production sessions (#309). AFTER createTestFormulaFactory's t.TempDir() (R-7).
+	setupHermeticSessions(t)
 
 	agents := map[string]interface{}{
 		"agents": map[string]interface{}{
@@ -1238,6 +1233,10 @@ func TestSlingLongDescription_MentionsSuccession(t *testing.T) {
 
 func TestDispatchToSpecialist_ResetCleansRuntimeFiles(t *testing.T) {
 	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+	// Hermetic: the reset path (mgr.Stop) + dispatch run through the fake (#309).
+	// AFTER createTestFormulaFactory's t.TempDir() (R-7). installFailingIssueStore
+	// below overrides the memstore so dispatch still bails at the store boundary.
+	setupHermeticSessions(t)
 
 	agents := map[string]interface{}{
 		"agents": map[string]interface{}{
@@ -1273,10 +1272,6 @@ func TestDispatchToSpecialist_ResetCleansRuntimeFiles(t *testing.T) {
 	slingReset = true
 	defer func() { slingReset = origReset }()
 
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
-	})
-
 	// Force newIssueStore to return an error so that dispatchToSpecialist
 	// bails out of instantiateFormulaWorkflow BEFORE persistFormulaInstanceID
 	// rewrites hooked_formula. This pins the ordering invariant (reset
@@ -1300,74 +1295,20 @@ func TestDispatchToSpecialist_ResetCleansRuntimeFiles(t *testing.T) {
 	}
 }
 
-func TestDispatchToSpecialist_RunningAgentWithoutResetErrors(t *testing.T) {
-	// When target agent has a running tmux session and --reset is false,
-	// dispatchToSpecialist should return an error BEFORE creating beads.
-	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
-
-	agents := map[string]interface{}{
-		"agents": map[string]interface{}{
-			"specialist-agent": map[string]interface{}{
-				"type":        "autonomous",
-				"description": "Test specialist",
-				"formula":     "test-specialist-formula",
-			},
-		},
-	}
-	data, _ := json.Marshal(agents)
-	os.WriteFile(filepath.Join(root, ".agentfactory", "agents.json"), data, 0o644)
-
-	// Create a tmux session to simulate a running agent
-	sessionName := "af-specialist-agent"
-	createErr := exec.Command("tmux", "new-session", "-d", "-s", sessionName).Run()
-	if createErr != nil {
-		t.Skip("tmux not available, skipping integration test")
-	}
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", sessionName).Run()
-	})
-
-	cmd := &cobra.Command{}
-	cmd.SetContext(t.Context())
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetErr(&buf)
-
-	callerWd := filepath.Join(root, ".agentfactory", "agents", "caller-agent")
-	os.MkdirAll(callerWd, 0o755)
-
-	// Set --reset to false
-	origReset := slingReset
-	origNoLaunch := slingNoLaunch
-	slingReset = false
-	slingNoLaunch = false
-	defer func() {
-		slingReset = origReset
-		slingNoLaunch = origNoLaunch
-	}()
-
-	err := dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "some task")
-	if err == nil {
-		t.Fatal("expected error when dispatching to running agent without --reset")
-	}
-	if !strings.Contains(err.Error(), "already running") {
-		t.Errorf("error should contain 'already running', got: %s", err.Error())
-	}
-	if !strings.Contains(err.Error(), "--reset") {
-		t.Errorf("error should mention '--reset', got: %s", err.Error())
-	}
-
-	// Verify no bead was created (error fired BEFORE instantiation)
-	hookedPath := filepath.Join(root, ".agentfactory", "agents", "specialist-agent", ".runtime", "hooked_formula")
-	if _, statErr := os.Stat(hookedPath); statErr == nil {
-		t.Error("hooked_formula should NOT exist — error should fire before bead creation")
-	}
-}
+// TestDispatchToSpecialist_RunningAgentWithoutResetErrors lives in
+// sling_running_integration_test.go (//go:build integration): the dispatch
+// "already running" pre-flight uses a raw tmux.NewTmux() client (sling.go), so
+// driving the running-agent branch requires a REAL session and cannot be faked
+// without changing production code. It runs only under `make test-integration`
+// (#309 Phase 3).
 
 func TestDispatchToSpecialist_ResetWithNonRunningAgent(t *testing.T) {
 	// --reset should succeed even when agent is not running.
 	// mgr.Stop() returns ErrNotRunning, which is explicitly ignored.
 	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+	// Hermetic: reset path + dispatch run through the fake; default-absent
+	// liveness models the not-running agent (#309). AFTER t.TempDir() (R-7).
+	setupHermeticSessions(t)
 
 	agents := map[string]interface{}{
 		"agents": map[string]interface{}{
@@ -1401,10 +1342,6 @@ func TestDispatchToSpecialist_ResetWithNonRunningAgent(t *testing.T) {
 	origReset := slingReset
 	slingReset = true
 	defer func() { slingReset = origReset }()
-
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
-	})
 
 	// Same reasoning as TestDispatchToSpecialist_ResetCleansRuntimeFiles:
 	// force an error at the store boundary so dispatch bails out BEFORE
@@ -1609,6 +1546,10 @@ func TestDispatchToSpecialist_WritesDispatchedMarker(t *testing.T) {
 	t.Setenv("AF_WORKTREE_ID", "")
 	installNoopLaunchSession(t)
 	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+	// Hermetic: the memstore + the af-test-<hex>- prefix keep this dispatch off
+	// real and production sessions — its has-session pre-flight resolves to a
+	// hermetic name (#309). AFTER createTestFormulaFactory's t.TempDir() (R-7).
+	setupHermeticSessions(t)
 
 	agents := map[string]interface{}{
 		"agents": map[string]interface{}{
@@ -1631,10 +1572,6 @@ func TestDispatchToSpecialist_WritesDispatchedMarker(t *testing.T) {
 	callerWd := filepath.Join(root, ".agentfactory", "agents", "caller-agent")
 	os.MkdirAll(callerWd, 0o755)
 
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
-	})
-
 	// dispatchToSpecialist will fail at store.Create, but marker write happens BEFORE that
 	_ = dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "implement issue #99")
 
@@ -1647,6 +1584,8 @@ func TestDispatchToSpecialist_WritesDispatchedMarker(t *testing.T) {
 func TestDispatchToSpecialist_ResetCleansDispatchedMarker(t *testing.T) {
 	installNoopLaunchSession(t)
 	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+	// Hermetic: reset path + dispatch run through the fake (#309). AFTER t.TempDir() (R-7).
+	setupHermeticSessions(t)
 
 	agents := map[string]interface{}{
 		"agents": map[string]interface{}{
@@ -1678,10 +1617,6 @@ func TestDispatchToSpecialist_ResetCleansDispatchedMarker(t *testing.T) {
 	origReset := slingReset
 	slingReset = true
 	defer func() { slingReset = origReset }()
-
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
-	})
 
 	_ = dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "implement issue #40")
 
@@ -1728,6 +1663,10 @@ func TestDispatchToSpecialist_PersistentFlag_SuppressesMarker(t *testing.T) {
 	t.Setenv("AF_WORKTREE_ID", "")
 	installNoopLaunchSession(t)
 	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+	// Hermetic: the memstore + the af-test-<hex>- prefix keep this dispatch off
+	// real and production sessions — its has-session pre-flight resolves to a
+	// hermetic name (#309). AFTER createTestFormulaFactory's t.TempDir() (R-7).
+	setupHermeticSessions(t)
 
 	agents := map[string]interface{}{
 		"agents": map[string]interface{}{
@@ -1749,10 +1688,6 @@ func TestDispatchToSpecialist_PersistentFlag_SuppressesMarker(t *testing.T) {
 
 	callerWd := filepath.Join(root, ".agentfactory", "agents", "caller-agent")
 	os.MkdirAll(callerWd, 0o755)
-
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
-	})
 
 	origPersistent := slingPersistent
 	slingPersistent = true
@@ -1776,6 +1711,10 @@ func TestDispatchToSpecialist_PersistentDefault_WritesMarker(t *testing.T) {
 	t.Setenv("AF_WORKTREE_ID", "")
 	installNoopLaunchSession(t)
 	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+	// Hermetic: the memstore + the af-test-<hex>- prefix keep this dispatch off
+	// real and production sessions — its has-session pre-flight resolves to a
+	// hermetic name (#309). AFTER createTestFormulaFactory's t.TempDir() (R-7).
+	setupHermeticSessions(t)
 
 	agents := map[string]interface{}{
 		"agents": map[string]interface{}{
@@ -1797,10 +1736,6 @@ func TestDispatchToSpecialist_PersistentDefault_WritesMarker(t *testing.T) {
 
 	callerWd := filepath.Join(root, ".agentfactory", "agents", "caller-agent")
 	os.MkdirAll(callerWd, 0o755)
-
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
-	})
 
 	origPersistent := slingPersistent
 	slingPersistent = false
@@ -1836,6 +1771,11 @@ func TestDispatchToSpecialist_ExplicitCaller(t *testing.T) {
 	data, _ := json.Marshal(agents)
 	os.WriteFile(filepath.Join(root, ".agentfactory", "agents.json"), data, 0o644)
 
+	// Hermetic: the memstore + the af-test-<hex>- prefix keep this dispatch off
+	// real and production sessions — its has-session pre-flight resolves to a
+	// hermetic name (#309). AFTER createTestFormulaFactory's t.TempDir() (R-7).
+	setupHermeticSessions(t)
+
 	agentDir := filepath.Join(root, ".agentfactory", "agents", "specialist-agent")
 	runtimeDir := filepath.Join(agentDir, ".runtime")
 	os.MkdirAll(runtimeDir, 0o755)
@@ -1850,10 +1790,6 @@ func TestDispatchToSpecialist_ExplicitCaller(t *testing.T) {
 	origCaller := slingCaller
 	slingCaller = "manager"
 	defer func() { slingCaller = origCaller }()
-
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
-	})
 
 	// Dispatch from factory root — without explicit caller this would produce @cli
 	_ = dispatchToSpecialist(cmd, root, root, "specialist-agent", "implement issue #99")
@@ -1883,6 +1819,10 @@ func TestDispatchToSpecialist_CallerFlagEmpty_FallsBack(t *testing.T) {
 	t.Setenv("AF_WORKTREE_ID", "")
 	installNoopLaunchSession(t)
 	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+	// Hermetic: the memstore + the af-test-<hex>- prefix keep this dispatch off
+	// real and production sessions — its has-session pre-flight resolves to a
+	// hermetic name (#309). AFTER createTestFormulaFactory's t.TempDir() (R-7).
+	setupHermeticSessions(t)
 
 	agents := map[string]interface{}{
 		"agents": map[string]interface{}{
@@ -1914,10 +1854,6 @@ func TestDispatchToSpecialist_CallerFlagEmpty_FallsBack(t *testing.T) {
 
 	callerWd := filepath.Join(root, ".agentfactory", "agents", "dispatcher-agent")
 	os.MkdirAll(callerWd, 0o755)
-
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
-	})
 
 	_ = dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "some task")
 
@@ -2448,7 +2384,7 @@ title = "Step 2"
 }
 
 // TestInstantiateFormula_FallsBackToSlingAgentWhenUndeclared pins the Phase 1
-// data-plane invariant (parent_id = '' OR assignee != ''): when no agent is
+// data-plane invariant (parent_id = ” OR assignee != ”): when no agent is
 // declared at any formula level, the step bead's Assignee falls back to the
 // CLI-resolved slingAgent via assigneeForStep. Empty Assignee on
 // parent-scoped beads is now unrepresentable; the fallback is what makes
@@ -3048,8 +2984,10 @@ func TestSling_AbortsOnWorktreeFailure(t *testing.T) {
 
 	t.Setenv("AF_WORKTREE", "")
 	t.Setenv("AF_WORKTREE_ID", "")
-	killStaleTmuxSession(t, "af-solver")
 
+	// slingNoLaunch=true skips the dispatch tmux pre-flight entirely and the
+	// worktree creation fails before any launch, so this test touches no tmux —
+	// the former defensive stale-session kill of af-solver is unnecessary (#309).
 	origNoLaunch := slingNoLaunch
 	slingNoLaunch = true
 	defer func() { slingNoLaunch = origNoLaunch }()
@@ -3070,11 +3008,13 @@ func TestSling_AbortsOnWorktreeFailure(t *testing.T) {
 }
 
 func TestSlingAdvisesOnMissingTemplate(t *testing.T) {
-	killStaleTmuxSession(t, "af-notemplate-agent")
-	installMemStore(t)
 	installNoopLaunchSession(t)
 
 	root, _ := createTestFormulaFactory(t, "notemplate-formula", "notemplate-agent")
+	// Hermetic: the memstore + the af-test-<hex>- prefix keep this dispatch off
+	// real and production sessions — its has-session pre-flight resolves to a
+	// hermetic name (#309). AFTER createTestFormulaFactory's t.TempDir() (R-7).
+	setupHermeticSessions(t)
 
 	agents := map[string]interface{}{
 		"agents": map[string]interface{}{
@@ -3096,10 +3036,6 @@ func TestSlingAdvisesOnMissingTemplate(t *testing.T) {
 
 	callerWd := filepath.Join(root, ".agentfactory", "agents", "caller-agent")
 	os.MkdirAll(callerWd, 0o755)
-
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", "af-notemplate-agent").Run()
-	})
 
 	err := dispatchToSpecialist(cmd, root, callerWd, "notemplate-agent", "test task")
 
@@ -3321,6 +3257,9 @@ title = "Step 1"
 
 func TestSlingReset_DirtyWorktreeForceRemoved(t *testing.T) {
 	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+	// Hermetic: reset path + dispatch run through the fake (#309). AFTER
+	// t.TempDir() (R-7). installFailingIssueStore below keeps the store boundary.
+	setupHermeticSessions(t)
 
 	agents := map[string]interface{}{
 		"agents": map[string]interface{}{
@@ -3362,10 +3301,6 @@ func TestSlingReset_DirtyWorktreeForceRemoved(t *testing.T) {
 	slingReset = true
 	defer func() { slingReset = origReset }()
 
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
-	})
-
 	installFailingIssueStore(t)
 
 	_ = dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "test task")
@@ -3383,6 +3318,9 @@ func TestSlingReset_DirtyWorktreeForceRemoved(t *testing.T) {
 
 func TestSlingReset_BeadsClosed(t *testing.T) {
 	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+	// Hermetic: reset path + dispatch run through the fake; the returned memstore
+	// is the one dispatch's reset closes beads in (#309). AFTER t.TempDir() (R-7).
+	_, store := setupHermeticSessions(t)
 
 	agents := map[string]interface{}{
 		"agents": map[string]interface{}{
@@ -3396,7 +3334,6 @@ func TestSlingReset_BeadsClosed(t *testing.T) {
 	data, _ := json.Marshal(agents)
 	os.WriteFile(filepath.Join(root, ".agentfactory", "agents.json"), data, 0o644)
 
-	store := installMemStore(t)
 	installNoopLaunchSession(t)
 	ctx := t.Context()
 
@@ -3427,10 +3364,6 @@ func TestSlingReset_BeadsClosed(t *testing.T) {
 	slingReset = true
 	defer func() { slingReset = origReset }()
 
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
-	})
-
 	_ = dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "test task")
 
 	// Check only the pre-existing beads (formula instantiation creates new ones)
@@ -3450,6 +3383,9 @@ func TestSlingReset_BeadsClosed(t *testing.T) {
 
 func TestSlingReset_CoTenantSafety(t *testing.T) {
 	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+	// Hermetic: reset path + dispatch run through the fake (#309). AFTER
+	// t.TempDir() (R-7). installFailingIssueStore below keeps the store boundary.
+	setupHermeticSessions(t)
 
 	agents := map[string]interface{}{
 		"agents": map[string]interface{}{
@@ -3491,10 +3427,6 @@ func TestSlingReset_CoTenantSafety(t *testing.T) {
 	slingReset = true
 	defer func() { slingReset = origReset }()
 
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
-	})
-
 	installFailingIssueStore(t)
 
 	_ = dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "test task")
@@ -3510,6 +3442,8 @@ func TestSlingReset_CoTenantSafety(t *testing.T) {
 
 func TestSlingReset_NoWorktreeProceeds(t *testing.T) {
 	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+	// Hermetic: reset path + dispatch run through the fake (#309). AFTER t.TempDir() (R-7).
+	_, store := setupHermeticSessions(t)
 
 	agents := map[string]interface{}{
 		"agents": map[string]interface{}{
@@ -3523,7 +3457,6 @@ func TestSlingReset_NoWorktreeProceeds(t *testing.T) {
 	data, _ := json.Marshal(agents)
 	os.WriteFile(filepath.Join(root, ".agentfactory", "agents.json"), data, 0o644)
 
-	store := installMemStore(t)
 	installNoopLaunchSession(t)
 
 	agentDir := filepath.Join(root, ".agentfactory", "agents", "specialist-agent")
@@ -3544,10 +3477,6 @@ func TestSlingReset_NoWorktreeProceeds(t *testing.T) {
 	origReset := slingReset
 	slingReset = true
 	defer func() { slingReset = origReset }()
-
-	t.Cleanup(func() {
-		exec.Command("tmux", "kill-session", "-t", "af-specialist-agent").Run()
-	})
 
 	err := dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "test task")
 	if err != nil {

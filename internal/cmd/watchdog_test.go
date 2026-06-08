@@ -1,0 +1,289 @@
+package cmd
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+
+	"github.com/spf13/cobra"
+	"github.com/stempeck/agentfactory/internal/checkpoint"
+	"github.com/stempeck/agentfactory/internal/session"
+)
+
+func TestWatchdog_DetectsErrorPattern(t *testing.T) {
+	output := "Some output...\nInvalid signature in thinking block\nMore output"
+	detected, pattern := detectErrorPattern(output)
+	if !detected {
+		t.Fatal("should detect 'Invalid signature in thinking block'")
+	}
+	if pattern == "" {
+		t.Error("pattern description should not be empty")
+	}
+}
+
+func TestWatchdog_HTTP400NotDetected(t *testing.T) {
+	outputs := []string{
+		"error: HTTP 400 Bad Request",
+		"GitHub API returned HTTP 400 rate limited",
+		"HTTP 400 in response from upstream",
+	}
+	for _, output := range outputs {
+		detected, pattern := detectErrorPattern(output)
+		if detected {
+			t.Errorf("HTTP 400 should NOT trigger detection, but got pattern %q for input %q", pattern, output)
+		}
+	}
+}
+
+func TestWatchdog_Status400NotDetected(t *testing.T) {
+	outputs := []string{
+		"response returned status 400",
+		"API call failed with status 400",
+	}
+	for _, output := range outputs {
+		detected, pattern := detectErrorPattern(output)
+		if detected {
+			t.Errorf("status 400 should NOT trigger detection, but got pattern %q for input %q", pattern, output)
+		}
+	}
+}
+
+func TestWatchdog_OnlyThinkingBlockTriggers(t *testing.T) {
+	detected, pattern := detectErrorPattern("Some output\nInvalid signature in thinking block\nMore output")
+	if !detected {
+		t.Fatal("should detect 'Invalid signature in thinking block'")
+	}
+	if pattern != "Invalid signature in thinking block" {
+		t.Errorf("expected pattern 'Invalid signature in thinking block', got %q", pattern)
+	}
+}
+
+func TestWatchdog_NoFalsePositive(t *testing.T) {
+	outputs := []string{
+		"Working on step 1...",
+		"Reading files...\nRunning tests...\nAll 42 tests passed",
+		"Analyzing code in internal/cmd/watchdog.go",
+		"HTTP 200 OK",
+	}
+	for _, output := range outputs {
+		detected, pattern := detectErrorPattern(output)
+		if detected {
+			t.Errorf("false positive on %q: detected pattern %q", output, pattern)
+		}
+	}
+}
+
+func TestWatchdog_SilenceDetection(t *testing.T) {
+	state := make(map[string]*watchdogAgentState)
+	output := "some static output that never changes"
+	threshold := 3
+
+	for i := 0; i < threshold; i++ {
+		silent := checkSilence("agent1", output, state, threshold)
+		if i < threshold-1 && silent {
+			t.Errorf("poll %d: should not be silent yet", i)
+		}
+		if i == threshold-1 && !silent {
+			t.Error("should detect silence after threshold polls")
+		}
+	}
+}
+
+func TestWatchdog_SilenceResets(t *testing.T) {
+	state := make(map[string]*watchdogAgentState)
+	threshold := 5
+
+	for i := 0; i < 3; i++ {
+		checkSilence("agent1", "same output", state, threshold)
+	}
+	if state["agent1"].silenceCount != 3 {
+		t.Fatalf("expected silence count 3 before reset, got %d", state["agent1"].silenceCount)
+	}
+
+	checkSilence("agent1", "different output now", state, threshold)
+
+	if state["agent1"].silenceCount != 0 {
+		t.Errorf("silence counter should reset on output change, got %d", state["agent1"].silenceCount)
+	}
+}
+
+func TestWatchdog_CircuitBreaker(t *testing.T) {
+	failures := make(map[string]int)
+	maxFailures := 3
+
+	for i := 0; i < maxFailures; i++ {
+		failures["agent1"]++
+	}
+
+	if shouldRespawn(failures, "agent1", maxFailures) {
+		t.Error("should NOT respawn after circuit breaker threshold reached")
+	}
+
+	if !shouldRespawn(failures, "agent2", maxFailures) {
+		t.Error("agent2 has no failures, should be allowed to respawn")
+	}
+}
+
+func TestWatchdog_CircuitBreakerResets(t *testing.T) {
+	failures := make(map[string]int)
+	failures["agent1"] = 5
+
+	resetCircuitBreaker(failures, "agent1")
+
+	if failures["agent1"] != 0 {
+		t.Errorf("circuit breaker should reset to 0, got %d", failures["agent1"])
+	}
+}
+
+func TestWatchdog_SilenceNudgesNotKills(t *testing.T) {
+	agentStates := make(map[string]*watchdogAgentState)
+	failures := make(map[string]int)
+
+	output := "static output"
+	threshold := 3
+	for i := 0; i < threshold; i++ {
+		checkSilence("agent1", output, agentStates, threshold)
+	}
+
+	nudged := false
+	old := watchdogNudgeFn
+	watchdogNudgeFn = func(sessionID string) error {
+		nudged = true
+		return nil
+	}
+	defer func() { watchdogNudgeFn = old }()
+
+	handleSilenceNudge("test-session", "agent1", agentStates, failures)
+
+	if !nudged {
+		t.Error("expected nudge function to be called on silence")
+	}
+	if failures["agent1"] != 0 {
+		t.Errorf("silence nudge should NOT increment failures, got %d", failures["agent1"])
+	}
+	if agentStates["agent1"].silenceCount != 0 {
+		t.Errorf("silence counter should reset after nudge, got %d", agentStates["agent1"].silenceCount)
+	}
+}
+
+func TestWatchdog_SilenceNudgeNoCircuitBreakerIncrement(t *testing.T) {
+	agentStates := make(map[string]*watchdogAgentState)
+	failures := make(map[string]int)
+	failures["agent1"] = 2
+
+	agentStates["agent1"] = &watchdogAgentState{silenceCount: 5}
+
+	old := watchdogNudgeFn
+	watchdogNudgeFn = func(sessionID string) error { return nil }
+	defer func() { watchdogNudgeFn = old }()
+
+	handleSilenceNudge("test-session", "agent1", agentStates, failures)
+
+	if failures["agent1"] != 2 {
+		t.Errorf("silence nudge should NOT change failure count, was 2 got %d", failures["agent1"])
+	}
+}
+
+func TestWatchdog_CheckpointBeforeKill(t *testing.T) {
+	tmpDir := t.TempDir()
+	agentDir := filepath.Join(tmpDir, ".agentfactory", "agents", "test-agent")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("git", "init")
+	cmd.Dir = agentDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git init failed: %v", err)
+	}
+
+	checkpointBeforeKill(agentDir, "test error pattern")
+
+	cp, err := checkpoint.Read(agentDir)
+	if err != nil {
+		t.Fatalf("reading checkpoint: %v", err)
+	}
+	if cp == nil {
+		t.Fatal("checkpoint should exist after checkpointBeforeKill")
+	}
+	if cp.Notes == "" {
+		t.Error("checkpoint should contain notes describing the recovery reason")
+	}
+}
+
+func TestWatchdog_InteractiveAgentNoRespawn(t *testing.T) {
+	if shouldAutoRecover("interactive") {
+		t.Error("interactive agents should get alert-only, not auto-respawn")
+	}
+	if !shouldAutoRecover("autonomous") {
+		t.Error("autonomous agents should be auto-recoverable")
+	}
+	if !shouldAutoRecover("") {
+		t.Error("agents with empty type should default to auto-recoverable")
+	}
+}
+
+// fakeWatchdogTmux reports every session as alive with static output so the
+// silence threshold trips on every agent, letting a test drive the poll loop.
+type fakeWatchdogTmux struct{ output string }
+
+func (f *fakeWatchdogTmux) HasSession(string) (bool, error)         { return true, nil }
+func (f *fakeWatchdogTmux) IsClaudeRunning(string) bool             { return true }
+func (f *fakeWatchdogTmux) CapturePane(string, int) (string, error) { return f.output, nil }
+
+func writeTestAgentsConfig(t *testing.T, root, json string) {
+	t.Helper()
+	dotDir := filepath.Join(root, ".agentfactory")
+	if err := os.MkdirAll(dotDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dotDir, "agents.json"), []byte(json), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestWatchdog_PollSilenceRespectsAgentType drives the actual poll loop with a
+// mixed fleet and asserts at the loop level (not via the isolated helper) that
+// an idle interactive agent is never silence-nudged while an autonomous agent
+// still is. This is the regression guard for issue #302.
+func TestWatchdog_PollSilenceRespectsAgentType(t *testing.T) {
+	root := t.TempDir()
+	writeTestAgentsConfig(t, root, `{
+		"agents": {
+			"manager": {"type": "interactive", "description": "human-supervised manager"},
+			"factoryworker": {"type": "autonomous", "description": "autonomous worker"}
+		}
+	}`)
+
+	oldTmux := newWatchdogTmux
+	newWatchdogTmux = func() watchdogTmux { return &fakeWatchdogTmux{output: "idle, waiting for input"} }
+	defer func() { newWatchdogTmux = oldTmux }()
+
+	nudged := map[string]int{}
+	oldNudge := watchdogNudgeFn
+	watchdogNudgeFn = func(sessionID string) error {
+		nudged[sessionID]++
+		return nil
+	}
+	defer func() { watchdogNudgeFn = oldNudge }()
+
+	agentStates := make(map[string]*watchdogAgentState)
+	failures := make(map[string]int)
+	const threshold = 2
+
+	// Several ticks so silence trips for every agent regardless of map order.
+	for i := 0; i < 4; i++ {
+		pollAgents(&cobra.Command{}, root, "", agentStates, failures, threshold)
+	}
+
+	managerSession := session.SessionName("manager")
+	workerSession := session.SessionName("factoryworker")
+
+	if nudged[managerSession] != 0 {
+		t.Errorf("interactive agent 'manager' must NOT be silence-nudged, got %d nudges", nudged[managerSession])
+	}
+	if nudged[workerSession] == 0 {
+		t.Error("autonomous agent 'factoryworker' must still be silence-nudged (no #298 regression), got 0 nudges")
+	}
+}

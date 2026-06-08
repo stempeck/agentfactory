@@ -3,7 +3,6 @@ package session
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -444,49 +443,6 @@ func TestBuildStartupCommand_WorktreePathWithSpaces(t *testing.T) {
 	}
 }
 
-func TestStartAndStop(t *testing.T) {
-	if os.Getenv("AF_INTEGRATION_TEST") == "" {
-		t.Skip("set AF_INTEGRATION_TEST=1 to run integration tests")
-	}
-
-	// Create a temp workspace with a worktree-style agent dir so the Phase 3.5
-	// ErrWorktreeNotSet guard is satisfied and workDir() still resolves to a
-	// provisioned directory.
-	tmpDir := t.TempDir()
-	wtPath := filepath.Join(tmpDir, ".worktrees", "wt-test")
-	agentDir := filepath.Join(wtPath, ".agentfactory", "agents", "testagent")
-	if err := os.MkdirAll(agentDir, 0755); err != nil {
-		t.Fatalf("creating agent dir: %v", err)
-	}
-
-	entry := config.AgentEntry{Type: "interactive", Description: "test"}
-	mgr := NewManager(tmpDir, "testagent", entry)
-	if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
-		t.Fatalf("SetWorktree: %v", err)
-	}
-
-	// Start — should create session (Claude won't actually launch in test, but session will exist)
-	// Note: This will timeout on WaitForCommand since Claude isn't installed in test env.
-	// The important thing is the session gets created.
-	_ = mgr.Start()
-
-	// Check running
-	running, _ := mgr.IsRunning()
-	if !running {
-		t.Skip("session did not start — tmux may not be available")
-	}
-
-	// Stop
-	if err := mgr.Stop(); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-
-	running, _ = mgr.IsRunning()
-	if running {
-		t.Fatal("session still running after Stop")
-	}
-}
-
 func TestStart_ErrorsWithoutWorktree(t *testing.T) {
 	entry := config.AgentEntry{Type: "interactive", Description: "test"}
 	mgr := NewManager("/tmp/af-test-no-worktree-factory", "af-test-no-worktree-agent", entry)
@@ -523,42 +479,6 @@ func TestSetWorktree_RejectsEmptyPath(t *testing.T) {
 	want := "/tmp/factory/.agentfactory/agents/agent"
 	if got != want {
 		t.Errorf("WorkDir() after rejected SetWorktree = %q, want %q", got, want)
-	}
-}
-
-func TestSessionStart_RefusesWhenMemoryLow(t *testing.T) {
-	orig := checkAvailableMemoryFunc
-	checkAvailableMemoryFunc = func() (uint64, error) { return 256, nil } // 256MB < 512MB threshold
-	t.Cleanup(func() { checkAvailableMemoryFunc = orig })
-
-	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testmem", entry)
-	_ = mgr.SetWorktree("/tmp/worktree", "wt-abc123")
-
-	// Create the workspace directory so we don't fail on ErrNotProvisioned
-	workDir := mgr.WorkDir()
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		t.Fatalf("creating workspace: %v", err)
-	}
-
-	// Start requires tmux — if not available, skip
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not available")
-	}
-
-	err := mgr.Start()
-	if err == nil {
-		// Clean up tmux session if it was created
-		mgr.Stop()
-		t.Fatal("expected error for low memory, got nil")
-	}
-	if !strings.Contains(err.Error(), "insufficient memory") {
-		// Could also fail for other reasons (shell not ready, etc.)
-		// Only fail if tmux worked but memory check didn't fire
-		if strings.Contains(err.Error(), "waiting for shell") || strings.Contains(err.Error(), "tmux") {
-			t.Skip("tmux shell readiness issue, cannot test memory gate")
-		}
-		t.Errorf("expected error about insufficient memory, got: %v", err)
 	}
 }
 
@@ -632,198 +552,6 @@ func TestBuildStartupCommand_ModelWithShellMetachars(t *testing.T) {
 	quoted := shellQuote(`"; rm -rf /`)
 	if !strings.Contains(cmd, "--model "+quoted) {
 		t.Errorf("command should contain safely quoted model value, got: %s", cmd)
-	}
-}
-
-func TestStart_SetsAnthropicModelEnv(t *testing.T) {
-	if os.Getenv("AF_INTEGRATION_TEST") == "" {
-		t.Skip("set AF_INTEGRATION_TEST=1 to run integration tests")
-	}
-
-	tmpDir := t.TempDir()
-	wtPath := filepath.Join(tmpDir, ".worktrees", "wt-test")
-
-	// Test with model set
-	t.Run("with_model", func(t *testing.T) {
-		agentDir := filepath.Join(wtPath, ".agentfactory", "agents", "testmodel")
-		if err := os.MkdirAll(agentDir, 0755); err != nil {
-			t.Fatalf("creating agent dir: %v", err)
-		}
-
-		entry := config.AgentEntry{Type: "interactive", Description: "test", Model: "sonnet"}
-		mgr := NewManager(tmpDir, "testmodel", entry)
-		if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
-			t.Fatalf("SetWorktree: %v", err)
-		}
-
-		_ = mgr.Start()
-
-		running, _ := mgr.IsRunning()
-		if !running {
-			t.Skip("session did not start — tmux may not be available")
-		}
-		defer mgr.Stop()
-
-		out, err := exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_MODEL").Output()
-		if err != nil {
-			t.Fatalf("failed to read ANTHROPIC_MODEL from tmux: %v", err)
-		}
-		if !strings.Contains(string(out), "ANTHROPIC_MODEL=sonnet") {
-			t.Errorf("expected ANTHROPIC_MODEL=sonnet, got: %s", string(out))
-		}
-	})
-
-	// Test without model
-	t.Run("without_model", func(t *testing.T) {
-		agentDir := filepath.Join(wtPath, ".agentfactory", "agents", "testnomodel")
-		if err := os.MkdirAll(agentDir, 0755); err != nil {
-			t.Fatalf("creating agent dir: %v", err)
-		}
-
-		entry := config.AgentEntry{Type: "interactive", Description: "test"}
-		mgr := NewManager(tmpDir, "testnomodel", entry)
-		if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
-			t.Fatalf("SetWorktree: %v", err)
-		}
-
-		_ = mgr.Start()
-
-		running, _ := mgr.IsRunning()
-		if !running {
-			t.Skip("session did not start — tmux may not be available")
-		}
-		defer mgr.Stop()
-
-		out, err := exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_MODEL").CombinedOutput()
-		if err == nil && strings.Contains(string(out), "ANTHROPIC_MODEL=") {
-			t.Errorf("ANTHROPIC_MODEL should NOT be set when model is empty, got: %s", string(out))
-		}
-	})
-}
-
-func TestStart_SetsEndpointEnvVars(t *testing.T) {
-	if os.Getenv("AF_INTEGRATION_TEST") == "" {
-		t.Skip("set AF_INTEGRATION_TEST=1 to run integration tests")
-	}
-
-	tmpDir := t.TempDir()
-	wtPath := filepath.Join(tmpDir, ".worktrees", "wt-test")
-
-	t.Run("with_endpoint", func(t *testing.T) {
-		agentDir := filepath.Join(wtPath, ".agentfactory", "agents", "testendpoint")
-		if err := os.MkdirAll(agentDir, 0755); err != nil {
-			t.Fatalf("creating agent dir: %v", err)
-		}
-
-		entry := config.AgentEntry{
-			Type: "interactive", Description: "test",
-			BaseURL: "http://localhost:9999/v1/messages", AuthToken: "endpoint-tok-42",
-		}
-		mgr := NewManager(tmpDir, "testendpoint", entry)
-		if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
-			t.Fatalf("SetWorktree: %v", err)
-		}
-
-		_ = mgr.Start()
-
-		running, _ := mgr.IsRunning()
-		if !running {
-			t.Skip("session did not start — tmux may not be available")
-		}
-		defer mgr.Stop()
-
-		out, err := exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_BASE_URL").Output()
-		if err != nil {
-			t.Fatalf("failed to read ANTHROPIC_BASE_URL from tmux: %v", err)
-		}
-		if !strings.Contains(string(out), "ANTHROPIC_BASE_URL=http://localhost:9999/v1/messages") {
-			t.Errorf("expected ANTHROPIC_BASE_URL=http://localhost:9999/v1/messages, got: %s", string(out))
-		}
-
-		out, err = exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_AUTH_TOKEN").Output()
-		if err != nil {
-			t.Fatalf("failed to read ANTHROPIC_AUTH_TOKEN from tmux: %v", err)
-		}
-		if !strings.Contains(string(out), "ANTHROPIC_AUTH_TOKEN=endpoint-tok-42") {
-			t.Errorf("expected ANTHROPIC_AUTH_TOKEN=endpoint-tok-42, got: %s", string(out))
-		}
-	})
-
-	t.Run("without_endpoint", func(t *testing.T) {
-		agentDir := filepath.Join(wtPath, ".agentfactory", "agents", "testnoendpoint")
-		if err := os.MkdirAll(agentDir, 0755); err != nil {
-			t.Fatalf("creating agent dir: %v", err)
-		}
-
-		entry := config.AgentEntry{Type: "interactive", Description: "test"}
-		mgr := NewManager(tmpDir, "testnoendpoint", entry)
-		if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
-			t.Fatalf("SetWorktree: %v", err)
-		}
-
-		_ = mgr.Start()
-
-		running, _ := mgr.IsRunning()
-		if !running {
-			t.Skip("session did not start — tmux may not be available")
-		}
-		defer mgr.Stop()
-
-		out, err := exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_BASE_URL").CombinedOutput()
-		if err == nil && strings.Contains(string(out), "ANTHROPIC_BASE_URL=") {
-			t.Errorf("ANTHROPIC_BASE_URL should NOT be set when endpoint is empty, got: %s", string(out))
-		}
-
-		out, err = exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_AUTH_TOKEN").CombinedOutput()
-		if err == nil && strings.Contains(string(out), "ANTHROPIC_AUTH_TOKEN=") {
-			t.Errorf("ANTHROPIC_AUTH_TOKEN should NOT be set when endpoint is empty, got: %s", string(out))
-		}
-	})
-}
-
-func TestStop_CleansUpGateLocks(t *testing.T) {
-	if os.Getenv("AF_INTEGRATION_TEST") == "" {
-		t.Skip("set AF_INTEGRATION_TEST=1 to run integration tests")
-	}
-
-	tmpDir := t.TempDir()
-	wtPath := filepath.Join(tmpDir, ".worktrees", "wt-test")
-	agentDir := filepath.Join(wtPath, ".agentfactory", "agents", "testagent")
-	runtimeDir := filepath.Join(agentDir, ".runtime")
-	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
-		t.Fatalf("creating runtime dir: %v", err)
-	}
-
-	gateLocks := []string{"fidelity-gate.lock", "quality-gate.lock"}
-	for _, name := range gateLocks {
-		lockPath := filepath.Join(runtimeDir, name)
-		data := `{"pid":99999999,"acquired_at":"2026-01-01T00:00:00Z"}`
-		if err := os.WriteFile(lockPath, []byte(data), 0o644); err != nil {
-			t.Fatalf("creating %s: %v", name, err)
-		}
-	}
-
-	entry := config.AgentEntry{Type: "interactive", Description: "test"}
-	mgr := NewManager(tmpDir, "testagent", entry)
-	if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
-		t.Fatalf("SetWorktree: %v", err)
-	}
-
-	_ = mgr.Start()
-	running, _ := mgr.IsRunning()
-	if !running {
-		t.Skip("session did not start — tmux may not be available")
-	}
-
-	if err := mgr.Stop(); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-
-	for _, name := range gateLocks {
-		lockPath := filepath.Join(runtimeDir, name)
-		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-			t.Errorf("%s should be removed after Stop(), but still exists", name)
-		}
 	}
 }
 
@@ -1032,29 +760,6 @@ func TestBuildStartupCommand_BuildHostLocalMode(t *testing.T) {
 	}
 	if strings.Contains(cmd, "AF_HOST_MOUNT") {
 		t.Errorf("local mode should NOT contain AF_HOST_MOUNT, got: %s", cmd)
-	}
-}
-
-func TestBuildStartupCommand_SSHAuthSockPropagated(t *testing.T) {
-	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-	mgr.SetSSHAuthSock("/tmp/ssh-agent.sock")
-
-	cmd := mgr.BuildStartupCommand()
-
-	if !strings.Contains(cmd, "SSH_AUTH_SOCK='/tmp/ssh-agent.sock'") {
-		t.Errorf("command should contain SSH_AUTH_SOCK when set, got: %s", cmd)
-	}
-}
-
-func TestBuildStartupCommand_SSHAuthSockEmpty(t *testing.T) {
-	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-
-	cmd := mgr.BuildStartupCommand()
-
-	if strings.Contains(cmd, "SSH_AUTH_SOCK") {
-		t.Errorf("command should NOT contain SSH_AUTH_SOCK when not set, got: %s", cmd)
 	}
 }
 

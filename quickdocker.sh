@@ -66,7 +66,7 @@ if [[ $# -lt 1 ]] || [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
     echo "  <github-repo-path>   Target project repo (e.g., user/myrepo)"
     echo ""
     echo "Options:"
-    echo "  --platform ios         Enable iOS build-host support (SSH agent forwarding,"
+    echo "  --platform ios         Enable iOS build-host support (dedicated SSH key setup,"
     echo "                         build-host.json config, connectivity verification)"
     echo "  --build-host user@host SSH build host in user@host format"
     echo "                         (or set AF_BUILD_HOST_USER and AF_BUILD_HOST_HOST)"
@@ -164,16 +164,6 @@ if [ -z "$GH_TOKEN" ]; then
 fi
 
 if [[ "$PLATFORM" == "ios" ]]; then
-    if [[ "$(uname)" != "Darwin" ]] && [[ -z "${SSH_AUTH_SOCK:-}" ]]; then
-        echo "ERROR: SSH_AUTH_SOCK not set. Start ssh-agent first." >&2
-        exit 1
-    fi
-    if ! ssh-add -l &>/dev/null; then
-        echo "ERROR: No SSH keys loaded in ssh-agent." >&2
-        echo "  Run: ssh-add (loads default key) or ssh-add /path/to/key" >&2
-        echo "  Verify: ssh-add -l must show at least one key that can access the build host." >&2
-        exit 1
-    fi
     BUILD_USER="${AF_BUILD_HOST_USER:-}"
     BUILD_HOST="${AF_BUILD_HOST_HOST:-}"
     if [[ -n "$BUILD_HOST_ARG" ]]; then
@@ -192,6 +182,28 @@ if [[ "$PLATFORM" == "ios" ]]; then
         fi
         BUILD_USER="${BUILD_HOST_INPUT%%@*}"
         BUILD_HOST="${BUILD_HOST_INPUT#*@}"
+    fi
+fi
+
+if [[ "$PLATFORM" == "ios" ]]; then
+    AF_KEY="${HOME}/.ssh/af_container_ed25519"
+    if [[ ! -f "$AF_KEY" ]]; then
+        echo "  Generating container SSH keypair..."
+        ssh-keygen -t ed25519 -f "$AF_KEY" -N "" -C "agentfactory-container"
+    fi
+    # Key authorization: the build host IS the local Mac (the container reaches it
+    # via host.docker.internal, which only resolves inside containers). Authorize by
+    # appending the pubkey to the LOCAL authorized_keys — no SSH. Only on macOS, where
+    # sshd ("Remote Login") serves the container's connection.
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        mkdir -p "${HOME}/.ssh"
+        chmod 700 "${HOME}/.ssh"
+        touch "${HOME}/.ssh/authorized_keys"
+        chmod 600 "${HOME}/.ssh/authorized_keys"
+        if ! grep -qF "agentfactory-container" "${HOME}/.ssh/authorized_keys"; then
+            echo "  Authorizing container key in ~/.ssh/authorized_keys..."
+            cat "${AF_KEY}.pub" >> "${HOME}/.ssh/authorized_keys"
+        fi
     fi
 fi
 
@@ -224,11 +236,9 @@ fi
 
 IOS_DOCKER_ARGS=""
 if [[ "$PLATFORM" == "ios" ]]; then
-    if [[ "$(uname)" == "Darwin" ]]; then
-        IOS_DOCKER_ARGS="-v /run/host-services/ssh-auth.sock:/run/ssh-agent.sock -e SSH_AUTH_SOCK=/run/ssh-agent.sock"
-    else
-        IOS_DOCKER_ARGS="-v $SSH_AUTH_SOCK:/run/ssh-agent.sock -e SSH_AUTH_SOCK=/run/ssh-agent.sock"
-    fi
+    HOST_MOUNT="${HOME}/.af-containers/${CONTAINER_NAME}"
+    mkdir -p "$HOST_MOUNT"
+    IOS_DOCKER_ARGS="-v ${HOST_MOUNT}:${WORKSPACE_DIR}/${REPO_NAME}"
 fi
 
 docker run -dit \
@@ -239,6 +249,14 @@ docker run -dit \
     $IOS_DOCKER_ARGS \
     --name "$CONTAINER_NAME" \
     "$BASE_IMAGE" bash --login
+
+if [[ "$PLATFORM" == "ios" ]]; then
+    docker exec -u dev "$CONTAINER_NAME" mkdir -p /home/dev/.ssh
+    docker cp "${HOME}/.ssh/af_container_ed25519" "${CONTAINER_NAME}:/home/dev/.ssh/id_ed25519"
+    docker cp "${HOME}/.ssh/af_container_ed25519.pub" "${CONTAINER_NAME}:/home/dev/.ssh/id_ed25519.pub"
+    docker exec "$CONTAINER_NAME" chown dev:dev /home/dev/.ssh/id_ed25519 /home/dev/.ssh/id_ed25519.pub
+    docker exec "$CONTAINER_NAME" chmod 600 /home/dev/.ssh/id_ed25519
+fi
 
 step_done
 
@@ -302,16 +320,6 @@ if [[ -z \"\$TMUX\" ]]; then
 fi
 BASHRC_EOF"
 
-if [[ "$PLATFORM" == "ios" ]]; then
-    docker exec -u dev "$CONTAINER_NAME" bash -c "cat >> ~/.bashrc << 'BASHRC_EOF'
-
-# SSH agent socket guard (iOS build-host support)
-if [[ -n \"\${SSH_AUTH_SOCK:-}\" ]] && [[ ! -S \"\$SSH_AUTH_SOCK\" ]]; then
-    echo \"WARNING: SSH agent socket not found at \$SSH_AUTH_SOCK. Recreate container with --platform ios for SSH forwarding.\"
-fi
-BASHRC_EOF"
-fi
-
 step_done
 
 # ─── Step 8: Run quickstart.sh ──────────────────────────────────────────────
@@ -326,7 +334,7 @@ step_done
 if [[ "$PLATFORM" == "ios" ]]; then
     echo ""
     echo "  Configuring iOS build host..."
-    docker exec -u dev -w "$WORKSPACE_DIR/$REPO_NAME" "$CONTAINER_NAME" af config build-host --mode ssh --host "$BUILD_HOST" --user "$BUILD_USER" --mount-path "$WORKSPACE_DIR/$REPO_NAME" --skip-ssh-check || {
+    docker exec -u dev -w "$WORKSPACE_DIR/$REPO_NAME" "$CONTAINER_NAME" af config build-host --mode ssh --host "$BUILD_HOST" --user "$BUILD_USER" --mount-path "${HOME}/.af-containers/${CONTAINER_NAME}" --skip-ssh-check || {
         echo "ERROR: af config build-host failed inside container" >&2
         exit 1
     }
@@ -335,7 +343,7 @@ if [[ "$PLATFORM" == "ios" ]]; then
         ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
             "$BUILD_USER@$BUILD_HOST" echo ok || {
         echo "ERROR: SSH connectivity verification failed from inside container." >&2
-        echo "Check: SSH agent forwarding, network access, host key acceptance." >&2
+        echo "Check: network access, host key acceptance, key authorization on build host." >&2
         exit 1
     }
     echo "  -> iOS build host configured and verified"
@@ -354,7 +362,8 @@ echo "  Container: $CONTAINER_NAME"
 echo "  Workspace: $WORKSPACE_DIR/$REPO_NAME"
 if [[ "$PLATFORM" == "ios" ]]; then
     echo "  iOS build host: $BUILD_USER@$BUILD_HOST"
-    echo "  SSH agent forwarding: active"
+    echo "  SSH key-based auth: configured"
+    echo "  Shared volume: ${HOME}/.af-containers/${CONTAINER_NAME}"
 fi
 echo ""
 echo "  Connect:"

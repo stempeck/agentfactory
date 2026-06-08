@@ -24,6 +24,7 @@ type MCPStore struct {
 	client      *rpcClient
 	actor       string
 	factoryRoot string // retained for error context / future use (IMPLREADME L163)
+	ownedPID    int    // pid of a server THIS adapter spawned; 0 when discovered
 }
 
 // New discovers a running MCP server at factoryRoot or spawns a new one,
@@ -31,7 +32,7 @@ type MCPStore struct {
 // Gate-4 client-side scoping; any non-empty value scopes List when the
 // caller passes IncludeAllAgents=false AND leaves Filter.Assignee empty.
 func New(factoryRoot, actor string) (*MCPStore, error) {
-	endpoint, err := discoverOrStart(factoryRoot)
+	endpoint, ownedPID, err := discoverOrStart(factoryRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -40,7 +41,25 @@ func New(factoryRoot, actor string) (*MCPStore, error) {
 		client:      newRPCClient(endpoint, httpClient),
 		actor:       actor,
 		factoryRoot: factoryRoot,
+		ownedPID:    ownedPID,
 	}, nil
+}
+
+// Stop reaps the MCP server's process group when this adapter spawned it,
+// closing the OS-level orphan path (#309 Phase 5): an interrupted run that
+// calls Stop on teardown cannot leak a detached python3 with a (deleted) cwd.
+// It is a no-op when the server was discovered (ownedPID == 0) so a shared
+// detached server is never killed — production callers that rely on the
+// long-lived shared server simply do not call Stop. Best-effort.
+//
+// Note: this is distinct from Close, which closes an ISSUE; Stop is process
+// lifecycle. It does NOT cover a SIGKILL of the parent (where Stop never runs)
+// — that case is handled by the server's own cwd/endpoint self-exit watcher.
+func (m *MCPStore) Stop() error {
+	if m.ownedPID <= 0 {
+		return nil
+	}
+	return killProcGroup(m.ownedPID)
 }
 
 // Get returns the issue with the given id, or a wrapped ErrNotFound.

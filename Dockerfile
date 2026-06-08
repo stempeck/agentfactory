@@ -3,7 +3,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
-# System packages (no Chromium/browser deps — unlike gastown)
+# System packages
 RUN apt-get update && apt-get install -y \
     git curl wget sudo tmux jq build-essential \
     openssh-client sqlite3 \

@@ -105,17 +105,41 @@ func readDarwinMemAvailableMB() (uint64, error) {
 	return (freePages + inactivePages) * pageSize / (1024 * 1024), nil
 }
 
+// tmuxClient is the exact union of the 11 *tmux.Tmux methods that Manager.Start()
+// and Manager.Stop() call. Typing Manager.tmux to this interface is the seam that
+// lets tests inject a fake; the compile assertion below guarantees the real
+// client still satisfies it.
+type tmuxClient interface {
+	HasSession(name string) (bool, error)
+	IsClaudeRunning(session string) bool
+	KillSession(name string) error
+	NewSession(name, workDir string) error
+	SetEnvironment(session, key, value string) error
+	WaitForShellReady(session string, timeout time.Duration) error
+	SendKeysDelayed(session, keys string, delayMs int) error
+	WaitForCommand(session string, excludeCommands []string, timeout time.Duration) error
+	AcceptBypassPermissionsWarning(session string) error
+	NudgeSession(session, message string) error
+	SendKeysRaw(session, keys string) error
+}
+
+// Compile-time check: the real *tmux.Tmux must satisfy tmuxClient (R-4 discipline).
+var _ tmuxClient = (*tmux.Tmux)(nil)
+
+// newManagerTmux is the seam tests override to inject a fake tmux client into
+// NewManager. Production default returns the real *tmux.Tmux.
+var newManagerTmux = func() tmuxClient { return tmux.NewTmux() }
+
 // Manager handles agent session lifecycle operations.
 type Manager struct {
-	factoryRoot    string
-	agentName      string
-	agentEntry     config.AgentEntry
-	tmux           *tmux.Tmux
-	initialPrompt  string
-	worktreePath   string
-	worktreeID     string
-	buildHost      *config.BuildHostConfig
-	sshAuthSock    string
+	factoryRoot   string
+	agentName     string
+	agentEntry    config.AgentEntry
+	tmux          tmuxClient
+	initialPrompt string
+	worktreePath  string
+	worktreeID    string
+	buildHost     *config.BuildHostConfig
 }
 
 // NewManager creates a Manager for the given agent.
@@ -124,7 +148,7 @@ func NewManager(factoryRoot, agentName string, entry config.AgentEntry) *Manager
 		factoryRoot: factoryRoot,
 		agentName:   agentName,
 		agentEntry:  entry,
-		tmux:        tmux.NewTmux(),
+		tmux:        newManagerTmux(),
 	}
 }
 
@@ -151,11 +175,6 @@ func (m *Manager) SetWorktree(path, id string) error {
 // environment variables are exported into the tmux session.
 func (m *Manager) SetBuildHost(cfg *config.BuildHostConfig) {
 	m.buildHost = cfg
-}
-
-// SetSSHAuthSock sets the SSH_AUTH_SOCK value to propagate into the tmux session.
-func (m *Manager) SetSSHAuthSock(v string) {
-	m.sshAuthSock = v
 }
 
 // SessionID returns the tmux session name for this agent.
@@ -250,9 +269,6 @@ func (m *Manager) Start() error {
 			_ = m.tmux.SetEnvironment(sessionID, "AF_HOST_MOUNT", m.buildHost.MountPath)
 		}
 	}
-	if m.sshAuthSock != "" {
-		_ = m.tmux.SetEnvironment(sessionID, "SSH_AUTH_SOCK", m.sshAuthSock)
-	}
 
 	// Wait for shell to be ready
 	if err := m.tmux.WaitForShellReady(sessionID, 5*time.Second); err != nil {
@@ -318,9 +334,6 @@ func (m *Manager) buildStartupCommand() string {
 		if m.buildHost.MountPath != "" {
 			exports += fmt.Sprintf(" AF_HOST_MOUNT=%s", shellQuote(m.buildHost.MountPath))
 		}
-	}
-	if m.sshAuthSock != "" {
-		exports += fmt.Sprintf(" SSH_AUTH_SOCK=%s", shellQuote(m.sshAuthSock))
 	}
 
 	claude := "claude --dangerously-skip-permissions"

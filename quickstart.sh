@@ -383,10 +383,10 @@ configure_shell() {
 
     {
         echo "$begin_marker"
-        echo 'export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-opus-4-6}"'
-        echo 'export ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL:-claude-opus-4-6}"'
+        echo 'export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-opus-4-8}"'
+        echo 'export ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL:-claude-opus-4-8}"'
         echo 'export ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-6}"'
-        echo 'export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL:-high}"'
+        echo 'export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL:-xhigh}"'
         echo 'export CLAUDE_CODE_DISABLE_AUTO_MEMORY="${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-1}"'
         echo "$end_marker"
     } >> "$shell_config"
@@ -398,12 +398,14 @@ configure_shell() {
 configure_factory() {
     log_step "Configuring agentfactory workspace"
 
-    # Find the repo directory
-    local repo_dir
-    repo_dir=$(find "$WORKSPACE_DIR" -maxdepth 1 -mindepth 1 -type d | head -1)
+    # Find the repo directory — look for a git repo with go.mod, not just any dir.
+    local repo_dir=""
+    for d in "$WORKSPACE_DIR"/*/; do
+        [ -d "$d/.git" ] && [ -f "$d/go.mod" ] && { repo_dir="${d%/}"; break; }
+    done
 
     if [ -z "$repo_dir" ]; then
-        log_error "No repository found under $WORKSPACE_DIR"
+        log_error "No git repository with go.mod found under $WORKSPACE_DIR"
         return 1
     fi
 

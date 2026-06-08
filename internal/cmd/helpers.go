@@ -1,20 +1,119 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 
+	"github.com/stempeck/agentfactory/internal/checkpoint"
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/issuestore/mcpstore"
+	"github.com/stempeck/agentfactory/internal/issuestore/memstore"
+	"github.com/stempeck/agentfactory/internal/session"
+	"github.com/stempeck/agentfactory/internal/tmux"
 )
+
+type respawnTmux interface {
+	ClearHistory(pane string) error
+	RespawnPane(pane, command string) error
+}
+
+// cmdTmux is the full union of *tmux.Tmux methods the cmd layer drives across
+// up.go, down.go, done.go, and dispatch.go. The last three (GetPaneCommand,
+// IsAgentRunning, SetEnvironment) are not called yet — they are declared up
+// front because Phase 4's watchdog health-gate + AF_ROOT export will need them,
+// so the seam surface is fixed once (Round-2 HIGH-1). It exists so those command
+// paths can be driven with a fake in tests.
+type cmdTmux interface {
+	IsAvailable() bool
+	HasSession(name string) (bool, error)
+	NewSession(name, workDir string) error
+	KillSession(name string) error
+	SendKeys(session, keys string) error
+	SendKeysDelayed(session, keys string, delayMs int) error
+	GetPaneCommand(session string) (string, error)
+	IsAgentRunning(session string, expectedPaneCommands ...string) bool
+	SetEnvironment(session, key, value string) error
+}
+
+// Compile-time check: the real *tmux.Tmux must satisfy cmdTmux (R-4 discipline).
+var _ cmdTmux = (*tmux.Tmux)(nil)
+
+// newCmdTmux is the seam tests override to inject a fake tmux client into the
+// cmd-layer watchdog/dispatch/terminate paths. Production default returns the
+// real *tmux.Tmux.
+var newCmdTmux = func() cmdTmux { return tmux.NewTmux() }
+
+type RespawnOptions struct {
+	FactoryRoot  string
+	AgentName    string
+	AgentEntry   config.AgentEntry
+	PaneID       string
+	CmdPrefix    string
+	WorktreePath string
+	WorktreeID   string
+	Tx           respawnTmux
+}
+
+func respawnSession(opts RespawnOptions) error {
+	mgr := session.NewManager(opts.FactoryRoot, opts.AgentName, opts.AgentEntry)
+	mgr.SetInitialPrompt("af prime")
+	if opts.WorktreePath != "" {
+		_ = mgr.SetWorktree(opts.WorktreePath, opts.WorktreeID)
+	}
+	respawnCmd := opts.CmdPrefix + mgr.BuildStartupCommand()
+	tx := opts.Tx
+	if tx == nil {
+		tx = tmux.NewTmux()
+	}
+	_ = tx.ClearHistory(opts.PaneID)
+	return tx.RespawnPane(opts.PaneID, respawnCmd)
+}
+
+func captureCheckpointWithFormula(ctx context.Context, cwd, notes string, mutate func(*checkpoint.Checkpoint)) error {
+	cp, err := checkpoint.Capture(cwd)
+	if err != nil {
+		return err
+	}
+
+	if mutate != nil {
+		mutate(cp)
+	}
+
+	formulaID := readHookedFormulaID(cwd)
+	if formulaID != "" {
+		actor := os.Getenv("AF_ACTOR")
+		if store, storeErr := newIssueStore(cwd, actor); storeErr == nil {
+			result, _ := store.Ready(ctx, issuestore.Filter{MoleculeID: formulaID})
+			if len(result.Steps) > 0 {
+				cp.WithFormula(formulaID, result.Steps[0].ID, result.Steps[0].Title)
+			}
+		}
+	}
+
+	cp.WithNotes(notes)
+	if cp.SessionID == "" {
+		cp.SessionID = os.Getenv("CLAUDE_SESSION_ID")
+	}
+	return checkpoint.Write(cwd, cp)
+}
 
 // newIssueStore is the seam tests override to substitute an in-memory store.
 // Production default constructs an mcpstore backed by the in-tree Python MCP
-// server; the adapter lazy-starts the server on first use. Tests override
-// this to return memstore.New() (or memstore.NewWithActor for actor-scoped
-// behavior) so they don't require Python 3.12 on the test host.
+// server; the adapter discovers/spawns the server in New().
+//
+// STORE-GUARD: in the default (non-integration) test build, storeGuardActive is
+// true (storeguard_default.go), so this short-circuits to an in-memory store
+// BEFORE resolving the factory root or contacting Python — a default-suite test
+// can never spawn or mutate the operator's py.issuestore.server (#317). The
+// integration build sets storeGuardActive false (storeguard_integration.go), so
+// `-tags=integration` and production keep the real mcpstore (AC-6). The
+// installMemStore opt-in (sling_test.go) still works and is now redundant.
 var newIssueStore = func(wd, actor string) (issuestore.Store, error) {
+	if storeGuardActive {
+		return memstore.NewWithActor(actor), nil
+	}
 	root, err := config.FindFactoryRoot(wd)
 	if err != nil {
 		return nil, err

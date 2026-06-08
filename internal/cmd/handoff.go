@@ -13,7 +13,6 @@ import (
 	"github.com/stempeck/agentfactory/internal/checkpoint"
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
-	"github.com/stempeck/agentfactory/internal/session"
 	"github.com/stempeck/agentfactory/internal/tmux"
 )
 
@@ -88,7 +87,7 @@ func runHandoffCore(ctx context.Context, cwd, subject, message string, collect, 
 	if dryRun {
 		fmt.Printf("[dry-run] Would write checkpoint with notes: %s\n", subject)
 	} else {
-		if err := writeHandoffCheckpoint(ctx, cwd, factoryRoot, subject); err != nil {
+		if err := captureCheckpointWithFormula(ctx, cwd, subject, nil); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: checkpoint write failed: %v\n", err)
 		} else {
 			fmt.Println("Checkpoint written")
@@ -118,52 +117,21 @@ func runHandoffCore(ctx context.Context, cwd, subject, message string, collect, 
 		removeIdleCycles(cwd)
 	}
 
-	// 8. Build respawn command
-	mgr := session.NewManager(factoryRoot, agentName, *agentEntry)
-	if v := os.Getenv("SSH_AUTH_SOCK"); v != "" {
-		mgr.SetSSHAuthSock(v)
-	}
-	mgr.SetInitialPrompt("af prime")
-	respawnCmd := sleepPrefix + mgr.BuildStartupCommand()
-
+	// 8. Build respawn command and recycle
 	if dryRun {
 		fmt.Printf("[dry-run] Would clear tmux history for pane %s\n", pane)
-		fmt.Printf("[dry-run] Would respawn pane with: %s\n", respawnCmd)
+		fmt.Printf("[dry-run] Would respawn pane with startup command\n")
 		return nil
 	}
 
-	// 9. Clear tmux history and respawn pane
 	fmt.Printf("Handing off %s...\n", agentName)
-	tx := tmux.NewTmux()
-	_ = tx.ClearHistory(pane) // best-effort
-
-	// Process dies here — RespawnPane kills the current pane process
-	return tx.RespawnPane(pane, respawnCmd)
-}
-
-// writeHandoffCheckpoint captures state and writes a checkpoint with handoff notes.
-func writeHandoffCheckpoint(ctx context.Context, cwd, factoryRoot, subject string) error {
-	cp, err := checkpoint.Capture(cwd)
-	if err != nil {
-		return err
-	}
-
-	formulaID := readHookedFormulaID(cwd)
-	if formulaID != "" {
-		actor := os.Getenv("AF_ACTOR")
-		if store, err := newIssueStore(cwd, actor); err == nil {
-			result, _ := store.Ready(ctx, issuestore.Filter{MoleculeID: formulaID})
-			if len(result.Steps) > 0 {
-				cp.WithFormula(formulaID, result.Steps[0].ID, result.Steps[0].Title)
-			}
-		}
-	}
-
-	cp.WithNotes(subject)
-	if cp.SessionID == "" {
-		cp.SessionID = os.Getenv("CLAUDE_SESSION_ID")
-	}
-	return checkpoint.Write(cwd, cp)
+	return respawnSession(RespawnOptions{
+		FactoryRoot: factoryRoot,
+		AgentName:   agentName,
+		AgentEntry:  *agentEntry,
+		PaneID:      pane,
+		CmdPrefix:   sleepPrefix,
+	})
 }
 
 // sendHandoffMail shells out to `af mail send` to deliver the handoff message.

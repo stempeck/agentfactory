@@ -44,7 +44,6 @@ if [ -f "$LOCKFILE" ]; then
     STORED_PID=$(jq -r '.pid' "$LOCKFILE" 2>/dev/null || grep -o '"pid":[[:space:]]*[0-9]*' "$LOCKFILE" | grep -o '[0-9]*')
     if [ -n "$STORED_PID" ] && kill -0 "$STORED_PID" 2>/dev/null; then
         echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT4a: lock_contention pid=$STORED_PID" >> "$AGENT_RUNTIME/quality_debug.log" 2>/dev/null
-        af mail send "$ROLE" -s "GATE_LOCK_CONTENTION" -m "quality gate lock contention: PID $STORED_PID alive" 2>/dev/null
         echo '{"ok": true}'
         exit 0
     fi
