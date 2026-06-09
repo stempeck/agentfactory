@@ -110,3 +110,61 @@ func TestQuickstartSupplyChainInvariants(t *testing.T) {
 		}
 	})
 }
+
+// TestQuickstartConfigureFactoryDiscovery locks in tech-stack-agnostic repo
+// discovery: configure_factory must find the cloned target repo by its .git
+// directory alone, never by go.mod, so non-Go customer repos are selected
+// (issue af-8b4ee574 / GitHub #336). The install_af AF-source go.mod check is
+// separate and must be preserved.
+func TestQuickstartConfigureFactoryDiscovery(t *testing.T) {
+	root := findModuleRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "quickstart.sh"))
+	if err != nil {
+		t.Fatalf("reading quickstart.sh: %v", err)
+	}
+	content := string(data)
+
+	configureFactory := extractShellFunction(content, "configure_factory")
+	if configureFactory == "" {
+		t.Fatal("could not extract configure_factory() function body")
+	}
+
+	installAf := extractShellFunction(content, "install_af")
+	if installAf == "" {
+		t.Fatal("could not extract install_af() function body")
+	}
+
+	// Scenario: configure_factory discovery is stack-agnostic
+	t.Run("configure_factory_discovery_is_stack_agnostic", func(t *testing.T) {
+		if strings.Contains(configureFactory, "go.mod") {
+			t.Error("configure_factory() must not reference go.mod: discovery must be tech-stack-agnostic (no go.mod in the loop, comment, or error message)")
+		}
+	})
+
+	// Scenario: configure_factory keeps the .git filter
+	t.Run("configure_factory_keeps_git_filter", func(t *testing.T) {
+		if !strings.Contains(configureFactory, `[ -d "$d/.git" ]`) {
+			t.Error("configure_factory() must keep the [ -d \"$d/.git\" ] filter so non-git scratch dirs (e.g. aftmp) are excluded")
+		}
+	})
+
+	// Scenario: configure_factory error message no longer names go.mod
+	t.Run("configure_factory_error_no_longer_names_go_mod", func(t *testing.T) {
+		if !strings.Contains(configureFactory, "No git repository") {
+			t.Error("configure_factory() discovery-failure error must say 'No git repository'")
+		}
+		if strings.Contains(configureFactory, "go.mod") {
+			t.Error("configure_factory() error message must not name go.mod")
+		}
+	})
+
+	// Scenario: install_af still verifies the agentfactory source go.mod
+	t.Run("install_af_preserves_source_go_mod_check", func(t *testing.T) {
+		if !strings.Contains(installAf, "$SCRIPT_DIR/go.mod") {
+			t.Error("install_af() must keep its $SCRIPT_DIR/go.mod AF-source check")
+		}
+		if !strings.Contains(installAf, "agentfactory") {
+			t.Error("install_af() must keep grepping the source go.mod for agentfactory")
+		}
+	})
+}
