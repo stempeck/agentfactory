@@ -398,14 +398,14 @@ configure_shell() {
 configure_factory() {
     log_step "Configuring agentfactory workspace"
 
-    # Find the repo directory — look for a git repo with go.mod, not just any dir.
+    # Find the repo directory — first git repo under the workspace (the cloned target).
     local repo_dir=""
     for d in "$WORKSPACE_DIR"/*/; do
-        [ -d "$d/.git" ] && [ -f "$d/go.mod" ] && { repo_dir="${d%/}"; break; }
+        [ -d "$d/.git" ] && { repo_dir="${d%/}"; break; }
     done
 
     if [ -z "$repo_dir" ]; then
-        log_error "No git repository with go.mod found under $WORKSPACE_DIR"
+        log_error "No git repository found under $WORKSPACE_DIR"
         return 1
     fi
 
