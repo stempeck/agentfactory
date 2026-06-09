@@ -224,3 +224,7 @@ agents at runtime — agents legitimately manage real sessions.
   (why the trust-dialog handler is out of scope)
 - Related issues: #297 (watchdog self-recovery), #288 (watchdog introduction), #303 (doc-only
   enforcement proved insufficient)
+- Related issue #327 (env-family hermeticity): the next member of the chokepoint lineage
+  `TMUX → GOTMPDIR → AF_*/CLAUDE_*` — an `AF_*`/`CLAUDE_*` prefix-wipe (`NeutralizeAFEnv`) at the
+  same env-free, build-tag-gated `TestMain → tmuxisolation` boundary, incl. a `//go:build integration`
+  companion `TestMain` for `internal/cmd`

@@ -328,7 +328,7 @@ func (s *Store) Render(_ context.Context, id string) (string, error) {
 		return "", fmt.Errorf("render %s: %w", id, issuestore.ErrNotFound)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "ID: %s\nTitle: %s\nType: %s\nStatus: %s\nPriority: %d\n",
+	fmt.Fprintf(&b, "ID: %s\nTitle: %s\nType: %s\nStatus: %s\nPriority: %s\n",
 		iss.ID, iss.Title, iss.Type, iss.Status, iss.Priority)
 	if len(iss.Labels) > 0 {
 		fmt.Fprintf(&b, "Labels: %s\n", strings.Join(iss.Labels, ","))

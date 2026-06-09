@@ -824,7 +824,7 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 			"title":        "render-parity-issue",
 			"status":       string(StatusClosed),
 			"type":         string(TypeBug),
-			"priority":     "1", // PriorityHigh = 1
+			"priority":     PriorityHigh.String(), // display form: "high"
 			"label":        "render-label",
 			"description":  "the description body",
 			"notes":        "some notes",

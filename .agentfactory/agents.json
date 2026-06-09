@@ -41,6 +41,12 @@
       "directive": "Run af prime to load formula context.",
       "formula": "mergepatrol"
     },
+    "minimalworker": {
+      "type": "autonomous",
+      "description": "Minimal directive executor with no competing identity or lifecycle opinions.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "minimalworker"
+    },
     "supervisor": {
       "type": "autonomous",
       "description": "Autonomous agent for independent task execution",
