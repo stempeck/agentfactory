@@ -1,8 +1,18 @@
-// Package tmuxisolation redirects a test binary's entire process tree to a
-// private, throwaway tmux server so that a default-suite test — or any child it
-// execs (a spawned `af`, or a raw `tmux`) — can never reach the operator's real
-// tmux server. It exists for issue #317 (incident #316: a default-suite test
-// killed a live af-manager session).
+// Package tmuxisolation provides test-support process-env isolation for the
+// default unit suites, applied once per test-binary startup inside Setup before
+// m.Run(). It has two members:
+//
+//   - The TMUX family: it redirects a test binary's entire process tree to a
+//     private, throwaway tmux server (TMUX_TMPDIR) and unsets $TMUX, so that a
+//     default-suite test — or any child it execs (a spawned `af`, or a raw
+//     `tmux`) — can never reach the operator's real tmux server. This exists for
+//     issue #317 (incident #316: a default-suite test killed a live af-manager
+//     session).
+//   - The AF_*/CLAUDE_* family: NeutralizeAFEnv prefix-wipes every AF_/CLAUDE_-
+//     prefixed env var (keeping the AF_TEST_* test-infra set) so an ambient
+//     AF_SOURCE_ROOT (etc.) cannot outrank a test's own compiledSourceRoot and
+//     leak agent-gen template writes into the operator's real checkout. This
+//     exists for issue #327.
 //
 // It is wired from each package's TestMain:
 //
@@ -20,6 +30,18 @@
 // $TMUX MUST therefore also be unset, or the out-of-process backstop is
 // ineffective in exactly the #316 scenario. Do not "optimize away" the
 // Unsetenv("TMUX").
+//
+// # Load-bearing: NeutralizeAFEnv (AF_*/CLAUDE_* prefix wipe)
+//
+// resolveAFSource (internal/cmd/formula.go) ranks an ambient AF_SOURCE_ROOT env
+// value ABOVE a test's compiledSourceRoot, so a suite running inside a live agent
+// (where AF_SOURCE_ROOT is set) would resolve the operator's real checkout and
+// land agent-gen template writes there (#327). NeutralizeAFEnv wipes the whole
+// AF_*/CLAUDE_* family by PREFIX (keeping AF_TEST_*) before m.Run(), so each test
+// falls back to its own setup. It is a prefix wipe — not a named-member loop — so
+// it also covers dynamic ${AF_*} formula-variable reads and any future family
+// member; see AFEnvFamily for the documented (assertion-target) inventory. The
+// call MUST sit before m.Run(); one placed after never takes effect.
 //
 // # Cross-phase contract: OriginalTMUXTMPDIR
 //
@@ -42,8 +64,63 @@ package tmuxisolation
 import (
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 )
+
+// AFEnvFamily is the documented inventory of AF_*/CLAUDE_* env vars the
+// command layer (internal/cmd + cmd/af) reads today. It is the assertion
+// target for the coverage tests and the drift target for the structural
+// scan — it is NOT the runtime neutralization set (NeutralizeAFEnv wipes by
+// prefix, which also covers dynamic ${AF_*} formula-variable reads and any
+// future family member). If you added a new literal AF_*/CLAUDE_* read and a
+// drift-scan test sent you here: the prefix wipe ALREADY neutralizes it at
+// runtime — add it to this list only to keep the documented inventory
+// accurate. See #327 (H-1).
+var AFEnvFamily = []string{
+	"AF_ACTOR",
+	"AF_DONE_VELOCITY_THRESHOLD",
+	"AF_DONE_VELOCITY_WINDOW",
+	"AF_ROLE",
+	"AF_ROOT",
+	"AF_SOURCE_ROOT",
+	"AF_WORKTREE",
+	"AF_WORKTREE_ID",
+	"CLAUDE_SESSION_ID",
+}
+
+// AFEnvKeepPrefixes are AF_-family prefixes preserved by NeutralizeAFEnv
+// (reserved for test-infra, e.g. AF_TEST_TMPDIR from the Makefile).
+var AFEnvKeepPrefixes = []string{"AF_TEST_"}
+
+// NeutralizeAFEnv unsets every AF_/CLAUDE_-prefixed env var except the
+// AF_TEST_* keep-set, so default-suite tests cannot inherit an ambient
+// AF_SOURCE_ROOT (etc.) that overrides their own setup and leaks writes into
+// the operator's real checkout (#327/AC-2). Prefix wipe, not a named loop:
+// it also covers dynamic ${AF_*} formula-variable reads (sling.go EnvLookup)
+// and any future family member. PATH/TMUX*/GOTMPDIR/TMPDIR do not match the
+// prefixes and survive by construction. Do not optimize away — see #327 H-1.
+func NeutralizeAFEnv() {
+	for _, kv := range os.Environ() {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue // malformed entry with no '=' — skip, never slice-panic
+		}
+		if !strings.HasPrefix(key, "AF_") && !strings.HasPrefix(key, "CLAUDE_") {
+			continue
+		}
+		keep := false
+		for _, p := range AFEnvKeepPrefixes {
+			if strings.HasPrefix(key, p) {
+				keep = true
+				break
+			}
+		}
+		if !keep {
+			os.Unsetenv(key)
+		}
+	}
+}
 
 // originalTMUXTMPDIR and originalTMUX hold the operator's environment as captured
 // by Setup BEFORE any redirect, so the real socket remains reachable afterwards.
@@ -80,6 +157,13 @@ func Setup(m *testing.M) int {
 	// inside-tmux fallback. Both are required (see package doc).
 	os.Setenv("TMUX_TMPDIR", dir)
 	os.Unsetenv("TMUX")
+
+	// 4b. Load-bearing: NeutralizeAFEnv() — prefix-wipe the AF_*/CLAUDE_* family
+	// (keeping AF_TEST_*) so an ambient AF_SOURCE_ROOT cannot outrank a test's
+	// own compiledSourceRoot and leak agent-gen writes into the operator's real
+	// checkout (#327/AC-2). MUST run before m.Run(); a call after it never takes
+	// effect. Do not "optimize away" (mirrors the Unsetenv("TMUX") idiom above).
+	NeutralizeAFEnv()
 
 	// 5. Run the package's tests against the private server.
 	code := m.Run()
