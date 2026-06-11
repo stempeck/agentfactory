@@ -273,8 +273,9 @@ func TestWatchdog_PollSilenceRespectsAgentType(t *testing.T) {
 	const threshold = 2
 
 	// Several ticks so silence trips for every agent regardless of map order.
+	// nil scope = monitor all agents (the legacy "" single-agent behavior).
 	for i := 0; i < 4; i++ {
-		pollAgents(&cobra.Command{}, root, "", agentStates, failures, threshold)
+		pollAgents(&cobra.Command{}, root, nil, agentStates, failures, threshold)
 	}
 
 	managerSession := session.SessionName("manager")
@@ -285,5 +286,84 @@ func TestWatchdog_PollSilenceRespectsAgentType(t *testing.T) {
 	}
 	if nudged[workerSession] == 0 {
 		t.Error("autonomous agent 'factoryworker' must still be silence-nudged (no #298 regression), got 0 nudges")
+	}
+}
+
+// TestWatchdog_PollScopeFiltersAgents verifies the SC5 set-membership scope: a
+// non-nil scope only polls in-scope agents (an out-of-scope autonomous agent is
+// never nudged), and an interactive in-scope agent stays alert-only.
+func TestWatchdog_PollScopeFiltersAgents(t *testing.T) {
+	root := t.TempDir()
+	writeTestAgentsConfig(t, root, `{
+		"agents": {
+			"manager": {"type": "interactive", "description": "human-supervised manager"},
+			"worker_a": {"type": "autonomous", "description": "in-scope autonomous worker"},
+			"worker_b": {"type": "autonomous", "description": "out-of-scope autonomous worker"}
+		}
+	}`)
+
+	oldTmux := newWatchdogTmux
+	newWatchdogTmux = func() watchdogTmux { return &fakeWatchdogTmux{output: "idle, waiting for input"} }
+	defer func() { newWatchdogTmux = oldTmux }()
+
+	nudged := map[string]int{}
+	oldNudge := watchdogNudgeFn
+	watchdogNudgeFn = func(sessionID string) error {
+		nudged[sessionID]++
+		return nil
+	}
+	defer func() { watchdogNudgeFn = oldNudge }()
+
+	// Scope to {manager (interactive), worker_a (autonomous)} — worker_b excluded.
+	scope := buildWatchdogScope([]string{"manager", "worker_a"}, "")
+
+	agentStates := make(map[string]*watchdogAgentState)
+	failures := make(map[string]int)
+	const threshold = 2
+
+	for i := 0; i < 4; i++ {
+		pollAgents(&cobra.Command{}, root, scope, agentStates, failures, threshold)
+	}
+
+	managerSession := session.SessionName("manager")
+	workerASession := session.SessionName("worker_a")
+	workerBSession := session.SessionName("worker_b")
+
+	if nudged[workerBSession] != 0 {
+		t.Errorf("out-of-scope agent 'worker_b' must NOT be polled/nudged, got %d nudges", nudged[workerBSession])
+	}
+	if nudged[managerSession] != 0 {
+		t.Errorf("interactive in-scope agent 'manager' must stay alert-only, got %d nudges", nudged[managerSession])
+	}
+	if nudged[workerASession] == 0 {
+		t.Error("autonomous in-scope agent 'worker_a' must be silence-nudged, got 0 nudges")
+	}
+}
+
+func TestBuildWatchdogScope(t *testing.T) {
+	if scope := buildWatchdogScope(nil, ""); scope != nil {
+		t.Errorf("no flags must yield nil scope (all), got %v", scope)
+	}
+	if scope := buildWatchdogScope([]string{"  ", ""}, ""); scope != nil {
+		t.Errorf("only-blank entries must yield nil scope (all), got %v", scope)
+	}
+
+	scope := buildWatchdogScope([]string{"a", " b "}, "c")
+	if scope == nil {
+		t.Fatal("expected a non-nil scope set")
+	}
+	for _, want := range []string{"a", "b", "c"} {
+		if _, in := scope[want]; !in {
+			t.Errorf("scope missing %q; got %v", want, scope)
+		}
+	}
+	if len(scope) != 3 {
+		t.Errorf("scope size = %d, want 3 (got %v)", len(scope), scope)
+	}
+
+	// The legacy single --agent alone forms a one-element scope.
+	single := buildWatchdogScope(nil, "solo")
+	if _, in := single["solo"]; !in || len(single) != 1 {
+		t.Errorf("single --agent should yield scope {solo}, got %v", single)
 	}
 }

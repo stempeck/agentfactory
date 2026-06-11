@@ -50,7 +50,7 @@ func TestDeadWatchdogReplaced(t *testing.T) {
 	fake.running[ws] = false
 
 	cmd, _ := newTestCmd()
-	launchWatchdog(cmd, fake, root)
+	launchWatchdog(cmd, fake, root, nil)
 
 	killIdx := opIndex(fake.ops, "KillSession "+ws)
 	if killIdx < 0 {
@@ -80,7 +80,7 @@ func TestHealthyWatchdogNotDisturbed(t *testing.T) {
 	fake.paneCommand[ws] = "af"
 
 	cmd, _ := newTestCmd()
-	launchWatchdog(cmd, fake, "/factory/root")
+	launchWatchdog(cmd, fake, "/factory/root", nil)
 
 	if hasOp(fake.ops, "KillSession "+ws) {
 		t.Fatalf("healthy watchdog must NOT be killed; ops=%v", fake.ops)

@@ -96,13 +96,24 @@ func runDown(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Kill watchdog session when stopping all agents
+	// Kill watchdog + dispatcher sessions when stopping all agents. Mirrors the
+	// startup symmetry: `start_dispatch: true` in startup.json has `af up` bring
+	// the dispatcher up, so a stop-all `af down` tears it back down (#303). The
+	// inline HasSession guard + KillSession (rather than the `af dispatch stop`
+	// handler, which errors when the dispatcher is absent) keeps the no-dispatcher
+	// case silent.
 	if len(args) == 0 {
 		watchdogSession := session.WatchdogSessionName()
 		tx := newCmdTmux()
 		if running, _ := tx.HasSession(watchdogSession); running {
 			_ = tx.KillSession(watchdogSession)
 			fmt.Fprintf(cmd.OutOrStdout(), "Stopped %s\n", watchdogSession)
+		}
+
+		dispatchSession := session.DispatchSessionName()
+		if running, _ := tx.HasSession(dispatchSession); running {
+			_ = tx.KillSession(dispatchSession)
+			fmt.Fprintf(cmd.OutOrStdout(), "Stopped %s\n", dispatchSession)
 		}
 	}
 

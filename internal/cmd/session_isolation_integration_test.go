@@ -107,7 +107,7 @@ func TestSessionIsolation_SentinelUntouched(t *testing.T) {
 	// Drive the under-test session-lifecycle code through the fake:
 	//   spawn path — launchWatchdog -> NewSession(af-test-<hex>-watchdog)
 	//   kill  path — af down sentinel-<hex> -> Stop() -> KillSession(af-test-<hex>-sentinel-<hex>)
-	launchWatchdog(cmd, newCmdTmux(), root)
+	launchWatchdog(cmd, newCmdTmux(), root, nil)
 	_ = runDown(cmd, []string{agentName})
 
 	// 1. The under-test code actually went through the fake (seam is engaged).

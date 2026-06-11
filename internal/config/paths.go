@@ -17,6 +17,7 @@ func FactoryConfigPath(root string) string   { return filepath.Join(root, dotDir
 func AgentsConfigPath(root string) string    { return filepath.Join(root, dotDir, "agents.json") }
 func MessagingConfigPath(root string) string { return filepath.Join(root, dotDir, "messaging.json") }
 func DispatchConfigPath(root string) string  { return filepath.Join(root, dotDir, "dispatch.json") }
+func StartupConfigPath(root string) string   { return filepath.Join(root, dotDir, "startup.json") }
 func HooksDir(root string) string            { return filepath.Join(root, dotDir, "hooks") }
 func StoreDir(root string) string            { return filepath.Join(root, dotDir, "store") }
 func FormulasDir(root string) string         { return filepath.Join(StoreDir(root), "formulas") }

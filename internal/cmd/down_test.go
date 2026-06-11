@@ -14,6 +14,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/checkpoint"
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
+	"github.com/stempeck/agentfactory/internal/session"
 	"github.com/stempeck/agentfactory/internal/worktree"
 )
 
@@ -905,5 +906,89 @@ func TestDown_Reset_BehavioralFreshStart(t *testing.T) {
 	}
 	if newID == meta.ID {
 		t.Errorf("new worktree ID should differ from original: both are %q", newID)
+	}
+}
+
+// --- SC9 (#303 Phase 4): bare `af down` dispatch teardown ---
+
+// setupDownFactory writes a minimal factory root (factory.json + agents.json),
+// chdir's into it, and installs the hermetic tmux/store seam. Mirrors the
+// up_startup_test.go pattern. Returns the recording fake.
+func setupDownFactory(t *testing.T) *fakeTmux {
+	t.Helper()
+	root := t.TempDir()
+	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
+	writeAFFile(t, root, "agents.json",
+		`{"agents":{"manager":{"type":"autonomous","description":"m"}}}`)
+	t.Chdir(root)
+	fake, _ := setupHermeticSessions(t)
+	return fake
+}
+
+// SC9: a bare `af down` (stop-all) tears down a running dispatch session, mirroring
+// the watchdog teardown. Uses the LIVE session.DispatchSessionName() (namespaced under
+// the hermetic seam), NOT the init-frozen dispatchSessionName var.
+func TestDown_StopsDispatchSession(t *testing.T) {
+	fake := setupDownFactory(t)
+	fake.present[session.DispatchSessionName()] = true
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	if err := runDown(cmd, nil); err != nil {
+		t.Fatalf("runDown: %v", err)
+	}
+
+	killOp := "KillSession " + session.DispatchSessionName()
+	if !opRecorded(fake.ops, killOp) {
+		t.Errorf("bare `af down` with a running dispatcher must record %q; ops=%v", killOp, fake.ops)
+	}
+	if !strings.Contains(buf.String(), "Stopped "+session.DispatchSessionName()) {
+		t.Errorf("expected a 'Stopped %s' line; out=%q", session.DispatchSessionName(), buf.String())
+	}
+}
+
+// SC9 silent no-op: a bare `af down` with NO dispatcher running records no KillSession
+// for the dispatch session and does not error (the inline HasSession guard, not
+// runDispatchStop, keeps the no-dispatcher case quiet).
+func TestDown_NoDispatchSession_Silent(t *testing.T) {
+	fake := setupDownFactory(t)
+	// dispatch session intentionally NOT marked present.
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	if err := runDown(cmd, nil); err != nil {
+		t.Fatalf("runDown should not error when no dispatcher is running: %v", err)
+	}
+
+	killOp := "KillSession " + session.DispatchSessionName()
+	if opRecorded(fake.ops, killOp) {
+		t.Errorf("no dispatcher running ⇒ no %q op expected; ops=%v", killOp, fake.ops)
+	}
+}
+
+// SC9 scope: `af down <agent>` (positional arg ⇒ len(args) != 0) must NOT touch the
+// dispatcher, even when it is running — the teardown block is stop-all only.
+func TestDown_SingleAgent_LeavesDispatch(t *testing.T) {
+	fake := setupDownFactory(t)
+	fake.present[session.DispatchSessionName()] = true
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	if err := runDown(cmd, []string{"manager"}); err != nil {
+		t.Fatalf("runDown manager: %v", err)
+	}
+
+	killOp := "KillSession " + session.DispatchSessionName()
+	if opRecorded(fake.ops, killOp) {
+		t.Errorf("`af down <agent>` must NOT tear down the dispatcher; ops=%v", fake.ops)
 	}
 }

@@ -141,7 +141,7 @@ func checkCompactHandoffRate(cwd, agentName string) {
 
 	// Escalate to supervisor if threshold exceeded
 	if counter.Count > compactHandoffThreshold {
-		_ = sendHandoffMail("supervisor",
+		_ = sendHandoffMail(escalationTarget,
 			"COMPACTION RATE ALERT: Rapid compaction cycling detected",
 			fmt.Sprintf("Agent %s has triggered %d compaction handoffs within %v. "+
 				"This may indicate a context pressure loop. Please investigate.",

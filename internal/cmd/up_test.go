@@ -107,21 +107,35 @@ title = "Step 1"
 	}
 }
 
-func TestRunUp_AbortsOnWorktreeFailure(t *testing.T) {
+// PR2-HIGH-2: a mid-loop worktree-creation failure must NO LONGER fatally abort. It
+// warns, skips that agent, and CONTINUES to the next; runUp returns the non-fatal
+// aggregate "some agents failed to start" (allOK=false), NOT the old
+// "worktree creation failed for ..." abort. This REPLACES the former
+// TestRunUp_AbortsOnWorktreeFailure, which encoded the removed fatal-abort contract.
+//
+// The conversion applies to ALL worktree-creation failures (cap, disk, git). The
+// worktree cap cannot be exercised hermetically: ResolveOrCreate runs GC first
+// (worktree.go:686), and GC shells out to the REAL `tmux has-session` (worktree.go:631)
+// — not the fake — so it prunes the just-created test worktrees and the count never
+// reaches the cap. So this drives the same warn+skip+continue code path via a
+// git-add failure (no initTestGitRepo, exactly like the replaced test) with TWO
+// agents: BOTH fail, and the fact that BOTH are warned proves the loop CONTINUED past
+// the first failure instead of aborting on it (the behavioral change under test).
+func TestRunUp_WorktreeCapHit_SkipsAndContinues(t *testing.T) {
 	root := t.TempDir()
+	// NOTE: deliberately NO initTestGitRepo — `git worktree add` then fails for every
+	// agent, deterministically driving the worktree-creation-failure path.
 	afDir := filepath.Join(root, ".agentfactory")
 	os.MkdirAll(afDir, 0o755)
-	os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{"type":"factory","version":1,"name":"test"}`), 0o644)
+	os.WriteFile(filepath.Join(afDir, "factory.json"),
+		[]byte(`{"type":"factory","version":1,"name":"test"}`), 0o644)
 	os.WriteFile(filepath.Join(afDir, "agents.json"),
-		[]byte(`{"agents":{"solver":{"type":"autonomous","description":"test"}}}`), 0o644)
+		[]byte(`{"agents":{"alpha":{"type":"autonomous","description":"a"},"bravo":{"type":"autonomous","description":"b"}}}`), 0o644)
 
 	t.Setenv("AF_WORKTREE", "")
 	t.Setenv("AF_WORKTREE_ID", "")
 	t.Chdir(root)
 
-	// Hermetic: fake tmux (IsAvailable()==true) + memstore, so runUp proceeds past
-	// the IsAvailable gate to the worktree-creation logic under test instead of
-	// aborting at the default-build GUARD's IsAvailable()==false. #309 substrate.
 	setupHermeticSessions(t)
 
 	cmd := &cobra.Command{}
@@ -129,12 +143,25 @@ func TestRunUp_AbortsOnWorktreeFailure(t *testing.T) {
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
 
-	err := runUp(cmd, []string{"solver"})
+	err := runUp(cmd, nil)
+	out := buf.String()
+
 	if err == nil {
-		t.Fatal("runUp should return error when worktree creation fails")
+		t.Fatal("runUp should return the non-fatal aggregate error when worktree creation fails")
 	}
-	if !strings.Contains(err.Error(), "worktree creation failed") {
-		t.Errorf("error should contain 'worktree creation failed', got: %v", err)
+	if !strings.Contains(err.Error(), "some agents failed to start") {
+		t.Errorf("error should be the aggregate 'some agents failed to start', got: %v", err)
+	}
+	if strings.Contains(err.Error(), "worktree creation failed for") {
+		t.Errorf("the old fatal 'worktree creation failed for ...' abort must be gone, got: %v", err)
+	}
+	if !strings.Contains(out, "skipping") {
+		t.Errorf("a worktree failure must warn+skip (not abort); out=%q", out)
+	}
+	// The loop must have CONTINUED past the first failure to the second agent —
+	// proven by BOTH agents being warned (the old fatal abort returned after the first).
+	if !strings.Contains(out, "for alpha:") || !strings.Contains(out, "for bravo:") {
+		t.Errorf("both agents must be warned+skipped, proving the loop continued past the first failure; out=%q", out)
 	}
 }
 

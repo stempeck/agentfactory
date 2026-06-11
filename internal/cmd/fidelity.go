@@ -63,22 +63,63 @@ func runFidelity(cmd *cobra.Command, args []string) error {
 
 	switch args[0] {
 	case "on":
-		if err := os.WriteFile(gateFile, []byte("on\n"), 0644); err != nil {
-			return fmt.Errorf("enabling fidelity gate: %w", err)
+		if err := applyFidelityGate(factoryRoot, cwd, "on"); err != nil {
+			return err
 		}
 		fmt.Println("fidelity gate: on")
 	case "off":
-		hookedFormula := filepath.Join(cwd, ".runtime", "hooked_formula")
-		if _, err := os.Stat(hookedFormula); err == nil {
-			return fmt.Errorf("cannot disable fidelity gate while a formula is active (found .runtime/hooked_formula)")
-		}
-		if err := os.WriteFile(gateFile, []byte("off\n"), 0644); err != nil {
-			return fmt.Errorf("disabling fidelity gate: %w", err)
+		if err := applyFidelityGate(factoryRoot, cwd, "off"); err != nil {
+			return err
 		}
 		fmt.Println("fidelity gate: off")
 	default:
 		return fmt.Errorf("usage: af fidelity [on|off]")
 	}
 
+	return nil
+}
+
+// applyFidelityGate writes the fidelity gate, honoring the active-formula guard
+// for "off". root locates the gate file (.agentfactory/.fidelity-gate);
+// formulaDir is where .runtime/hooked_formula is checked (cwd for the CLI today,
+// the af-up-resolved root for the Phase-3 startup path). Write errors are wrapped
+// with the same messages runFidelity used historically; the guard refusal is
+// returned verbatim so CLI behavior is unchanged.
+func applyFidelityGate(root, formulaDir, state string) error {
+	gateFile := fidelityGateFile(root)
+	switch state {
+	case "on":
+		if err := os.WriteFile(gateFile, []byte("on\n"), 0644); err != nil {
+			return fmt.Errorf("enabling fidelity gate: %w", err)
+		}
+		return nil
+	case "off":
+		hookedFormula := filepath.Join(formulaDir, ".runtime", "hooked_formula")
+		if _, err := os.Stat(hookedFormula); err == nil {
+			return fmt.Errorf("cannot disable fidelity gate while a formula is active (found .runtime/hooked_formula)")
+		}
+		if err := os.WriteFile(gateFile, []byte("off\n"), 0644); err != nil {
+			return fmt.Errorf("disabling fidelity gate: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("usage: af fidelity [on|off]")
+}
+
+// applyGate applies a quality/fidelity gate state using the af-up-resolved root
+// (R-7: never re-derived from cwd). "default"/"" is a no-op (C-4 invariant).
+// quality has no active-formula guard and is a direct write; fidelity routes
+// through applyFidelityGate so the guard is honored. Its only caller is Phase 3's
+// runUp (the SC8 mechanism).
+func applyGate(root, formulaDir, gate, state string) error {
+	if state == "" || state == "default" {
+		return nil
+	}
+	switch gate {
+	case "quality":
+		return os.WriteFile(qualityGateFile(root), []byte(state+"\n"), 0644)
+	case "fidelity":
+		return applyFidelityGate(root, formulaDir, state)
+	}
 	return nil
 }

@@ -128,7 +128,7 @@ func TestReproduce_ManagerKillVector(t *testing.T) {
 		fake.present[ws] = true
 		fake.running[ws] = false // tmux session alive but `af` not running → zombie
 		cmd, _ := newTestCmd()
-		launchWatchdog(cmd, fake, t.TempDir())
+		launchWatchdog(cmd, fake, t.TempDir(), nil)
 		if !hasOp(fake.ops, "KillSession "+ws) {
 			t.Fatalf("the #288 vector did not issue KillSession against %q; ops=%v", ws, fake.ops)
 		}
