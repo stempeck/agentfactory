@@ -508,8 +508,10 @@ func unlinkBeforeRemove(worktreePath string) {
 // worktree at creation, WITHOUT touching skills the worktree's branch committed
 // itself. Provenance comes from git: a skill directory tracked in the worktree's
 // index is branch content and is preserved; an untracked directory whose name
-// matches a factory skill is a merge copy and is removed. If git tracking cannot
-// be determined, nothing is removed (ADR-017: when in doubt, don't delete).
+// matches a factory skill is a merge copy and is removed. If the git invocation
+// fails (e.g. git unavailable, or the path is not a git repository), nothing is
+// removed (ADR-017: when in doubt, don't delete). In production the worktree is
+// always a real git worktree, so the query resolves against its own index.
 func cleanupMergedSkills(factoryRoot, worktreePath string) {
 	skillsRel := filepath.Join(".claude", "skills")
 	wtSkillsDir := filepath.Join(worktreePath, skillsRel)
@@ -535,9 +537,9 @@ func cleanupMergedSkills(factoryRoot, worktreePath string) {
 }
 
 // trackedSkillDirs returns the set of top-level directory names under
-// .claude/skills tracked in the worktree's git index. ok is false if git
-// tracking could not be determined (e.g. git unavailable), in which case the
-// caller must not delete anything.
+// .claude/skills tracked in the worktree's git index. ok is false if the git
+// invocation fails (e.g. git unavailable, or worktreePath is not a git
+// repository), in which case the caller must not delete anything.
 func trackedSkillDirs(worktreePath string) (map[string]bool, bool) {
 	cmd := exec.Command("git", "ls-files", "-z", "--", ".claude/skills")
 	cmd.Dir = worktreePath

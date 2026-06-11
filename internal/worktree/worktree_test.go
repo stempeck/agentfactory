@@ -529,6 +529,92 @@ func TestRemove_FullLifecycle(t *testing.T) {
 	}
 }
 
+// TestRemove_PreservesBranchCommittedCollidingSkill drives the full public
+// Remove path (the af down / formula-completion lifecycle the issue names) and
+// asserts that a branch-committed skill whose name collides with a factory skill
+// is preserved: teardown removes only the untracked merge copy, so the non-force
+// git worktree remove succeeds instead of bricking on a tree dirtied by deleting
+// tracked content (the originally reported symptom).
+func TestRemove_PreservesBranchCommittedCollidingSkill(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	// .agentfactory/ is gitignored in production so worktree setup files do not
+	// block non-force removal.
+	if err := os.WriteFile(filepath.Join(realDir, ".gitignore"), []byte(".agentfactory/\n"), 0o644); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
+	// Commit a skill under .claude/skills whose name collides with a factory
+	// skill; the worktree inherits it as tracked branch content.
+	committed := filepath.Join(realDir, ".claude", "skills", "github-issue", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(committed), 0o755); err != nil {
+		t.Fatalf("mkdir committed skill: %v", err)
+	}
+	if err := os.WriteFile(committed, []byte("branch-committed github-issue"), 0o644); err != nil {
+		t.Fatalf("write committed skill: %v", err)
+	}
+	for _, args := range [][]string{
+		{"add", ".gitignore", ".claude/skills/github-issue/SKILL.md"},
+		{"commit", "-m", "add committed skill"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = realDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	// A factory-only skill present on disk but NOT committed; the lifecycle
+	// merge-copies it into the worktree as an untracked entry that teardown
+	// should still remove.
+	factoryOnly := filepath.Join(realDir, ".claude", "skills", "architecture-docs")
+	if err := os.MkdirAll(factoryOnly, 0o755); err != nil {
+		t.Fatalf("mkdir factory-only skill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(factoryOnly, "SKILL.md"), []byte("factory architecture-docs"), 0o644); err != nil {
+		t.Fatalf("write factory-only skill: %v", err)
+	}
+
+	absPath, meta, err := Create(realDir, "solver", CreateOpts{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Preconditions: the worktree tracks the committed colliding skill and has
+	// the untracked factory merge copy.
+	if _, err := os.Stat(filepath.Join(absPath, ".claude", "skills", "github-issue", "SKILL.md")); err != nil {
+		t.Fatalf("precondition: committed skill should exist in worktree: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(absPath, ".claude", "skills", "architecture-docs")); err != nil {
+		t.Fatalf("precondition: factory merge copy should exist in worktree: %v", err)
+	}
+	if tracked, ok := trackedSkillDirs(absPath); !ok || !tracked["github-issue"] {
+		t.Fatalf("precondition: github-issue should be git-tracked in worktree (ok=%v tracked=%v)", ok, tracked)
+	}
+
+	// Non-force Remove must succeed. Against the pre-fix code it fails because
+	// deleting the tracked skill dirties the tree and git refuses the remove.
+	if err := Remove(realDir, meta); err != nil {
+		t.Fatalf("Remove should succeed with branch-committed skills preserved: %v", err)
+	}
+
+	// Worktree is cleanly gone and no orphaned worktree survives with a deleted
+	// committed skill.
+	if _, err := os.Stat(absPath); !os.IsNotExist(err) {
+		t.Errorf("worktree dir should not exist after Remove, got err: %v", err)
+	}
+}
+
 func TestFindByOwner_NotFound(t *testing.T) {
 	dir := t.TempDir()
 	realDir, err := filepath.EvalSymlinks(dir)
@@ -1916,19 +2002,29 @@ func TestCleanupMergedSkills_PreservesBranchCommittedCollidingSkill(t *testing.T
 }
 
 // TestCleanupMergedSkills_FailSafeWhenProvenanceUnknown asserts ADR-017 Rule 3:
-// when git tracking cannot be determined (the worktree dir is not a git repo,
-// so git ls-files errors), cleanup deletes nothing rather than guessing.
+// when the git invocation fails, cleanup deletes nothing rather than guessing.
+// A .git file pointing at a non-existent gitdir forces git ls-files to error
+// deterministically — independent of whether TMPDIR sits inside an enclosing
+// git repository.
 func TestCleanupMergedSkills_FailSafeWhenProvenanceUnknown(t *testing.T) {
 	factoryRoot := t.TempDir()
 	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills", "github-issue"), 0o755)
 	os.WriteFile(filepath.Join(factoryRoot, ".claude", "skills", "github-issue", "SKILL.md"), []byte("factory"), 0o644)
 
-	// Worktree is a real directory but NOT a git repo, so git ls-files errors
-	// and provenance is undeterminable.
 	worktreePath := t.TempDir()
+	// Broken git boundary: git stops upward discovery at this .git file and then
+	// fails because the referenced gitdir does not exist.
+	if err := os.WriteFile(filepath.Join(worktreePath, ".git"), []byte("gitdir: ./nonexistent-gitdir\n"), 0o644); err != nil {
+		t.Fatalf("write broken .git: %v", err)
+	}
 	colliding := filepath.Join(worktreePath, ".claude", "skills", "github-issue")
 	os.MkdirAll(colliding, 0o755)
 	os.WriteFile(filepath.Join(colliding, "SKILL.md"), []byte("local"), 0o644)
+
+	// Sanity: provenance must be undeterminable for this test to be meaningful.
+	if _, ok := trackedSkillDirs(worktreePath); ok {
+		t.Fatal("precondition failed: git tracking should be undeterminable here")
+	}
 
 	cleanupMergedSkills(factoryRoot, worktreePath)
 
