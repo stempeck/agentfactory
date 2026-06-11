@@ -545,6 +545,8 @@ func trackedSkillDirs(worktreePath string) (map[string]bool, bool) {
 	if err != nil {
 		return nil, false
 	}
+	// git ls-files always emits forward-slash paths regardless of OS, so the
+	// literal "/" prefix and split are correct (do not swap for filepath.Separator).
 	const prefix = ".claude/skills/"
 	dirs := make(map[string]bool)
 	for _, p := range strings.Split(string(out), "\x00") {

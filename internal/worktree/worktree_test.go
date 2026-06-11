@@ -1915,6 +1915,28 @@ func TestCleanupMergedSkills_PreservesBranchCommittedCollidingSkill(t *testing.T
 	}
 }
 
+// TestCleanupMergedSkills_FailSafeWhenProvenanceUnknown asserts ADR-017 Rule 3:
+// when git tracking cannot be determined (the worktree dir is not a git repo,
+// so git ls-files errors), cleanup deletes nothing rather than guessing.
+func TestCleanupMergedSkills_FailSafeWhenProvenanceUnknown(t *testing.T) {
+	factoryRoot := t.TempDir()
+	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills", "github-issue"), 0o755)
+	os.WriteFile(filepath.Join(factoryRoot, ".claude", "skills", "github-issue", "SKILL.md"), []byte("factory"), 0o644)
+
+	// Worktree is a real directory but NOT a git repo, so git ls-files errors
+	// and provenance is undeterminable.
+	worktreePath := t.TempDir()
+	colliding := filepath.Join(worktreePath, ".claude", "skills", "github-issue")
+	os.MkdirAll(colliding, 0o755)
+	os.WriteFile(filepath.Join(colliding, "SKILL.md"), []byte("local"), 0o644)
+
+	cleanupMergedSkills(factoryRoot, worktreePath)
+
+	if _, err := os.Stat(filepath.Join(colliding, "SKILL.md")); err != nil {
+		t.Errorf("nothing should be deleted when git provenance is unknown (ADR-017 Rule 3); err=%v", err)
+	}
+}
+
 func TestCleanupMergedSkills_NoOpOnSymlink(t *testing.T) {
 	factoryRoot := t.TempDir()
 	worktreePath := t.TempDir()
