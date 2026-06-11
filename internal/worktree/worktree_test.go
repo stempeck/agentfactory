@@ -1814,7 +1814,12 @@ func TestEnsureWorktreeLinks_RealSkillsDir_MergesFactorySkills(t *testing.T) {
 
 func TestCleanupMergedSkills_RemovesFactoryCopiedEntries(t *testing.T) {
 	factoryRoot := t.TempDir()
+	// Cleanup runs inside a real git worktree in production; provenance is
+	// derived from git, so the test worktree must be a real git repo. The
+	// factory-named copies below are left UNTRACKED (merge copies), so they
+	// are still removed.
 	worktreePath := t.TempDir()
+	initGitRepo(t, worktreePath)
 
 	// Factory has skills A and B
 	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills", "skill-A"), 0o755)
@@ -1822,7 +1827,7 @@ func TestCleanupMergedSkills_RemovesFactoryCopiedEntries(t *testing.T) {
 	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills", "skill-B"), 0o755)
 	os.WriteFile(filepath.Join(factoryRoot, ".claude", "skills", "skill-B", "SKILL.md"), []byte("B"), 0o644)
 
-	// Worktree has skills A, B (merged), and C (git-tracked only)
+	// Worktree has skills A, B (untracked merge copies), and a non-colliding entry
 	os.MkdirAll(filepath.Join(worktreePath, ".claude", "skills", "skill-A"), 0o755)
 	os.WriteFile(filepath.Join(worktreePath, ".claude", "skills", "skill-A", "SKILL.md"), []byte("A"), 0o644)
 	os.MkdirAll(filepath.Join(worktreePath, ".claude", "skills", "skill-B"), 0o755)
@@ -1832,7 +1837,7 @@ func TestCleanupMergedSkills_RemovesFactoryCopiedEntries(t *testing.T) {
 
 	cleanupMergedSkills(factoryRoot, worktreePath)
 
-	// Factory-matching entries (A, B) should be removed
+	// Factory-matching untracked entries (A, B) should be removed
 	if _, err := os.Stat(filepath.Join(worktreePath, ".claude", "skills", "skill-A")); !os.IsNotExist(err) {
 		t.Error("skill-A should have been removed by cleanup")
 	}
@@ -1840,9 +1845,73 @@ func TestCleanupMergedSkills_RemovesFactoryCopiedEntries(t *testing.T) {
 		t.Error("skill-B should have been removed by cleanup")
 	}
 
-	// Git-only entry should survive
+	// Non-colliding entry should survive (not a factory skill name)
 	if _, err := os.Stat(filepath.Join(worktreePath, ".claude", "skills", "git-only-skill")); err != nil {
 		t.Error("git-only-skill should survive cleanup")
+	}
+}
+
+// TestCleanupMergedSkills_PreservesBranchCommittedCollidingSkill is the
+// regression test for issue #59: a skill directory the worktree's branch
+// committed itself must survive teardown even when its name collides with a
+// factory skill, while an untracked merge copy of a factory skill is removed.
+func TestCleanupMergedSkills_PreservesBranchCommittedCollidingSkill(t *testing.T) {
+	factoryRoot := t.TempDir()
+	for _, s := range []string{"github-issue", "architecture-docs"} {
+		dir := filepath.Join(factoryRoot, ".claude", "skills", s)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir factory skill %s: %v", s, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("factory "+s), 0o644); err != nil {
+			t.Fatalf("write factory skill %s: %v", s, err)
+		}
+	}
+
+	// Worktree is a real git repo whose branch COMMITS .claude/skills/github-issue
+	// (name collides with a factory skill, but it is branch content).
+	worktreePath := t.TempDir()
+	initGitRepo(t, worktreePath)
+	committed := filepath.Join(worktreePath, ".claude", "skills", "github-issue", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(committed), 0o755); err != nil {
+		t.Fatalf("mkdir committed skill: %v", err)
+	}
+	if err := os.WriteFile(committed, []byte("branch-committed github-issue"), 0o644); err != nil {
+		t.Fatalf("write committed skill: %v", err)
+	}
+	for _, args := range [][]string{
+		{"add", ".claude/skills/github-issue/SKILL.md"},
+		{"commit", "-m", "add branch-committed skill"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = worktreePath
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	// An UNTRACKED merge copy of a factory skill is also present (lifecycle artifact).
+	mergedDir := filepath.Join(worktreePath, ".claude", "skills", "architecture-docs")
+	if err := os.MkdirAll(mergedDir, 0o755); err != nil {
+		t.Fatalf("mkdir merged skill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mergedDir, "SKILL.md"), []byte("factory architecture-docs"), 0o644); err != nil {
+		t.Fatalf("write merged skill: %v", err)
+	}
+
+	cleanupMergedSkills(factoryRoot, worktreePath)
+
+	// Branch-committed colliding skill must survive with its content intact.
+	data, err := os.ReadFile(committed)
+	if err != nil {
+		t.Fatalf("branch-committed colliding skill was destroyed: %v", err)
+	}
+	if string(data) != "branch-committed github-issue" {
+		t.Errorf("branch-committed skill content changed: got %q", data)
+	}
+
+	// Untracked merge copy must be removed.
+	if _, err := os.Stat(mergedDir); !os.IsNotExist(err) {
+		t.Errorf("untracked merge copy should have been removed; err=%v", err)
 	}
 }
 
