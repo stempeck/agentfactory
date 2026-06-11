@@ -969,7 +969,7 @@ func TestEnsureGitExclude_CreatesEntries(t *testing.T) {
 	if !strings.Contains(content, "# agentfactory managed paths") {
 		t.Error("missing sentinel comment")
 	}
-	for _, pattern := range []string{".agentfactory/", ".runtime/", "AGENTS.md", ".claude/"} {
+	for _, pattern := range []string{".agentfactory/*", ".runtime/", "AGENTS.md", ".claude/"} {
 		if !strings.Contains(content, pattern) {
 			t.Errorf("missing pattern: %s", pattern)
 		}
@@ -1003,7 +1003,7 @@ func TestEnsureGitExclude_Idempotent(t *testing.T) {
 	if count := strings.Count(content, "# agentfactory managed paths"); count != 1 {
 		t.Errorf("sentinel count = %d, want 1", count)
 	}
-	for _, pattern := range []string{".agentfactory/", ".runtime/", "AGENTS.md", ".claude/"} {
+	for _, pattern := range []string{".agentfactory/*", ".runtime/", "AGENTS.md", ".claude/"} {
 		if count := strings.Count(content, pattern); count != 1 {
 			t.Errorf("pattern %q count = %d, want 1", pattern, count)
 		}
@@ -1038,7 +1038,7 @@ func TestEnsureGitExclude_PreservesExisting(t *testing.T) {
 	if !strings.Contains(content, "# agentfactory managed paths") {
 		t.Error("missing sentinel comment")
 	}
-	for _, pattern := range []string{".agentfactory/", ".runtime/", "AGENTS.md", ".claude/"} {
+	for _, pattern := range []string{".agentfactory/*", ".runtime/", "AGENTS.md", ".claude/"} {
 		if !strings.Contains(content, pattern) {
 			t.Errorf("missing pattern: %s", pattern)
 		}
@@ -1066,9 +1066,123 @@ func TestEnsureGitExclude_MissingFile(t *testing.T) {
 	if !strings.Contains(content, "# agentfactory managed paths") {
 		t.Error("missing sentinel comment")
 	}
-	for _, pattern := range []string{".agentfactory/", ".runtime/", "AGENTS.md", ".claude/"} {
+	for _, pattern := range []string{".agentfactory/*", ".runtime/", "AGENTS.md", ".claude/"} {
 		if !strings.Contains(content, pattern) {
 			t.Errorf("missing pattern: %s", pattern)
+		}
+	}
+}
+
+// TestEnsureGitExclude_DoesNotDefeatGitignoreReincludes locks in the BEHAVIOR
+// (not just the file contents) that issue #338 requires: in a repo whose committed
+// .gitignore opts in to tracking agent definitions via contents-form + re-includes,
+// the managed info/exclude block must NOT swallow a fresh, untracked agent dir. The
+// directory-form pattern ".agentfactory/" excludes the parent dir, which (per git's
+// "cannot re-include a child of an excluded parent" rule) silently defeats those
+// re-includes; the contents-form ".agentfactory/*" keeps the parent traversable so
+// the committed .gitignore — which outranks info/exclude — wins. Tracked files bypass
+// ignore entirely, so the agent dir here is left untracked to expose the defect.
+func TestEnsureGitExclude_DoesNotDefeatGitignoreReincludes(t *testing.T) {
+	root := t.TempDir()
+
+	gitEnv := append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.test",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.test",
+	)
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		cmd.Env = gitEnv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	runGit("init", "-q")
+
+	// Mirror the repo's own committed model (.gitignore:43-56): contents form plus
+	// targeted re-includes for the per-agent CLAUDE.md and .claude/settings.json.
+	gitignore := strings.Join([]string{
+		".runtime/",
+		".agentfactory/worktrees/",
+		".agentfactory/*",
+		"!.agentfactory/agents/",
+		".agentfactory/agents/**",
+		"!.agentfactory/agents/*/",
+		"!.agentfactory/agents/*/.claude/",
+		"!.agentfactory/agents/*/.claude/settings.json",
+		"!.agentfactory/agents/*/CLAUDE.md",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(gitignore), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", ".gitignore")
+	runGit("commit", "-q", "-m", "add gitignore", "--no-gpg-sign")
+
+	// A brand-new, UNTRACKED agent dir. Tracked files bypass ignore and would mask the bug.
+	agentDir := filepath.Join(root, ".agentfactory", "agents", "foo")
+	claudeDir := filepath.Join(agentDir, ".claude")
+	runtimeDir := filepath.Join(agentDir, ".runtime")
+	for _, d := range []string{claudeDir, runtimeDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []string{
+		filepath.Join(agentDir, "CLAUDE.md"),
+		filepath.Join(claudeDir, "settings.json"),
+		filepath.Join(claudeDir, "settings.local.json"),
+		filepath.Join(runtimeDir, "session_id"),
+	} {
+		if err := os.WriteFile(p, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Action under test: write the managed .git/info/exclude block.
+	if err := ensureGitExclude(root); err != nil {
+		t.Fatalf("ensureGitExclude: %v", err)
+	}
+
+	// `git check-ignore -q PATH` exits 0 when PATH is ignored, 1 when it is not.
+	isIgnored := func(rel string) bool {
+		t.Helper()
+		cmd := exec.Command("git", "check-ignore", "-q", "--", rel)
+		cmd.Dir = root
+		cmd.Env = gitEnv
+		err := cmd.Run()
+		if err == nil {
+			return true
+		}
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+			return false
+		}
+		t.Fatalf("git check-ignore %s: unexpected error: %v", rel, err)
+		return false
+	}
+
+	// The repo owner opted in: agent definitions must stay track-able.
+	for _, rel := range []string{
+		".agentfactory/agents/foo/CLAUDE.md",
+		".agentfactory/agents/foo/.claude/settings.json",
+	} {
+		if isIgnored(rel) {
+			t.Errorf("%s should NOT be ignored: the committed .gitignore re-includes it, "+
+				"but the managed info/exclude block defeated that re-include", rel)
+		}
+	}
+
+	// Runtime cruft and local overrides must remain ignored regardless of re-includes.
+	for _, rel := range []string{
+		".agentfactory/agents/foo/.claude/settings.local.json",
+		".agentfactory/agents/foo/.runtime/session_id",
+	} {
+		if !isIgnored(rel) {
+			t.Errorf("%s should remain ignored", rel)
 		}
 	}
 }

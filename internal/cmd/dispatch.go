@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -453,7 +454,14 @@ func runDispatchStart(cmd *cobra.Command, args []string) error {
 	}
 
 	interval := resolveDispatchInterval(dispatchStartInterval, dispatchCfg.IntervalSecs)
+	return launchDispatchSession(cmd, root, t, interval)
+}
 
+// launchDispatchSession creates the dispatcher tmux session and sends the loop
+// command — the shared launch core for the strict CLI path (runDispatchStart)
+// and the lenient af-up path (startDispatch). All tmux side-effects route
+// through the injected t so tests stay hermetic.
+func launchDispatchSession(cmd *cobra.Command, root string, t cmdTmux, interval int) error {
 	// Ensure .runtime/ exists so tee -a .runtime/dispatch.log works on first run
 	if err := os.MkdirAll(filepath.Join(root, ".runtime"), 0o755); err != nil {
 		return fmt.Errorf("creating .runtime directory: %w", err)
@@ -476,6 +484,37 @@ func runDispatchStart(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Dispatcher started (session: %s, interval: %ds)\n", dispatchSessionName, interval)
 	return nil
+}
+
+// startDispatch starts the dispatcher if not already running, for the af-up
+// startup path. An already-running dispatcher is a benign no-op (distinct from
+// runDispatchStart's strict CLI error). An absent dispatch.json or the empty
+// install default skips with a friendly message; any other config error
+// (unreadable file, malformed JSON, invalid values) is surfaced as a warning.
+// All config outcomes return nil, but a real launch failure from
+// launchDispatchSession (.runtime creation, tmux new-session, send-keys) IS
+// returned: the af-up call site folds it into allOK (warn + non-zero exit)
+// rather than aborting, so a dispatcher failure still never aborts af up
+// mid-flight. The caller passes its own injected cmdTmux.
+func startDispatch(cmd *cobra.Command, root string, t cmdTmux) error {
+	if running, _ := t.HasSession(dispatchSessionName); running {
+		fmt.Fprintf(cmd.OutOrStdout(), "Dispatcher already running (session: %s)\n", dispatchSessionName)
+		return nil
+	}
+
+	cfg, err := config.LoadDispatchConfig(root)
+	if errors.Is(err, config.ErrNotFound) || errors.Is(err, config.ErrMissingField) {
+		// Absent, or present but not yet filled in (the install default).
+		fmt.Fprintf(cmd.OutOrStdout(), "skipping dispatch (dispatch.json not configured)\n")
+		return nil
+	}
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: skipping dispatch: %v\n", err)
+		return nil
+	}
+
+	interval := resolveDispatchInterval(dispatchStartInterval, cfg.IntervalSecs)
+	return launchDispatchSession(cmd, root, t, interval)
 }
 
 func runDispatchStop(cmd *cobra.Command, args []string) error {

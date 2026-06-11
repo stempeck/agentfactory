@@ -22,6 +22,7 @@ import (
 var (
 	watchdogInterval       int
 	watchdogAgent          string
+	watchdogAgents         []string
 	watchdogSilenceTimeout int
 )
 
@@ -41,6 +42,7 @@ failures and escalates to the supervisor for manual intervention.`,
 func init() {
 	watchdogCmd.Flags().IntVar(&watchdogInterval, "interval", 30, "Polling interval in seconds")
 	watchdogCmd.Flags().StringVar(&watchdogAgent, "agent", "", "Monitor a specific agent (default: all)")
+	watchdogCmd.Flags().StringSliceVar(&watchdogAgents, "agents", nil, "Monitor a set of agents (CSV/repeatable; default: all)")
 	watchdogCmd.Flags().IntVar(&watchdogSilenceTimeout, "silence-timeout", 300, "Seconds of no output change before triggering recovery")
 	rootCmd.AddCommand(watchdogCmd)
 }
@@ -137,7 +139,7 @@ func checkCircuitBreaker(failures map[string]int, name string) bool {
 		return false
 	}
 	if failures[name] == watchdogMaxConsecutiveFailures {
-		_ = sendHandoffMail("supervisor",
+		_ = sendHandoffMail(escalationTarget,
 			fmt.Sprintf("WATCHDOG CIRCUIT BREAKER: %s failed %d consecutive recoveries. Manual intervention required.",
 				name, watchdogMaxConsecutiveFailures),
 			fmt.Sprintf("Agent %s has failed %d consecutive recovery attempts. The watchdog has stopped auto-recovery. Please investigate manually.",
@@ -179,7 +181,7 @@ func recoverAgent(root, agentName string, entry config.AgentEntry, pattern strin
 		fmt.Fprintf(os.Stderr, "watchdog: %s: failed to write last_error: %v\n", agentName, err)
 	}
 
-	_ = sendHandoffMail("supervisor",
+	_ = sendHandoffMail(escalationTarget,
 		fmt.Sprintf("WATCHDOG: %s session failure detected: %s", agentName, pattern),
 		fmt.Sprintf("Watchdog detected failure in agent %s: %s. Session will be respawned.", agentName, pattern))
 
@@ -243,6 +245,10 @@ func runWatchdog(cmd *cobra.Command, args []string) error {
 	agentStates := make(map[string]*watchdogAgentState)
 	failures := make(map[string]int)
 
+	// Scope folds the legacy single --agent into the multi-agent --agents set so
+	// `af watchdog --agent X` keeps working (C-4). A nil scope means "all".
+	scope := buildWatchdogScope(watchdogAgents, watchdogAgent)
+
 	fmt.Fprintf(cmd.OutOrStdout(), "watchdog: started (interval=%ds, silence-timeout=%ds)\n",
 		watchdogInterval, watchdogSilenceTimeout)
 
@@ -255,12 +261,31 @@ func runWatchdog(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(cmd.OutOrStdout(), "watchdog: shutting down\n")
 			return nil
 		case <-ticker.C:
-			pollAgents(cmd, root, watchdogAgent, agentStates, failures, silenceThreshold)
+			pollAgents(cmd, root, scope, agentStates, failures, silenceThreshold)
 		}
 	}
 }
 
-func pollAgents(cmd *cobra.Command, root, specificAgent string, agentStates map[string]*watchdogAgentState, failures map[string]int, silenceThreshold int) {
+// buildWatchdogScope builds the monitoring scope set, folding the single --agent
+// value into the --agents set. It returns nil ("all") when no scope is requested
+// so the existing bare-`af watchdog` and `--agent X` behaviors are unchanged.
+func buildWatchdogScope(agents []string, single string) map[string]struct{} {
+	scope := make(map[string]struct{})
+	for _, a := range agents {
+		if a = strings.TrimSpace(a); a != "" {
+			scope[a] = struct{}{}
+		}
+	}
+	if single != "" {
+		scope[single] = struct{}{}
+	}
+	if len(scope) == 0 {
+		return nil
+	}
+	return scope
+}
+
+func pollAgents(cmd *cobra.Command, root string, scope map[string]struct{}, agentStates map[string]*watchdogAgentState, failures map[string]int, silenceThreshold int) {
 	agentsPath := config.AgentsConfigPath(root)
 	agentsCfg, err := config.LoadAgentConfig(agentsPath)
 	if err != nil {
@@ -271,8 +296,11 @@ func pollAgents(cmd *cobra.Command, root, specificAgent string, agentStates map[
 	tx := newWatchdogTmux()
 
 	for name, entry := range agentsCfg.Agents {
-		if specificAgent != "" && name != specificAgent {
-			continue
+		// scope is nil ⇒ all (C-4); non-nil ⇒ only members.
+		if scope != nil {
+			if _, in := scope[name]; !in {
+				continue
+			}
 		}
 
 		sessionID := session.SessionName(name)
