@@ -504,6 +504,14 @@ func unlinkBeforeRemove(worktreePath string) {
 	}
 }
 
+// cleanupMergedSkills removes factory skills that were merge-copied into the
+// worktree at creation, WITHOUT touching skills the worktree's branch committed
+// itself. Provenance comes from git: a skill directory tracked in the worktree's
+// index is branch content and is preserved; an untracked directory whose name
+// matches a factory skill is a merge copy and is removed. If the git invocation
+// fails (e.g. git unavailable, or the path is not a git repository), nothing is
+// removed (ADR-017: when in doubt, don't delete). In production the worktree is
+// always a real git worktree, so the query resolves against its own index.
 func cleanupMergedSkills(factoryRoot, worktreePath string) {
 	skillsRel := filepath.Join(".claude", "skills")
 	wtSkillsDir := filepath.Join(worktreePath, skillsRel)
@@ -516,9 +524,47 @@ func cleanupMergedSkills(factoryRoot, worktreePath string) {
 	if err != nil {
 		return
 	}
+	tracked, ok := trackedSkillDirs(worktreePath)
+	if !ok {
+		return // provenance unknown — preserve everything (ADR-017)
+	}
 	for _, entry := range entries {
+		if tracked[entry.Name()] {
+			continue // branch-committed skill — preserve
+		}
 		os.RemoveAll(filepath.Join(wtSkillsDir, entry.Name()))
 	}
+}
+
+// trackedSkillDirs returns the set of top-level directory names under
+// .claude/skills tracked in the worktree's git index. ok is false if the git
+// invocation fails (e.g. git unavailable, or worktreePath is not a git
+// repository), in which case the caller must not delete anything.
+func trackedSkillDirs(worktreePath string) (map[string]bool, bool) {
+	cmd := exec.Command("git", "ls-files", "-z", "--", ".claude/skills")
+	cmd.Dir = worktreePath
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, false
+	}
+	// git ls-files always emits forward-slash paths regardless of OS, so the
+	// literal "/" prefix and split are correct (do not swap for filepath.Separator).
+	const prefix = ".claude/skills/"
+	dirs := make(map[string]bool)
+	for _, p := range strings.Split(string(out), "\x00") {
+		if !strings.HasPrefix(p, prefix) {
+			continue
+		}
+		rest := p[len(prefix):]
+		name := rest
+		if i := strings.IndexByte(rest, '/'); i >= 0 {
+			name = rest[:i]
+		}
+		if name != "" {
+			dirs[name] = true
+		}
+	}
+	return dirs, true
 }
 
 // Remove removes a worktree: git worktree remove, delete meta file,
