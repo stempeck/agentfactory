@@ -1,4 +1,4 @@
-.PHONY: build install clean clean-venv test generate test-integration check-formulas sync-formulas install-hooks check-skills sync-skills check-formula-skills
+.PHONY: build install clean clean-venv test generate test-integration check-formulas sync-formulas install-hooks check-skills sync-skills check-formula-skills check-regen
 
 BINARY := af
 BUILD_DIR := .
@@ -83,6 +83,23 @@ check-skills:
 check-formula-skills:
 	@mkdir -p $(AF_TEST_TMPDIR)
 	@TMPDIR=$(AF_TEST_TMPDIR) GOTMPDIR=$(AF_TEST_TMPDIR) go test -run TestEmbeddedFormulaSkillsAvailable ./internal/cmd/
+
+# Regeneration parity check (af-13234830 Phase 3 / six_sigma_gaps Gap 5): proves the
+# committed role templates in internal/templates/roles/ match what regeneration
+# produces from the current formulas. A forgotten `agent-gen-all.sh` run after editing
+# a formula would otherwise ship stale agent-identity prose — e.g. a branch literal
+# fixed in the formula but never propagated into the rendered template — silently
+# breaking agents on a non-main (e.g. master) repo.
+#
+# This is the honest alternative to un-skipping formula_template_drift_test.go (whose
+# chicken-and-egg skip is real: a brand-new formula has no committed template until
+# agent-gen runs in a live factory). It is intentionally NOT a `go test` and NOT part
+# of `make test`: agent-gen-all.sh is non-hermetic — it needs `af` on PATH, runs
+# `af down --all`, and regenerates agent artifacts — so it MUST run from the main repo
+# checkout, never a git worktree. Depends on `install` to put a fresh `af` on PATH.
+check-regen: install
+	PATH="$(HOME)/.local/bin:$$PATH" bash agent-gen-all.sh --no-build
+	git diff --exit-code internal/templates/roles/
 
 sync-skills:
 	@for d in internal/cmd/install_skills/*/; do \

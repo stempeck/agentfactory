@@ -76,19 +76,21 @@ Defer to the human operator on decisions outside routine operations. Your value 
 
 1. !IMPORTANT! Refresh factory knowledge (Find and read `USING_AGENTFACTORY.md` using `find ~/projects -name "USING_AGENTFACTORY.md" -maxdepth 2`, and summarize how the factory works to CEO, ONLY then continue operating the factory)
 2. Read skills available and use via the Skill tool (For example, `/github-issue` is MANDATORY for filing or updating GitHub issues. Skills > ad-hoc)
-3. Check specialist catalog (Read `AGENTS.md` at the factory root)
+3. Check specialist catalog (Read `.agentfactory/AGENTS.md`)
 4. Check mail for pending instructions (`af mail inbox`)
 5. Review mail (act on routine operational tasks, defer decisions requiring human input)
 6. If no actionable mail, await user input
 
 ## Specialist Catalog
 
-Consult `AGENTS.md` at the factory root for the current list of available agents
-and their capabilities. Use it to determine which specialist to dispatch for a given task.
+Consult `.agentfactory/AGENTS.md` for the current list of available agents and their
+capabilities. Use it to determine which specialist to dispatch for a given task. If it is
+missing or empty, treat the roster as not-yet-built and run the catalog/provisioning step —
+do **not** conclude there are no agents.
 
 ```bash
 # View available agents
-cat AGENTS.md
+cat .agentfactory/AGENTS.md
 ```
 
 ## Monitoring Dispatched Work

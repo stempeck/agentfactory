@@ -11,13 +11,29 @@
 #                    server at `py/issuestore/` is spawned by mcpstore) and
 #                    tmux (used by internal/cmd/integration_test.go). The
 #                    Makefile builds a venv from py/requirements.txt on demand.
+#   - regen        : `make check-regen` regenerates the role templates from the
+#                    current formulas (agent-gen-all.sh) and fails if the committed
+#                    internal/templates/roles/ diverge — closing six_sigma_gaps Gap 5
+#                    (a forgotten regen shipping stale, branch-broken agent identity).
+#                    Non-hermetic (needs `af` on PATH); runs on a full checkout, not a
+#                    worktree, so it is a dedicated job rather than part of `make test`.
 #   - supply-chain-lint : --require-hashes enforcement for all pip install sites.
 
 name: test
 
 on:
   push:
+    branches: [main]
+    tags: ['V*']
   pull_request:
+  workflow_dispatch:
+
+# Supersession control for superseded PR commits — NOT the dedup mechanism.
+# Dedup is the push trigger filter above (trigger-schema deletion; see
+# .designs/af-85f7458b/design-doc.md "Architecture Elevation Verdict").
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -44,8 +60,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-      - name: install tmux (required by internal/cmd/integration_test.go)
-        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: install system deps (tmux for internal/cmd/integration_test.go; libsqlite3-0 so the Python issue-store's sqlite3 can load libsqlite3.so.0)
+        run: sudo apt-get update && sudo apt-get install -y tmux libsqlite3-0
       # Python 3.12 is required by the in-tree MCP server
       # (py/issuestore/server.py) that mcpstore spawns and by install.go's
       # checkPython312. The Makefile's test-integration target builds a
@@ -57,6 +73,22 @@ jobs:
           python-version: '3.12'
       - name: make test-integration
         run: make test-integration
+
+  regen:
+    name: regen
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      # `make check-regen` builds + installs `af`, runs agent-gen-all.sh --no-build to
+      # regenerate internal/templates/roles/ from the current formulas, then
+      # `git diff --exit-code` fails the job if the committed templates are stale.
+      # This is the regeneration half of af-13234830 (Gap 5): formula source edits are
+      # only durable if the rendered agent identity is regenerated to match.
+      - name: regeneration parity check
+        run: make check-regen
 
   supply-chain-lint:
     name: supply-chain-lint

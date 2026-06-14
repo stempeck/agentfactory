@@ -18,7 +18,7 @@ You are an ephemeral worker. You:
 beads created from it. Use `af prime` to find them - do NOT read this file directly.
 
 **You do NOT:**
-- Push directly to main (Supervisor merges)
+- Push directly to the default branch (Supervisor merges)
 - Close your own issue (Supervisor closes after merge)
 - Wait for merge (you're done at submission)
 - Handle rebase conflicts (Supervisor dispatches fresh agents for that)
@@ -130,7 +130,7 @@ git checkout -- .
 **4. Sync with main:**
 ```bash
 git fetch origin
-git rebase origin/main      # Get latest, rebase your branch
+git rebase origin/{{default_branch}}      # Get latest, rebase your branch
 ```
 
 If rebase conflicts:
@@ -153,7 +153,7 @@ let someone else's mess consume your entire mission.
 **1. Check tests on main:**
 ```bash
 git stash                   # Save your branch state
-git checkout origin/main
+git checkout origin/{{default_branch}}
 # Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
 # Then run it. Examples: make test, npm test, cargo test, go test ./...
 ```
@@ -180,10 +180,10 @@ Make a judgment call:
 # Fix the issue
 git add <files>
 git commit -m "fix: <description> (pre-existing failure)"
-git push origin main
+git push origin {{default_branch}}
 git checkout -
 git stash pop
-git rebase origin/main      # Get your fix
+git rebase origin/{{default_branch}}      # Get your fix
 ```
 
 **File and proceed path:**
@@ -283,8 +283,8 @@ Review your own changes before running tests.
 
 **1. Review the diff:**
 ```bash
-git diff origin/main...HEAD     # All changes vs main
-git log --oneline origin/main..HEAD  # All commits
+git diff origin/{{default_branch}}...HEAD     # All changes vs main
+git log --oneline origin/{{default_branch}}..HEAD  # All commits
 ```
 
 **2. Check for common issues:**
@@ -302,7 +302,7 @@ Don't just note them - fix them now. Amend or add commits as needed.
 
 **4. Verify no unintended changes:**
 ```bash
-git diff --stat origin/main...HEAD
+git diff --stat origin/{{default_branch}}...HEAD
 # Only files relevant to {{issue}} should appear
 ```
 
@@ -334,7 +334,7 @@ Verify your changes don't break anything and are properly tested.
 ```bash
 # Check if failure exists on main:
 git stash
-git checkout main
+git checkout {{default_branch}}
 # Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
 # Then run it. Examples: make test, npm test, cargo test, go test ./...
 git checkout -
@@ -349,7 +349,7 @@ git stash pop
 **4. Validate terraform if .tf files were modified:**
 ```bash
 # Check if any .tf files were changed in this branch
-TF_CHANGED=$(git diff --name-only origin/main...HEAD -- '*.tf' | head -1)
+TF_CHANGED=$(git diff --name-only origin/{{default_branch}}...HEAD -- '*.tf' | head -1)
 if [ -n "$TF_CHANGED" ]; then
   echo "Terraform files modified — running validation..."
   TF_DIR=$(dirname "$TF_CHANGED")
@@ -411,8 +411,8 @@ git push -u origin $(git branch --show-current)
 ```bash
 git status                  # Clean
 git stash list              # Empty
-git log origin/main..HEAD   # Your commits
-git diff origin/main...HEAD # Your changes (expected)
+git log origin/{{default_branch}}..HEAD   # Your commits
+git diff origin/{{default_branch}}...HEAD # Your changes (expected)
 ```
 
 **Exit criteria:** Branch pushed, workspace clean, no cruft."""

@@ -2,7 +2,7 @@ description = """
 ## Overview
 PR merge processor patrol loop.
 
-The MergePatrol is the Engineer in the engine room. You process agent branches, merging them to main one at a time with sequential rebasing.
+The MergePatrol is the Engineer in the engine room. You process agent branches, merging them to the default branch one at a time with sequential rebasing.
 
 **The Scotty Test**: Before proceeding past any failure, ask yourself: "Would Scotty walk past a warp core leak because it existed before his shift?"
 
@@ -47,9 +47,20 @@ Every step produces a file artifact at a known path. `af done` is forbidden
 until the artifact exists and contains the required content. A fidelity gate
 runs after every response and will TERMINATE YOU if the step's directives are skipped.
 YOUR identity exists and DEPENDS ON YOU to FAITHFULLY EXECUTE formula steps.
+
+## !IMPORTANT - Wake Discipline (instantiate BEFORE you assess)
+On EVERY wake — session start, cron fire, `af handoff`, or a user nudge like "continue" —
+your FIRST action is to ensure a formula instance is live:
+- Run `af prime`. If it shows NO current step, immediately run
+  `af sling --formula mergepatrol --no-launch`, then drive it (af prime -> execute -> af done).
+- "No active formula step" NEVER means "no work." Work discovery happens INSIDE the
+  queue-scan step, not before it. You may NOT declare the queue empty until queue-scan
+  has actually run.
+- NEVER substitute ad-hoc `af mail` / `gh pr list` checks or an external cron loop for the
+  formula. The formula IS the patrol loop; looping lives in burn-or-loop, not outside it.
 """
 formula = "mergepatrol"
-version = 4
+version = 5
 
 [[steps]]
 id = "inbox-check"
@@ -90,8 +101,8 @@ Mark as read. The work will be processed in queue-scan/process-branch.
 **Merge verification (REQUIRED before deleting in any later step)**:
 Before deleting any MERGE_READY message, you MUST verify the merge landed on main:
 ```bash
-git log main --oneline -10  # Confirm merge commit for this branch exists
-git diff --name-only main...<branch>  # Should be empty if content is on main
+git log {{default_branch}} --oneline -10  # Confirm merge commit for this branch exists
+git diff --name-only {{default_branch}}...<branch>  # Should be empty if content is on main
 ```
 Only delete after merge-push step confirms the merge landed.
 
@@ -172,7 +183,7 @@ Pick next branch from queue. Attempt mechanical rebase on current main.
 **Step 1: Checkout and attempt rebase**
 ```bash
 git checkout -b temp origin/<agent-branch>
-git rebase origin/main
+git rebase origin/{{default_branch}}
 ```
 
 **Step 2: Check rebase result**
@@ -199,14 +210,40 @@ If rebase FAILED with conflicts:
 git rebase --abort
 ```
 
-2. **Record conflict metadata**:
+2. **Distinguish a TRUE conflict from a rebase-only conflict** (REQUIRED before skipping):
+A rebase replays each commit individually, so an *intermediate* commit can conflict even
+when the branch merges into main cleanly — GitHub reports such PRs as MERGEABLE. A rebase
+conflict ALONE is NOT grounds to skip a PR. Verify against how the PR actually lands on
+main — a merge:
 ```bash
-# Capture main SHA for reference
-MAIN_SHA=$(git rev-parse origin/main)
+git checkout -B temp origin/{{default_branch}}
+git merge --no-ff --no-edit origin/<agent-branch>
+MERGE_RC=$?
+git diff --name-only --diff-filter=U   # lists conflicted files, empty if merge clean
+```
+
+3. **If the merge SUCCEEDED** (MERGE_RC=0 and no unmerged files):
+This was a FALSE-POSITIVE rebase conflict. `temp` now holds main + the branch's work as a
+merge commit and is still a fast-forward from main, so merge-push's `git merge --ff-only temp`
+works unchanged. Proceed to run-tests — the PR is mergeable.
+
+4. **If the merge ALSO conflicted** (unmerged files present): this is a TRUE conflict
+requiring human resolution.
+
+   a. **Restore a clean state** (do NOT leave repo conflicted; remove the throwaway temp):
+```bash
+git merge --abort
+git checkout --detach origin/{{default_branch}}   # step off temp so it can be deleted
+git branch -D temp
+```
+
+   b. **Record conflict metadata**:
+```bash
+MAIN_SHA=$(git rev-parse origin/{{default_branch}})
 BRANCH_SHA=$(git rev-parse origin/<agent-branch>)
 ```
 
-3. **Create conflict-resolution task**:
+   c. **Create conflict-resolution task**:
 ```bash
 af bead create --type task --priority 1 \
   --title "Resolve merge conflicts: <original-issue-title>" \
@@ -220,7 +257,7 @@ Branch SHA: ${BRANCH_SHA}
 
 ## Instructions
 1. Clone/checkout the branch
-2. Rebase on current main: git rebase origin/main
+2. Rebase on current main: git rebase origin/{{default_branch}}
 3. Resolve conflicts
 4. Force push: git push -f origin <branch>
 5. Close this task when done
@@ -228,13 +265,15 @@ Branch SHA: ${BRANCH_SHA}
 The PR will be re-queued for processing after conflicts are resolved."
 ```
 
-4. **Skip this PR** (do NOT delete branch):
+   d. **Skip this PR** (do NOT delete branch):
 - Leave branch intact for conflict resolution
 - Leave PR open (will be re-processed after resolution)
 - Continue to loop-check for next branch
 
 **CRITICAL**: Never delete a branch that has conflicts. The branch contains
 the original work and must be preserved for conflict resolution.
+A rebase conflict alone is NOT a true conflict — only skip after the MERGE check in
+sub-step 2 also fails.
 
 Track: rebase result (success/conflict), conflict task ID if created."""
 
@@ -279,16 +318,17 @@ This is non-negotiable. Never disavow. Never "note and proceed." """
 
 [[steps]]
 id = "merge-push"
-title = "Merge and push to main"
+title = "Merge and push to the default branch"
 needs = ["handle-failures"]
 description = """
-Merge to main and push. CRITICAL: Notifications come IMMEDIATELY after push.
+Merge to the default branch and push. CRITICAL: Notifications come IMMEDIATELY after push.
 
 **Step 1: Merge and Push**
 ```bash
-git checkout main
+git checkout {{default_branch}}
 git merge --ff-only temp
-git push origin main
+git rev-parse --verify origin/{{default_branch}} || { echo "ERROR: origin/{{default_branch}} not found — aborting push"; exit 1; }
+git push origin {{default_branch}}
 ```
 
 ⚠️ **STOP HERE - DO NOT PROCEED UNTIL STEPS 2-3 COMPLETE**
@@ -314,9 +354,9 @@ by a human from GitHub UI), skip the MERGED notification. No agent to notify.
 ⚠️ **VERIFICATION BEFORE CLOSING**: Confirm the work is actually on main:
 ```bash
 # Get the commit message/issue from the branch
-git log origin/main --oneline | grep "<issue-id>"
+git log origin/{{default_branch}} --oneline | grep "<issue-id>"
 # OR verify the commit SHA is on main:
-git branch --contains <commit-sha> | grep main
+git branch --contains <commit-sha> | grep {{default_branch}}
 ```
 
 If work is NOT on main, DO NOT close the PR. Investigate first.
@@ -446,7 +486,7 @@ Look for messages that were processed but not deleted:
 - MERGE_READY where merge completed but deletion was missed:
   **VERIFY before deleting** — do NOT assume the merge completed:
   1. Parse Branch from message body
-  2. Verify merge landed: `git log main --oneline | grep <branch-or-issue>`
+  2. Verify merge landed: `git log {{default_branch}} --oneline | grep <branch-or-issue>`
   3. If merged (commit found on main): delete the message
   4. If NOT merged: DO NOT delete. This represents unfinished work.
      Leave for next patrol cycle.
@@ -465,7 +505,7 @@ gh pr list --state open
 
 For each open PR:
 1. Check if branch exists: `git ls-remote origin refs/heads/<branch>`
-2. If branch gone, verify work is on main: `git log origin/main --oneline | grep "<issue>"`
+2. If branch gone, verify work is on main: `git log origin/{{default_branch}} --oneline | grep "<issue>"`
 3. If work on main → close PR with comment "Merged (verified on main)"
 4. If work NOT on main → investigate before closing
 

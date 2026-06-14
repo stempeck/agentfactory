@@ -444,7 +444,7 @@ func TestWriteAgentsMd_CreatesNewFile(t *testing.T) {
 		t.Fatalf("writeAgentsMd: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	data, err := os.ReadFile(filepath.Join(dir, ".agentfactory", "AGENTS.md"))
 	if err != nil {
 		t.Fatalf("reading AGENTS.md: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestWriteAgentsMd_BlockReplace(t *testing.T) {
 	dir := setupFactoryDir(t)
 
 	prelude := "# My Project Notes\n\nSome existing content.\n\n"
-	agentsMdPath := filepath.Join(dir, "AGENTS.md")
+	agentsMdPath := filepath.Join(dir, ".agentfactory", "AGENTS.md")
 	if err := os.WriteFile(agentsMdPath, []byte(prelude), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -517,6 +517,51 @@ func TestWriteAgentsMd_BlockReplace(t *testing.T) {
 	}
 	if strings.Count(content, agentsMdBegin) != 1 {
 		t.Error("duplicate begin markers after replace")
+	}
+}
+
+func TestWriteAgentsMd_LoadErrorWarns(t *testing.T) {
+	dir := setupFactoryDir(t)
+
+	// Corrupt agents.json so config.LoadAgentConfig returns an error.
+	agentsCfg := filepath.Join(dir, ".agentfactory", "agents.json")
+	if err := os.WriteFile(agentsCfg, []byte("{not valid json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// writeAgentsMd writes the warning straight to os.Stderr (no cobra stream in
+	// scope), so capture it via an os.Pipe — same idiom as TestInstallRoleFallbackWarning.
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+
+	writeErr := writeAgentsMd(dir)
+
+	w.Close()
+	var stderrBuf bytes.Buffer
+	stderrBuf.ReadFrom(r)
+	os.Stderr = origStderr
+
+	// Non-fatal: a load error must NOT fail the install (AC-5).
+	if writeErr != nil {
+		t.Fatalf("writeAgentsMd should be non-fatal on load error, got: %v", writeErr)
+	}
+
+	// The previously-silent failure must now be observable on stderr.
+	out := stderrBuf.String()
+	if !strings.Contains(strings.ToLower(out), "warning") {
+		t.Errorf("expected a warning on stderr for unparseable agents.json, got: %q", out)
+	}
+	if !strings.Contains(out, "roster") && !strings.Contains(out, "agents") {
+		t.Errorf("expected the warning to mention the roster/agents load failure, got: %q", out)
+	}
+
+	// No roster file should be written when the catalog can't be loaded.
+	if _, statErr := os.Stat(filepath.Join(dir, ".agentfactory", "AGENTS.md")); !os.IsNotExist(statErr) {
+		t.Errorf("expected no roster file on load error, stat err: %v", statErr)
 	}
 }
 

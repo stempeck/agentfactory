@@ -245,6 +245,9 @@ func runFormulaAgentGen(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Keep the roster (.agentfactory/AGENTS.md) in sync with the mutated agents.json.
+	regenRoster(root)
+
 	if isUpdate {
 		fmt.Fprintf(cmd.ErrOrStderr(), "✓ Agent entry updated in .agentfactory/agents.json\n")
 	} else {
@@ -392,6 +395,10 @@ func runFormulaAgentGenDelete(cmd *cobra.Command, agentName string) error {
 	if err := config.SaveAgentConfig(agentsPath, cfg); err != nil {
 		return fmt.Errorf("saving agents.json: %w", err)
 	}
+
+	// Keep the roster (.agentfactory/AGENTS.md) in sync with the mutated agents.json.
+	regenRoster(root)
+
 	fmt.Fprintf(cmd.ErrOrStderr(), "✓ Agent entry removed from .agentfactory/agents.json\n")
 
 	// Remove template file (only when AF source tree is available)

@@ -846,8 +846,9 @@ func TestWorktreeLifecycle_SymlinksAndTeardown(t *testing.T) {
 	// Create factory-root resources that symlinks will target
 	os.MkdirAll(filepath.Join(realWorkspace, ".claude", "skills"), 0o755)
 	os.MkdirAll(filepath.Join(realWorkspace, ".runtime"), 0o755)
-	if _, err := os.Stat(filepath.Join(realWorkspace, "AGENTS.md")); os.IsNotExist(err) {
-		os.WriteFile(filepath.Join(realWorkspace, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+	os.MkdirAll(filepath.Join(realWorkspace, ".agentfactory"), 0o755)
+	if _, err := os.Stat(filepath.Join(realWorkspace, ".agentfactory", "AGENTS.md")); os.IsNotExist(err) {
+		os.WriteFile(filepath.Join(realWorkspace, ".agentfactory", "AGENTS.md"), []byte("# Agents\n"), 0o644)
 	}
 
 	// Create worktree via Go API
@@ -857,7 +858,7 @@ func TestWorktreeLifecycle_SymlinksAndTeardown(t *testing.T) {
 	}
 
 	// Verify symlinks
-	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", filepath.Join(".agentfactory", "AGENTS.md")} {
 		link := filepath.Join(wtPath, rel)
 		target, err := os.Readlink(link)
 		if err != nil {
@@ -907,7 +908,7 @@ func TestWorktreeLifecycle_SymlinksAndTeardown(t *testing.T) {
 		t.Fatalf("worktree.ForceRemove: %v", err)
 	}
 
-	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", filepath.Join(".agentfactory", "AGENTS.md")} {
 		if _, err := os.Stat(filepath.Join(realWorkspace, rel)); err != nil {
 			t.Errorf("factory root resource %s missing after teardown: %v", rel, err)
 		}
@@ -966,8 +967,9 @@ func TestWorktreeLifecycle_WithHostGitignore(t *testing.T) {
 	// Create factory-root resources
 	os.MkdirAll(filepath.Join(realWorkspace, ".claude", "skills"), 0o755)
 	os.MkdirAll(filepath.Join(realWorkspace, ".runtime"), 0o755)
-	if _, err := os.Stat(filepath.Join(realWorkspace, "AGENTS.md")); os.IsNotExist(err) {
-		os.WriteFile(filepath.Join(realWorkspace, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+	os.MkdirAll(filepath.Join(realWorkspace, ".agentfactory"), 0o755)
+	if _, err := os.Stat(filepath.Join(realWorkspace, ".agentfactory", "AGENTS.md")); os.IsNotExist(err) {
+		os.WriteFile(filepath.Join(realWorkspace, ".agentfactory", "AGENTS.md"), []byte("# Agents\n"), 0o644)
 	}
 
 	// Create worktree via Go API
@@ -977,7 +979,7 @@ func TestWorktreeLifecycle_WithHostGitignore(t *testing.T) {
 	}
 
 	// Verify symlinks work despite .claude/ being gitignored
-	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", filepath.Join(".agentfactory", "AGENTS.md")} {
 		link := filepath.Join(wtPath, rel)
 		target, err := os.Readlink(link)
 		if err != nil {
@@ -1008,7 +1010,7 @@ func TestWorktreeLifecycle_WithHostGitignore(t *testing.T) {
 		t.Fatalf("worktree.ForceRemove: %v", err)
 	}
 
-	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", filepath.Join(".agentfactory", "AGENTS.md")} {
 		if _, err := os.Stat(filepath.Join(realWorkspace, rel)); err != nil {
 			t.Errorf("factory root resource %s missing after teardown: %v", rel, err)
 		}
@@ -1086,8 +1088,9 @@ func TestWorktreeLifecycle_GitTrackedSkillsMerge(t *testing.T) {
 		t.Fatalf("write factory-skill SKILL.md: %v", err)
 	}
 	os.MkdirAll(filepath.Join(realWorkspace, ".runtime"), 0o755)
-	if _, err := os.Stat(filepath.Join(realWorkspace, "AGENTS.md")); os.IsNotExist(err) {
-		os.WriteFile(filepath.Join(realWorkspace, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+	os.MkdirAll(filepath.Join(realWorkspace, ".agentfactory"), 0o755)
+	if _, err := os.Stat(filepath.Join(realWorkspace, ".agentfactory", "AGENTS.md")); os.IsNotExist(err) {
+		os.WriteFile(filepath.Join(realWorkspace, ".agentfactory", "AGENTS.md"), []byte("# Agents\n"), 0o644)
 	}
 
 	// Create worktree via Go API
@@ -1134,13 +1137,13 @@ func TestWorktreeLifecycle_GitTrackedSkillsMerge(t *testing.T) {
 		t.Errorf(".runtime symlink: got %q, want %q", runtimeTarget, filepath.Join(realWorkspace, ".runtime"))
 	}
 
-	// Verify AGENTS.md is a symlink to factory root
-	agentsLink := filepath.Join(wtPath, "AGENTS.md")
+	// Verify .agentfactory/AGENTS.md is a symlink to factory root
+	agentsLink := filepath.Join(wtPath, ".agentfactory", "AGENTS.md")
 	agentsTarget, err := os.Readlink(agentsLink)
 	if err != nil {
-		t.Errorf("readlink AGENTS.md: %v", err)
-	} else if agentsTarget != filepath.Join(realWorkspace, "AGENTS.md") {
-		t.Errorf("AGENTS.md symlink: got %q, want %q", agentsTarget, filepath.Join(realWorkspace, "AGENTS.md"))
+		t.Errorf("readlink .agentfactory/AGENTS.md: %v", err)
+	} else if agentsTarget != filepath.Join(realWorkspace, ".agentfactory", "AGENTS.md") {
+		t.Errorf(".agentfactory/AGENTS.md symlink: got %q, want %q", agentsTarget, filepath.Join(realWorkspace, ".agentfactory", "AGENTS.md"))
 	}
 
 	// ForceRemove and verify factory root resources intact
@@ -1148,7 +1151,7 @@ func TestWorktreeLifecycle_GitTrackedSkillsMerge(t *testing.T) {
 		t.Fatalf("worktree.ForceRemove: %v", err)
 	}
 
-	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", filepath.Join(".agentfactory", "AGENTS.md")} {
 		if _, err := os.Stat(filepath.Join(realWorkspace, rel)); err != nil {
 			t.Errorf("factory root resource %s missing after teardown: %v", rel, err)
 		}
