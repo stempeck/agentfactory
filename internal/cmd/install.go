@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/claude"
 	"github.com/stempeck/agentfactory/internal/config"
+	"github.com/stempeck/agentfactory/internal/fsutil"
 	"github.com/stempeck/agentfactory/internal/issuestore/mcpstore"
 	"github.com/stempeck/agentfactory/internal/templates"
 )
@@ -493,10 +494,11 @@ const (
 	agentsMdEnd   = "## END AgentFactory Agents"
 )
 
-func writeAgentsMd(cwd string) error {
-	agentsPath := config.AgentsConfigPath(cwd)
+func writeAgentsMd(root string) error {
+	agentsPath := config.AgentsConfigPath(root)
 	agents, err := config.LoadAgentConfig(agentsPath)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: agent roster not written: could not load %s: %v\n", agentsPath, err)
 		return nil
 	}
 
@@ -521,11 +523,11 @@ func writeAgentsMd(cwd string) error {
 
 	block := buf.String()
 
-	agentsMdPath := filepath.Join(cwd, "AGENTS.md")
+	agentsMdPath := config.AgentsMdPath(root)
 	existing, err := os.ReadFile(agentsMdPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return os.WriteFile(agentsMdPath, []byte(block), 0644)
+			return fsutil.WriteFileAtomic(agentsMdPath, []byte(block), 0644)
 		}
 		return fmt.Errorf("reading AGENTS.md: %w", err)
 	}
@@ -540,14 +542,22 @@ func writeAgentsMd(cwd string) error {
 			after++
 		}
 		newContent := content[:beginIdx] + block + content[after:]
-		return os.WriteFile(agentsMdPath, []byte(newContent), 0644)
+		return fsutil.WriteFileAtomic(agentsMdPath, []byte(newContent), 0644)
 	}
 
 	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
 		content += "\n"
 	}
 	content += "\n" + block
-	return os.WriteFile(agentsMdPath, []byte(content), 0644)
+	return fsutil.WriteFileAtomic(agentsMdPath, []byte(content), 0644)
+}
+
+// regenRoster rewrites .agentfactory/AGENTS.md from the authoritative agents.json.
+// Surface-but-don't-fail: a roster-write error must not fail the agent-gen op.
+func regenRoster(root string) {
+	if err := writeAgentsMd(root); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not regenerate agent roster: %v\n", err)
+	}
 }
 
 const gitExcludeSentinel = "# agentfactory managed paths"

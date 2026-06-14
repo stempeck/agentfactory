@@ -107,7 +107,7 @@ Whichever form, capture the full requirements — this is your design problem st
 - **Problem**: The core design problem or feature request
 - **Context**: Existing code, architecture, constraints mentioned
 - **Scope**: Size hint if provided ('small', 'medium', 'large'). Default: medium
-- **Output directory**: Where to create design artifacts. Default: `.designs/<issue-id>`
+- **Output directory**: Where to create design artifacts, anchored at the repository root (resolved via `git rev-parse --show-toplevel`). Default: `<repo-root>/.designs/<issue-id>`
 
 **6. Verify you can proceed:**
 - No unresolved blockers on the issue
@@ -161,7 +161,7 @@ git checkout -- .
 **4. Sync with main:**
 ```bash
 git fetch origin
-git rebase origin/main      # Get latest, rebase your branch
+git rebase origin/{{default_branch}}      # Get latest, rebase your branch
 ```
 
 If rebase conflicts:
@@ -184,7 +184,7 @@ let someone else's mess consume your entire mission.
 **1. Check tests on main:**
 ```bash
 git stash                   # Save your branch state
-git checkout origin/main
+git checkout origin/{{default_branch}}
 # Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
 # Then run it. Examples: make test, npm test, cargo test, go test ./...
 ```
@@ -211,10 +211,10 @@ Make a judgment call:
 # Fix the issue
 git add <files>
 git commit -m "fix: <description> (pre-existing failure)"
-git push origin main
+git push origin {{default_branch}}
 git checkout -
 git stash pop
-git rebase origin/main      # Get your fix
+git rebase origin/{{default_branch}}      # Get your fix
 ```
 
 **File and proceed path:**
@@ -270,9 +270,11 @@ Parse the design problem and extract structured requirements.
 
 **3. Create the output directory and problem summary:**
 
-Determine the output directory (default: `.designs/{{issue}}`):
+Determine the output directory, anchored at the repository root via
+`git rev-parse --show-toplevel` so artifacts land in the committed tree
+regardless of your current working directory (default: `<repo-root>/.designs/{{issue}}`):
 ```bash
-OUTPUT_DIR=".designs/{{issue}}"
+OUTPUT_DIR="$(git rev-parse --show-toplevel)/.designs/{{issue}}"
 mkdir -p "$OUTPUT_DIR"
 ```
 
@@ -765,8 +767,8 @@ Review your own changes before running tests.
 
 **1. Review the diff:**
 ```bash
-git diff origin/main...HEAD     # All changes vs main
-git log --oneline origin/main..HEAD  # All commits
+git diff origin/{{default_branch}}...HEAD     # All changes vs main
+git log --oneline origin/{{default_branch}}..HEAD  # All commits
 ```
 
 **2. Check for common issues:**
@@ -784,7 +786,7 @@ Don't just note them - fix them now. Amend or add commits as needed.
 
 **4. Verify no unintended changes:**
 ```bash
-git diff --stat origin/main...HEAD
+git diff --stat origin/{{default_branch}}...HEAD
 # Only files relevant to {{issue}} should appear
 ```
 
@@ -816,7 +818,7 @@ Verify your changes don't break anything and are properly tested.
 ```bash
 # Check if failure exists on main:
 git stash
-git checkout main
+git checkout {{default_branch}}
 # Run the same test command you discovered above
 git checkout -
 git stash pop
@@ -830,7 +832,7 @@ git stash pop
 **4. Validate terraform if .tf files were modified:**
 ```bash
 # Check if any .tf files were changed in this branch
-TF_CHANGED=$(git diff --name-only origin/main...HEAD -- '*.tf' | head -1)
+TF_CHANGED=$(git diff --name-only origin/{{default_branch}}...HEAD -- '*.tf' | head -1)
 if [ -n "$TF_CHANGED" ]; then
   echo "Terraform files modified — running validation..."
   TF_DIR=$(dirname "$TF_CHANGED")
@@ -896,8 +898,8 @@ git push -u origin $(git branch --show-current)
 ```bash
 git status                  # Clean
 git stash list              # Empty
-git log origin/main..HEAD   # Your commits
-git diff origin/main...HEAD # Your changes (expected)
+git log origin/{{default_branch}}..HEAD   # Your commits
+git diff origin/{{default_branch}}...HEAD # Your changes (expected)
 ```
 
 **Exit criteria:** Branch pushed, workspace clean, no cruft."""

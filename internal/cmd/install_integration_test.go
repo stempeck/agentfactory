@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stempeck/agentfactory/internal/config"
+	"github.com/stempeck/agentfactory/internal/worktree"
 )
 
 // TestInstallInit_CreatesDispatchJson exercises `af install --init` end-to-end,
@@ -76,4 +79,222 @@ func TestInstallInit_CreatesDispatchJson(t *testing.T) {
 	if notify, ok := cfg["notify_on_complete"].(string); !ok || notify != "manager" {
 		t.Errorf("notify_on_complete should be 'manager', got: %v", cfg["notify_on_complete"])
 	}
+}
+
+// TestInstallInit_AgentsMdRelocation_Behavioral is the behavioral half of issue
+// #305 (relocating the agent roster from ./AGENTS.md to ./.agentfactory/AGENTS.md).
+// Phases 1 and 2 re-pathed every writer and reader; their tests are structural
+// (grep / os.Stat / symlink-target). This test proves the three load-bearing
+// acceptance criteria end-to-end against a real git-init'd repo:
+//
+//   - AC-1: the roster lands at .agentfactory/AGENTS.md (config.AgentsMdPath) with
+//     the BEGIN/END block and the agent table.
+//   - AC-2: `af install --init` leaves a *tracked* root AGENTS.md byte-unchanged
+//     (a content/tracked-file check via `git diff --exit-code AGENTS.md`, NOT an
+//     os.Stat existence check — .git/info/exclude only hides *untracked* files, so a
+//     mutated tracked file would still show dirty), and creates none when absent.
+//   - AC-3: a manager-style worktree resolves the roster via the
+//     .agentfactory/AGENTS.md symlink.
+//
+// It deliberately does NOT attempt to prove AC-4/AC-5 (whole-system autonomy):
+// `af sling --agent` dispatches off agents.json, not AGENTS.md, so those stay
+// no-regression smoke covered by the existing suites (design-doc.md L255-267).
+func TestInstallInit_AgentsMdRelocation_Behavioral(t *testing.T) {
+	requirePython3WithServerDeps(t)
+
+	// gitRun runs a git subcommand in dir, failing the test on error.
+	gitRun := func(t *testing.T, dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %s\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	gitInit := func(t *testing.T, dir string) {
+		t.Helper()
+		gitRun(t, dir, "init", "-q")
+		gitRun(t, dir, "config", "user.email", "test@test.test")
+		gitRun(t, dir, "config", "user.name", "Test")
+	}
+	// commitRootAgentsMd writes a root AGENTS.md fixture and git add + commit so it
+	// is a *tracked* file — the only meaningful subject for the AC-2 git-clean proof.
+	commitRootAgentsMd := func(t *testing.T, dir, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(content), 0o644); err != nil {
+			t.Fatalf("write root AGENTS.md fixture: %v", err)
+		}
+		gitRun(t, dir, "add", "AGENTS.md")
+		gitRun(t, dir, "commit", "-q", "-m", "fixture: tracked root AGENTS.md")
+	}
+
+	// AC-2 proof: `git diff --exit-code AGENTS.md` must report no changes to the
+	// tracked host file after install.
+	assertRootAgentsMdClean := func(t *testing.T, dir string) {
+		t.Helper()
+		cmd := exec.Command("git", "diff", "--exit-code", "--", "AGENTS.md")
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("AC-2: `git diff --exit-code AGENTS.md` reported the tracked root "+
+				"AGENTS.md changed — install must never mutate the host file: %v\n%s", err, out)
+		}
+	}
+
+	// AC-1 proof: the roster lives at .agentfactory/AGENTS.md with the block + table.
+	assertRosterRelocated := func(t *testing.T, dir string) {
+		t.Helper()
+		rosterPath := config.AgentsMdPath(dir)
+		data, err := os.ReadFile(rosterPath)
+		if err != nil {
+			t.Fatalf("AC-1: roster not found at relocated path %s: %v", rosterPath, err)
+		}
+		content := string(data)
+		for _, want := range []string{agentsMdBegin, agentsMdEnd, "| Agent | Type | Description |"} {
+			if !strings.Contains(content, want) {
+				t.Errorf("AC-1: roster at %s missing %q", rosterPath, want)
+			}
+		}
+	}
+
+	// installInit runs `af install --init` in dir via the in-process command and
+	// resets the cobra bool flag afterward (cobra does not reset it between tests).
+	installInit := func(t *testing.T, dir string) {
+		t.Helper()
+		output, err := runInstallInDir(t, dir, "--init")
+		installInitFlag = false
+		if err != nil {
+			t.Fatalf("install --init failed: %v\nOutput: %s", err, output)
+		}
+	}
+
+	t.Run("AC1_AC2_TrackedRootNoMarkers", func(t *testing.T) {
+		dir := t.TempDir()
+		ensurePySymlink(t, dir)
+		t.Cleanup(func() { terminateMCPServer(dir) })
+		gitInit(t, dir)
+		commitRootAgentsMd(t, dir, "# Host Project Agents\n\nThis is the host project's own roster.\n")
+
+		installInit(t, dir)
+
+		assertRootAgentsMdClean(t, dir) // AC-2: tracked host file untouched
+		assertRosterRelocated(t, dir)   // AC-1: roster at the new path with the table
+	})
+
+	t.Run("AC2_TrackedRootWithAFBlock", func(t *testing.T) {
+		dir := t.TempDir()
+		ensurePySymlink(t, dir)
+		t.Cleanup(func() { terminateMCPServer(dir) })
+		gitInit(t, dir)
+		// A host file that ALREADY contains an AgentFactory block (e.g. committed by a
+		// pre-relocation install in a prior life). Install must still leave it untouched
+		// — it now only ever writes .agentfactory/AGENTS.md (leave-and-stop, data.md D2.4).
+		withBlock := "# Host Project Agents\n\n" +
+			agentsMdBegin + "\n\nstale roster body\n\n" + agentsMdEnd + "\n\nMore host content.\n"
+		commitRootAgentsMd(t, dir, withBlock)
+
+		installInit(t, dir)
+
+		assertRootAgentsMdClean(t, dir) // AC-2: the host block is NOT rewritten
+		assertRosterRelocated(t, dir)   // AC-1: the fresh roster lives at the new path
+	})
+
+	t.Run("AC2_NoRootFile_NoneCreated", func(t *testing.T) {
+		dir := t.TempDir()
+		ensurePySymlink(t, dir)
+		t.Cleanup(func() { terminateMCPServer(dir) })
+		gitInit(t, dir)
+		// Intentionally NO root AGENTS.md.
+
+		installInit(t, dir)
+
+		if _, err := os.Stat(filepath.Join(dir, "AGENTS.md")); !os.IsNotExist(err) {
+			t.Errorf("AC-2: install created a root AGENTS.md when none existed (stat err=%v); "+
+				"the roster must live only at .agentfactory/AGENTS.md", err)
+		}
+		assertRosterRelocated(t, dir) // AC-1
+	})
+
+	t.Run("AC3_WorktreeResolvesRelocatedRoster", func(t *testing.T) {
+		// AC-3 uses a REAL binary + the worktree Go API (mirrors
+		// TestWorktreeLifecycle_SymlinksAndTeardown). A second `--init` inside a
+		// worktree is forbidden by the install guard (install.go:69-70), so resolution
+		// is proven through the worktree symlink, not a nested install.
+		binary := buildAF(t)
+		workspace := t.TempDir()
+		realWorkspace, err := filepath.EvalSymlinks(workspace)
+		if err != nil {
+			t.Fatalf("eval symlinks on workspace: %v", err)
+		}
+		ensurePySymlink(t, realWorkspace)
+		t.Cleanup(func() { terminateMCPServer(realWorkspace) })
+
+		gitInit(t, realWorkspace)
+		if err := os.WriteFile(filepath.Join(realWorkspace, ".gitignore"), []byte(".agentfactory/\n"), 0o644); err != nil {
+			t.Fatalf("write .gitignore: %v", err)
+		}
+		gitRun(t, realWorkspace, "add", ".gitignore")
+		gitRun(t, realWorkspace, "commit", "-q", "-m", "initial with gitignore")
+
+		// Real-binary install writes the relocated roster to .agentfactory/AGENTS.md.
+		runAF(t, binary, realWorkspace, "install", "--init")
+		assertRosterRelocated(t, realWorkspace)
+
+		// agents.json with a dispatchable specialist so a worktree can be created for it.
+		agentsPath := filepath.Join(realWorkspace, ".agentfactory", "agents.json")
+		if err := os.WriteFile(agentsPath, []byte(`{"agents":{"manager":{"type":"interactive","description":"manager"},"solver":{"type":"autonomous","description":"solver agent"}}}`), 0o644); err != nil {
+			t.Fatalf("write agents.json: %v", err)
+		}
+		// Factory-root resources the worktree symlinks target (mirror).
+		os.MkdirAll(filepath.Join(realWorkspace, ".claude", "skills"), 0o755)
+		os.MkdirAll(filepath.Join(realWorkspace, ".runtime"), 0o755)
+
+		wtPath, meta, err := worktree.Create(realWorkspace, "solver", worktree.CreateOpts{})
+		if err != nil {
+			t.Fatalf("worktree.Create: %v", err)
+		}
+		removed := false
+		t.Cleanup(func() {
+			if !removed {
+				_ = worktree.ForceRemove(realWorkspace, meta)
+			}
+		})
+
+		rel := filepath.Join(".agentfactory", "AGENTS.md")
+
+		// AC-3 (structural): the worktree's roster symlink targets the factory root's roster.
+		target, err := os.Readlink(filepath.Join(wtPath, rel))
+		if err != nil {
+			t.Fatalf("AC-3: readlink %s: %v", rel, err)
+		}
+		if expected := filepath.Join(realWorkspace, rel); target != expected {
+			t.Errorf("AC-3: roster symlink target = %q, want %q", target, expected)
+		}
+
+		// AC-3 (behavioral): reading the roster THROUGH the worktree symlink resolves the
+		// real roster content — what a manager sitting in the worktree actually sees.
+		data, err := os.ReadFile(filepath.Join(wtPath, rel))
+		if err != nil {
+			t.Fatalf("AC-3: reading roster through worktree symlink: %v", err)
+		}
+		content := string(data)
+		for _, want := range []string{agentsMdBegin, "| Agent | Type | Description |"} {
+			if !strings.Contains(content, want) {
+				t.Errorf("AC-3: roster resolved through worktree symlink missing %q", want)
+			}
+		}
+
+		// Provision the agent (mirror the Create/SetupAgent path).
+		if _, err := worktree.SetupAgent(realWorkspace, wtPath, "solver", true); err != nil {
+			t.Fatalf("worktree.SetupAgent: %v", err)
+		}
+
+		// Teardown leaves the factory-root roster intact.
+		if err := worktree.ForceRemove(realWorkspace, meta); err != nil {
+			t.Fatalf("worktree.ForceRemove: %v", err)
+		}
+		removed = true
+		if _, err := os.Stat(config.AgentsMdPath(realWorkspace)); err != nil {
+			t.Errorf("AC-3: factory-root roster missing after worktree teardown: %v", err)
+		}
+	})
 }

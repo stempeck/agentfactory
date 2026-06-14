@@ -175,8 +175,8 @@ func TestManagerTemplate_ReferencesAgentsMD(t *testing.T) {
 	if !strings.Contains(output, "## Specialist Catalog") {
 		t.Error("manager template should contain '## Specialist Catalog' section")
 	}
-	if !strings.Contains(output, "AGENTS.md") {
-		t.Error("manager template should reference AGENTS.md for dynamic agent catalog")
+	if !strings.Contains(output, ".agentfactory/AGENTS.md") {
+		t.Error("manager template should reference .agentfactory/AGENTS.md for dynamic agent catalog")
 	}
 }
 

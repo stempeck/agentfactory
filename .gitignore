@@ -102,3 +102,18 @@ test_results.txt
 !.claude/skills/github-upstreamer/SKILL.md
 !.claude/skills/formula-clean/
 !.claude/skills/formula-clean/SKILL.md
+
+# check-skills parity (af-13234830 Phase 3 / Gap 5): every source skill under
+# internal/cmd/install_skills/ must have a TRACKED installed copy here, or a clean
+# CI checkout (self-hosted runners aside) drifts and `make check-skills` fails.
+# Use /** to track all files (SKILL.md plus helpers like validate.sh, PATTERNS.md).
+!.claude/skills/architecture-docs/
+!.claude/skills/architecture-docs/**
+!.claude/skills/improve-agent/
+!.claude/skills/improve-agent/**
+!.claude/skills/plan-review/
+!.claude/skills/plan-review/**
+!.claude/skills/plan-work/
+!.claude/skills/plan-work/**
+!.claude/skills/terraform-fix/
+!.claude/skills/terraform-fix/**

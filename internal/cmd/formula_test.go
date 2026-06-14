@@ -1247,6 +1247,39 @@ func TestEscapeTmplDelimiters(t *testing.T) {
 
 // --- Delete tests ---
 
+// TestFormulaAgentGen_RegeneratesRoster exercises CMP-REGEN through the real
+// entry points in BOTH directions: agent-gen (add) must add the agent to the
+// roster, and agent-gen --delete must remove it. This is the freshness invariant
+// that #305 Phase 1 wires up; before the fix neither direction touched the roster.
+func TestFormulaAgentGen_RegeneratesRoster(t *testing.T) {
+	dir := setupFormulaFactory(t)
+	rosterPath := filepath.Join(dir, ".agentfactory", "AGENTS.md")
+
+	// Add direction: the new agent must appear in the regenerated roster.
+	if _, _, err := runFormulaAgentGenInDir(t, dir, "investigate"); err != nil {
+		t.Fatalf("agent-gen add failed: %v", err)
+	}
+	data, err := os.ReadFile(rosterPath)
+	if err != nil {
+		t.Fatalf("roster not written after add: %v", err)
+	}
+	if !strings.Contains(string(data), "| `investigate` |") {
+		t.Errorf("investigate row missing from roster after add:\n%s", data)
+	}
+
+	// Delete direction: the removed agent must be gone from the regenerated roster.
+	if _, _, err := runFormulaAgentGenInDir(t, dir, "investigate", "--delete"); err != nil {
+		t.Fatalf("agent-gen --delete failed: %v", err)
+	}
+	data, err = os.ReadFile(rosterPath)
+	if err != nil {
+		t.Fatalf("roster not readable after delete: %v", err)
+	}
+	if strings.Contains(string(data), "| `investigate` |") {
+		t.Errorf("investigate row still present in roster after delete:\n%s", data)
+	}
+}
+
 func TestFormulaAgentGen_DeleteSuccess(t *testing.T) {
 	dir := setupFormulaFactory(t)
 

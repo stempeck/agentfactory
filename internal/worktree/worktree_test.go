@@ -1552,7 +1552,8 @@ func TestEnsureWorktreeLinks_CreatesSymlinks(t *testing.T) {
 	// Create symlink targets at factory root
 	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills"), 0o755)
 	os.MkdirAll(filepath.Join(factoryRoot, ".runtime"), 0o755)
-	os.WriteFile(filepath.Join(factoryRoot, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+	os.MkdirAll(filepath.Join(factoryRoot, ".agentfactory"), 0o755)
+	os.WriteFile(filepath.Join(factoryRoot, ".agentfactory", "AGENTS.md"), []byte("# Agents\n"), 0o644)
 
 	err := EnsureWorktreeLinks(factoryRoot, worktreePath)
 	if err != nil {
@@ -1577,13 +1578,13 @@ func TestEnsureWorktreeLinks_CreatesSymlinks(t *testing.T) {
 		t.Errorf(".runtime symlink: got %q, want %q", link, filepath.Join(factoryRoot, ".runtime"))
 	}
 
-	// Verify AGENTS.md symlink
-	link, err = os.Readlink(filepath.Join(worktreePath, "AGENTS.md"))
+	// Verify .agentfactory/AGENTS.md symlink
+	link, err = os.Readlink(filepath.Join(worktreePath, ".agentfactory", "AGENTS.md"))
 	if err != nil {
-		t.Fatalf("readlink AGENTS.md: %v", err)
+		t.Fatalf("readlink .agentfactory/AGENTS.md: %v", err)
 	}
-	if link != filepath.Join(factoryRoot, "AGENTS.md") {
-		t.Errorf("AGENTS.md symlink: got %q, want %q", link, filepath.Join(factoryRoot, "AGENTS.md"))
+	if link != filepath.Join(factoryRoot, ".agentfactory", "AGENTS.md") {
+		t.Errorf(".agentfactory/AGENTS.md symlink: got %q, want %q", link, filepath.Join(factoryRoot, ".agentfactory", "AGENTS.md"))
 	}
 }
 
@@ -1593,7 +1594,8 @@ func TestEnsureWorktreeLinks_Idempotent(t *testing.T) {
 
 	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills"), 0o755)
 	os.MkdirAll(filepath.Join(factoryRoot, ".runtime"), 0o755)
-	os.WriteFile(filepath.Join(factoryRoot, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+	os.MkdirAll(filepath.Join(factoryRoot, ".agentfactory"), 0o755)
+	os.WriteFile(filepath.Join(factoryRoot, ".agentfactory", "AGENTS.md"), []byte("# Agents\n"), 0o644)
 
 	// Call twice
 	if err := EnsureWorktreeLinks(factoryRoot, worktreePath); err != nil {
@@ -1619,11 +1621,13 @@ func TestEnsureWorktreeLinks_ExistingRealFile(t *testing.T) {
 
 	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills"), 0o755)
 	os.MkdirAll(filepath.Join(factoryRoot, ".runtime"), 0o755)
-	os.WriteFile(filepath.Join(factoryRoot, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+	os.MkdirAll(filepath.Join(factoryRoot, ".agentfactory"), 0o755)
+	os.WriteFile(filepath.Join(factoryRoot, ".agentfactory", "AGENTS.md"), []byte("# Agents\n"), 0o644)
 
-	// Create a real file at AGENTS.md in worktree
+	// Create a real file at .agentfactory/AGENTS.md in worktree
 	realContent := []byte("user content\n")
-	os.WriteFile(filepath.Join(worktreePath, "AGENTS.md"), realContent, 0o644)
+	os.MkdirAll(filepath.Join(worktreePath, ".agentfactory"), 0o755)
+	os.WriteFile(filepath.Join(worktreePath, ".agentfactory", "AGENTS.md"), realContent, 0o644)
 
 	err := EnsureWorktreeLinks(factoryRoot, worktreePath)
 	if err != nil {
@@ -1631,16 +1635,16 @@ func TestEnsureWorktreeLinks_ExistingRealFile(t *testing.T) {
 	}
 
 	// Verify real file is preserved (not a symlink)
-	fi, err := os.Lstat(filepath.Join(worktreePath, "AGENTS.md"))
+	fi, err := os.Lstat(filepath.Join(worktreePath, ".agentfactory", "AGENTS.md"))
 	if err != nil {
-		t.Fatalf("lstat AGENTS.md: %v", err)
+		t.Fatalf("lstat .agentfactory/AGENTS.md: %v", err)
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
-		t.Error("AGENTS.md should remain a real file, not be replaced with symlink")
+		t.Error(".agentfactory/AGENTS.md should remain a real file, not be replaced with symlink")
 	}
-	data, _ := os.ReadFile(filepath.Join(worktreePath, "AGENTS.md"))
+	data, _ := os.ReadFile(filepath.Join(worktreePath, ".agentfactory", "AGENTS.md"))
 	if string(data) != string(realContent) {
-		t.Errorf("AGENTS.md content changed: got %q, want %q", data, realContent)
+		t.Errorf(".agentfactory/AGENTS.md content changed: got %q, want %q", data, realContent)
 	}
 }
 
@@ -1650,7 +1654,8 @@ func TestEnsureWorktreeLinks_CreatesParentDir(t *testing.T) {
 
 	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills"), 0o755)
 	os.MkdirAll(filepath.Join(factoryRoot, ".runtime"), 0o755)
-	os.WriteFile(filepath.Join(factoryRoot, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+	os.MkdirAll(filepath.Join(factoryRoot, ".agentfactory"), 0o755)
+	os.WriteFile(filepath.Join(factoryRoot, ".agentfactory", "AGENTS.md"), []byte("# Agents\n"), 0o644)
 
 	// Verify .claude/ does NOT exist in worktree initially
 	if _, err := os.Stat(filepath.Join(worktreePath, ".claude")); !os.IsNotExist(err) {
@@ -1736,10 +1741,10 @@ func TestForceRemove_PreservesFactoryRoot(t *testing.T) {
 	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
 		t.Fatalf("mkdir .runtime: %v", err)
 	}
-	agentsMD := filepath.Join(realDir, "AGENTS.md")
+	agentsMD := filepath.Join(realDir, ".agentfactory", "AGENTS.md")
 	agentsContent := []byte("# Agents\ntest content\n")
 	if err := os.WriteFile(agentsMD, agentsContent, 0o644); err != nil {
-		t.Fatalf("write AGENTS.md: %v", err)
+		t.Fatalf("write .agentfactory/AGENTS.md: %v", err)
 	}
 
 	absPath, meta, err := Create(realDir, "solver", CreateOpts{})
@@ -1747,7 +1752,7 @@ func TestForceRemove_PreservesFactoryRoot(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", filepath.Join(".agentfactory", "AGENTS.md")} {
 		p := filepath.Join(absPath, rel)
 		fi, err := os.Lstat(p)
 		if err != nil {
@@ -1786,14 +1791,15 @@ func TestUnlinkBeforeRemove_RemovesSymlinks(t *testing.T) {
 
 	os.MkdirAll(filepath.Join(factoryRoot, ".claude", "skills"), 0o755)
 	os.MkdirAll(filepath.Join(factoryRoot, ".runtime"), 0o755)
+	os.MkdirAll(filepath.Join(factoryRoot, ".agentfactory"), 0o755)
 	agentsContent := []byte("# Agents\n")
-	os.WriteFile(filepath.Join(factoryRoot, "AGENTS.md"), agentsContent, 0o644)
+	os.WriteFile(filepath.Join(factoryRoot, ".agentfactory", "AGENTS.md"), agentsContent, 0o644)
 
 	if err := EnsureWorktreeLinks(factoryRoot, worktreePath); err != nil {
 		t.Fatalf("EnsureWorktreeLinks: %v", err)
 	}
 
-	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", filepath.Join(".agentfactory", "AGENTS.md")} {
 		fi, err := os.Lstat(filepath.Join(worktreePath, rel))
 		if err != nil {
 			t.Fatalf("symlink %s should exist before unlinkBeforeRemove: %v", rel, err)
@@ -1805,7 +1811,7 @@ func TestUnlinkBeforeRemove_RemovesSymlinks(t *testing.T) {
 
 	unlinkBeforeRemove(worktreePath)
 
-	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", "AGENTS.md"} {
+	for _, rel := range []string{filepath.Join(".claude", "skills"), ".runtime", filepath.Join(".agentfactory", "AGENTS.md")} {
 		_, err := os.Lstat(filepath.Join(worktreePath, rel))
 		if !os.IsNotExist(err) {
 			t.Errorf("symlink %s should not exist after unlinkBeforeRemove, got err: %v", rel, err)
@@ -1818,9 +1824,9 @@ func TestUnlinkBeforeRemove_RemovesSymlinks(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(factoryRoot, ".runtime")); err != nil {
 		t.Errorf("factory root .runtime should still exist: %v", err)
 	}
-	got, err := os.ReadFile(filepath.Join(factoryRoot, "AGENTS.md"))
+	got, err := os.ReadFile(filepath.Join(factoryRoot, ".agentfactory", "AGENTS.md"))
 	if err != nil {
-		t.Errorf("factory root AGENTS.md should still exist: %v", err)
+		t.Errorf("factory root .agentfactory/AGENTS.md should still exist: %v", err)
 	} else if string(got) != string(agentsContent) {
 		t.Errorf("AGENTS.md content changed: got %q, want %q", got, agentsContent)
 	}
@@ -1842,7 +1848,8 @@ func TestEnsureWorktreeLinks_RealSkillsDir_MergesFactorySkills(t *testing.T) {
 	os.WriteFile(filepath.Join(factoryRoot, ".claude", "skills", "factory-skill-B", "SKILL.md"), []byte("factory B content"), 0o644)
 
 	os.MkdirAll(filepath.Join(factoryRoot, ".runtime"), 0o755)
-	os.WriteFile(filepath.Join(factoryRoot, "AGENTS.md"), []byte("# Agents\n"), 0o644)
+	os.MkdirAll(filepath.Join(factoryRoot, ".agentfactory"), 0o755)
+	os.WriteFile(filepath.Join(factoryRoot, ".agentfactory", "AGENTS.md"), []byte("# Agents\n"), 0o644)
 
 	// Worktree has skill B as a git-tracked real directory (different content)
 	os.MkdirAll(filepath.Join(worktreePath, ".claude", "skills", "factory-skill-B"), 0o755)
@@ -1888,7 +1895,7 @@ func TestEnsureWorktreeLinks_RealSkillsDir_MergesFactorySkills(t *testing.T) {
 		t.Errorf("should not warn about skipping .claude/skills, got: %q", output)
 	}
 
-	// .runtime and AGENTS.md should still be symlinks
+	// .runtime should still be a symlink
 	fi, err := os.Lstat(filepath.Join(worktreePath, ".runtime"))
 	if err != nil {
 		t.Fatalf("lstat .runtime: %v", err)

@@ -51,7 +51,7 @@ var stderrWriter io.Writer = os.Stderr
 var worktreeSymlinks = []string{
 	filepath.Join(".claude", "skills"),
 	".runtime",
-	"AGENTS.md",
+	filepath.Join(".agentfactory", "AGENTS.md"),
 }
 
 // EnsureWorktreeLinks creates symlinks from a worktree to factory-root resources.

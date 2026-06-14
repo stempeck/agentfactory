@@ -489,6 +489,20 @@ func instantiateFormulaWorkflow(params InstantiateParams, w io.Writer) (string, 
 		resolvedVars["orchestrator"] = callerIdentity
 	}
 
+	// 3.4. Inject detected default branch (after resolve, before expand) — A1 ambient token.
+	// {{default_branch}} is NOT a declared formula var, so ResolveVars never applied a
+	// --var override to it; honor the override by reading cliVars directly.
+	if v, ok := cliVars["default_branch"]; ok {
+		resolvedVars["default_branch"] = v // operator override wins (A4)
+	} else if db := detectDefaultBranch(params.WorkDir); db != "" {
+		resolvedVars["default_branch"] = db
+		fmt.Fprintf(w, "Default branch: %s\n", db) // K9 success echo (U2)
+	} else {
+		// K9 fail-loud: visible warning, do NOT silently bake "main".
+		fmt.Fprintf(w, "warning: could not detect repository default branch (origin/HEAD unset, no GitHub remote); re-run with --var default_branch=<name>\n")
+		resolvedVars["default_branch"] = "main" // last-resort sentinel, surfaced by the warning above
+	}
+
 	// 4. Topological sort for execution order
 	sortedIDs, err := f.TopologicalSort()
 	if err != nil {
