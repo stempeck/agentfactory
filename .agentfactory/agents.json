@@ -47,10 +47,28 @@
       "directive": "Run af prime to load formula context.",
       "formula": "minimalworker"
     },
+    "rapid-implement": {
+      "type": "autonomous",
+      "description": "## Overview\nLean, adaptive implementation workflow that classifies task complexity and scales process rigor accordingly.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "rapid-implement"
+    },
+    "rapid-increment": {
+      "type": "autonomous",
+      "description": "## Overview\nLean, adaptive incremental workflow that addresses the UNRESOLVED review comments on a pull request, scaling process rigor to the size of the change.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "rapid-increment"
+    },
     "supervisor": {
       "type": "autonomous",
       "description": "Autonomous agent for independent task execution",
       "directive": "Read your memory and docs, and prove it."
+    },
+    "ultra-review": {
+      "type": "autonomous",
+      "description": "Multi-agent pull request review with five parallel specialized reviewers, confidence-scored filtering, and findings posted as inline review comments anchored to the PR diff.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "ultra-review"
     }
   }
 }
