@@ -22,8 +22,10 @@ structure into a formula that preserves enforcement rigor.
 **Formula name:** `<skill-name>` (from YAML frontmatter `name` field)
 
 Every generated formula has three zones: pre-work invariant steps, domain steps from the
-skill, and post-work invariant steps. The invariant steps come from `factoryworker` and
-are the same for every agent work execution formula regardless of the skill being converted.
+skill, and post-work invariant steps. The 8 standard invariant steps come from
+`factoryworker`; the 2 architecture gates (`validate-contract`, `self-verify`) come from
+`rapid-implement` (factoryworker predates them). They are the same for every agent work
+execution formula regardless of the skill being converted.
 
 **Pre-work invariant steps** (always present, in this order):
 
@@ -102,9 +104,9 @@ formulas. The `skills` field goes after `version = 1` in the formula header.
 
 There are two types of gates in a generated formula:
 
-1. **Architecture gates** (from factoryworker): `validate-contract` and `self-verify`.
-   These are copied verbatim from factoryworker and are NOT derived from the skill's
-   GATE sections. See Section 10.9 for how to source their content.
+1. **Architecture gates** (from rapid-implement): `validate-contract` and `self-verify`.
+   These are copied verbatim from `rapid-implement` (factoryworker predates them) and are
+   NOT derived from the skill's GATE sections. See Section 10.9 for how to source their content.
 
 2. **Skill-derived gates** (from the SKILL.md's Phase Gate Enforcement table).
    These use the template below.
@@ -150,7 +152,9 @@ Step descriptions are **self-contained**:
 
 ## 10.6 Variable Inference
 
-- Always add `[vars.issue]` with `source = "hook_bead"` (polecats always have an assigned issue)
+- Always add `[vars.issue]` with `source = "cli"` (every shipped work formula uses `cli`; it
+  was flipped from `hook_bead` to `cli` in issue #98 and is enforced by
+  `TestSpecialistFormulasIssueSourceCLI` — do not revert it to `hook_bead`)
 - If the skill references `BUILD_CMD`, `TEST_CMD`, `TEST_PATTERN_CMD`: these are
   discovered per-project during the pre-implementation phase, NOT formula variables.
   Document them in the phase description, not as `[vars]`.
@@ -180,29 +184,32 @@ Build the top-level `description` from:
 
 Before generating, examine BOTH reference formulas:
 
-**1. factoryworker.formula.toml** — the invariant step source:
+**1. factoryworker.formula.toml** — source for the 8 standard invariant steps:
 ```bash
 cat .agentfactory/store/formulas/factoryworker.formula.toml
 ```
 
-This defines all 10 invariant steps. Copy step descriptions for:
-`load-context` (adapted), `branch-setup`, `validate-contract`, `preflight-tests`,
-`self-review`, `run-tests`, `self-verify`, `cleanup-workspace`, `prepare-for-review`,
-`submit-and-exit`.
+This defines the 8 standard invariant steps. Copy step descriptions for:
+`load-context` (adapted), `branch-setup`, `preflight-tests`,
+`self-review`, `run-tests`, `cleanup-workspace`, `prepare-for-review`,
+`submit-and-exit`. factoryworker predates the two architecture gates — source those from
+`rapid-implement` (below).
 
-**2. design-v3.formula.toml** — a complete skill-derived formula:
+**2. rapid-implement.formula.toml** — source for the 2 architecture gates and a complete reference:
 ```bash
-cat .agentfactory/store/formulas/design-v3.formula.toml
+cat .agentfactory/store/formulas/rapid-implement.formula.toml
 ```
 
-Shows the full 16-step structure with all 10 invariant steps, domain phase interleaving,
-`af handoff` between major phases, and failure mode tables.
+A complete implementation formula showing all 10 invariant steps — including the
+`validate-contract` and `self-verify` architecture gates copied verbatim — plus domain
+phase/gate interleaving and conditional gates with N/A escape clauses. For an example of
+`af handoff` between major domain phases, see `design-v3.formula.toml`.
 
 Key patterns to follow:
 - All 10 invariant steps present (not a subset)
 - `af handoff` instructions between major domain phases (for context management)
 - Failure mode table in the formula description
-- `[vars.issue]` with `source = "hook_bead"`
+- `[vars.issue]` with `source = "cli"`
 - Graceful degradation in architecture gates (skip if no contract exists)
 - Cleanup separated from submit-and-exit
 
@@ -213,16 +220,17 @@ Key patterns to follow:
 
 ## 10.9 Invariant Step Content
 
-The 10 invariant steps (`load-context`, `branch-setup`, `validate-contract`, `preflight-tests`,
-`self-review`, `run-tests`, `self-verify`, `cleanup-workspace`, `prepare-for-review`,
-`submit-and-exit`) must have their descriptions populated from `factoryworker.formula.toml`.
-`load-context` is adapted per Section 10.2; the remaining 9 are copied verbatim except for
-the two skill-specific adaptations below.
+The 10 invariant steps must have their descriptions populated from existing formulas: the 8
+standard steps (`load-context`, `branch-setup`, `preflight-tests`, `self-review`, `run-tests`,
+`cleanup-workspace`, `prepare-for-review`, `submit-and-exit`) from `factoryworker.formula.toml`,
+and the 2 architecture gates (`validate-contract`, `self-verify`) from `rapid-implement.formula.toml`
+(factoryworker predates them). `load-context` is adapted per Section 10.2; the rest are copied
+verbatim except for the skill-specific adaptations below.
 
 **Process:**
 
-1. Read `factoryworker.formula.toml` (already done in Section 10.8)
-2. For each invariant step, copy its `description` field verbatim into the generated formula
+1. Read `factoryworker.formula.toml` and `rapid-implement.formula.toml` (already done in Section 10.8)
+2. For each invariant step, copy its `description` field verbatim from the appropriate source
 3. Apply the skill-specific adaptations below (only these four are allowed)
 
 **Adaptation 1 — `run-tests`:** If the skill defines a specific TEST_CMD (e.g.,
