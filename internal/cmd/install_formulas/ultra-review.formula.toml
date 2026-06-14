@@ -1,0 +1,857 @@
+description = """
+Multi-agent pull request review with five parallel specialized reviewers, confidence-scored filtering, and findings posted as inline review comments anchored to the PR diff.
+
+## Overview
+This formula replicates the "ultrareview" (`/code-review ultra`) workflow natively
+using Claude Code sub-agents — it does NOT invoke the cloud code-review skill,
+which is user-triggered and billed. The agent orchestrates:
+
+1. Eligibility check — skip closed/draft/trivial/already-reviewed PRs
+2. Context gathering — relevant CLAUDE.md paths + PR summary
+3. Five PARALLEL reviewers, each with an independent lens:
+   CLAUDE.md compliance, shallow bug scan, git blame/history,
+   prior PR comments, in-code comment guidance
+4. Per-finding confidence scoring against a strict 0-100 rubric
+5. Aggressive filtering — findings below the confidence threshold are dropped
+6. Eligibility re-check, then ONE review submitted via the GitHub API, with
+   each finding as an INLINE comment anchored to the diff line it concerns
+
+The review is built for human triage: every finding lands as its own resolvable
+inline thread, so the operator can reply, request tweaks, or resolve threads
+they don't care about directly on the PR — then dispatch ultra-implement to
+address the comments that remain.
+
+The defining property of ultrareview is the separation of finding from judging:
+reviewers generate candidates without seeing each other's output, and an
+independent scorer judges each candidate against a rubric designed to kill
+false positives. Only findings scoring at or above {{min_confidence}} survive.
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| pr_uri | input (cli) | Pull request to review: full GitHub URL, owner/repo#number, or bare number |
+| min_confidence | input (cli, default 70) | Minimum 0-100 confidence score a finding needs to be reported |
+
+## Orchestrator Communication Contract
+
+All notification mail routes to {{orchestrator}} — the agent that dispatched this
+formula, injected by `af sling` at instantiation — never to a hardcoded recipient.
+
+| Inbound message | When sent | Expected response |
+|-----------------|-----------|-------------------|
+| HELP: unclear requirements | Agent blocked on ambiguous input | Clarification or decision |
+| NOTICE: PR ineligible for review | PR closed/draft/already reviewed | Acknowledgment |
+| Stuck/blocked notification | Agent can't proceed | Unblocking help or reassignment |
+| WORK_DONE (via `af done`) | All formula steps complete | Process result, close issue |
+
+## Failure Modes
+
+| Situation | Action |
+|-----------|--------|
+| PR not found or gh auth fails | Mail {{orchestrator}}, do not guess at the PR identity |
+| PR ineligible (closed/draft/reviewed) | Record INELIGIBLE verdict, close remaining steps with that reason, complete formula |
+| A reviewer sub-agent fails/returns nothing | Re-spawn ONLY that reviewer (not all five) |
+| Zero findings survive the filter | Record NO_ISSUES verdict, do NOT post a review, mail {{orchestrator}} the dropped-findings detail, complete formula |
+| Finding not anchorable to a diff line | Put it in the review body with a full-sha permalink instead of an inline comment |
+| PR changed mid-review (new commits) | Re-run eligibility; if the diff materially changed, restart from phase-3-parallel-review |
+| Context filling up | Use `af handoff` to cycle to fresh session |
+| Blocked on external | Mail {{orchestrator}}, mark yourself stuck |
+
+## False Positive Examples (give to reviewers AND scorers verbatim)
+
+- Pre-existing issues
+- Something that looks like a bug but is not actually a bug
+- Pedantic nitpicks that a senior engineer wouldn't call out
+- Issues that a linter, typechecker, or compiler would catch (eg. missing or
+  incorrect imports, type errors, broken tests, formatting issues, pedantic
+  style issues like newlines). No need to run these build steps yourself --
+  it is safe to assume that they will be run separately as part of CI.
+- General code quality issues (eg. lack of test coverage, general security
+  issues, poor documentation), unless explicitly required in CLAUDE.md
+- Issues that are called out in CLAUDE.md, but explicitly silenced in the code
+  (eg. due to a lint ignore comment)
+- Changes in functionality that are likely intentional or are directly related
+  to the broader change
+- Real issues, but on lines that the user did not modify in their pull request
+
+## Anti-Patterns to Avoid
+
+| Anti-pattern | Prevention |
+|--------------|------------|
+| Invoking the cloud /code-review skill | Replicate the workflow with local sub-agents per these steps — the cloud skill is user-triggered and billed |
+| Serializing the five reviewers | ALL FIVE reviewer sub-agents MUST launch in a SINGLE message |
+| Letting reviewers see each other's output | Each reviewer receives only the PR reference, context.md content, and its own lens instructions |
+| Reviewing your own opinion of the diff | You orchestrate; sub-agents review; the rubric judges |
+| Building or typechecking the PR | CI handles build signal — it is NOT part of this review |
+| Posting findings below threshold | The {{min_confidence}} filter is a hard gate, not a suggestion |
+| Posting findings as separate top-level comments | ONE review submission (single notification) carrying all findings as inline comments — one resolvable thread per finding |
+| Anchoring an inline comment to a line outside the diff | The reviews API rejects it (HTTP 422) — verify the line appears in `gh pr diff`; non-anchorable findings go in the review body with a permalink |
+| Linking code without a full sha | GitHub links MUST use the full 40-char sha — `$(git rev-parse HEAD)` inside a posted comment does not render |
+| Skipping the eligibility re-check before posting | The PR may have closed or been reviewed while you worked |
+| Pushing your branch, or opening a PR for review artifacts | Review-only formula — ZERO remote git footprint. The ONLY externally visible action is the posted PR review itself |
+
+## !IMPORTANT - MANDATORY Exact Step Execution
+Execute each formula step EXACTLY as written, in order, with no modifications.
+Every step produces a file artifact at a known path. `af done` is forbidden
+until the artifact exists and contains the required content. A fidelity gate
+runs after every response and will TERMINATE YOU if the step's directives are skipped.
+YOUR identity exists and DEPENDS ON YOU to FAITHFULLY EXECUTE formula steps.
+"""
+formula = "ultra-review"
+version = 1
+
+[inputs]
+[inputs.pr_uri]
+description = "Pull request to review: full GitHub URL (https://github.com/owner/repo/pull/N), owner/repo#N, or bare PR number (current repo)"
+type = "string"
+required = true
+
+[inputs.min_confidence]
+description = "Minimum 0-100 confidence score a finding needs to be included in the posted review"
+type = "number"
+required = false
+default = "70"
+
+# ============================================================================
+# PRE-WORK INVARIANT STEPS
+# ============================================================================
+
+[[steps]]
+id = "load-context"
+title = "Load context and identify the pull request"
+description = """
+Initialize your session and resolve exactly which pull request you are reviewing.
+
+**1. Prime your environment:**
+```bash
+af prime                    # Load role context
+```
+
+**2. Check inbox for additional context:**
+```bash
+af mail inbox
+# Read any HANDOFF or assignment messages
+```
+
+**3. Resolve the PR reference from {{pr_uri}}:**
+The input may arrive in one of three forms:
+
+- **Full URL**: `https://github.com/owner/repo/pull/42` — extract owner/repo and number
+- **Short form**: `owner/repo#42` — extract owner/repo and number
+- **Bare number**: `42` — number only; repo is the current repository (`gh repo view --json nameWithOwner`)
+
+**4. Verify access:**
+```bash
+gh auth status
+gh pr view <number> --repo <owner/repo> --json number,title,state,isDraft,headRefOid,url
+```
+
+**5. Create the review working directory and record the resolution:**
+```bash
+REVIEW_DIR="${AF_WORKTREE:-.}/.reviews/pr-<number>"
+mkdir -p "$REVIEW_DIR"
+```
+
+Write `$REVIEW_DIR/target.md` containing:
+- Resolved repo (owner/repo), PR number, PR URL
+- Head sha (`headRefOid`) at review start — later steps link code against THIS sha
+- The raw {{pr_uri}} input for the audit trail
+
+**6. Make a todo list** covering the remaining phases (eligibility, context,
+parallel review, scoring, filter, post).
+
+If the PR cannot be resolved or gh auth fails, mail the orchestrator immediately:
+```bash
+af mail send {{orchestrator}} -s "HELP: cannot resolve PR" -m "Input: {{pr_uri}}
+Problem: <what failed>"
+```
+
+**Exit criteria:** `$REVIEW_DIR/target.md` exists with repo, number, URL, and head sha."""
+
+[[steps]]
+id = "branch-setup"
+title = "Set up working branch"
+needs = ["load-context"]
+description = """
+Verify your workspace branch state.
+A prior run created and pushed an unnecessary remote branch. This formula is
+REVIEW-ONLY: it must leave ZERO remote git footprint. The only externally
+visible action of the entire formula is the posted PR review.
+
+**Note:** You will NOT check out or build the PR under review. This step is
+about YOUR workspace hygiene — the review artifacts you produce are committed
+LOCALLY as an audit trail, never pushed.
+
+**1. Check current branch state:**
+```bash
+git status
+git branch --show-current
+```
+
+Dispatched agents already run on a dedicated worktree branch — use it as-is.
+Do NOT create another branch, do NOT rebase, do NOT push.
+
+**2. ONLY if you are directly on main/master (no worktree):** create a LOCAL
+branch so artifacts never land on main:
+```bash
+git checkout -b review/pr-<number>    # local only — never pushed
+```
+
+**3. Ensure clean working state:**
+```bash
+git status                  # Should show "working tree clean" (plus your .reviews dir)
+git stash list              # Should be empty
+```
+
+If dirty state from previous work: commit it if relevant, stash or discard if not.
+
+**Exit criteria:** Clean working tree on your existing worktree branch (or a
+local review/pr-<number> branch); no new remote branches, nothing pushed."""
+
+[[steps]]
+id = "validate-contract"
+title = "Validate incoming contract"
+needs = ["branch-setup"]
+description = """
+Architecture gate (Poka-yoke): Inspect any incoming contract that constrains this review.
+
+**1. Check for prior review state:**
+```bash
+ls "$REVIEW_DIR" 2>/dev/null
+```
+
+**If a prior review of this PR exists in `$REVIEW_DIR`** (findings.md, verdict.md):
+- Read it. Decide: has the PR gained new commits since (compare head sha in target.md
+  against current `gh pr view --json headRefOid`)?
+- If unchanged AND a comment was already posted: this PR is already reviewed —
+  note it in `$REVIEW_DIR/eligibility.md` ahead of time; phase-1-eligibility will confirm.
+- If changed: archive the prior artifacts (`mv "$REVIEW_DIR" "$REVIEW_DIR.old"`) and
+  re-create the directory fresh.
+
+**2. Check the dispatch mail / bead for special constraints:**
+e.g., a different confidence threshold, a request to always post even with
+no findings, or scope restrictions. Note any in `$REVIEW_DIR/target.md`.
+
+**3. If NO contract exists (typical):**
+This is normal. Close this step with reason "No incoming contract".
+
+**Exit criteria:** Prior review state handled; any dispatch constraints recorded."""
+
+[[steps]]
+id = "preflight-tests"
+title = "Verify own workspace health"
+needs = ["validate-contract"]
+description = """
+Check that YOUR workspace is healthy before starting review work.
+
+**IMPORTANT — scope guard:** This step checks your OWN repo state. Do NOT build,
+typecheck, or run the test suite of the PR under review — build signal runs
+separately in CI and is explicitly NOT part of this review.
+
+**1. Verify your repo is functional:**
+```bash
+git status                  # clean
+gh auth status              # authenticated
+```
+
+**2. Verify the review target is still reachable:**
+```bash
+gh pr view <number> --repo <owner/repo> --json state
+```
+
+If anything fails, mail {{orchestrator}} rather than guessing.
+
+**Exit criteria:** Workspace clean, gh authenticated, PR reachable. Ready for review work."""
+
+# ============================================================================
+# DOMAIN STEPS (from the ultrareview / code-review workflow)
+# ============================================================================
+
+[[steps]]
+id = "phase-1-eligibility"
+title = "Phase 1: Eligibility check"
+needs = ["preflight-tests"]
+description = """
+Determine whether this PR should be reviewed at all. Use a CHEAP sub-agent —
+this is a quick classification, not analysis.
+
+**Entry criteria:** `$REVIEW_DIR/target.md` exists.
+
+**Spawn ONE sub-agent** (Agent tool, `subagent_type: "general-purpose"`,
+`model: "haiku"` if available) with this prompt (fill in repo/number):
+
+```
+Check pull request <owner/repo>#<number> using the gh CLI and report whether it
+is eligible for code review. It is INELIGIBLE if ANY of these hold:
+(a) it is closed or merged
+(b) it is a draft
+(c) it does not need a code review (eg. it is an automated pull request such as
+    a dependency bump, or is very simple and obviously ok)
+(d) it already has a code review from this reviewer from earlier
+    (look for a PR review or comment containing the heading "### Code review")
+
+Run: gh pr view <number> --repo <owner/repo> --json state,isDraft,author,title,body
+And: gh pr view <number> --repo <owner/repo> --comments
+And: gh api repos/<owner>/<repo>/pulls/<number>/reviews --jq '.[].body'
+
+Return exactly: ELIGIBLE or INELIGIBLE, followed by one sentence of reasoning.
+```
+
+**Write `$REVIEW_DIR/eligibility.md`** with the verdict, the reasoning, and a timestamp.
+
+**Decision logic:**
+- IF ELIGIBLE → proceed to phase-2-context-gathering.
+- IF INELIGIBLE → mail the orchestrator and close out:
+```bash
+af mail send {{orchestrator}} -s "NOTICE: PR ineligible for review" -m "PR: <url>
+Reason: <verdict reasoning>
+No review will be posted."
+```
+  Then close this and EACH remaining step with reason "PR ineligible — see eligibility.md"
+  (run the step's early-exit clause; every later step has one). Do NOT fabricate a review.
+
+**Exit criteria:** `$REVIEW_DIR/eligibility.md` exists with an explicit
+ELIGIBLE or INELIGIBLE verdict."""
+
+[[steps]]
+id = "phase-2-context-gathering"
+title = "Phase 2: Gather CLAUDE.md paths and PR summary"
+needs = ["phase-1-eligibility"]
+description = """
+Collect the two context artifacts every downstream agent needs: the list of
+relevant CLAUDE.md files and a summary of the change.
+
+**Early exit:** If eligibility.md says INELIGIBLE, close this step with reason
+"PR ineligible" and continue closing remaining steps.
+
+**Spawn TWO cheap sub-agents IN A SINGLE MESSAGE** (`subagent_type:
+"general-purpose"`, `model: "haiku"` if available):
+
+**Sub-agent A — CLAUDE.md locator:**
+```
+List the file paths (NOT the contents) of all CLAUDE.md files relevant to pull
+request <owner/repo>#<number>:
+1. The repository root CLAUDE.md, if one exists
+2. Any CLAUDE.md in the directories whose files the pull request modifies
+Run: gh pr diff <number> --repo <owner/repo> --name-only
+Then check each modified file's directory (and parent directories) for CLAUDE.md.
+Return a plain list of paths, one per line. If none exist, return "NONE".
+```
+
+**Sub-agent B — PR summarizer:**
+```
+View pull request <owner/repo>#<number> with the gh CLI (gh pr view, gh pr diff)
+and return a summary of the change: what it does, which files it touches, the
+apparent intent, and the rough size/shape of the diff. Be factual, not evaluative.
+```
+
+**Write `$REVIEW_DIR/context.md`** with two sections:
+- `## CLAUDE.md files` — the path list (or NONE)
+- `## PR summary` — the summary verbatim
+
+**Exit criteria:** `$REVIEW_DIR/context.md` exists with both sections populated."""
+
+[[steps]]
+id = "phase-3-parallel-review"
+title = "Phase 3: Five parallel independent reviewers"
+needs = ["phase-2-context-gathering"]
+description = """
+**CRITICAL INSTRUCTION: Spawn ALL FIVE reviewer sub-agents in a SINGLE message.**
+
+Each runs in its own context window with an independent lens. They must NOT see
+each other's output — independence is the entire point. Use the Agent tool five
+times in the SAME response, `subagent_type: "general-purpose"`,
+`run_in_background: true`, capable model (sonnet-class).
+
+**Early exit:** If eligibility.md says INELIGIBLE, close with reason "PR ineligible".
+
+**Shared prompt preamble** (include in ALL five prompts, filling in repo/number
+and pasting the CLAUDE.md path list and PR summary from context.md):
+
+```
+You are reviewing pull request <owner/repo>#<number>.
+PR summary: <paste from context.md>
+Relevant CLAUDE.md files: <paste path list from context.md>
+
+Use the gh CLI (gh pr view, gh pr diff) — never web fetch.
+Do NOT build, typecheck, or run tests — CI handles that separately.
+
+Return a list of issues found. For EACH issue include:
+- A one-paragraph description with the exact file path and line(s)
+- The reason it was flagged (eg. CLAUDE.md adherence, bug, historical git context)
+- A direct citation: the code snippet, CLAUDE.md quote, commit, or PR comment that supports it
+
+Do NOT report any of the following false positives:
+<paste the False Positive Examples list from your role context verbatim>
+
+If you find nothing report-worthy, return "NO ISSUES". Focus on large, real
+problems — not nitpicks.
+```
+
+**The five lenses** (append one per agent after the preamble):
+
+**Reviewer #1 — CLAUDE.md compliance:**
+```
+Audit the changes to make sure they comply with each relevant CLAUDE.md.
+Read each CLAUDE.md listed above. Note that CLAUDE.md is guidance for Claude as
+it writes code, so not all instructions will be applicable during code review.
+Only flag violations the CLAUDE.md explicitly calls out.
+```
+
+**Reviewer #2 — Shallow bug scan:**
+```
+Read the file changes in the pull request, then do a shallow scan for obvious
+bugs. Avoid reading extra context beyond the changes, focusing just on the
+changes themselves. Focus on large bugs, and avoid small issues and nitpicks.
+Ignore likely false positives.
+```
+
+**Reviewer #3 — Git history:**
+```
+Read the git blame and history of the code modified (git log, git blame on the
+touched files at the relevant lines) to identify any bugs in light of that
+historical context — eg. the PR reverts a deliberate fix, reintroduces a
+pattern that was intentionally removed, or conflicts with the reason the code
+was last changed.
+```
+
+**Reviewer #4 — Prior PR comments:**
+```
+Find previous pull requests that touched these same files
+(gh pr list --state merged --search "<file path>", gh search prs) and read the
+review comments on them. Check whether any comment on those PRs also applies to
+the current pull request.
+```
+
+**Reviewer #5 — In-code comment guidance:**
+```
+Read the code comments in the modified files (the full files, not just the
+diff). Make sure the changes in the pull request comply with any guidance,
+warnings, or invariants stated in those comments.
+```
+
+**After all five complete**, consolidate into `$REVIEW_DIR/findings.md`:
+- One numbered entry per issue: `### Finding N`, source reviewer, file:line,
+  description, reason flagged, citation
+- Deduplicate identical findings reported by multiple reviewers (note both sources)
+- Record reviewers that returned NO ISSUES
+
+**If a reviewer fails or returns nothing at all (not even "NO ISSUES"):**
+re-spawn ONLY that reviewer.
+
+**If ALL reviewers return NO ISSUES:** write findings.md stating that, and
+carry the early-exit forward — phases 4-5 will record a NO_ISSUES verdict.
+
+**Exit criteria:** `$REVIEW_DIR/findings.md` exists, every reviewer accounted
+for, every finding numbered with source, citation, and file:line."""
+
+[[steps]]
+id = "phase-4-confidence-scoring"
+title = "Phase 4: Score every finding against the rubric"
+needs = ["phase-3-parallel-review"]
+description = """
+Judge each finding independently. Finding and judging are separated on purpose:
+the scorer's job is to KILL false positives, not to defend the reviewer.
+
+**Early exit:** If eligibility.md says INELIGIBLE or findings.md has zero
+findings, write `$REVIEW_DIR/scores.md` recording that and close this step.
+
+**For EACH finding in findings.md, spawn a scoring sub-agent — ALL IN A SINGLE
+MESSAGE** (`subagent_type: "general-purpose"`, `model: "haiku"` if available,
+`run_in_background: true`). Each scorer receives: the PR reference, ONE issue
+description (with its citation), and the CLAUDE.md path list from context.md.
+
+**Scorer prompt** (give the rubric VERBATIM):
+
+```
+You are scoring a single code-review finding for pull request <owner/repo>#<number>.
+
+Finding: <paste the full finding entry>
+Relevant CLAUDE.md files: <paste path list>
+
+Verify the finding yourself using gh pr diff, gh pr view, and by reading the
+relevant files. For issues that were flagged due to CLAUDE.md instructions,
+double check that the CLAUDE.md actually calls out that issue specifically.
+
+Score your confidence that this is a real issue on a scale from 0-100:
+
+a. 0: Not confident at all. This is a false positive that doesn't stand up to
+   light scrutiny, or is a pre-existing issue.
+b. 25: Somewhat confident. This might be a real issue, but may also be a false
+   positive. The agent wasn't able to verify that it's a real issue. If the
+   issue is stylistic, it is one that was not explicitly called out in the
+   relevant CLAUDE.md.
+c. 50: Moderately confident. The agent was able to verify this is a real issue,
+   but it might be a nitpick or not happen very often in practice. Relative to
+   the rest of the PR, it's not very important.
+d. 75: Highly confident. The agent double checked the issue, and verified that
+   it is very likely it is a real issue that will be hit in practice. The
+   existing approach in the PR is insufficient. The issue is very important and
+   will directly impact the code's functionality, or it is an issue that is
+   directly mentioned in the relevant CLAUDE.md.
+e. 100: Absolutely certain. The agent double checked the issue, and confirmed
+   that it is definitely a real issue, that will happen frequently in practice.
+   The evidence directly confirms this.
+
+These are common false positives — score them 0:
+<paste the False Positive Examples list verbatim>
+
+Return exactly: the numeric score, then your verification reasoning.
+```
+
+**Write `$REVIEW_DIR/scores.md`** as a table:
+
+| # | Finding (short) | Source reviewer | Score | Scorer rationale (1 line) |
+
+**Exit criteria:** `$REVIEW_DIR/scores.md` exists with a score for every
+finding in findings.md — no finding skipped."""
+
+[[steps]]
+id = "phase-5-threshold-filter"
+title = "Phase 5: Apply the confidence threshold filter"
+needs = ["phase-4-confidence-scoring"]
+description = """
+**MANDATORY GATE CHECK** — the threshold is a hard cutoff, not a suggestion.
+
+**Early exit:** If eligibility.md says INELIGIBLE, close with reason "PR ineligible".
+
+**1. Apply the filter:**
+Findings with score < {{min_confidence}} are DROPPED. No exceptions, no
+"but it seems important" overrides — the rubric already accounted for importance.
+
+**2. Write `$REVIEW_DIR/verdict.md`:**
+
+```markdown
+# Ultra-review Verdict — <owner/repo>#<number>
+
+Threshold: {{min_confidence}}
+Findings reviewed: N | Survived: N | Dropped: N
+
+## Surviving findings
+[Full entry per surviving finding: description, file:line, reason, citation, score]
+
+## Dropped findings
+| # | Finding (short) | Score | Why dropped |
+```
+
+**3. Decision logic:**
+- IF one or more findings survive → proceed to phase-6-post-comment.
+- IF ZERO findings survive → do NOT post a review. Record verdict NO_ISSUES in
+  verdict.md, then mail the orchestrator the FULL detail — the dispatcher must
+  see what was found and dropped without digging through your worktree:
+```bash
+af mail send {{orchestrator}} -s "Ultra-review complete: no issues above threshold" -m "PR: <url>
+Findings reviewed: <N>, none scored >= {{min_confidence}}.
+No review posted (per protocol).
+
+Dropped findings (score < {{min_confidence}}):
+<paste the dropped-findings table from verdict.md verbatim>
+
+Full artifacts: <absolute path to $REVIEW_DIR>"
+```
+  Then close phase-6-post-comment with reason "No findings above threshold" when
+  you reach it. (Exception: if the dispatch mail explicitly requested a comment
+  regardless of outcome — recorded in target.md at validate-contract — post the
+  no-issues comment variant shown in phase-6 instead.)
+
+**Exit criteria:** `$REVIEW_DIR/verdict.md` exists with surviving and dropped
+tables and an explicit decision: POST or NO_ISSUES."""
+
+[[steps]]
+id = "phase-6-post-comment"
+title = "Phase 6: Re-check eligibility and post the inline review"
+needs = ["phase-5-threshold-filter"]
+description = """
+Post ONE review with each finding as an inline comment anchored to the diff
+line it concerns. This is the only externally visible action of the entire
+formula — get the anchors and format exactly right. The inline threads are the
+deliverable: the operator triages them on GitHub (reply, tweak, or resolve
+individually), then dispatches ultra-implement for the comments left standing.
+
+**Early exit:** If verdict.md says NO_ISSUES (and no comment was explicitly
+requested) or eligibility.md says INELIGIBLE, close this step with that reason.
+
+**1. Repeat the eligibility check** (same cheap sub-agent prompt as
+phase-1-eligibility). The PR may have closed, merged, or been reviewed while
+you worked. If now INELIGIBLE: update eligibility.md, mail the dispatcher,
+do NOT post, and close this step.
+
+**2. Capture the head sha** (used as the review's commit_id and for permalinks):
+```bash
+gh pr view <number> --repo <owner/repo> --json headRefOid -q .headRefOid
+```
+
+**3. Anchor each surviving finding to the diff:**
+For every finding in verdict.md, locate its file path and line number in the
+CURRENT diff:
+```bash
+gh pr diff <number> --repo <owner/repo>
+```
+- The anchor line MUST appear in a diff hunk. Anchor to the new-file side
+  (`side: RIGHT`) for added/modified lines.
+- Multi-line findings: use `start_line` (first line) plus `line` (last line),
+  both with `side: RIGHT`.
+- A finding whose line is NOT in the diff (rare — the protocol already drops
+  issues on unmodified lines as false positives) cannot be inline-anchored:
+  put it in the review body instead, with a full-sha permalink.
+
+**4. Build `$REVIEW_DIR/review-payload.json`:**
+One review submission carries the summary body plus ALL inline comments:
+
+```json
+{
+  "commit_id": "<full-head-sha>",
+  "event": "COMMENT",
+  "body": "<review summary - format below>",
+  "comments": [
+    {
+      "path": "internal/foo.go",
+      "line": 42,
+      "side": "RIGHT",
+      "body": "<brief description of bug> (CLAUDE.md says '<...>')"
+    },
+    {
+      "path": "internal/bar.go",
+      "start_line": 10,
+      "start_side": "RIGHT",
+      "line": 14,
+      "side": "RIGHT",
+      "body": "<brief description of bug> (bug due to <code snippet>)"
+    }
+  ]
+}
+```
+
+Inline comment body rules:
+- Brief, no emojis
+- State the reason it was flagged and quote the supporting citation
+  (CLAUDE.md text, commit, or prior PR comment) — the thread is already
+  anchored to the code, so no permalink is needed inside it
+
+Review summary `body` format (assuming 3 findings, 1 not anchorable):
+
+```markdown
+### Code review
+
+Found 3 issues. 2 are posted as inline comments on the diff; 1 below:
+
+1. <brief description of bug> (bug due to <file and code snippet>)
+
+<permalink — full 40-char sha, at least 1 line of context before and after,
+eg. commenting on lines 5-6 → link #L4-L7, repo matching the PR's repo:
+https://github.com/<owner>/<repo>/blob/<full-head-sha>/<path>#L4-L7>
+
+🤖 Generated with [Claude Code](https://claude.ai/code)
+
+<sub>- If this code review was useful, please react with 👍. Otherwise, react with 👎.</sub>
+```
+
+If ALL findings anchored inline, the body is just the header, "Found N issues,
+posted as inline comments.", and the footer.
+
+**5. Post the review:**
+```bash
+gh api repos/<owner>/<repo>/pulls/<number>/reviews --input "$REVIEW_DIR/review-payload.json"
+```
+Capture `html_url` from the response. If the API returns HTTP 422, an anchor is
+bad: re-check that comment's path/line against the diff, fix it (or move that
+finding to the body fallback), and retry. Do NOT retry blindly.
+
+No-issues variant (ONLY when a comment was explicitly requested despite zero
+surviving findings) — plain comment, no inline anchors:
+```bash
+gh pr comment <number> --repo <owner/repo> --body "### Code review
+
+No issues found. Checked for bugs and CLAUDE.md compliance.
+
+🤖 Generated with [Claude Code](https://claude.ai/code)"
+```
+
+**6. Record the result:** append the review URL, timestamp, and a placement
+table (finding → inline path:line, or body) to `$REVIEW_DIR/verdict.md`.
+
+**Exit criteria:** Review posted with one inline thread per anchorable finding
+(or step closed with documented reason); review URL and placement table
+recorded in verdict.md."""
+
+# ============================================================================
+# POST-WORK INVARIANT STEPS
+# ============================================================================
+
+[[steps]]
+id = "self-review"
+title = "Self-review the review"
+needs = ["phase-6-post-comment"]
+description = """
+Review your own work product before finalizing.
+
+**1. Re-read the posted review (or the NO_ISSUES/INELIGIBLE verdict):**
+- Every finding in the review scored >= {{min_confidence}} in scores.md
+- Each inline comment landed on the intended path and line — verify against
+  the placement table in verdict.md:
+```bash
+gh api repos/<owner>/<repo>/pulls/<number>/comments --jq '.[] | {path, line, body}'
+```
+- Body-fallback findings (if any) have full-40-char-sha permalinks that render
+  correctly
+- No dropped finding leaked into the review
+- The review is brief and emoji-free (footer excepted)
+
+**2. Verify artifact chain integrity:**
+```bash
+ls "$REVIEW_DIR"/target.md "$REVIEW_DIR"/eligibility.md "$REVIEW_DIR"/context.md
+ls "$REVIEW_DIR"/findings.md "$REVIEW_DIR"/scores.md "$REVIEW_DIR"/verdict.md
+```
+(review-payload.json additionally required if a review was posted; on the
+INELIGIBLE early-exit path, artifacts from unreached phases may be absent —
+verify target.md + eligibility.md at minimum and that each closed step's
+reason is recorded.)
+
+**3. Fix issues found — don't leave a broken review on the PR:**
+- Wrong inline comment text:
+```bash
+gh api -X PATCH repos/<owner>/<repo>/pulls/comments/<comment-id> -f body='<corrected text>'
+```
+- Wrong anchor (path/line): delete the misplaced comment and post a corrected one:
+```bash
+gh api -X DELETE repos/<owner>/<repo>/pulls/comments/<comment-id>
+gh api repos/<owner>/<repo>/pulls/<number>/comments -f commit_id=<head-sha> -f path=<path> -F line=<line> -f side=RIGHT -f body='<text>'
+```
+
+**Exit criteria:** Posted review (if any) verified accurate — anchors, scores,
+and permalinks all checked; artifact chain complete."""
+
+[[steps]]
+id = "run-tests"
+title = "Run tests and verify coverage"
+needs = ["self-review"]
+description = """
+**Scope note:** This formula produces review artifacts, not code. There is
+nothing of YOURS to test — and you must NOT build or test the PR under review
+(CI owns build signal).
+
+**1. Confirm no code changes on your branch:**
+```bash
+git diff --stat origin/{{default_branch}}...HEAD
+# Expected: only .reviews/pr-<number>/ files (or nothing yet, if uncommitted)
+```
+
+**2. If — unexpectedly — you modified project code:** revert it. This formula
+must never change project source:
+```bash
+git checkout -- <accidentally-modified-files>
+```
+
+**3. If only review artifacts exist:** nothing to test. Close this step with
+reason "Review-only work product — no code changes to test".
+
+**Exit criteria:** Verified zero project-code changes on your branch."""
+
+[[steps]]
+id = "self-verify"
+title = "Verify output matches the ultra-review contract"
+needs = ["run-tests"]
+description = """
+Architecture gate (Jidoka): verify the work product matches the protocol.
+
+**Verify against the protocol checklist:**
+- [ ] Eligibility was checked BEFORE review work and AGAIN before posting
+- [ ] Five reviewers ran (or documented re-spawn), each with its distinct lens
+- [ ] Every finding has a score in scores.md; every score used the verbatim rubric
+- [ ] Filter applied at {{min_confidence}} with zero overrides
+- [ ] At most ONE review submission posted; every anchorable finding is its own
+      inline thread; summary body matches the template
+- [ ] If NO_ISSUES or INELIGIBLE: nothing posted, {{orchestrator}} mailed with
+      the reason (and, for NO_ISSUES, the dropped-findings table)
+- [ ] No project code was modified; no build/test of the PR was attempted
+- [ ] Nothing was pushed to origin; no remote branch was created
+
+**If any item fails:** go back to the relevant step and fix it. A posted
+comment with protocol violations gets corrected via comment edit, not ignored.
+
+**Exit criteria:** Every checklist item explicitly verified and passing."""
+
+[[steps]]
+id = "cleanup-workspace"
+title = "Clean up workspace"
+needs = ["self-verify"]
+description = """
+Ensure the workspace is pristine and the audit trail is preserved.
+
+**1. Commit the review artifacts (the audit trail):**
+```bash
+git add .reviews/pr-<number>/
+git commit -m "review: ultra-review of <owner/repo>#<number>"
+```
+
+**2. Verify clean state:**
+```bash
+git status                  # working tree clean
+git stash list              # empty
+```
+
+**3. Do NOT push (zero-remote-footprint guard):**
+A prior run pushed its worktree branch to origin, polluting the repo with an
+unnecessary remote branch. The commit above is a LOCAL audit trail only —
+being ahead of origin is expected and CORRECT. Never run `git push` in this
+formula.
+
+**Exit criteria:** Artifacts committed locally, workspace clean, NOTHING pushed."""
+
+[[steps]]
+id = "prepare-for-review"
+title = "Prepare work for review"
+needs = ["cleanup-workspace"]
+description = """
+Record completion on the assignment.
+
+**Note:** Do NOT close the issue/bead. The orchestrator closes it after processing.
+
+**1. Add completion notes to your assigned bead (if dispatched with one):**
+```bash
+af bead update <bead-id> --notes "Completed: ultra-review of <owner/repo>#<number>.
+Outcome: <POSTED <review-url> (N inline, N in body) | NO_ISSUES | INELIGIBLE: reason>
+Findings reviewed: <N>, survived filter (>= {{min_confidence}}): <N>.
+Audit trail: .reviews/pr-<number>/ committed on local branch <branch> (not pushed).
+Next: operator triages the inline threads on the PR (reply/tweak/resolve), then
+dispatches ultra-implement to address the comments left unresolved."
+```
+
+If no bead exists (direct dispatch), the WORK_DONE mail from `af done` carries
+the completion signal — make sure verdict.md tells the full story.
+
+**Exit criteria:** Completion recorded with outcome, counts, and artifact location."""
+
+[[steps]]
+id = "submit-and-exit"
+title = "Submit and exit"
+needs = ["prepare-for-review"]
+description = """
+Signal completion. The work product is an inline PR review (or a documented
+no-action verdict) — not a code PR — so this step focuses on signaling done.
+
+**1. PR creation: SKIP. Push: SKIP.**
+Your branch contains only review artifacts. Do not open a PR for them and do
+NOT push the branch; the local commit is the audit trail.
+
+**2. Signal completion:**
+```bash
+af done
+```
+
+This closes the final formula step. When all steps are complete, it:
+- Mails WORK_DONE to the dispatcher
+- Cleans up the checkpoint and runtime artifacts
+
+**Ephemeral Agent Model:**
+Once you signal completion, you're done. Your workspace can be cleaned up —
+the review (if any) lives on the PR, the NO_ISSUES detail (if any) was mailed
+to {{orchestrator}}, and the local .reviews audit trail is disposable with
+the worktree.
+
+If you have context remaining, you may:
+- Pick up new work from `af prime`
+- Or use `af handoff` to cycle to a fresh session
+
+**Exit criteria:** `af done` signaled, agent done."""

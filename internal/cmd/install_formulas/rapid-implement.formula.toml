@@ -1,0 +1,917 @@
+description = """
+## Overview
+Lean, adaptive implementation workflow that classifies task complexity and scales process rigor accordingly.
+
+Requirements come from the assigned bead — which may contain inline requirements, a path
+to a proposal/problem document, a link to a GitHub issue, or a link to a GitHub pull request.
+
+This formula guides an agent through the rapid-implement process:
+1. Classify task complexity (Trivial/Moderate/Complex/Epic) and, for Complex/Epic, write a
+   PLAN.md with a complete spec checklist
+2. Investigate with rigor scaled to the tier (none -> one subagent -> two parallel subagents)
+3. Write failing tests FIRST (proving they exercise new code), then implement to green
+4. Verify the full suite and save the judging artifact (test_results.txt)
+5. For Complex/Epic, pass a blind review (>= 8/10) before commit
+6. Finalize through the standard self-review / cleanup / submit invariant steps
+
+Process weight scales to task complexity: trivial tasks stay lean, epics get full rigor.
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| issue | cli | The issue/PR ID you're assigned to work on |
+
+## Failure Modes
+
+| Situation | Action |
+|-----------|--------|
+| Tests pass before implementation | Tests aren't testing new code — fix the tests, not the code |
+| Tests fail 3x on the same issue | Stop, re-read requirements, use a subagent to review the approach |
+| Tests fail | Fix the code, never weaken the test. Do not proceed with failures |
+| Running low on time/context | Reduce scope to core requirements and ship working code (Ship over DNF) |
+| Context filling up | Use af handoff to cycle to a fresh session |
+| Blocked / unclear requirements | Mail Supervisor, do not guess |
+
+## Anti-Patterns to Avoid
+
+| Anti-Pattern | Prevention |
+|--------------|------------|
+| Skipping the failing-test gate | A test that passes before implementation proves nothing — GATE 2 is mandatory |
+| Weakening a test to make it pass | Fix the code, not the test |
+| Over-classifying a trivial task | Process overhead kills speed — treat trivial as trivial |
+| Under-classifying a complex task | Skipping investigation causes rework — investigate Complex/Epic first |
+| Forgetting test_results.txt | Save full suite output every time — it is the judging artifact |
+| Implementing untested code paths | Every code path (405 guard, nil check, error branch) MUST have a test |
+| DNF when partial work is possible | A 70%-complete implementation with passing tests scores non-zero — ship something |
+| Over-investigating | One pass for Complex, two parallel for Epic, then start coding |
+| Substituting custom alternatives for spec'd formats | Use stdlib (url.Parse, uuid, time.Parse) — never hand-roll prefix/regex checks |
+
+## !IMPORTANT - MANDATORY Exact Step Execution
+Execute each formula step EXACTLY as written, in order, with no modifications.
+Every step produces a file artifact at a known path. `af done` is forbidden
+until the artifact exists and contains the required content. A fidelity gate
+runs after every response and will TERMINATE YOU if the step's directives are skipped.
+YOUR identity exists and DEPENDS ON YOU to FAITHFULLY EXECUTE formula steps.
+"""
+formula = "rapid-implement"
+version = 1
+
+# ============================================================================
+# PRE-WORK INVARIANT STEPS
+# ============================================================================
+
+[[steps]]
+id = "load-context"
+title = "Load context and verify assignment"
+description = """
+Initialize your session and understand your assignment.
+
+**1. Prime your environment:**
+```bash
+af prime                    # Load role context
+```
+
+**2. Check your assignment:**
+
+The formula provides your assigned issue via `{{issue}}`. Read it carefully:
+```bash
+af bead show {{issue}}           # Full issue details
+```
+
+**3. Check inbox for additional context:**
+```bash
+af mail inbox
+# Read any HANDOFF or assignment messages
+```
+
+**4. Extract requirements from the bead and classify the input MODE:**
+The bead is your source of truth. Classify which form it takes — this sets your
+branch **MODE**, which governs branch-setup, your push target, and PR handling later.
+
+- **Pull request link** (contains `/pull/`, e.g. `https://github.com/org/repo/pull/372`) ->
+  **MODE=pr**. The PR's branch is the shared work surface: you build ON it, push your
+  commits BACK to it, and post a summary comment — you do NOT open a new PR. The PR
+  often carries the spec to implement (a problem doc, `IMPLREADME`, or design doc in its
+  diff/body). Resolve the PR's branch now and read it for requirements:
+  ```bash
+  PR_NUM=$(printf '%s' "<bead-input>" | grep -oE '/pull/[0-9]+' | grep -oE '[0-9]+' | head -1)
+  SRC_BRANCH=$(gh pr view "$PR_NUM" --json headRefName --jq '.headRefName')
+  gh pr view "$PR_NUM" --json title,body --jq '.title, .body'   # requirements
+  gh pr diff "$PR_NUM"                                          # spec doc carried by the PR
+  ```
+- **GitHub issue link** (contains `/issues/`, e.g. `https://github.com/org/repo/issues/123`) ->
+  **MODE=issue**. Fetch via `gh issue view <number> --repo <org/repo>` and extract requirements.
+- **Problem file path** (e.g., `IMPLREADME.md`, `bugs/issue-123.md`) -> **MODE=issue**. Read it completely.
+- **Inline requirements** (the bead description is the problem) -> **MODE=issue**. Extract directly.
+
+Whichever form, capture the full requirements — this is your problem statement. Remember
+**MODE** (and **SRC_BRANCH** + **PR_NUM** when MODE=pr) for branch-setup and finalization.
+If MODE=pr, verify SRC_BRANCH is non-empty before proceeding.
+
+**5. Understand the requirements:**
+- What exactly needs to be fixed/built?
+- What are the reproduction steps (for bugs)?
+- What are the acceptance criteria?
+- What does "done" look like?
+
+**6. Verify you can proceed:**
+- No unresolved blockers on the issue
+- You understand what to do
+- Required resources are available
+
+If blocked or unclear, mail Supervisor immediately:
+```bash
+af mail send supervisor -s "HELP: Unclear requirements" -m "Issue: {{issue}}
+Question: <what you need clarified>"
+```
+
+**Exit criteria:** You understand the problem and can begin classification (phase-0-classify)."""
+
+[[steps]]
+id = "branch-setup"
+title = "Set up working branch"
+needs = ["load-context"]
+description = """
+Ensure you're on a clean feature branch ready for work.
+
+**1. Check current branch state:**
+```bash
+git status
+git branch --show-current
+```
+
+**2. If not on a feature branch, create one:**
+```bash
+# Standard naming: agent/<your-name> or feature/<issue-id>
+git checkout -b agent/<name>
+```
+
+**3. Ensure clean working state:**
+```bash
+git status                  # Should show "working tree clean"
+git stash list              # Should be empty
+```
+
+If dirty state from previous work:
+```bash
+# If changes are relevant to this issue:
+git add -A && git commit -m "WIP: <description>"
+
+# If changes are unrelated cruft:
+git stash push -m "unrelated changes before {{issue}}"
+# Or discard if truly garbage:
+git checkout -- .
+```
+
+**4. MODE=pr — point your branch AT the PR head (do NOT sync to {{default_branch}}):**
+The PR's branch is the shared work surface, so your work CONTINUES that PR rather
+than starting fresh off main. Your local branch keeps its unique worktree name (only
+the remote ref is shared); re-point it at the PR head:
+```bash
+# Re-derive MODE/SRC_BRANCH from the bead (handoff-safe; load-context set these):
+ASSIGN=$(af bead show {{issue}} 2>/dev/null)
+if printf '%s' "$ASSIGN" | grep -q '/pull/'; then
+  MODE=pr
+  PR_NUM=$(printf '%s' "$ASSIGN" | grep -oE '/pull/[0-9]+' | grep -oE '[0-9]+' | head -1)
+  SRC_BRANCH=$(gh pr view "$PR_NUM" --json headRefName --jq '.headRefName')
+else
+  MODE=issue
+fi
+
+if [ "$MODE" = "pr" ]; then
+  git fetch origin "$SRC_BRANCH"
+  git reset --hard origin/"$SRC_BRANCH"   # the PR head is your baseline
+fi
+```
+Do NOT rebase onto origin/{{default_branch}} and do NOT merge {{default_branch}} in for MODE=pr — diverging or
+rewriting the PR's history breaks the push-back. **If MODE=pr, skip action 5.**
+
+**5. MODE=issue — sync with main:**
+```bash
+git fetch origin
+git rebase origin/{{default_branch}}      # Get latest, rebase your branch
+```
+
+If rebase conflicts:
+- Resolve them carefully
+- Test after resolution
+- If stuck, mail Supervisor
+
+**Exit criteria:** MODE=pr -> your branch points at the PR head (no main rebase);
+MODE=issue -> you're on a clean feature branch, rebased on latest main."""
+
+[[steps]]
+id = "validate-contract"
+title = "Validate design contract (if present)"
+needs = ["branch-setup"]
+description = """
+Gate: incoming design contract inspection (Poka-yoke).
+
+Check if a design contract exists for this work:
+```bash
+# Look for design documents related to this issue
+ls .designs/{{issue}}/design-doc.md 2>/dev/null || echo "No design contract found"
+```
+
+**If design contract EXISTS:**
+- Read it completely
+- Extract key requirements and constraints
+- Note any specific implementation guidance
+- These become verification points for self-verify later
+
+**If NO design contract exists:**
+- This is acceptable — not all work has a prior design
+- Close this step with reason "No design contract found"
+- Proceed without contract verification
+
+**Exit criteria:** Design contract reviewed (if present), or step closed as N/A."""
+
+[[steps]]
+id = "preflight-tests"
+title = "Verify tests pass on main"
+needs = ["validate-contract"]
+description = """
+Check if the codebase is healthy BEFORE starting your work.
+
+**The Scotty Principle:** Don't walk past a broken warp core. But also don't
+let someone else's mess consume your entire mission.
+
+**1. Check tests on main:**
+```bash
+git stash                   # Save your branch state
+git checkout origin/{{default_branch}}
+# Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
+# Then run it. Examples: make test, npm test, cargo test, go test ./...
+```
+
+**2. If tests PASS:**
+```bash
+git checkout -              # Back to your branch
+git stash pop               # Restore state
+```
+Continue to phase-0-classify step.
+
+**3. If tests FAIL on main:**
+
+Make a judgment call:
+
+| Situation | Action |
+|-----------|--------|
+| Quick fix (<15 min) | Fix it, commit to main, then continue |
+| Medium fix (15-60 min) | Fix if it blocks your work, else file bead |
+| Big fix (>1 hour) | File bead, notify Supervisor, proceed with your work |
+
+**Quick fix path:**
+```bash
+# Fix the issue
+git add <files>
+git commit -m "fix: <description> (pre-existing failure)"
+git push origin {{default_branch}}
+git checkout -
+git stash pop
+git rebase origin/{{default_branch}}      # Get your fix
+```
+
+**File and proceed path:**
+```bash
+af bead create --title "Pre-existing test failure: <description>" \
+  --type bug --priority 1
+
+af mail send supervisor -s "NOTICE: Main has failing tests" \
+  -m "Found pre-existing test failures on main.
+Filed: <bead-id>
+Proceeding with my assigned work ({{issue}})."
+
+git checkout -
+git stash pop
+```
+
+**Context consideration:**
+If fixing pre-existing failures consumed significant context:
+```bash
+af handoff -s "Fixed pre-existing failures, ready for assigned work" \
+  -m "Issue: {{issue}}
+Fixed: <what you fixed>
+Ready to start: phase-0-classify step"
+```
+Fresh session continues from phase-0-classify.
+
+**Exit criteria:** Tests pass on main (or issue filed), ready to begin classification."""
+
+# ============================================================================
+# DOMAIN STEPS — from .claude/skills/rapid-implement/SKILL.md
+# ============================================================================
+
+[[steps]]
+id = "phase-0-classify"
+title = "Phase 0: Classify complexity"
+needs = ["preflight-tests"]
+description = """
+
+Read the requirements (from bead description, problem/proposal file, GitHub issue, or PR).
+Classify complexity — this governs how much process the rest of the formula applies.
+
+| Signal | Trivial | Moderate | Complex | Epic |
+|--------|---------|----------|---------|------|
+| Files touched | 1-2 | 2-4 | 5-10 | 10+ |
+| New models/tables | 0 | 0-1 | 1-3 | 3+ |
+| Concurrency needed | No | No | Maybe | Yes |
+| Cross-component | No | No | Yes | Yes |
+| Design decisions | 0 | 1-2 | 3-5 | 5+ |
+
+**Trivial/Moderate:** Note the classification mentally. No PLAN.md needed. Proceed —
+gate-0 and gate-1 will be closed as N/A.
+
+**Complex/Epic:** Write the classification to `todos/rapid/PLAN.md`:
+```bash
+mkdir -p todos/rapid
+```
+
+```markdown
+## Classification: [Complex|Epic]
+## Rationale: [1-2 sentences with signals observed]
+## Files to modify: [list]
+## Key risks: [list]
+## Verification: [test command from requirements]
+
+## Spec Checklist (enumerate EVERY item)
+### Components/Subcommands/Endpoints:
+- [ ] [list each one from the spec]
+### Architectural Constraints:
+- [ ] [e.g., "must call REST API, not direct DB access"]
+### Flags/Options per component:
+- [ ] [list each flag from the spec]
+```
+
+**MANDATORY for Complex/Epic:** Every subcommand, endpoint, flag, and architectural
+constraint from the spec MUST be enumerated in the Spec Checklist. Missing items in the
+checklist = missing features in the implementation.
+
+**Anti-pattern:** Never over-classify (process overhead kills speed) and never
+under-classify (skipping investigation causes rework). Be honest about the signals.
+
+**Exit criteria:** Complexity classified. For Complex/Epic, `todos/rapid/PLAN.md` exists
+with classification AND a complete Spec Checklist enumerating every spec item."""
+
+[[steps]]
+id = "gate-0-plan-checklist"
+title = "GATE 0: PLAN.md with classification and complete spec checklist (Complex/Epic only)"
+needs = ["phase-0-classify"]
+description = """
+**MANDATORY GATE CHECK** — Do NOT close this step until the check passes.
+
+**Conditional gate:** This gate applies ONLY to Complex/Epic tasks. If you classified the
+task as Trivial or Moderate, close this step immediately with reason
+"N/A: Trivial/Moderate task — no PLAN.md required".
+
+For Complex/Epic, run this command:
+```bash
+if [ -f todos/rapid/PLAN.md ] && grep -qiE "spec checklist" todos/rapid/PLAN.md; then
+  echo "GATE 0 PASS: PLAN.md exists with a Spec Checklist"
+else
+  echo "GATE 0 FAIL: PLAN.md missing or has no Spec Checklist"
+fi
+```
+
+Then manually confirm: every subcommand, endpoint, flag, and architectural constraint
+from the spec is enumerated as a checklist item.
+
+**If FAIL**: Go back to phase-0-classify and write a complete PLAN.md. Do NOT proceed.
+**If PASS**: Close this step and continue."""
+
+[[steps]]
+id = "phase-1-investigate"
+title = "Phase 1: Investigate (adaptive)"
+needs = ["gate-0-plan-checklist"]
+description = """
+
+Investigate with rigor scaled to the classification from Phase 0.
+
+**Trivial:** Read the target file(s) directly. No investigation phase.
+
+**Moderate:** Read target files + related tests. Note the patterns to follow.
+
+**Complex:** Use ONE subagent to investigate:
+```
+Read [relevant directories], understand the architecture, identify patterns for
+[feature type], and report: (1) files to modify, (2) patterns to follow,
+(3) potential risks, (4) existing test patterns.
+```
+
+**Epic:** Use TWO parallel subagents:
+```
+Subagent 1: Investigate the data layer — models, stores, database schema.
+            Report: existing patterns, naming conventions, migration approach.
+
+Subagent 2: Investigate the API/service layer — handlers, services, routing.
+            Report: existing patterns, middleware, error handling conventions.
+```
+
+**Anti-stall rule (Complex/Epic):** Investigation is subordinate to implementation.
+One subagent pass for Complex, two parallel passes for Epic. If investigation is
+incomplete after that, proceed with what you have — compile errors teach faster than
+a third investigation pass. Do NOT over-investigate.
+
+**Complex/Epic:** Append the investigation findings (files to modify, patterns to follow,
+risks, test patterns) to `todos/rapid/PLAN.md` so they survive a context handoff.
+
+**Exit criteria:** Investigation complete to the depth required by the tier. For
+Complex/Epic, findings are documented in `todos/rapid/PLAN.md`."""
+
+[[steps]]
+id = "gate-1-investigation"
+title = "GATE 1: Investigation documented (Complex/Epic only)"
+needs = ["phase-1-investigate"]
+description = """
+**MANDATORY GATE CHECK** — Do NOT close this step until the check passes.
+
+**Conditional gate:** This gate applies ONLY to Complex/Epic tasks. If you classified the
+task as Trivial or Moderate, close this step immediately with reason
+"N/A: Trivial/Moderate task — no documented investigation required".
+
+For Complex/Epic, run this command:
+```bash
+if [ -f todos/rapid/PLAN.md ] && grep -qiE "files to modify|patterns to follow|test pattern" todos/rapid/PLAN.md; then
+  echo "GATE 1 PASS: investigation findings documented in PLAN.md"
+else
+  echo "GATE 1 FAIL: investigation findings not documented"
+fi
+```
+
+**If FAIL**: Go back to phase-1-investigate and record the findings in PLAN.md. Do NOT proceed.
+**If PASS**: Close this step and continue."""
+
+[[steps]]
+id = "phase-2-test-first"
+title = "Phase 2: Test first (write failing tests)"
+needs = ["gate-1-investigation"]
+description = """
+
+Write failing tests BEFORE implementing. Test EVERY behavior you will implement.
+
+**Coverage by tier:**
+- **Trivial:** Happy path + one error/edge case.
+- **Moderate:** Happy path + all error cases mentioned in requirements + edge cases. For
+  each validation rule in the spec (URL format, allowed values, required fields), write a
+  dedicated test that verifies the rejection response and status code.
+- **Complex/Epic:** Happy path + all error cases + edge cases + integration test.
+
+**Coverage rule:** If you will implement a code path (e.g., a method guard returning 405,
+a nil-check returning an error), write a test for it. Untested code paths are invisible to
+reviewers and judges.
+
+**Test naming:** Name each test to directly map to an acceptance criterion (e.g.,
+`TestWebhookCreateRejectsInvalidURL` for "POST rejects invalid URLs"). This makes coverage
+visible to reviewers.
+
+**Verify the tests FAIL (proves they exercise real new code) and SAVE the output:**
+```bash
+# Discover the project's test command and run ONLY the new tests.
+# Save the failing output to test_fail_output.txt — this proves test-first discipline.
+# Example (Go): go test ./[path] -run [TestName] -v 2>&1 | tee test_fail_output.txt | tail -10
+# Expected: FAIL (compile error or assertion failure)
+```
+
+**CRITICAL:** `test_fail_output.txt` MUST exist and show failure. If all tests pass before
+implementation, they are not testing new code — fix the tests.
+
+**Exit criteria:** Failing tests exist AND `test_fail_output.txt` shows the failure."""
+
+[[steps]]
+id = "gate-2-failing-test"
+title = "GATE 2: Failing test exists (ALL tiers)"
+needs = ["phase-2-test-first"]
+description = """
+**MANDATORY GATE CHECK** — Do NOT close this step until the check passes.
+
+Run this command:
+```bash
+if [ -f test_fail_output.txt ] && grep -qiE "fail|error" test_fail_output.txt; then
+  echo "GATE 2 PASS: tests fail before implementation"
+else
+  echo "GATE 2 FAIL: no failing-test evidence in test_fail_output.txt"
+fi
+```
+
+**If FAIL**: Either `test_fail_output.txt` is missing, or the tests passed before
+implementation (proving nothing). Go back to phase-2-test-first, write meaningful failing
+tests, and re-save the output. Do NOT proceed.
+**If PASS**: Close this step and continue."""
+
+[[steps]]
+id = "phase-3-implement"
+title = "Phase 3: Implement"
+needs = ["gate-2-failing-test"]
+description = """
+
+Implement the solution. Follow the patterns found in investigation (or the target files).
+
+**Rules:**
+- Follow existing code conventions exactly (naming, error handling, imports)
+- Use package-level types for response/request structs, not inline definitions
+- Consolidate duplicate error-return paths into helper functions or early returns
+- No over-engineering — implement what the requirements ask, nothing more
+- If requirements are ambiguous, pick the simplest interpretation
+- **Spec-literal compliance:** If the spec names a specific type or format (UUID, RFC3339,
+  HTTPS URL), implement EXACTLY that. Do NOT substitute custom alternatives (e.g., use
+  `uuid.New()` not `generateID("prefix-")`)
+- **Standard library validation:** Use stdlib for standard formats — `url.Parse` /
+  `url.ParseRequestURI` for URLs, a `uuid` package for UUIDs, `time.Parse` for timestamps.
+  NEVER hand-roll prefix checks or regex for standard formats
+- **Response field cross-check:** Before moving on, verify every field in the spec's data
+  model appears correctly in your handler response. Missing or misnamed fields are
+  correctness bugs
+- **Priority ordering:** Implement in architectural dependency order: data structures ->
+  business logic -> API/handlers -> secondary features. Each layer should compile before
+  starting the next
+- **Ship over DNF:** A working implementation covering 70% of requirements with passing
+  tests is infinitely better than no implementation. If Phase 0+1 consumed significant
+  time, reduce scope to core requirements and ship working code
+
+**If tests fail:** Read the error. Fix the code. Do NOT change the test to match wrong behavior.
+
+**If tests fail 3 times on the same issue:** Stop. Re-read the requirements. Check if the
+approach is wrong. Use a subagent to review:
+"Review my implementation against the requirements. What am I missing?"
+
+**Exit criteria:** Implementation complete, target tests pass, changes committed."""
+
+[[steps]]
+id = "gate-3-target-tests"
+title = "GATE 3: Target tests pass (ALL tiers)"
+needs = ["phase-3-implement"]
+description = """
+**MANDATORY GATE CHECK** — Do NOT close this step until the check passes.
+
+Run the target tests (the ones written in phase-2-test-first). They MUST now pass:
+```bash
+# Discover the project's test command and run the target tests.
+# Example (Go): go test ./[path] -run [TestName] -v
+# Expected: PASS
+```
+
+**If FAIL**: Read the failure. Fix the CODE, not the test. If you have failed 3 times on
+the same issue, stop and re-read the requirements / use a subagent to review the approach.
+Do NOT proceed.
+**If PASS**: Close this step and continue."""
+
+[[steps]]
+id = "phase-4-verify"
+title = "Phase 4: Verify and save results"
+needs = ["gate-3-target-tests"]
+description = """
+
+Run the FULL test suite and SAVE the output — this is a judging artifact.
+
+```bash
+# Discover the project's full-suite test command and save output to test_results.txt.
+# Example (Go): go test ./... -v 2>&1 | tee test_results.txt
+```
+
+**CRITICAL:** `test_results.txt` MUST exist with the full test output. Do NOT skip this.
+
+**If regressions are found:** Fix them. Do NOT skip failing tests. Do NOT delete tests.
+Re-run and re-save to `test_results.txt`.
+
+**Concurrency tasks:** If the implementation uses goroutines, channels, or mutexes (or the
+language equivalent), run with the race detector and save that output:
+```bash
+# Example (Go): go test -race ./[path] -v 2>&1 | tee test_results.txt
+```
+
+**Exit criteria:** Full test suite passes AND `test_results.txt` exists with passing output."""
+
+[[steps]]
+id = "gate-4-full-suite"
+title = "GATE 4: Full suite passes and test_results.txt saved (ALL tiers)"
+needs = ["phase-4-verify"]
+description = """
+**MANDATORY GATE CHECK** — Do NOT close this step until the check passes.
+
+Run this command:
+```bash
+if [ -f test_results.txt ]; then
+  echo "GATE 4: test_results.txt present — confirm it shows the full suite PASSING"
+else
+  echo "GATE 4 FAIL: test_results.txt missing"
+fi
+```
+
+Then confirm the saved output shows the full suite passing (no FAIL / no regressions).
+
+**If FAIL**: `test_results.txt` is missing, or it shows failures. Go back to
+phase-4-verify, fix the regressions, re-run the full suite, and re-save. Do NOT proceed.
+**If PASS**: Close this step and continue."""
+
+[[steps]]
+id = "gate-5-blind-review"
+title = "GATE 5: Blind review >= 8/10 (Complex/Epic only)"
+needs = ["gate-4-full-suite"]
+description = """
+**MANDATORY GATE CHECK** — Do NOT close this step until the check passes.
+
+**Conditional gate:** This gate applies ONLY to Complex/Epic tasks. If you classified the
+task as Trivial or Moderate, close this step immediately with reason
+"N/A: Trivial/Moderate task — no blind review required".
+
+For Complex/Epic, use a subagent for a BLIND review of the diff against the original
+requirements (the subagent must NOT see your investigation or implementation process):
+```
+Review this diff against the original requirements. You have NOT seen the
+investigation or implementation process — judge the output on its own merits.
+
+Requirements: [paste the requirements captured in load-context]
+Diff: [paste `git diff origin/{{default_branch}}...HEAD`]
+
+Score 1-10 on: Correctness, Completeness, Quality, Risk.
+Minimum passing score: 8/10.
+```
+
+**If score < 8/10**: Address the feedback, then re-run the blind review. Do NOT proceed
+until the score is >= 8/10.
+**If score >= 8/10**: Close this step and continue."""
+
+# ============================================================================
+# POST-WORK INVARIANT STEPS
+# ============================================================================
+
+[[steps]]
+id = "self-review"
+title = "Self-review changes"
+needs = ["gate-5-blind-review"]
+description = """
+Review your own changes before running tests.
+
+**1. Review the diff:**
+```bash
+git diff origin/{{default_branch}}...HEAD     # All changes vs main
+git log --oneline origin/{{default_branch}}..HEAD  # All commits
+```
+
+**2. Check for common issues:**
+
+| Category | Look For |
+|----------|----------|
+| Bugs | Off-by-one, null handling, edge cases |
+| Security | Injection, auth bypass, exposed secrets |
+| Style | Naming, formatting, code organization |
+| Completeness | Missing error handling, incomplete paths |
+| Cruft | Debug prints, commented code, TODOs |
+
+**3. Fix issues found:**
+Don't just note them - fix them now. Amend or add commits as needed.
+
+**4. Verify no unintended changes:**
+```bash
+git diff --stat origin/{{default_branch}}...HEAD
+# Only files relevant to {{issue}} should appear
+```
+
+If you accidentally modified unrelated files, remove those changes.
+
+**Exit criteria:** Changes are clean, reviewed, and ready for testing."""
+
+[[steps]]
+id = "run-tests"
+title = "Run tests and verify coverage"
+needs = ["self-review"]
+description = """
+Verify your changes don't break anything and are properly tested.
+
+**1. Run the full test suite:**
+```bash
+# Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
+# Then run it. Examples: make test, npm test, cargo test, go test ./...
+```
+
+**ALL TESTS MUST PASS.** Do not proceed with failures.
+
+**2. If tests fail:**
+- Read the failure output carefully
+- Determine if your change caused it:
+  - If yes: Fix it. Return to phase-3-implement step if needed.
+  - If no (pre-existing): File a bead, but still must pass for your PR
+
+```bash
+# Check if failure exists on main:
+git stash
+git checkout {{default_branch}}
+# Run the same test command you discovered above
+git checkout -
+git stash pop
+```
+
+**3. Verify test coverage for new code:**
+- New features should have tests
+- Bug fixes should have regression tests
+- If you added significant code without tests, add them now
+
+**4. Validate terraform if .tf files were modified:**
+```bash
+# Check if any .tf files were changed in this branch
+TF_CHANGED=$(git diff --name-only origin/{{default_branch}}...HEAD -- '*.tf' | head -1)
+if [ -n "$TF_CHANGED" ]; then
+  echo "Terraform files modified — running validation..."
+  TF_DIR=$(dirname "$TF_CHANGED")
+  (cd "$TF_DIR" && terraform validate) || { echo "FAIL: terraform validate failed"; exit 1; }
+  terraform fmt -check -recursive "$TF_DIR" || { echo "FAIL: terraform fmt check failed — run 'terraform fmt'"; exit 1; }
+  echo "Terraform validation passed."
+fi
+```
+
+**Exit criteria:** All tests pass, terraform valid (if applicable), new code has appropriate test coverage."""
+
+[[steps]]
+id = "self-verify"
+title = "Verify implementation matches design contract (if present)"
+needs = ["run-tests"]
+description = """
+Gate: verify implementation matches design contract (Jidoka).
+
+**If a design contract was found in validate-contract:**
+- Re-read the design contract from `.designs/{{issue}}/design-doc.md`
+- For each requirement/constraint in the contract:
+  - Verify the implementation addresses it
+  - Check that no constraints are violated
+  - Cross-reference with the actual code changes
+- Document any deviations with justification
+
+**If NO design contract was found in validate-contract:**
+- Close this step with reason "No design contract to verify against"
+- Proceed to cleanup-workspace
+
+**Exit criteria:** Implementation verified against design contract (if present), or step closed as N/A."""
+
+[[steps]]
+id = "cleanup-workspace"
+title = "Clean up workspace"
+needs = ["self-verify"]
+description = """
+**Skill artifact cleanup:**
+The rapid-implement process creates working files that should NOT be merged to main.
+```bash
+rm -f test_results.txt test_fail_output.txt
+rm -rf todos/rapid
+```
+
+Ensure workspace is pristine before handoff.
+
+**1. Check for uncommitted changes:**
+```bash
+git status
+```
+Must show "working tree clean". If not:
+- Commit legitimate changes
+- Discard garbage: `git checkout -- .`
+
+**2. Check for untracked files:**
+```bash
+git status --porcelain
+```
+Should be empty. If not:
+- Add to .gitignore if appropriate
+- Remove if temporary: `rm <file>`
+- Commit if needed
+
+**3. Check stash:**
+```bash
+git stash list
+```
+Should be empty. If not:
+- Pop and commit: `git stash pop && git add -A && git commit`
+- Or drop if garbage: `git stash drop`
+
+**4. Push your work (MODE-aware):**
+```bash
+# Re-derive MODE/SRC_BRANCH from the bead (handoff-safe):
+ASSIGN=$(af bead show {{issue}} 2>/dev/null)
+if printf '%s' "$ASSIGN" | grep -q '/pull/'; then
+  MODE=pr
+  PR_NUM=$(printf '%s' "$ASSIGN" | grep -oE '/pull/[0-9]+' | grep -oE '[0-9]+' | head -1)
+  SRC_BRANCH=$(gh pr view "$PR_NUM" --json headRefName --jq '.headRefName')
+else
+  MODE=issue
+fi
+
+if [ "$MODE" = "pr" ]; then
+  # Push BACK to the PR's branch via explicit refspec (local worktree name differs).
+  git push origin HEAD:"$SRC_BRANCH"
+  # If rejected because the PR branch advanced:
+  #   git pull --rebase origin "$SRC_BRANCH" && git push origin HEAD:"$SRC_BRANCH"
+else
+  git push -u origin $(git branch --show-current)
+fi
+```
+
+**5. Verify nothing left behind:**
+```bash
+git status                  # Clean
+git stash list              # Empty
+git log origin/{{default_branch}}..HEAD   # Your commits
+git diff origin/{{default_branch}}...HEAD # Your changes (expected)
+```
+
+**Exit criteria:** Branch pushed, workspace clean, no cruft (test_results.txt,
+test_fail_output.txt, and todos/rapid removed)."""
+
+[[steps]]
+id = "prepare-for-review"
+title = "Prepare work for review"
+needs = ["cleanup-workspace"]
+description = """
+Verify work is complete and ready for PR submission.
+
+**Note:** Do NOT close the issue. The Supervisor will close it after successful merge.
+This enables conflict-resolution retries without reopening closed issues.
+
+**1. Verify the issue shows your work:**
+```bash
+af bead show {{issue}}
+# Status should still be 'in_progress' (you're working on it)
+```
+
+**2. Add completion notes:**
+```bash
+af bead update {{issue}} --notes "Implemented via rapid-implement for {{issue}}.
+Classification: <Trivial|Moderate|Complex|Epic>.
+Test-first (GATE 2): failing test proven before implementation.
+GATE 3: target tests pass. GATE 4: full suite passed (test_results.txt verified).
+Blind review (GATE 5, Complex/Epic): >= 8/10. Changes committed and pushed."
+```
+
+**Exit criteria:** Issue updated with completion notes."""
+
+[[steps]]
+id = "submit-and-exit"
+title = "Submit PR and exit"
+needs = ["prepare-for-review"]
+description = """
+Create a PR and signal completion.
+
+**Ephemeral Agent Model:**
+Once you submit, you're done. The Supervisor will:
+1. Review and merge your PR
+2. Handle rebasing (mechanical rebases done automatically)
+3. Close your issue after successful merge
+4. Create conflict-resolution tasks if needed (fresh agent handles those)
+
+**1. Deliver the work (MODE-aware — re-derive MODE from the bead first):**
+```bash
+ASSIGN=$(af bead show {{issue}} 2>/dev/null)
+if printf '%s' "$ASSIGN" | grep -q '/pull/'; then
+  MODE=pr
+  PR_NUM=$(printf '%s' "$ASSIGN" | grep -oE '/pull/[0-9]+' | grep -oE '[0-9]+' | head -1)
+else
+  MODE=issue
+fi
+```
+
+**MODE=pr — do NOT create a new PR.** Your commits are already on the input PR's
+branch (pushed in cleanup-workspace). Post a completion summary as a comment on it:
+```bash
+gh pr comment "$PR_NUM" --body "## rapid-implement: fix implemented on this PR's branch
+Resolves {{issue}} via the rapid-implement process (classify -> test-first -> implement ->
+verify; all applicable gates passed). The implementation continues this PR's branch — no
+separate PR was opened. See the commits pushed above."
+```
+
+**MODE=issue — create a pull request:**
+```bash
+gh pr create --title "feat: {{issue}} (rapid-implement)" --body "Resolves {{issue}}.
+
+Implemented via the rapid-implement process:
+- Phase 0: complexity classified (PLAN.md spec checklist for Complex/Epic)
+- Phase 2: test-first (failing test proven before code)
+- Phase 3/4: implemented to green, full suite verified
+- Blind review (Complex/Epic): >= 8/10
+
+All applicable gates passed."
+```
+
+**2. Complete the formula:**
+```bash
+af done
+```
+
+`af done` closes the current formula step and — since this is the last step —
+mails WORK_DONE to the Supervisor and cleans up the checkpoint.
+
+**3. You're done:**
+Your PR is open and the Supervisor knows you're done.
+Your workspace can be cleaned up - all work is pushed to origin.
+
+If you have context remaining, you may:
+- Pick up new work from `af prime`
+- Or use `af handoff` to cycle to a fresh session
+
+If the Supervisor needs conflict resolution, it will dispatch a fresh agent.
+You do NOT need to wait around.
+
+**Exit criteria:** PR created (or PR comment posted for MODE=pr), Supervisor notified via WORK_DONE, agent done."""
+
+[vars]
+[vars.issue]
+description = "The issue/PR ID assigned to this agent"
+required = true
+source = "cli"
