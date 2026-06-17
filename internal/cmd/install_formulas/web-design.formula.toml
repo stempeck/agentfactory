@@ -1,0 +1,1251 @@
+description = """
+Transform a GitHub issue, Jira issue, or problem-description document into an interactive, distinctively-designed web UI prototype through iterative exploration and human feedback.
+
+## Overview
+This formula creates a design swarm that turns a *problem source* (not Gherkin
+scenarios) into multiple competing, fully-realized web UI design directions,
+presents them for human review, and iterates until a direction is agreed upon.
+
+It accepts ONE of three problem sources and performs its own breakdown:
+- A **GitHub issue link** (fetched via the `gh` CLI)
+- A **Jira issue link** (fetched via the `jira` CLI or the Jira REST API)
+- A **problem_description_file.md** (read directly from the workspace)
+
+The focus is exclusively on:
+- Look and feel (visual identity, aesthetics, type, color, signature element)
+- Flow (navigation, user journeys, transitions)
+- UI components (buttons, forms, layouts, widgets)
+- Interactive experience (a prototype that can be navigated)
+
+Unlike a generic mockup pass, this formula treats visual design as a deliberate,
+opinionated act: each exploration commits to a token system (palette, typography,
+layout, signature) and takes one justified aesthetic risk, and every direction is
+critiqued against the known AI-default looks before any code is written.
+
+## Workflow
+1. Intake the problem source (GitHub/Jira/file) and normalize it into a Problem Brief
+2. Derive UI-specific requirements (screens, components, flows, states) — the breakdown
+3. Design direction: brainstorm token systems and self-critique against AI defaults
+4. Spawn the design swarm (parallel, distinct visual directions)
+5. Generate initial interactive HTML prototype options + a feedback form
+6. Push to branch, notify the manager, and await human feedback (gate)
+7. Iterate on refined designs based on feedback until consensus (up to max_iterations)
+8. Finalize the agreed-upon prototype and generate a machine-readable design contract
+
+## Output
+A {{output_dir}}/ directory containing:
+- A Problem Brief and UI Requirements Matrix (the breakdown)
+- A design-plan.md (token systems + critique) for each direction
+- Per-iteration interactive HTML prototypes with feedback forms
+- A finalized prototype, design-decisions.md, prototype-guide.md, and design-contract.yaml
+
+## !IMPORTANT - MANDATORY Exact Step Execution
+Execute each formula step EXACTLY as written, in order, with no modifications.
+Every step produces a file artifact at a known path. `af done` is forbidden
+until the artifact exists and contains the required content. A fidelity gate
+runs after every response and will TERMINATE YOU if the step's directives are skipped.
+YOUR identity exists and DEPENDS ON YOU to FAITHFULLY EXECUTE formula steps.
+"""
+formula = "web-design"
+version = 1
+
+[inputs]
+[inputs.source]
+description = "The problem source: a GitHub issue URL, a Jira issue URL (or KEY), or a path to a problem_description_file.md. This is the single required input — `af sling --agent web-design \"<link-or-path>\"` fills it automatically."
+type = "string"
+required = true
+
+[inputs.source_type]
+description = "Source type override: 'github', 'jira', 'file', or 'auto' (default: auto — detected from the source string)"
+type = "string"
+required = false
+default = "auto"
+
+[inputs.design_style]
+description = "Design style hint: 'minimal', 'modern', 'enterprise', 'playful', 'editorial', etc. (default: modern). A hint only — the brief always wins over the hint."
+type = "string"
+required = false
+default = "modern"
+
+[inputs.max_iterations]
+description = "Maximum design iterations before forcing finalization (default: 5)"
+type = "number"
+required = false
+default = "5"
+
+[inputs.output_dir]
+description = "Output directory for design artifacts (default: .designs/web-ui)"
+type = "string"
+required = false
+default = ".designs/web-ui"
+
+# ============================================================================
+# STEPS - Source-agnostic intake + breakdown, then an interactive design swarm
+#         with a human feedback loop.
+#
+# Structure:
+#   intake-source            (fetch + normalize: GitHub | Jira | file)
+#     -> derive-ui-requirements   (the breakdown: screens/components/flows)
+#       -> design-direction       (token systems + anti-default critique)
+#         -> design-swarm         (parallel, distinct visual directions)
+#           -> generate-prototype-1
+#             -> push-and-await-feedback-1 (GATE: human)
+#               -> check-consensus-1
+#                 -> [iterate up to max_iterations]
+#                   -> finalize-prototype
+#                     -> generate-contract
+# ============================================================================
+
+[[steps]]
+id = "intake-source"
+title = "Intake the problem source and normalize it into a Problem Brief"
+description = """
+**Entry criteria:** A problem source is available in `{{source}}` (a GitHub issue URL,
+a Jira issue URL/KEY, or a path to a problem_description_file.md).
+
+**Actions:**
+
+1. **Determine the source type.** If `{{source_type}}` is `auto` (default), detect it:
+   - Matches `github.com/.../issues/<n>` → `github`
+   - Matches an Atlassian/Jira URL (`*.atlassian.net/browse/<KEY>`) or a bare issue
+     KEY like `PROJ-123` → `jira`
+   - Ends in `.md` or resolves to an existing file in the workspace → `file`
+   Otherwise honor the explicit `{{source_type}}`.
+
+2. **Fetch the source content:**
+
+   **GitHub (`github`):**
+   ```bash
+   gh issue view "{{source}}" --json title,body,labels,comments \\
+     --jq '{title, body, labels: [.labels[].name], comments: [.comments[].body]}'
+   ```
+   Capture the title, body, labels, and any comments that add requirements.
+
+   **Jira (`jira`):** try, in order, until one succeeds:
+   ```bash
+   # (a) jira-cli, if installed
+   jira issue view "<KEY>" --plain
+   # (b) Jira REST API, if JIRA_BASE_URL + JIRA_EMAIL + JIRA_API_TOKEN are set
+   curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \\
+     "$JIRA_BASE_URL/rest/api/3/issue/<KEY>?fields=summary,description,labels"
+   ```
+   **If neither Jira access path works (no CLI, no env credentials):**
+   This is a hard BLOCK — do not guess at the issue's contents. Mail the manager:
+   ```bash
+   af mail send manager/ -s "BLOCKED: Jira issue unreadable - web-design intake" -m "
+   Cannot fetch Jira issue {{source}} — no 'jira' CLI and no JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN in env.
+   Please either provide those credentials, or paste the issue content into a
+   problem_description_file.md and re-dispatch with that file as the source.
+   "
+   ```
+   Then stop and await re-dispatch — do NOT fabricate requirements.
+
+   **File (`file`):** read the markdown file at `{{source}}` in the workspace.
+
+3. **Normalize into a Problem Brief** — the source-agnostic analog of a scenario
+   inventory. Following the "ground it in the subject" principle, pin down the
+   concrete subject even if the source leaves it implicit:
+   ```markdown
+   # Problem Brief
+
+   ## Source
+   - Type: [github | jira | file]
+   - Reference: [URL / KEY / path]
+
+   ## Subject & Audience
+   - Subject: [the concrete product/page this UI is for — name it explicitly]
+   - Audience: [who uses it]
+   - The page's single job: [one sentence — what must this UI let someone do]
+
+   ## Problem / Goal
+   [What the issue or document is actually asking for, in plain terms]
+
+   ## Explicit Requirements
+   - [requirement pulled verbatim or near-verbatim from the source]
+   ...
+
+   ## Implied Requirements & Constraints
+   - [reasonable inferences — clearly marked as inferred, not stated]
+   ...
+
+   ## Open Questions
+   - [anything genuinely ambiguous in the source]
+   ```
+
+4. Write the Problem Brief to `{{output_dir}}/problem-brief.md` and store a summary
+   in the step bead for downstream steps.
+
+**Exit criteria:**
+- Source type detected and content fetched (or a hard BLOCK mailed if Jira is unreadable)
+- `{{output_dir}}/problem-brief.md` exists with subject, audience, single job, and requirements
+- No fabricated requirements — inferences are explicitly labeled
+"""
+
+[[steps]]
+id = "derive-ui-requirements"
+title = "Derive UI-specific requirements from the Problem Brief (the breakdown)"
+needs = ["intake-source"]
+description = """
+**Entry criteria:** `{{output_dir}}/problem-brief.md` exists.
+
+This is the breakdown step that replaces Gherkin parsing — it does the requirements
+decomposition itself, from prose, into a structured UI map.
+
+**Actions:**
+1. Read the Problem Brief from the previous step.
+
+2. From the brief, identify UI requirements:
+
+   **User Actions:** clicks, form submissions, navigation, data entry, selection,
+   filtering, drag-drop, gestures.
+
+   **Visual States:** pages/screens that must exist; component states
+   (empty, loading, error, success); data displays (lists, tables, cards);
+   feedback (messages, notifications, indicators).
+
+   **User Flows:** multi-step processes, navigation paths between screens,
+   conditional branches (success vs error).
+
+3. Create a **UI Requirements Matrix** at `{{output_dir}}/ui-requirements.md`:
+   ```markdown
+   # UI Requirements Matrix
+
+   ## Screens Identified
+   | Screen | Purpose | Triggered By | Contains |
+   |--------|---------|--------------|----------|
+   | ...    | ...     | ...          | ...      |
+
+   ## Components Needed
+   | Component | Used In | States | Interactions |
+   |-----------|---------|--------|--------------|
+   | ...       | ...     | ...    | ...          |
+
+   ## User Flows
+   1. [Flow name]: Screen A -> Action -> Screen B -> ...
+
+   ## Design Constraints
+   - [constraints inferred from the brief — platform, accessibility, brand, data shapes]
+
+   ## Acceptance-style Outcomes
+   - [observable outcomes the finished UI must satisfy, derived from the brief]
+   ```
+
+4. Store the matrix summary in the step bead.
+
+**Exit criteria:**
+- All UI-relevant requirements extracted from prose
+- Screens, components, and flows identified
+- `{{output_dir}}/ui-requirements.md` created
+"""
+
+[[steps]]
+id = "design-direction"
+title = "Brainstorm token systems and self-critique against AI defaults"
+needs = ["derive-ui-requirements"]
+description = """
+**Entry criteria:** UI Requirements Matrix available.
+
+This is a two-pass plan-then-critique step. It happens BEFORE any HTML is written.
+Do the planning and critique in your thinking; only commit a direction to design-plan.md
+once you have confidence it is specific to this brief rather than a generic default.
+
+**Actions:**
+
+1. **First pass — brainstorm 4 distinct design directions.** Each direction is a
+   complete visual identity, not just a layout philosophy. For EACH direction define a
+   compact **token system**:
+   - **Color:** the palette as 4–6 named hex values.
+   - **Type:** typefaces for 2+ roles — a characterful display face used with
+     restraint, a complementary body face, and a utility face for captions/data if
+     needed. Set an intentional type scale (weights, widths, spacing).
+   - **Layout:** a layout concept in one or two sentences plus an ASCII wireframe.
+   - **Signature:** the single element this design will be remembered by — the one
+     that embodies the subject. Spend boldness in ONE place; keep the rest quiet.
+   - **Hero-as-thesis:** what the most characteristic thing in the subject's world is,
+     and how this direction opens with it (headline, image, animation, live demo,
+     interactive moment) — avoid the template "big number + label + gradient accent"
+     unless it is genuinely the best answer.
+   - **Aesthetic risk:** the one real, justifiable risk this direction takes.
+
+2. **Second pass — critique against the brief and the AI defaults.** AI-generated web
+   design clusters around three default looks. Treat them as defaults to avoid, NOT
+   choices, unless the brief explicitly asks for one:
+   - (1) warm cream background (~#F4F1EA) + high-contrast serif display + terracotta accent
+   - (2) near-black background + a single acid-green/vermilion accent
+   - (3) broadsheet layout: hairline rules, zero border-radius, dense newspaper columns
+   For each direction, if any axis reads like the generic default you would produce for
+   any similar brief, REVISE it and record what you changed and why. Where the brief
+   pins down a direction, follow it exactly — the brief's words always win.
+
+3. Write `{{output_dir}}/design-plan.md` containing all 4 token systems, their ASCII
+   wireframes, their signature elements, their aesthetic risks, and the
+   revised-away-from-default notes.
+
+**Exit criteria:**
+- `{{output_dir}}/design-plan.md` exists with 4 distinct token systems
+- Each direction has palette, type, layout, signature, and a justified aesthetic risk
+- Each direction has been critiqued against the 3 AI defaults and revised if needed
+"""
+
+[[steps]]
+id = "design-swarm"
+title = "Spawn design swarm with parallel explorations"
+needs = ["design-direction"]
+description = """
+**Entry criteria:** `{{output_dir}}/design-plan.md` with 4 token systems available.
+
+**Actions:**
+1. Read the design plan. Turn each of the 4 directions into a build brief that solves
+   ALL requirements in the UI Requirements Matrix while expressing its own visual
+   identity. To keep the four genuinely distinct, anchor each on a different axis:
+
+   **Exploration A — Layout-First:** information architecture and content hierarchy lead;
+   the token system serves structure.
+
+   **Exploration B — Component-Driven:** a small reusable design system (buttons, cards,
+   forms) expressed in the token system; emphasis on consistency and patterns.
+
+   **Exploration C — Flow-Optimized:** minimal friction, one clear action per screen,
+   progressive disclosure; the token system stays calm to keep focus on the task.
+
+   **Exploration D — Signature-Forward:** lead with the signature element and the
+   {{design_style}} aesthetic; visual impact and the one bold risk are foregrounded.
+
+2. Create exploration briefs in `{{output_dir}}/explorations/`:
+   - exploration-a-layout.md
+   - exploration-b-components.md
+   - exploration-c-flow.md
+   - exploration-d-signature.md
+
+3. Each brief carries: its token system (from design-plan.md), the screens to design,
+   the component inventory needed, and its specific approach to the requirements.
+
+**Exit criteria:**
+- Four exploration briefs created in `{{output_dir}}/explorations/`
+- Each brief addresses all UI requirements through a distinct visual identity
+- Each brief references its token system from design-plan.md
+"""
+
+[[steps]]
+id = "generate-prototype-1"
+title = "Iteration 1: Generate initial prototype options"
+needs = ["design-swarm"]
+description = """
+**Iteration 1 of {{max_iterations}}** - Initial prototype generation
+
+**Entry criteria:** Design exploration briefs available.
+
+**Actions:**
+1. For EACH exploration brief, create an interactive HTML prototype. Create files in
+   `{{output_dir}}/prototype-v1/`:
+   ```
+   prototype-v1/
+   ├── index.html          # Comparison hub linking all explorations/screens
+   ├── styles/
+   │   ├── base.css        # Shared reset + quality-floor styles
+   │   ├── exploration-a.css   # Direction A token system (colors, type, spacing)
+   │   ├── exploration-b.css
+   │   ├── exploration-c.css
+   │   └── exploration-d.css
+   ├── screens/
+   │   ├── a-[screen].html
+   │   ├── b-[screen].html
+   │   ├── c-[screen].html
+   │   └── d-[screen].html
+   ├── feedback-form.md    # Structured feedback (see step push-and-await-feedback-1)
+   └── README.md           # How to open and navigate the prototype
+   ```
+
+2. **Design principles for the prototypes:**
+   - Derive every color and type decision from the direction's token system in
+     design-plan.md — define them as CSS variables in each exploration's stylesheet.
+   - Semantic HTML5; CSS-only interactions where possible (hover, focus states).
+   - Make the signature element real and visible for each direction.
+   - Match complexity to the vision: maximalist directions need elaborate execution;
+     minimal directions need precision in spacing, type, and detail.
+   - Use motion deliberately, not decoratively — an orchestrated moment over scattered
+     effects; respect `prefers-reduced-motion`.
+   - Watch CSS selector specificity (type-based `.section` vs element-based `.cta` can
+     cancel each other's paddings/margins). Keep section spacing predictable.
+
+3. **Copy is design material:**
+   - Write real placeholder copy, not lorem ipsum — templated copy makes a design feel
+     as templated as the visuals.
+   - Active voice on controls; a control says what happens ("Save changes", not "Submit"),
+     and keeps the same verb through the flow (a "Publish" button → a "Published" toast).
+   - Name things by what people control, not by how the system is built.
+   - Treat error and empty states as direction: say what happened and how to fix it; an
+     empty screen is an invitation to act.
+
+4. **Quality floor (build it in, don't announce it):** responsive down to mobile,
+   visible keyboard focus, `prefers-reduced-motion` respected, sufficient color contrast.
+
+5. For each exploration, create screens for every screen in the UI Requirements Matrix,
+   with key flows navigable and component states shown (hover, active, error, loading).
+
+6. Create the **comparison view** (`index.html`): side-by-side preview of the 4
+   directions, quick links to each screen in each direction, and a legend naming each
+   direction's signature element and aesthetic risk.
+
+**Exit criteria:**
+- Interactive HTML prototype created with 4 distinct directions
+- All identified screens implemented in each direction, derived from token systems
+- Quality floor met; copy is intentional; comparison view and feedback form ready
+- Prototype can be opened in a browser and navigated
+"""
+
+[[steps]]
+id = "push-and-await-feedback-1"
+title = "Iteration 1: Push prototype and await feedback via git"
+needs = ["generate-prototype-1"]
+gate = { type = "human", id = "design-feedback-1", timeout = "24h" }
+description = """
+**Iteration 1 of {{max_iterations}}** - Git-based feedback collection
+
+This step has a **GATE**. The gate blocks closure until the manager resolves it.
+
+**Entry criteria:** Prototype v1 generated with all 4 directions.
+
+**Actions:**
+
+1. **Write the feedback form** at `{{output_dir}}/prototype-v1/feedback-form.md`:
+   ```markdown
+   # Design Feedback - Iteration 1
+
+   Add the word APPROVED anywhere in this file to lock the direction and finalize.
+   Add REJECTED to halt. Otherwise, fill in feedback below and the agent will iterate.
+
+   ## Overall Impressions
+   - [ ] Exploration A (Layout-First): Like / Dislike / Mixed
+   - [ ] Exploration B (Component-Driven): Like / Dislike / Mixed
+   - [ ] Exploration C (Flow-Optimized): Like / Dislike / Mixed
+   - [ ] Exploration D (Signature-Forward): Like / Dislike / Mixed
+
+   ## Direction to Converge On
+   - [ ] Which direction (or blend) should iteration 2 pursue? [A / B / C / D / blend of __]
+
+   ## Visual Identity Reactions
+   - Palette: [what works / what doesn't]
+   - Typography: [what works / what doesn't]
+   - Signature element: [keep / change / drop — which direction's]
+
+   ## Specific Elements I Like
+   - [ ] [direction]: [specific element]
+
+   ## Elements to Change/Remove
+   - [ ] [element]: [reason]
+
+   ## Missing Elements
+   - [ ] [what's missing]
+
+   ## Notes
+   [free-form feedback]
+   ```
+
+2. **Commit and push prototype to branch:**
+   ```bash
+   git add {{output_dir}}/
+   git commit -m "feat: web-design prototype v1 ready for review
+
+   Generated by web-design formula.
+
+   ## How to Review
+   1. Open {{output_dir}}/prototype-v1/index.html locally or view on GitHub
+   2. Edit {{output_dir}}/prototype-v1/feedback-form.md with your feedback
+   3. Commit and push your changes, then resolve the review gate
+
+   Directions: A (Layout), B (Components), C (Flow), D (Signature)
+   "
+   git push origin $(git branch --show-current)
+   ```
+
+3. **Get branch URL for Manager:**
+   ```bash
+   REMOTE_URL=$(git remote get-url origin | sed 's/\\.git$//')
+   BRANCH=$(git branch --show-current)
+   PROTO_URL="${REMOTE_URL}/tree/${BRANCH}/{{output_dir}}/prototype-v1"
+   FEEDBACK_URL="${REMOTE_URL}/blob/${BRANCH}/{{output_dir}}/prototype-v1/feedback-form.md"
+   ```
+
+4. **Mail Manager with review request:**
+   ```bash
+   af mail send manager/ -s "REVIEW REQUEST: Web Design Prototype v1 - Iteration 1" -m "
+   *** IMPORTANT: Do NOT resolve this gate until {{output_dir}}/prototype-v1/feedback-form.md is FILLED OUT.
+   Resolving with a blank form does NOT advance the design — the agent will HOLD and wait, it will not iterate. ***
+
+   Web design prototype pushed to branch and ready for review!
+
+   ## Access
+   - Branch: ${BRANCH}
+   - Prototype: ${PROTO_URL}
+   - Feedback form: ${FEEDBACK_URL}
+
+   ## How to Review
+   1. Clone/pull the branch
+   2. Open {{output_dir}}/prototype-v1/index.html in a browser
+   3. Review the 4 design directions (A, B, C, D)
+   4. Edit {{output_dir}}/prototype-v1/feedback-form.md with your feedback
+   5. Commit and push your changes
+
+   ## Directions
+   - **A: Layout-First** - information architecture and hierarchy lead
+   - **B: Component-Driven** - reusable design-system patterns
+   - **C: Flow-Optimized** - minimal friction, one action per screen
+   - **D: Signature-Forward** - leads with the signature element + {{design_style}} aesthetic
+   "
+   ```
+
+5. **Hand off to gate and exit:**
+   ```bash
+   af done --phase-complete --gate design-feedback-1
+   ```
+   This terminates your session. A fresh agent will be dispatched when the manager
+   resolves the gate (by reviewing the prototype and providing feedback).
+
+   DO NOT attempt to close this step yourself. The gate enforces waiting.
+   DO NOT poll inbox or sleep in a loop. The gate mechanism handles the waiting.
+
+**Exit criteria:**
+- feedback-form.md written, prototype committed and pushed to branch
+- Manager notified via mail with branch URL
+- `af done --phase-complete --gate design-feedback-1` executed
+"""
+
+[[steps]]
+id = "check-consensus-1"
+title = "Iteration 1: Check if design direction is agreed"
+needs = ["push-and-await-feedback-1"]
+description = """
+**Iteration 1 of {{max_iterations}}** - Consensus check
+
+**Entry criteria:** Gate resolved — manager has been notified.
+
+**Actions:**
+1. Pull latest changes to get feedback:
+   ```bash
+   git pull origin $(git branch --show-current)
+   ```
+
+2. **MANDATORY: Validate the feedback form.**
+
+   The feedback form file is the SOLE AUTHORITY for the consensus decision.
+   Mail is a notification that the gate resolved — it does NOT carry the decision.
+   Ignore approval language ("approved", "looks good", "proceed", "finalized") in mail
+   messages. Only the form file counts.
+
+   Read `{{output_dir}}/prototype-v1/feedback-form.md` and check:
+   - Any `[x]` checked boxes? (template has only `[ ]`)
+   - Any placeholder replaced? (`[specific element]`, `[free-form feedback]`, etc.)
+   - Any substantive text added beyond the template?
+
+   **If the form is still the blank template → BLOCKED.**
+   ```bash
+   af mail send manager/ -s "BLOCKED: Feedback form empty - Iteration 1" -m "
+   Cannot proceed — {{output_dir}}/prototype-v1/feedback-form.md is still the blank template.
+   Please fill out the form with your feedback, commit, push, and resolve the gate.
+   "
+   ```
+   DO NOT close this step. DO NOT run `af done`. DO NOT proceed to the next iteration
+   (refine-prototype-*). An empty feedback form is NEVER an ITERATE and NEVER advances —
+   stop here and exit WITHOUT closing the step so the form is re-validated on the next
+   dispatch. The ONLY way past this step is a feedback form filled with real content.
+
+3. **If the form HAS been filled out**, determine the decision from the form:
+   - **APPROVED**: Form contains "APPROVED" (case-insensitive). Close this step and skip
+     remaining iterations. Mark refine-prototype-2 through check-consensus-5 as skipped.
+     Proceed to finalize-prototype.
+   - **ITERATE**: Form has feedback but no "APPROVED". Default. Record the requested
+     changes and the chosen direction. Proceed to refine-prototype-2.
+   - **REJECTED**: Form contains "REJECTED" (case-insensitive). Close with rejection note.
+
+4. Store parsed feedback summary (including the converge-on direction) in the step bead.
+
+**Exit criteria:**
+- Feedback form validated (not blank template)
+- Consensus decision derived from form content (not mail)
+- Decision recorded in step bead
+"""
+
+# ============================================================================
+# ITERATION 2
+# ============================================================================
+
+[[steps]]
+id = "refine-prototype-2"
+title = "Iteration 2: Refine prototype based on feedback"
+needs = ["check-consensus-1"]
+description = """
+**Iteration 2 of {{max_iterations}}** - Refinement based on iteration 1 feedback
+
+**Entry criteria:** Consensus not reached in iteration 1.
+
+**Actions:**
+1. Read the feedback summary from iteration 1, including the chosen direction.
+
+2. Create a refined prototype in `{{output_dir}}/prototype-v2/`:
+   - Converge toward the chosen direction's token system (or a blend the form requested).
+   - Keep liked elements; remove/change disliked ones; implement combination requests;
+     add requested features.
+   - Hold the quality floor and copy discipline from iteration 1.
+
+3. The refined prototype should converge toward a single unified design, OR offer 2
+   refined alternatives if the direction is still genuinely unclear.
+
+4. Structure:
+   ```
+   prototype-v2/
+   ├── index.html
+   ├── styles/refined.css   # Unified token system (or fewer alternatives)
+   ├── screens/[screen].html
+   ├── feedback-form.md     # Same structure as v1
+   └── CHANGELOG.md         # What was kept / changed / added / removed vs v1
+   ```
+
+**Exit criteria:**
+- Refined prototype v2 created with feedback-form.md and CHANGELOG.md
+- Changes documented; ready for review
+"""
+
+[[steps]]
+id = "push-and-await-feedback-2"
+title = "Iteration 2: Push refined prototype and await feedback via git"
+needs = ["refine-prototype-2"]
+gate = { type = "human", id = "design-feedback-2", timeout = "24h" }
+description = """
+**Iteration 2 of {{max_iterations}}** - Git-based feedback collection
+
+This step has a **GATE**. The gate blocks closure until the manager resolves it.
+
+**Entry criteria:** Prototype v2 generated with refinements.
+
+**Actions:**
+
+1. **Commit and push refined prototype:**
+   ```bash
+   git add {{output_dir}}/
+   git commit -m "feat: web-design prototype v2 ready for review
+
+   Iteration 2 - Refined based on previous feedback.
+   See {{output_dir}}/prototype-v2/CHANGELOG.md for changes.
+   "
+   git push origin $(git branch --show-current)
+   ```
+
+2. **Get branch URL and mail Manager:**
+   ```bash
+   REMOTE_URL=$(git remote get-url origin | sed 's/\\.git$//')
+   BRANCH=$(git branch --show-current)
+   PROTO_URL="${REMOTE_URL}/tree/${BRANCH}/{{output_dir}}/prototype-v2"
+
+   af mail send manager/ -s "REVIEW REQUEST: Web Design Prototype v2 - Iteration 2" -m "
+   *** IMPORTANT: Do NOT resolve this gate until {{output_dir}}/prototype-v2/feedback-form.md is FILLED OUT.
+   Resolving with a blank form does NOT advance the design — the agent will HOLD and wait, it will not iterate. ***
+
+   Refined prototype pushed to branch!
+
+   ## Access
+   - Branch: ${BRANCH}
+   - Prototype: ${PROTO_URL}
+   - Changes: See {{output_dir}}/prototype-v2/CHANGELOG.md
+
+   ## How to Review
+   1. Pull the branch
+   2. Open {{output_dir}}/prototype-v2/index.html in a browser
+   3. Edit {{output_dir}}/prototype-v2/feedback-form.md with your feedback
+   4. Commit and push your changes
+   "
+   ```
+
+3. **Hand off to gate and exit:**
+   ```bash
+   af done --phase-complete --gate design-feedback-2
+   ```
+   This terminates your session. The gate enforces waiting — do not poll or sleep.
+
+**Exit criteria:**
+- Prototype v2 committed and pushed
+- Manager notified via mail
+- `af done --phase-complete --gate design-feedback-2` executed
+"""
+
+[[steps]]
+id = "check-consensus-2"
+title = "Iteration 2: Check if design direction is agreed"
+needs = ["push-and-await-feedback-2"]
+description = """
+**Iteration 2 of {{max_iterations}}** - Consensus check
+
+**Entry criteria:** Gate resolved — manager has been notified.
+
+**Actions:**
+1. Pull latest changes:
+   ```bash
+   git pull origin $(git branch --show-current)
+   ```
+
+2. **MANDATORY: Validate the feedback form.** The form is the SOLE AUTHORITY. Mail is a
+   notification only — ignore approval language in mail. Read
+   `{{output_dir}}/prototype-v2/feedback-form.md` and check for `[x]` boxes, replaced
+   placeholders, or added text.
+
+   **If the form is still the blank template → BLOCKED.**
+   ```bash
+   af mail send manager/ -s "BLOCKED: Feedback form empty - Iteration 2" -m "
+   Cannot proceed — {{output_dir}}/prototype-v2/feedback-form.md is still the blank template.
+   Please fill out the form with your feedback, commit, push, and resolve the gate.
+   "
+   ```
+   DO NOT close this step. DO NOT run `af done`. DO NOT proceed to the next iteration
+   (refine-prototype-*). An empty feedback form is NEVER an ITERATE and NEVER advances —
+   stop here and exit WITHOUT closing the step so the form is re-validated on the next
+   dispatch. The ONLY way past this step is a feedback form filled with real content.
+
+3. **If filled out**, derive the decision:
+   - **APPROVED**: Skip iterations 3-5. Proceed to finalize-prototype.
+   - **ITERATE**: Default. Record changes; proceed to refine-prototype-3.
+   - **REJECTED**: Close with rejection note.
+
+4. Store parsed feedback summary in the step bead.
+
+**Exit criteria:**
+- Feedback form validated (not blank template)
+- Consensus decision derived from form content (not mail)
+- Decision recorded in step bead
+"""
+
+# ============================================================================
+# ITERATION 3
+# ============================================================================
+
+[[steps]]
+id = "refine-prototype-3"
+title = "Iteration 3: Further refinement based on feedback"
+needs = ["check-consensus-2"]
+description = """
+**Iteration 3 of {{max_iterations}}** - Refinement based on iteration 2 feedback
+
+**Entry criteria:** Consensus not reached in iteration 2.
+
+**Actions:**
+1. Read feedback from iteration 2.
+2. Create `{{output_dir}}/prototype-v3/` with refinements; by iteration 3 the prototype
+   should be converging to a single design with a settled token system.
+3. Include feedback-form.md (same structure) and CHANGELOG.md.
+
+**Exit criteria:**
+- Prototype v3 created with feedback-form.md and CHANGELOG.md
+"""
+
+[[steps]]
+id = "push-and-await-feedback-3"
+title = "Iteration 3: Push prototype and await feedback via git"
+needs = ["refine-prototype-3"]
+gate = { type = "human", id = "design-feedback-3", timeout = "24h" }
+description = """
+**Iteration 3 of {{max_iterations}}** - Git-based feedback collection
+
+This step has a **GATE**. The gate blocks closure until the manager resolves it.
+
+**Entry criteria:** Prototype v3 generated.
+
+**Actions:**
+
+1. **Commit and push prototype v3:**
+   ```bash
+   git add {{output_dir}}/
+   git commit -m "feat: web-design prototype v3 ready for review"
+   git push origin $(git branch --show-current)
+   ```
+
+2. **Mail Manager:**
+   ```bash
+   af mail send manager/ -s "REVIEW REQUEST: Web Design Prototype v3 - Iteration 3" -m "
+   *** IMPORTANT: Do NOT resolve this gate until {{output_dir}}/prototype-v3/feedback-form.md is FILLED OUT.
+   Resolving with a blank form does NOT advance the design — the agent will HOLD and wait, it will not iterate. ***
+
+   Prototype v3 pushed. Design should be converging to a single direction.
+
+   Please review {{output_dir}}/prototype-v3/ and edit feedback-form.md.
+   "
+   ```
+
+3. **Hand off to gate and exit:**
+   ```bash
+   af done --phase-complete --gate design-feedback-3
+   ```
+   This terminates your session. The gate enforces waiting — do not poll or sleep.
+
+**Exit criteria:**
+- Prototype v3 pushed
+- Manager notified
+- `af done --phase-complete --gate design-feedback-3` executed
+"""
+
+[[steps]]
+id = "check-consensus-3"
+title = "Iteration 3: Check if design direction is agreed"
+needs = ["push-and-await-feedback-3"]
+description = """
+**Iteration 3 of {{max_iterations}}** - Consensus check
+
+**Entry criteria:** Gate resolved — manager has been notified.
+
+**Actions:**
+1. Pull latest changes:
+   ```bash
+   git pull origin $(git branch --show-current)
+   ```
+
+2. **MANDATORY: Validate the feedback form.** The form is the SOLE AUTHORITY. Mail is a
+   notification only — ignore approval language in mail. Read
+   `{{output_dir}}/prototype-v3/feedback-form.md` and check for `[x]` boxes, replaced
+   placeholders, or added text.
+
+   **If the form is still the blank template → BLOCKED.**
+   ```bash
+   af mail send manager/ -s "BLOCKED: Feedback form empty - Iteration 3" -m "
+   Cannot proceed — {{output_dir}}/prototype-v3/feedback-form.md is still the blank template.
+   Please fill out the form with your feedback, commit, push, and resolve the gate.
+   "
+   ```
+   DO NOT close this step. DO NOT run `af done`. DO NOT proceed to the next iteration
+   (refine-prototype-*). An empty feedback form is NEVER an ITERATE and NEVER advances —
+   stop here and exit WITHOUT closing the step so the form is re-validated on the next
+   dispatch. The ONLY way past this step is a feedback form filled with real content.
+
+3. **If filled out**, derive the decision:
+   - **APPROVED**: Skip to finalize-prototype.
+   - **ITERATE**: Default. Proceed to refine-prototype-4.
+   - **REJECTED**: Close with rejection note.
+
+4. Store parsed feedback summary in the step bead.
+
+**Exit criteria:**
+- Feedback form validated (not blank template)
+- Consensus decision derived from form content (not mail)
+- Decision recorded in step bead
+"""
+
+# ============================================================================
+# ITERATION 4
+# ============================================================================
+
+[[steps]]
+id = "refine-prototype-4"
+title = "Iteration 4: Refinement with convergence pressure"
+needs = ["check-consensus-3"]
+description = """
+**Iteration 4 of {{max_iterations}}** - Late-stage refinement
+
+**Entry criteria:** Consensus not reached in iteration 3.
+
+**Actions:**
+1. Read feedback from iteration 3.
+2. Create `{{output_dir}}/prototype-v4/` focused on resolving remaining issues.
+3. Only 1 iteration remains after this — emphasize convergence.
+4. Include feedback-form.md and CHANGELOG.md.
+
+**Exit criteria:**
+- Prototype v4 created with strong convergence, feedback-form.md, and CHANGELOG.md
+"""
+
+[[steps]]
+id = "push-and-await-feedback-4"
+title = "Iteration 4: Push prototype and await feedback via git"
+needs = ["refine-prototype-4"]
+gate = { type = "human", id = "design-feedback-4", timeout = "24h" }
+description = """
+**Iteration 4 of {{max_iterations}}** - Git-based feedback collection
+
+This step has a **GATE**. The gate blocks closure until the manager resolves it.
+
+**Entry criteria:** Prototype v4 generated.
+
+**Actions:**
+
+1. **Commit and push prototype v4:**
+   ```bash
+   git add {{output_dir}}/
+   git commit -m "feat: web-design prototype v4 ready for review (second-to-last iteration)"
+   git push origin $(git branch --show-current)
+   ```
+
+2. **Mail Manager:**
+   ```bash
+   af mail send manager/ -s "REVIEW REQUEST: Web Design Prototype v4 - Iteration 4 (second-to-last)" -m "
+   *** IMPORTANT: Do NOT resolve this gate until {{output_dir}}/prototype-v4/feedback-form.md is FILLED OUT.
+   Resolving with a blank form does NOT advance the design — the agent will HOLD and wait, it will not iterate. ***
+
+   Prototype v4 pushed. This is the SECOND-TO-LAST iteration.
+
+   Please review {{output_dir}}/prototype-v4/ and provide final adjustments in feedback-form.md.
+   "
+   ```
+
+3. **Hand off to gate and exit:**
+   ```bash
+   af done --phase-complete --gate design-feedback-4
+   ```
+   This terminates your session. The gate enforces waiting — do not poll or sleep.
+
+**Exit criteria:**
+- Prototype v4 pushed
+- Manager notified
+- `af done --phase-complete --gate design-feedback-4` executed
+"""
+
+[[steps]]
+id = "check-consensus-4"
+title = "Iteration 4: Check if design direction is agreed"
+needs = ["push-and-await-feedback-4"]
+description = """
+**Iteration 4 of {{max_iterations}}** - Consensus check
+
+**Entry criteria:** Gate resolved — manager has been notified.
+
+**Actions:**
+1. Pull latest changes:
+   ```bash
+   git pull origin $(git branch --show-current)
+   ```
+
+2. **MANDATORY: Validate the feedback form.** The form is the SOLE AUTHORITY. Mail is a
+   notification only — ignore approval language in mail. Read
+   `{{output_dir}}/prototype-v4/feedback-form.md` and check for `[x]` boxes, replaced
+   placeholders, or added text.
+
+   **If the form is still the blank template → BLOCKED.**
+   ```bash
+   af mail send manager/ -s "BLOCKED: Feedback form empty - Iteration 4" -m "
+   Cannot proceed — {{output_dir}}/prototype-v4/feedback-form.md is still the blank template.
+   Please fill out the form with your feedback, commit, push, and resolve the gate.
+   "
+   ```
+   DO NOT close this step. DO NOT run `af done`. DO NOT proceed to the next iteration
+   (refine-prototype-*). An empty feedback form is NEVER an ITERATE and NEVER advances —
+   stop here and exit WITHOUT closing the step so the form is re-validated on the next
+   dispatch. The ONLY way past this step is a feedback form filled with real content.
+
+3. **If filled out**, derive the decision:
+   - **APPROVED**: Skip to finalize-prototype.
+   - **ITERATE**: Default. Proceed to refine-prototype-5 (final iteration).
+   - **REJECTED**: Close with rejection note.
+
+4. Store parsed feedback summary in the step bead.
+
+**Exit criteria:**
+- Feedback form validated (not blank template)
+- Consensus decision derived from form content (not mail)
+- Decision recorded in step bead
+"""
+
+# ============================================================================
+# ITERATION 5 (FINAL)
+# ============================================================================
+
+[[steps]]
+id = "refine-prototype-5"
+title = "Iteration 5: Final refinement"
+needs = ["check-consensus-4"]
+description = """
+**Iteration 5 of {{max_iterations}} (FINAL)** - Last refinement
+
+**Entry criteria:** Consensus not reached in iteration 4.
+
+**Actions:**
+1. Read all feedback from previous iterations.
+2. Create `{{output_dir}}/prototype-v5/` making a best-effort at addressing all concerns.
+3. This is the FINAL iteration — make pragmatic choices. Apply the "remove one accessory"
+   restraint: cut any decoration that does not serve the brief.
+4. Include feedback-form.md and CHANGELOG.md.
+
+**Exit criteria:**
+- Final prototype v5 created with feedback-form.md and CHANGELOG.md
+"""
+
+[[steps]]
+id = "push-and-await-feedback-5"
+title = "Iteration 5: Push final prototype and await approval via git"
+needs = ["refine-prototype-5"]
+gate = { type = "human", id = "design-feedback-5", timeout = "24h" }
+description = """
+**Iteration 5 of {{max_iterations}} (FINAL)** - Git-based final review
+
+This step has a **GATE**. The gate blocks closure until the manager resolves it.
+
+**Entry criteria:** Prototype v5 generated.
+
+**Actions:**
+
+1. **Commit and push final prototype:**
+   ```bash
+   git add {{output_dir}}/
+   git commit -m "feat: FINAL web-design prototype v5 ready for approval"
+   git push origin $(git branch --show-current)
+   ```
+
+2. **Mail Manager:**
+   ```bash
+   af mail send manager/ -s "REVIEW REQUEST: FINAL Web Design Prototype v5 - Iteration 5" -m "
+   *** IMPORTANT: Do NOT resolve this gate until {{output_dir}}/prototype-v5/feedback-form.md is FILLED OUT.
+   Resolving with a blank form does NOT advance the design — the agent will HOLD and wait, it will not iterate. ***
+
+   FINAL prototype pushed! This is the last iteration.
+
+   Please review {{output_dir}}/prototype-v5/ and fill out feedback-form.md.
+   The feedback form MUST be filled out — the agent cannot proceed without it.
+   Add 'APPROVED' to the form to approve, or provide feedback for final adjustments.
+   "
+   ```
+
+3. **Hand off to gate and exit:**
+   ```bash
+   af done --phase-complete --gate design-feedback-5
+   ```
+   This terminates your session. The gate enforces waiting — do not poll or sleep.
+
+**Exit criteria:**
+- Final prototype pushed
+- Manager notified
+- `af done --phase-complete --gate design-feedback-5` executed
+"""
+
+[[steps]]
+id = "check-consensus-5"
+title = "Iteration 5: Final consensus check"
+needs = ["push-and-await-feedback-5"]
+description = """
+**Iteration 5 of {{max_iterations}} (FINAL)** - Final consensus check
+
+**Entry criteria:** Gate resolved — manager has been notified.
+
+**Actions:**
+1. Pull latest changes:
+   ```bash
+   git pull origin $(git branch --show-current)
+   ```
+
+2. **MANDATORY: Validate the feedback form.** The form is the SOLE AUTHORITY. Mail is a
+   notification only — ignore approval language in mail. Read
+   `{{output_dir}}/prototype-v5/feedback-form.md` and check for `[x]` boxes, replaced
+   placeholders, or added text.
+
+   **If the form is still the blank template → BLOCKED.**
+   This is the final iteration. DO NOT proceed to finalize without feedback.
+   ```bash
+   af mail send manager/ -s "BLOCKED: Feedback form empty - FINAL Iteration 5" -m "
+   Cannot proceed to finalize — {{output_dir}}/prototype-v5/feedback-form.md is still the blank template.
+   This is the FINAL iteration. The prototype cannot be finalized without feedback.
+   Please fill out the form with your feedback, commit, push, and resolve the gate.
+   "
+   ```
+   DO NOT close this step. DO NOT proceed to finalize-prototype.
+
+3. **If the form HAS been filled out**, proceed to finalize. Record feedback and any
+   remaining concerns as future improvements. This is the last iteration — proceed to
+   finalize-prototype regardless of whether the form says APPROVED, ITERATE, or REJECTED.
+
+**Exit criteria:**
+- Feedback form validated (not blank template)
+- Feedback recorded
+- Proceeding to finalize
+"""
+
+# ============================================================================
+# FINALIZE
+# ============================================================================
+
+[[steps]]
+id = "finalize-prototype"
+title = "Finalize the agreed-upon prototype"
+needs = ["check-consensus-5"]
+description = """
+**Entry criteria:** Design direction agreed (or max iterations reached).
+
+**Note:** This step may be reached early if consensus was reached before iteration 5.
+It depends on check-consensus-5 but can be unblocked by earlier consensus checks marking
+later steps as 'skipped'.
+
+**Actions:**
+1. Determine which prototype version to finalize: the latest version that received
+   approval, or v5 if max iterations were reached.
+
+2. Create the final prototype in `{{output_dir}}/final/`:
+   ```
+   final/
+   ├── index.html
+   ├── styles/
+   │   ├── variables.css   # Design tokens from the chosen direction (color, type, spacing)
+   │   └── main.css
+   ├── screens/[screen].html
+   ├── components/[component].html
+   └── assets/[placeholder images/icons]
+   ```
+   Tokens in variables.css MUST match the chosen direction's token system from
+   design-plan.md (the single source of truth for color and type).
+
+3. Create **design-decisions.md**:
+   ```markdown
+   # Web UI Design Decisions
+
+   ## Subject & Single Job
+   [from the Problem Brief]
+
+   ## Chosen Design Direction
+   [which exploration/blend won, and why]
+
+   ## Token System (final)
+   - Palette: [4-6 named hex]
+   - Type: [display / body / utility faces + scale]
+   - Layout: [concept]
+   - Signature element: [the one memorable thing]
+   - Aesthetic risk taken: [what and why it works]
+
+   ## Iterations Summary
+   - Total iterations: [N]
+   - Consensus reached: Iteration [X] / Max iterations reached
+
+   ## Key Decisions
+   | Decision | Options Considered | Chosen | Rationale (user feedback) |
+   |----------|-------------------|--------|---------------------------|
+
+   ## Screen Inventory
+   | Screen | File | Purpose |
+   |--------|------|---------|
+
+   ## Component Library
+   | Component | File | Usage |
+   |-----------|------|-------|
+
+   ## User Feedback History
+   ### Iteration 1 ... ### Iteration N
+
+   ## Future Improvements
+   [deferred feedback or enhancement ideas]
+
+   ## Traceability to Requirements
+   | Requirement (from ui-requirements.md) | Screen(s) | Components |
+   |---------------------------------------|-----------|------------|
+   ```
+
+4. Create **prototype-guide.md** (how to open, the user flows, implementation notes:
+   CSS variables in variables.css, component patterns in components/).
+
+5. Commit, push, and notify:
+   ```bash
+   git add {{output_dir}}/
+   git commit -m "feat: finalize web UI prototype
+
+   Generated by web-design formula.
+   - Source: {{source}}
+   - Iterations: [N]
+   - Screens: [count]  Components: [count]
+
+   Open {{output_dir}}/final/index.html to view."
+   git push origin $(git branch --show-current)
+
+   REMOTE_URL=$(git remote get-url origin | sed 's/\\.git$//')
+   BRANCH=$(git branch --show-current)
+   FINAL_URL="${REMOTE_URL}/tree/${BRANCH}/{{output_dir}}/final"
+
+   af mail send manager/ -s "COMPLETE: Web UI Prototype Finalized" -m "
+   Web design prototype finalized and pushed!
+
+   ## Access
+   - Branch: ${BRANCH}
+   - Final prototype: ${FINAL_URL}
+   - Design decisions: {{output_dir}}/design-decisions.md
+   - Prototype guide: {{output_dir}}/prototype-guide.md
+
+   Open {{output_dir}}/final/index.html to view. Ready for implementation.
+   "
+   ```
+
+6. Create a completion bead:
+   ```bash
+   af bead create --type=task \\
+     --title="Web UI Prototype: [feature name]" \\
+     -d "Interactive HTML prototype from {{source}}.
+
+   ## Files
+   - Prototype: {{output_dir}}/final/index.html
+   - Decisions: {{output_dir}}/design-decisions.md
+   - Guide: {{output_dir}}/prototype-guide.md
+
+   ## Summary
+   [Iteration count and key decisions]"
+   ```
+
+**Exit criteria:**
+- Final prototype created and polished; tokens match the chosen direction
+- design-decisions.md and prototype-guide.md created
+- All artifacts committed and pushed; completion bead created
+"""
+
+[[steps]]
+id = "generate-contract"
+title = "Generate machine-readable design contract"
+needs = ["finalize-prototype"]
+description = """
+**Entry criteria:** Finalized prototype exists in `{{output_dir}}/final/`.
+
+Generate a design-contract.yaml from the finalized prototype — the machine-readable
+bridge between the visual design (for humans) and the implementation verification
+system (for quality gates).
+
+**Actions:**
+
+1. Parse all screen HTML files in `{{output_dir}}/final/screens/`:
+   - Extract elements with accessible roles (form, button, textbox, heading, alert, etc.)
+   - Extract aria-labels and accessible names
+   - Identify ViewModel bindings from data attributes and naming conventions
+   - Map requirements to screens using the traceability table in design-decisions.md
+
+2. For each interactive element, record: `id`, `accessible.role`, `accessible.name`,
+   `purpose`, `required` (default true), and `viewmodel` (the property/method it binds to).
+
+3. **Accessibility requirement:** every interactive element MUST have an appropriate
+   ARIA role (explicit or implicit) and an accessible name. If an element in the
+   prototype lacks these, ADD them to the prototype HTML before generating the contract.
+
+4. Generate `{{output_dir}}/final/design-contract.yaml`:
+   ```yaml
+   version: 1
+   feature: "[Feature Name]"
+   generated_from: "{{source}}"
+   generated_at: "[ISO 8601 timestamp]"
+   screens:
+     - id: screen-identifier
+       prototype: screens/screen-name.html
+       route: "/expected-route"
+       elements:
+         - id: element-id
+           accessible:
+             role: button
+             name: "Click me"
+           purpose: "Description"
+           required: true
+           viewmodel: "ViewModel.method"
+   viewmodel_contracts:
+     - name: "ScreenViewModel"
+       test_pattern: "**/*screen*.test.*"
+       properties:
+         - name: propName
+           type: string
+       methods:
+         - name: methodName
+           async: true
+   ```
+
+5. Commit the contract:
+   ```bash
+   git add {{output_dir}}/final/design-contract.yaml
+   git commit -m "feat: add design-contract.yaml for quality gate verification"
+   git push origin $(git branch --show-current)
+   ```
+
+**Exit criteria:**
+- design-contract.yaml exists in `{{output_dir}}/final/`
+- All screens have elements with accessible roles and names
+- Contract committed and pushed
+"""
