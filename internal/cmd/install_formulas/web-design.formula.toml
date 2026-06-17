@@ -412,8 +412,14 @@ This step has a **GATE**. The gate blocks closure until the manager resolves it.
    ```markdown
    # Design Feedback - Iteration 1
 
-   Add the word APPROVED anywhere in this file to lock the direction and finalize.
-   Add REJECTED to halt. Otherwise, fill in feedback below and the agent will iterate.
+   Fill in real feedback below, then commit, push, and resolve the review gate.
+   An empty/untouched form does NOT advance the design — the agent HOLDS until this has
+   real content (a ticked box, a written Decision verdict, or real notes).
+
+   ## Decision
+   - Decision: ______
+     (Leave blank to iterate on the feedback below. To approve and finalize — or to halt —
+      write the exact verdict keyword given in the review email on this line.)
 
    ## Overall Impressions
    - [ ] Exploration A (Layout-First): Like / Dislike / Mixed
@@ -472,6 +478,7 @@ This step has a **GATE**. The gate blocks closure until the manager resolves it.
    af mail send manager/ -s "REVIEW REQUEST: Web Design Prototype v1 - Iteration 1" -m "
    *** IMPORTANT: Do NOT resolve this gate until {{output_dir}}/prototype-v1/feedback-form.md is FILLED OUT.
    Resolving with a blank form does NOT advance the design — the agent will HOLD and wait, it will not iterate. ***
+   To APPROVE & finalize, write APPROVED on the form's Decision line; to halt, write REJECTED; otherwise add real feedback and the agent iterates.
 
    Web design prototype pushed to branch and ready for review!
 
@@ -538,17 +545,28 @@ description = """
    - Any placeholder replaced? (`[specific element]`, `[free-form feedback]`, etc.)
    - Any substantive text added beyond the template?
 
-   **If the form is still the blank template → BLOCKED.**
+   **If the form is still the blank template → BLOCKED (mechanically enforced).**
+   Run this hard interlock FIRST — it exits non-zero on an empty form so the step CANNOT
+   close and the workflow CANNOT advance. Prose alone was bypassed in a prior run of a
+   sibling design formula: the agent rationalized an empty form as "ITERATE" and
+   auto-advanced two whole iterations with no human feedback. This biases to BLOCKED
+   unless there is an unambiguous positive signal of real feedback (a ticked box, a
+   written Decision verdict, or real notes):
    ```bash
-   af mail send manager/ -s "BLOCKED: Feedback form empty - Iteration 1" -m "
-   Cannot proceed — {{output_dir}}/prototype-v1/feedback-form.md is still the blank template.
-   Please fill out the form with your feedback, commit, push, and resolve the gate.
-   "
+   FORM="{{output_dir}}/prototype-v1/feedback-form.md"
+   [ -f "$FORM" ] || { echo "HARD STOP: $FORM missing — NOT closing this step, NOT running 'af done'."; exit 1; }
+   HAS_CHECK=$(command grep -qiF -e '[x]' "$FORM" && echo 1 || echo 0)            # a ticked decision box [x]/[X]
+   HAS_WORD=$(command grep -qiE 'APPROVED|REJECTED' "$FORM" && echo 1 || echo 0)  # a written verdict
+   HAS_NOTE=$(command grep -iE '(palette|typography|signature|decision|notes?):[[:space:]]*[^[:space:]]' "$FORM" | command grep -qvE ':[[:space:]]*(_+|[[])' && echo 1 || echo 0)  # real free-text, not a placeholder
+   if [ "${HAS_CHECK}${HAS_WORD}${HAS_NOTE}" = "000" ]; then
+     af mail send manager/ -s "BLOCKED: Feedback form empty - Iteration 1" -m "$FORM is still the blank template (no ticked box, no APPROVED/REJECTED, no notes). HOLDING — not advancing. Fill it with real feedback, commit, push, and re-resolve gate design-feedback-1."
+     echo "HARD STOP: blank feedback form — NOT closing this step, NOT running 'af done'. Re-validated on next dispatch."
+     exit 1
+   fi
+   echo "OK: $FORM has real feedback — proceed to parse the decision below."
    ```
-   DO NOT close this step. DO NOT run `af done`. DO NOT proceed to the next iteration
-   (refine-prototype-*). An empty feedback form is NEVER an ITERATE and NEVER advances —
-   stop here and exit WITHOUT closing the step so the form is re-validated on the next
-   dispatch. The ONLY way past this step is a feedback form filled with real content.
+   The ONLY way past this step is a feedback form filled with real content. DO NOT run
+   `af done` while the interlock above exits non-zero. (This mirrors check-consensus-5.)
 
 3. **If the form HAS been filled out**, determine the decision from the form:
    - **APPROVED**: Form contains "APPROVED" (case-insensitive). Close this step and skip
@@ -640,6 +658,7 @@ This step has a **GATE**. The gate blocks closure until the manager resolves it.
    af mail send manager/ -s "REVIEW REQUEST: Web Design Prototype v2 - Iteration 2" -m "
    *** IMPORTANT: Do NOT resolve this gate until {{output_dir}}/prototype-v2/feedback-form.md is FILLED OUT.
    Resolving with a blank form does NOT advance the design — the agent will HOLD and wait, it will not iterate. ***
+   To APPROVE & finalize, write APPROVED on the form's Decision line; to halt, write REJECTED; otherwise add real feedback and the agent iterates.
 
    Refined prototype pushed to branch!
 
@@ -688,17 +707,26 @@ description = """
    `{{output_dir}}/prototype-v2/feedback-form.md` and check for `[x]` boxes, replaced
    placeholders, or added text.
 
-   **If the form is still the blank template → BLOCKED.**
+   **If the form is still the blank template → BLOCKED (mechanically enforced).**
+   Run this hard interlock FIRST — it exits non-zero on an empty form so the step CANNOT
+   close and the workflow CANNOT advance (prose alone was bypassed in a prior run of a
+   sibling design formula). Biases to BLOCKED unless there is a ticked box, a written
+   Decision verdict, or real notes:
    ```bash
-   af mail send manager/ -s "BLOCKED: Feedback form empty - Iteration 2" -m "
-   Cannot proceed — {{output_dir}}/prototype-v2/feedback-form.md is still the blank template.
-   Please fill out the form with your feedback, commit, push, and resolve the gate.
-   "
+   FORM="{{output_dir}}/prototype-v2/feedback-form.md"
+   [ -f "$FORM" ] || { echo "HARD STOP: $FORM missing — NOT closing this step, NOT running 'af done'."; exit 1; }
+   HAS_CHECK=$(command grep -qiF -e '[x]' "$FORM" && echo 1 || echo 0)
+   HAS_WORD=$(command grep -qiE 'APPROVED|REJECTED' "$FORM" && echo 1 || echo 0)
+   HAS_NOTE=$(command grep -iE '(palette|typography|signature|decision|notes?):[[:space:]]*[^[:space:]]' "$FORM" | command grep -qvE ':[[:space:]]*(_+|[[])' && echo 1 || echo 0)
+   if [ "${HAS_CHECK}${HAS_WORD}${HAS_NOTE}" = "000" ]; then
+     af mail send manager/ -s "BLOCKED: Feedback form empty - Iteration 2" -m "$FORM is still the blank template (no ticked box, no APPROVED/REJECTED, no notes). HOLDING — not advancing. Fill it with real feedback, commit, push, and re-resolve gate design-feedback-2."
+     echo "HARD STOP: blank feedback form — NOT closing this step, NOT running 'af done'. Re-validated on next dispatch."
+     exit 1
+   fi
+   echo "OK: $FORM has real feedback — proceed to parse the decision below."
    ```
-   DO NOT close this step. DO NOT run `af done`. DO NOT proceed to the next iteration
-   (refine-prototype-*). An empty feedback form is NEVER an ITERATE and NEVER advances —
-   stop here and exit WITHOUT closing the step so the form is re-validated on the next
-   dispatch. The ONLY way past this step is a feedback form filled with real content.
+   The ONLY way past this step is a feedback form filled with real content. DO NOT run
+   `af done` while the interlock above exits non-zero.
 
 3. **If filled out**, derive the decision:
    - **APPROVED**: Skip iterations 3-5. Proceed to finalize-prototype.
@@ -762,6 +790,7 @@ This step has a **GATE**. The gate blocks closure until the manager resolves it.
    af mail send manager/ -s "REVIEW REQUEST: Web Design Prototype v3 - Iteration 3" -m "
    *** IMPORTANT: Do NOT resolve this gate until {{output_dir}}/prototype-v3/feedback-form.md is FILLED OUT.
    Resolving with a blank form does NOT advance the design — the agent will HOLD and wait, it will not iterate. ***
+   To APPROVE & finalize, write APPROVED on the form's Decision line; to halt, write REJECTED; otherwise add real feedback and the agent iterates.
 
    Prototype v3 pushed. Design should be converging to a single direction.
 
@@ -801,17 +830,26 @@ description = """
    `{{output_dir}}/prototype-v3/feedback-form.md` and check for `[x]` boxes, replaced
    placeholders, or added text.
 
-   **If the form is still the blank template → BLOCKED.**
+   **If the form is still the blank template → BLOCKED (mechanically enforced).**
+   Run this hard interlock FIRST — it exits non-zero on an empty form so the step CANNOT
+   close and the workflow CANNOT advance (prose alone was bypassed in a prior run of a
+   sibling design formula). Biases to BLOCKED unless there is a ticked box, a written
+   Decision verdict, or real notes:
    ```bash
-   af mail send manager/ -s "BLOCKED: Feedback form empty - Iteration 3" -m "
-   Cannot proceed — {{output_dir}}/prototype-v3/feedback-form.md is still the blank template.
-   Please fill out the form with your feedback, commit, push, and resolve the gate.
-   "
+   FORM="{{output_dir}}/prototype-v3/feedback-form.md"
+   [ -f "$FORM" ] || { echo "HARD STOP: $FORM missing — NOT closing this step, NOT running 'af done'."; exit 1; }
+   HAS_CHECK=$(command grep -qiF -e '[x]' "$FORM" && echo 1 || echo 0)
+   HAS_WORD=$(command grep -qiE 'APPROVED|REJECTED' "$FORM" && echo 1 || echo 0)
+   HAS_NOTE=$(command grep -iE '(palette|typography|signature|decision|notes?):[[:space:]]*[^[:space:]]' "$FORM" | command grep -qvE ':[[:space:]]*(_+|[[])' && echo 1 || echo 0)
+   if [ "${HAS_CHECK}${HAS_WORD}${HAS_NOTE}" = "000" ]; then
+     af mail send manager/ -s "BLOCKED: Feedback form empty - Iteration 3" -m "$FORM is still the blank template (no ticked box, no APPROVED/REJECTED, no notes). HOLDING — not advancing. Fill it with real feedback, commit, push, and re-resolve gate design-feedback-3."
+     echo "HARD STOP: blank feedback form — NOT closing this step, NOT running 'af done'. Re-validated on next dispatch."
+     exit 1
+   fi
+   echo "OK: $FORM has real feedback — proceed to parse the decision below."
    ```
-   DO NOT close this step. DO NOT run `af done`. DO NOT proceed to the next iteration
-   (refine-prototype-*). An empty feedback form is NEVER an ITERATE and NEVER advances —
-   stop here and exit WITHOUT closing the step so the form is re-validated on the next
-   dispatch. The ONLY way past this step is a feedback form filled with real content.
+   The ONLY way past this step is a feedback form filled with real content. DO NOT run
+   `af done` while the interlock above exits non-zero.
 
 3. **If filled out**, derive the decision:
    - **APPROVED**: Skip to finalize-prototype.
@@ -875,6 +913,7 @@ This step has a **GATE**. The gate blocks closure until the manager resolves it.
    af mail send manager/ -s "REVIEW REQUEST: Web Design Prototype v4 - Iteration 4 (second-to-last)" -m "
    *** IMPORTANT: Do NOT resolve this gate until {{output_dir}}/prototype-v4/feedback-form.md is FILLED OUT.
    Resolving with a blank form does NOT advance the design — the agent will HOLD and wait, it will not iterate. ***
+   To APPROVE & finalize, write APPROVED on the form's Decision line; to halt, write REJECTED; otherwise add real feedback and the agent iterates.
 
    Prototype v4 pushed. This is the SECOND-TO-LAST iteration.
 
@@ -914,17 +953,26 @@ description = """
    `{{output_dir}}/prototype-v4/feedback-form.md` and check for `[x]` boxes, replaced
    placeholders, or added text.
 
-   **If the form is still the blank template → BLOCKED.**
+   **If the form is still the blank template → BLOCKED (mechanically enforced).**
+   Run this hard interlock FIRST — it exits non-zero on an empty form so the step CANNOT
+   close and the workflow CANNOT advance (prose alone was bypassed in a prior run of a
+   sibling design formula). Biases to BLOCKED unless there is a ticked box, a written
+   Decision verdict, or real notes:
    ```bash
-   af mail send manager/ -s "BLOCKED: Feedback form empty - Iteration 4" -m "
-   Cannot proceed — {{output_dir}}/prototype-v4/feedback-form.md is still the blank template.
-   Please fill out the form with your feedback, commit, push, and resolve the gate.
-   "
+   FORM="{{output_dir}}/prototype-v4/feedback-form.md"
+   [ -f "$FORM" ] || { echo "HARD STOP: $FORM missing — NOT closing this step, NOT running 'af done'."; exit 1; }
+   HAS_CHECK=$(command grep -qiF -e '[x]' "$FORM" && echo 1 || echo 0)
+   HAS_WORD=$(command grep -qiE 'APPROVED|REJECTED' "$FORM" && echo 1 || echo 0)
+   HAS_NOTE=$(command grep -iE '(palette|typography|signature|decision|notes?):[[:space:]]*[^[:space:]]' "$FORM" | command grep -qvE ':[[:space:]]*(_+|[[])' && echo 1 || echo 0)
+   if [ "${HAS_CHECK}${HAS_WORD}${HAS_NOTE}" = "000" ]; then
+     af mail send manager/ -s "BLOCKED: Feedback form empty - Iteration 4" -m "$FORM is still the blank template (no ticked box, no APPROVED/REJECTED, no notes). HOLDING — not advancing. Fill it with real feedback, commit, push, and re-resolve gate design-feedback-4."
+     echo "HARD STOP: blank feedback form — NOT closing this step, NOT running 'af done'. Re-validated on next dispatch."
+     exit 1
+   fi
+   echo "OK: $FORM has real feedback — proceed to parse the decision below."
    ```
-   DO NOT close this step. DO NOT run `af done`. DO NOT proceed to the next iteration
-   (refine-prototype-*). An empty feedback form is NEVER an ITERATE and NEVER advances —
-   stop here and exit WITHOUT closing the step so the form is re-validated on the next
-   dispatch. The ONLY way past this step is a feedback form filled with real content.
+   The ONLY way past this step is a feedback form filled with real content. DO NOT run
+   `af done` while the interlock above exits non-zero.
 
 3. **If filled out**, derive the decision:
    - **APPROVED**: Skip to finalize-prototype.
@@ -989,6 +1037,7 @@ This step has a **GATE**. The gate blocks closure until the manager resolves it.
    af mail send manager/ -s "REVIEW REQUEST: FINAL Web Design Prototype v5 - Iteration 5" -m "
    *** IMPORTANT: Do NOT resolve this gate until {{output_dir}}/prototype-v5/feedback-form.md is FILLED OUT.
    Resolving with a blank form does NOT advance the design — the agent will HOLD and wait, it will not iterate. ***
+   To APPROVE & finalize, write APPROVED on the form's Decision line; to halt, write REJECTED; otherwise add real feedback and the agent iterates.
 
    FINAL prototype pushed! This is the last iteration.
 
@@ -1030,16 +1079,26 @@ description = """
    `{{output_dir}}/prototype-v5/feedback-form.md` and check for `[x]` boxes, replaced
    placeholders, or added text.
 
-   **If the form is still the blank template → BLOCKED.**
-   This is the final iteration. DO NOT proceed to finalize without feedback.
+   **If the form is still the blank template → BLOCKED (mechanically enforced).**
+   This is the final iteration; it guards finalize-prototype. Run this hard interlock
+   FIRST — it exits non-zero on an empty form so the step CANNOT close and finalize CANNOT
+   proceed. Biases to BLOCKED unless there is a ticked box, a written Decision verdict, or
+   real notes:
    ```bash
-   af mail send manager/ -s "BLOCKED: Feedback form empty - FINAL Iteration 5" -m "
-   Cannot proceed to finalize — {{output_dir}}/prototype-v5/feedback-form.md is still the blank template.
-   This is the FINAL iteration. The prototype cannot be finalized without feedback.
-   Please fill out the form with your feedback, commit, push, and resolve the gate.
-   "
+   FORM="{{output_dir}}/prototype-v5/feedback-form.md"
+   [ -f "$FORM" ] || { echo "HARD STOP: $FORM missing — NOT closing this step, NOT running 'af done', NOT finalizing."; exit 1; }
+   HAS_CHECK=$(command grep -qiF -e '[x]' "$FORM" && echo 1 || echo 0)
+   HAS_WORD=$(command grep -qiE 'APPROVED|REJECTED' "$FORM" && echo 1 || echo 0)
+   HAS_NOTE=$(command grep -iE '(palette|typography|signature|decision|notes?):[[:space:]]*[^[:space:]]' "$FORM" | command grep -qvE ':[[:space:]]*(_+|[[])' && echo 1 || echo 0)
+   if [ "${HAS_CHECK}${HAS_WORD}${HAS_NOTE}" = "000" ]; then
+     af mail send manager/ -s "BLOCKED: Feedback form empty - FINAL Iteration 5" -m "$FORM is still the blank template. This is the FINAL iteration — the prototype CANNOT be finalized without feedback. HOLDING. Fill it with real feedback, commit, push, and re-resolve gate design-feedback-5."
+     echo "HARD STOP: blank feedback form on FINAL iteration — NOT closing this step, NOT finalizing. Re-validated on next dispatch."
+     exit 1
+   fi
+   echo "OK: $FORM has real feedback — proceed to finalize."
    ```
-   DO NOT close this step. DO NOT proceed to finalize-prototype.
+   DO NOT run `af done` and DO NOT proceed to finalize-prototype while the interlock above
+   exits non-zero. The ONLY way past this step is a feedback form filled with real content.
 
 3. **If the form HAS been filled out**, proceed to finalize. Record feedback and any
    remaining concerns as future improvements. This is the last iteration — proceed to
