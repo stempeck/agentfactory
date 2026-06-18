@@ -69,6 +69,12 @@
       "description": "Multi-agent pull request review with five parallel specialized reviewers, confidence-scored filtering, and findings posted as inline review comments anchored to the PR diff.",
       "directive": "Run af prime to load formula context.",
       "formula": "ultra-review"
+    },
+    "web-design": {
+      "type": "autonomous",
+      "description": "Transform a GitHub issue, Jira issue, or problem-description document into an interactive, distinctively-designed web UI prototype through iterative exploration and human feedback.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "web-design"
     }
   }
 }
