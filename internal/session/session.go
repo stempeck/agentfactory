@@ -27,6 +27,24 @@ var (
 const (
 	envBaseURL   = "ANTHROPIC_BASE_URL"
 	envAuthToken = "ANTHROPIC_AUTH_TOKEN"
+
+	// Git identity env (issue #371 AC-2): exported only when no ambient identity
+	// resolves, so they never clobber a present one (C-4). GIT_AUTHOR_*/
+	// GIT_COMMITTER_* override config unconditionally, hence the presence-gate.
+	envGitAuthorName     = "GIT_AUTHOR_NAME"
+	envGitAuthorEmail    = "GIT_AUTHOR_EMAIL"
+	envGitCommitterName  = "GIT_COMMITTER_NAME"
+	envGitCommitterEmail = "GIT_COMMITTER_EMAIL"
+
+	// Trailer activation env (issue #371 AC-4/AC-5): GIT_CONFIG_* sets
+	// core.hooksPath to the af-managed githooks dir for this session (writing
+	// nothing to .git/), and AF_COAUTHOR_* hand the prepare-commit-msg hook the
+	// co-author value from the C-3 constants (one source of truth, no shell literal).
+	envGitConfigCount  = "GIT_CONFIG_COUNT"
+	envGitConfigKey0   = "GIT_CONFIG_KEY_0"
+	envGitConfigValue0 = "GIT_CONFIG_VALUE_0"
+	envCoauthorName    = "AF_COAUTHOR_NAME"
+	envCoauthorEmail   = "AF_COAUTHOR_EMAIL"
 )
 
 var checkAvailableMemoryFunc = checkAvailableMemory
@@ -140,6 +158,36 @@ type Manager struct {
 	worktreePath  string
 	worktreeID    string
 	buildHost     *config.BuildHostConfig
+
+	// Git identity to export when no ambient identity resolves (issue #371 AC-2).
+	// Empty ⇒ not exported (presence-gate / C-4); set via SetGitIdentity.
+	gitAuthorName  string
+	gitAuthorEmail string
+
+	// Trailer activation (issue #371 AC-4/AC-5): when gitHooksDir is non-empty the
+	// session sets core.hooksPath to it and passes the co-author value to the hook.
+	gitHooksDir   string
+	coauthorName  string
+	coauthorEmail string
+}
+
+// SetGitIdentity configures the default git author/committer identity exported
+// into the agent session (issue #371 AC-2). The caller (cmd layer) presence-gates
+// this: it is invoked only when no ambient identity resolves, so the exports
+// never override a real identity (C-4). Empty values leave the exports off.
+func (m *Manager) SetGitIdentity(name, email string) {
+	m.gitAuthorName = name
+	m.gitAuthorEmail = email
+}
+
+// SetGitTrailer activates the centralized Co-authored-by trailer for this session
+// (issue #371 AC-4/AC-5): hooksDir becomes core.hooksPath (via GIT_CONFIG_*), and
+// the co-author name/email are handed to the prepare-commit-msg hook via env. An
+// empty hooksDir leaves the trailer channel off.
+func (m *Manager) SetGitTrailer(hooksDir, coauthorName, coauthorEmail string) {
+	m.gitHooksDir = hooksDir
+	m.coauthorName = coauthorName
+	m.coauthorEmail = coauthorEmail
 }
 
 // NewManager creates a Manager for the given agent.
@@ -257,6 +305,23 @@ func (m *Manager) Start() error {
 			fmt.Fprintf(os.Stderr, "warning: failed to set %s for %s: %v\n", envAuthToken, sessionID, err)
 		}
 	}
+	// Git identity fallback (best-effort; presence-gated — issue #371 AC-2/C-4).
+	if m.gitAuthorName != "" && m.gitAuthorEmail != "" {
+		_ = m.tmux.SetEnvironment(sessionID, envGitAuthorName, m.gitAuthorName)
+		_ = m.tmux.SetEnvironment(sessionID, envGitAuthorEmail, m.gitAuthorEmail)
+		_ = m.tmux.SetEnvironment(sessionID, envGitCommitterName, m.gitAuthorName)
+		_ = m.tmux.SetEnvironment(sessionID, envGitCommitterEmail, m.gitAuthorEmail)
+	}
+	// Trailer activation (best-effort — issue #371 AC-4/AC-5).
+	if m.gitHooksDir != "" {
+		_ = m.tmux.SetEnvironment(sessionID, envGitConfigCount, "1")
+		_ = m.tmux.SetEnvironment(sessionID, envGitConfigKey0, "core.hooksPath")
+		_ = m.tmux.SetEnvironment(sessionID, envGitConfigValue0, m.gitHooksDir)
+		if m.coauthorName != "" && m.coauthorEmail != "" {
+			_ = m.tmux.SetEnvironment(sessionID, envCoauthorName, m.coauthorName)
+			_ = m.tmux.SetEnvironment(sessionID, envCoauthorEmail, m.coauthorEmail)
+		}
+	}
 	if m.buildHost != nil {
 		_ = m.tmux.SetEnvironment(sessionID, "AF_BUILD_MODE", m.buildHost.Mode)
 		if m.buildHost.Host != "" {
@@ -322,6 +387,27 @@ func (m *Manager) buildStartupCommand() string {
 	}
 	if m.agentEntry.AuthToken != "" {
 		exports += fmt.Sprintf(" %s=%s", envAuthToken, shellQuote(m.agentEntry.AuthToken))
+	}
+	// Git identity fallback (presence-gated — only when no ambient identity resolved).
+	if m.gitAuthorName != "" && m.gitAuthorEmail != "" {
+		exports += fmt.Sprintf(" %s=%s %s=%s %s=%s %s=%s",
+			envGitAuthorName, shellQuote(m.gitAuthorName),
+			envGitAuthorEmail, shellQuote(m.gitAuthorEmail),
+			envGitCommitterName, shellQuote(m.gitAuthorName),
+			envGitCommitterEmail, shellQuote(m.gitAuthorEmail))
+	}
+	// Trailer activation: redirect git hook lookup to the af-managed githooks dir
+	// (via core.hooksPath, ADR-017-clean) and hand the hook the co-author value.
+	if m.gitHooksDir != "" {
+		exports += fmt.Sprintf(" %s=1 %s=%s %s=%s",
+			envGitConfigCount,
+			envGitConfigKey0, shellQuote("core.hooksPath"),
+			envGitConfigValue0, shellQuote(m.gitHooksDir))
+		if m.coauthorName != "" && m.coauthorEmail != "" {
+			exports += fmt.Sprintf(" %s=%s %s=%s",
+				envCoauthorName, shellQuote(m.coauthorName),
+				envCoauthorEmail, shellQuote(m.coauthorEmail))
+		}
 	}
 	if m.buildHost != nil {
 		exports += fmt.Sprintf(" AF_BUILD_MODE=%s", shellQuote(m.buildHost.Mode))

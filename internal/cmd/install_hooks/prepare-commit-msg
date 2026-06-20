@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# prepare-commit-msg: append the agentfactory Co-authored-by trailer (issue #371
+# AC-4/AC-5). Centralized and formula-agnostic — git runs this for every commit
+# in an agent session because session.Manager points core.hooksPath here, so no
+# formula needs awareness of it. Never blocks (ADR-007): every path exits 0.
+# Idempotent: the trailer survives --amend without duplicating (C-5).
+#
+# The co-author value is read from AF_COAUTHOR_NAME / AF_COAUTHOR_EMAIL, which
+# session.Manager exports from the C-3 constants — there is NO literal hard-coded
+# here, so the value cannot drift (Gap 6). When that env is absent (an ordinary
+# non-agent commit) the hook is a silent no-op.
+set -u
+
+msg_file="${1:-}"
+[ -n "$msg_file" ] || exit 0
+[ -f "$msg_file" ] || exit 0
+
+name="${AF_COAUTHOR_NAME:-}"
+email="${AF_COAUTHOR_EMAIL:-}"
+[ -n "$name" ] || exit 0
+[ -n "$email" ] || exit 0
+
+trailer="Co-authored-by: ${name} <${email}>"
+
+# Idempotent: skip if this exact trailer is already present (e.g. on --amend).
+if grep -qF "$trailer" "$msg_file" 2>/dev/null; then
+    exit 0
+fi
+
+# Append at the very bottom, blank-line separated from the body (C-5).
+printf '\n%s\n' "$trailer" >> "$msg_file"
+exit 0

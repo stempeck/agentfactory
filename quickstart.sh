@@ -462,11 +462,26 @@ configure_git_defaults() {
         log_info "Set git default branch to 'main'"
     fi
 
-    # Set user identity if not configured (required for commits inside container)
+    # Set user identity if not configured (required for commits inside container).
+    # Use the agentfactory default identity (issue #371 AC-2/AC-3) so commits in a
+    # fresh container are authored by agentfactory-cli — not a placeholder that the
+    # presence-gate would later honour, silently failing AC-2 in the docker target.
+    # On a clean install factory.json does not exist yet: it is written later by
+    # `af install --init` in configure_factory (below), so the `[ -f ]` guard fails,
+    # the jq read is skipped, and the literal fallback (the same issue-#371 C-3
+    # identity as the Go constants) is what runs. The jq read is best-effort and
+    # only applies on a re-run where factory.json already exists.
     if ! git config --global user.email >/dev/null 2>&1; then
-        git config --global user.email "dev@agentfactory.local"
-        git config --global user.name "agentfactory"
-        log_info "Set default git identity"
+        local gi_name gi_email factory_json=".agentfactory/factory.json"
+        if command -v jq >/dev/null 2>&1 && [ -f "$factory_json" ]; then
+            gi_name=$(jq -r '.git_identity.name // empty' "$factory_json" 2>/dev/null)
+            gi_email=$(jq -r '.git_identity.email // empty' "$factory_json" 2>/dev/null)
+        fi
+        : "${gi_name:=agentfactory-cli}"
+        : "${gi_email:=293373236+agentfactory-cli@users.noreply.github.com}"
+        git config --global user.email "$gi_email"
+        git config --global user.name "$gi_name"
+        log_info "Set default git identity ($gi_name)"
     fi
 
     log_success "Git configured"

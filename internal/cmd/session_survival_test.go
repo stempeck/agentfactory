@@ -219,7 +219,8 @@ func TestProductionSessionsSurviveDefaultSuite(t *testing.T) {
 	// → guard panics (recovered).
 	exercise("launchWatchdog", func() {
 		cmd, _ := newTestCmd()
-		launchWatchdog(cmd, newCmdTmux(), t.TempDir(), nil)
+		scope, agentsCfg := knownScope("alpha")
+		launchWatchdog(cmd, newCmdTmux(), t.TempDir(), scope, agentsCfg)
 	})
 
 	// notifyRecipient (via the exported Router.Send) short-circuits at the

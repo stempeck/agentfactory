@@ -26,6 +26,17 @@ var (
 // CurrentFactoryVersion is the highest supported factory.json schema version.
 const CurrentFactoryVersion = 1
 
+// Default git identity literals (issue #371 C-3). These are the ONE source of
+// truth for the agentfactory commit identity: referenced by the factory.json
+// default-fill, the installer (DefaultFactoryConfigJSON), the session env
+// export, and the trailer hook (via env). A hand-typed second copy would risk
+// Gap-6 drift, so do not inline these strings elsewhere — reference the
+// constants (TestDefaultGitIdentityConstants pins the exact values).
+const (
+	DefaultGitUserName  = "agentfactory-cli"
+	DefaultGitUserEmail = "293373236+agentfactory-cli@users.noreply.github.com"
+)
+
 // AgentConfig holds the contents of agents.json
 type AgentConfig struct {
 	Agents map[string]AgentEntry `json:"agents"`
@@ -59,10 +70,57 @@ type MessagingConfig struct {
 
 // FactoryConfig holds the contents of factory.json (root marker)
 type FactoryConfig struct {
-	Type         string `json:"type"`
-	Version      int    `json:"version"`
-	Name         string `json:"name"`
-	MaxWorktrees int    `json:"max_worktrees,omitempty"`
+	Type         string       `json:"type"`
+	Version      int          `json:"version"`
+	Name         string       `json:"name"`
+	MaxWorktrees int          `json:"max_worktrees,omitempty"`
+	GitIdentity  *GitIdentity `json:"git_identity,omitempty"` // nil ⇒ validator fills C-3 defaults
+}
+
+// GitIdentity is the default git author/committer identity drawn from
+// factory.json (issue #371 AC-3). A nil *GitIdentity distinguishes "absent on
+// disk" (validator fills the C-3 defaults) from "operator set".
+type GitIdentity struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
+}
+
+// DefaultGitIdentity returns the C-3 default identity built from the constants.
+func DefaultGitIdentity() *GitIdentity {
+	return &GitIdentity{Name: DefaultGitUserName, Email: DefaultGitUserEmail}
+}
+
+// ResolveIdentity implements the issue #371 IFF presence-gate (AC-2/C-4): it
+// returns the default identity to apply ONLY when the ambient name OR email is
+// absent; when both are present it returns apply=false ("leave the ambient
+// identity"). It is a pure function (no env reads, no shell-out) per ADR-004 —
+// the ambient read happens in the cmd layer and is plumbed in as parameters.
+func ResolveIdentity(def *GitIdentity, ambientName, ambientEmail string) (name, email string, apply bool) {
+	if def == nil {
+		return "", "", false
+	}
+	if ambientName != "" && ambientEmail != "" {
+		return "", "", false
+	}
+	return def.Name, def.Email, true
+}
+
+// DefaultFactoryConfigJSON returns the fresh-install factory.json content built
+// from the in-code defaults (incl. the C-3 git identity), so there is no
+// hand-typed literal to drift from the constants (issue #371 Gap-6).
+func DefaultFactoryConfigJSON() string {
+	cfg := FactoryConfig{
+		Type:         "factory",
+		Version:      CurrentFactoryVersion,
+		Name:         "agentfactory",
+		MaxWorktrees: 4,
+		GitIdentity:  DefaultGitIdentity(),
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil { // unreachable for these scalar/pointer field types
+		return `{"type":"factory","version":1,"name":"agentfactory"}`
+	}
+	return string(b)
 }
 
 // BuildHostConfig holds the contents of build-host.json
@@ -209,6 +267,11 @@ func validateFactoryConfig(c *FactoryConfig) error {
 	}
 	if c.Version > CurrentFactoryVersion {
 		return fmt.Errorf("%w: version %d is newer than supported version %d", ErrInvalidVersion, c.Version, CurrentFactoryVersion)
+	}
+	// Default-fill the C-3 git identity when absent on disk (issue #371 AC-2/AC-3),
+	// mirroring the in-place default-fill in validateDispatchConfig/validateStartupConfig.
+	if c.GitIdentity == nil {
+		c.GitIdentity = DefaultGitIdentity()
 	}
 	return nil
 }

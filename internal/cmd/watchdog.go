@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -21,8 +22,6 @@ import (
 
 var (
 	watchdogInterval       int
-	watchdogAgent          string
-	watchdogAgents         []string
 	watchdogSilenceTimeout int
 )
 
@@ -33,16 +32,16 @@ var watchdogCmd = &cobra.Command{
 for error patterns, silence timeouts, and Claude crashes. On detection it
 writes .runtime/last_error, mails the supervisor, and respawns the session.
 
-Use --interval to set the polling frequency and --agent to monitor a single
-agent instead of all. A circuit breaker stops respawning after consecutive
-failures and escalates to the supervisor for manual intervention.`,
+Scope comes solely from startup.json.watchdog_agents — the explicit, bounded set
+of agents to monitor. The watchdog refuses to start when none is configured
+(issue #408); it never monitors all agents. Use --interval to set the polling
+frequency. A circuit breaker stops respawning after consecutive failures and
+escalates to the supervisor for manual intervention.`,
 	RunE: runWatchdog,
 }
 
 func init() {
 	watchdogCmd.Flags().IntVar(&watchdogInterval, "interval", 30, "Polling interval in seconds")
-	watchdogCmd.Flags().StringVar(&watchdogAgent, "agent", "", "Monitor a specific agent (default: all)")
-	watchdogCmd.Flags().StringSliceVar(&watchdogAgents, "agents", nil, "Monitor a set of agents (CSV/repeatable; default: all)")
 	watchdogCmd.Flags().IntVar(&watchdogSilenceTimeout, "silence-timeout", 300, "Seconds of no output change before triggering recovery")
 	rootCmd.AddCommand(watchdogCmd)
 }
@@ -158,10 +157,26 @@ func writeLastError(agentDir, description string) error {
 	return os.WriteFile(filepath.Join(runtimeDir, "last_error"), []byte(content), 0o644)
 }
 
+// writeWatchdogLastError writes a timestamped breadcrumb to
+// <root>/.runtime/watchdog_last_error — the watchdog process's own (factory-root)
+// error record. It is DISTINCT from writeLastError, whose
+// <agentDir>/.runtime/last_error is the per-agent recovery record used by
+// recoverAgent; a factory-root last_error would be ambiguous with an agent's
+// (issue #408 R2-L1). The `af up` pre-check (Phase 3) points at this same file so
+// operators have a single place to look.
+func writeWatchdogLastError(root, description string) error {
+	runtimeDir := filepath.Join(root, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		return err
+	}
+	content := fmt.Sprintf("%s %s\n", time.Now().Format(time.RFC3339), description)
+	return os.WriteFile(filepath.Join(runtimeDir, "watchdog_last_error"), []byte(content), 0o644)
+}
+
 func resolveAgentDir(root, agentName string) string {
 	meta, err := worktree.FindByAgent(root, agentName)
 	if err == nil && meta != nil {
-		return config.AgentDir(filepath.Join(root, meta.Path), agentName)
+		return config.AgentDir(worktree.AbsWorktreePath(root, meta), agentName)
 	}
 	return config.AgentDir(root, agentName)
 }
@@ -169,7 +184,7 @@ func resolveAgentDir(root, agentName string) string {
 func resolveWorktreeMeta(root, agentName string) (*worktree.Meta, string) {
 	meta, err := worktree.FindByAgent(root, agentName)
 	if err == nil && meta != nil {
-		return meta, filepath.Join(root, meta.Path)
+		return meta, worktree.AbsWorktreePath(root, meta)
 	}
 	return nil, ""
 }
@@ -233,6 +248,31 @@ func runWatchdog(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// The watchdog is the single authority for its scope (issue #408 Phase 2): it
+	// self-reads startup.json.watchdog_agents (NOT the CLI flags) and refuses to
+	// start on an empty or all-unknown scope, leaving a durable breadcrumb before
+	// refusing so the misconfiguration is loud and discoverable.
+	ws, err := resolveWatchdogScope(root)
+	if err != nil {
+		if werr := writeWatchdogLastError(root, err.Error()); werr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "watchdog: failed to write breadcrumb: %v\n", werr)
+		}
+		return err
+	}
+	if ws.membershipNote != "" {
+		// Transient-read guard (N-2): membership could not be validated, so the
+		// scope launches unvalidated. Surface it both ways so "monitoring nothing
+		// because of a flaky read" stays discoverable.
+		fmt.Fprintln(cmd.ErrOrStderr(), ws.membershipNote)
+		_ = writeWatchdogLastError(root, ws.membershipNote)
+	}
+	// Per-name typos stay non-fatal: warn, but keep monitoring the known names.
+	for _, name := range ws.unknown {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"watchdog: startup.json watchdog_agents names unknown agent %q — it will NOT be monitored\n", name)
+	}
+	scope := ws.agents
+
 	ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -244,10 +284,6 @@ func runWatchdog(cmd *cobra.Command, args []string) error {
 
 	agentStates := make(map[string]*watchdogAgentState)
 	failures := make(map[string]int)
-
-	// Scope folds the legacy single --agent into the multi-agent --agents set so
-	// `af watchdog --agent X` keeps working (C-4). A nil scope means "all".
-	scope := buildWatchdogScope(watchdogAgents, watchdogAgent)
 
 	fmt.Fprintf(cmd.OutOrStdout(), "watchdog: started (interval=%ds, silence-timeout=%ds)\n",
 		watchdogInterval, watchdogSilenceTimeout)
@@ -266,9 +302,10 @@ func runWatchdog(cmd *cobra.Command, args []string) error {
 	}
 }
 
-// buildWatchdogScope builds the monitoring scope set, folding the single --agent
-// value into the --agents set. It returns nil ("all") when no scope is requested
-// so the existing bare-`af watchdog` and `--agent X` behaviors are unchanged.
+// buildWatchdogScope builds the monitoring scope set from a list of agent names,
+// folding an optional single name into the set (blank names are dropped). An empty
+// result is a non-nil EMPTY map meaning "no-scope" — monitor NOTHING (issue #408).
+// A nil/empty scope is never "all"; pollAgents fail-closes on it.
 func buildWatchdogScope(agents []string, single string) map[string]struct{} {
 	scope := make(map[string]struct{})
 	for _, a := range agents {
@@ -279,10 +316,84 @@ func buildWatchdogScope(agents []string, single string) map[string]struct{} {
 	if single != "" {
 		scope[single] = struct{}{}
 	}
-	if len(scope) == 0 {
-		return nil
-	}
 	return scope
+}
+
+// watchdogScope is the resolved monitoring scope plus the membership metadata the
+// caller needs for non-fatal observability: per-name typo warnings (unknown) and
+// the transient-read note (membershipNote). When resolveWatchdogScope returns a
+// nil error, agents is the non-empty set to monitor.
+type watchdogScope struct {
+	agents         map[string]struct{} // the set to monitor (non-empty on success)
+	unknown        []string            // configured names absent from agents.json (typos)
+	membershipNote string              // non-empty when the all-unknown check was skipped (transient read)
+}
+
+// resolveWatchdogScope is the watchdog's single authority for its scope (issue
+// #408 Phase 2). It self-reads startup.json.watchdog_agents (NOT the CLI flags)
+// under root, folds it through the Phase-1 buildWatchdogScope contract, and
+// validates membership against agents.json. It returns a non-nil error — so the
+// caller (a cobra RunE) exits non-zero — when the watchdog must refuse to start:
+//
+//   - the resolved scope is empty (absent file, omitted field, [], or all-blank), or
+//   - the scope is non-empty but EVERY name is unknown vs agents.json (R2-H1).
+//
+// Membership keys on agents.json, NOT on a live session: a configured-but-not-
+// running agent is "known". A failed/partial agents.json read is NOT escalated to
+// an all-unknown refusal (transient-read guard, N-2); the configured scope launches
+// unvalidated with membershipNote set. The refuse/membership decision lives here in
+// the cmd layer, never in internal/config (ADR-004). The agents.json read here is a
+// read-once-at-start snapshot, separate from pollAgents' per-tick read (N-1).
+func resolveWatchdogScope(root string) (watchdogScope, error) {
+	startupCfg, err := config.LoadStartupConfig(root)
+	if err != nil {
+		return watchdogScope{}, err
+	}
+
+	// Source the scope from startup.json (not flags), reusing the Phase-1 contract
+	// so blank entries drop and an empty result is the non-nil empty map.
+	scope := buildWatchdogScope(startupCfg.WatchdogAgents, "")
+	if len(scope) == 0 {
+		return watchdogScope{}, fmt.Errorf(
+			"watchdog: refusing to start — no watchdog_agents configured. "+
+				"The watchdog only monitors an explicit, bounded set of agents (issue #408). "+
+				"Set \"watchdog_agents\" in %s or it will not start.",
+			config.StartupConfigPath(root))
+	}
+
+	agentsCfg, agErr := config.LoadAgentConfig(config.AgentsConfigPath(root))
+	if agErr != nil || agentsCfg == nil {
+		// Transient/partial read (unreadable/absent agents.json): do NOT treat as
+		// all-unknown. Prefer launching on the configured (non-empty) scope over
+		// refusing on a flaky read. A successfully-parsed but EMPTY map is NOT a
+		// transient read — it falls through to the all-unknown refusal below (#408/PR#410).
+		return watchdogScope{
+			agents: scope,
+			membershipNote: "watchdog: could not validate scope membership — agents.json " +
+				"unreadable; launching on configured scope unvalidated",
+		}, nil
+	}
+
+	// Membership = a plain agents.json map lookup (the warnUnknownWatchdogAgents
+	// idiom). Refuse only when EVERY configured name is unknown.
+	var unknown []string
+	known := 0
+	for name := range scope {
+		if _, ok := agentsCfg.Agents[name]; ok {
+			known++
+		} else {
+			unknown = append(unknown, name)
+		}
+	}
+	sort.Strings(unknown)
+	if known == 0 {
+		return watchdogScope{}, fmt.Errorf(
+			"watchdog: refusing to start — none of watchdog_agents {%s} exist in agents.json; "+
+				"nothing to monitor (issue #408). Fix the names or set a valid watchdog_agents.",
+			strings.Join(unknown, ", "))
+	}
+
+	return watchdogScope{agents: scope, unknown: unknown}, nil
 }
 
 func pollAgents(cmd *cobra.Command, root string, scope map[string]struct{}, agentStates map[string]*watchdogAgentState, failures map[string]int, silenceThreshold int) {
@@ -296,11 +407,10 @@ func pollAgents(cmd *cobra.Command, root string, scope map[string]struct{}, agen
 	tx := newWatchdogTmux()
 
 	for name, entry := range agentsCfg.Agents {
-		// scope is nil ⇒ all (C-4); non-nil ⇒ only members.
-		if scope != nil {
-			if _, in := scope[name]; !in {
-				continue
-			}
+		// nil/empty scope monitors NOTHING — the watchdog must refuse before
+		// reaching here (issue #408); a nil scope is never "all".
+		if _, in := scope[name]; !in {
+			continue
 		}
 
 		sessionID := session.SessionName(name)

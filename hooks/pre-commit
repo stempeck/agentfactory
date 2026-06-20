@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# pre-commit (af-managed delegating hook): setting core.hooksPath redirects ALL
+# git hook lookup into the af-managed githooks dir, which would otherwise BYPASS a
+# repo's own .git/hooks/pre-commit (e.g. agentfactory-pro's protect-agent-scaffold
+# guard) inside agent sessions. This hook delegates to that repo-local pre-commit
+# so its behavior — including a blocking exit — is preserved. It is a silent no-op
+# when the repo has no pre-commit of its own (the common case for customer repos).
+set -u
+
+# --git-common-dir resolves the shared .git even from a linked worktree, where the
+# repo's real hooks live.
+common_dir="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+[ -n "$common_dir" ] || exit 0
+
+delegate="$common_dir/hooks/pre-commit"
+if [ -x "$delegate" ]; then
+    exec "$delegate" "$@"
+fi
+exit 0

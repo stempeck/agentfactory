@@ -181,3 +181,77 @@ func TestEnsureSettings_CreatesDirectory(t *testing.T) {
 		t.Fatalf("settings.json not created: %v", err)
 	}
 }
+
+// TestEnsureSettings_PreToolUseContainment is a STRUCTURAL presence check (Phase 3,
+// issue #386): it proves BOTH templates carry the PreToolUse -> af containment-check
+// hook after EnsureSettings, for every role type. It is deliberately SUBORDINATE and
+// SEPARATE from the behavioral enforcement tests — presence-in-settings is necessary but
+// is NOT the detection/correction test. The real interlock behavior is proven by the
+// Phase 2 seam tests (af containment-check) and the Phase 4 e2e; do not let this
+// structural check stand in for them.
+func TestEnsureSettings_PreToolUseContainment(t *testing.T) {
+	cases := []struct {
+		name     string
+		roleType RoleType
+	}{
+		{"Interactive", Interactive},
+		{"Autonomous", Autonomous},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := EnsureSettings(dir, tc.roleType); err != nil {
+				t.Fatalf("EnsureSettings(%s) error: %v", tc.name, err)
+			}
+
+			settingsPath := filepath.Join(dir, ".claude", "settings.json")
+			data, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatalf("reading settings.json: %v", err)
+			}
+
+			var parsed map[string]interface{}
+			if err := json.Unmarshal(data, &parsed); err != nil {
+				t.Fatalf("settings.json is not valid JSON: %v", err)
+			}
+
+			// Walk into hooks.PreToolUse[0].hooks[0].command (mirrors the SessionStart
+			// idiom above). The PreToolUse lookup is comma-ok-guarded because its very
+			// presence is what this test proves.
+			hooks := parsed["hooks"].(map[string]interface{})
+			preToolUseRaw, ok := hooks["PreToolUse"]
+			if !ok {
+				t.Fatalf("%s settings.json missing top-level hooks.PreToolUse entry", tc.name)
+			}
+			preToolUse := preToolUseRaw.([]interface{})
+			if len(preToolUse) == 0 {
+				t.Fatalf("%s PreToolUse array is empty", tc.name)
+			}
+			firstEntry := preToolUse[0].(map[string]interface{})
+
+			// Matcher uniquely fingerprints this hook vs. the empty-matcher siblings (D-8:
+			// scope to cwd-affecting tools).
+			matcher, _ := firstEntry["matcher"].(string)
+			if matcher != "Bash|Write|Edit" {
+				t.Errorf("%s PreToolUse matcher = %q, want \"Bash|Write|Edit\"", tc.name, matcher)
+			}
+
+			hooksList := firstEntry["hooks"].([]interface{})
+			if len(hooksList) == 0 {
+				t.Fatalf("%s PreToolUse hooks array is empty", tc.name)
+			}
+			firstHook := hooksList[0].(map[string]interface{})
+			cmd := firstHook["command"].(string)
+
+			if !strings.Contains(cmd, "af containment-check") {
+				t.Errorf("%s PreToolUse command should run 'af containment-check', got: %s", tc.name, cmd)
+			}
+			// Carries the same PATH-export prefix as every other direct-af hook. NOT
+			// ${AF_ROOT} (that token belongs only to the bash-script Stop hooks).
+			if !strings.Contains(cmd, `export PATH="$HOME/go/bin:`) {
+				t.Errorf("%s PreToolUse command should carry the export PATH= prefix, got: %s", tc.name, cmd)
+			}
+		})
+	}
+}

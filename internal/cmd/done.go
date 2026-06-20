@@ -212,6 +212,19 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 		return fmt.Errorf("formula completion guard triggered: %s", reason)
 	}
 
+	// K5 (issue #392): genuine completion is now confirmed — the
+	// completion-velocity guard passed above. Close the durable formula-instance
+	// epic so that "an open formula-instance epic" reliably means "in flight" for
+	// af up's K4 recovery query (the Gap-1 prerequisite, R1). Not gated on
+	// shouldTerminate: an interactive, non-dispatched session that finishes its
+	// formula must also close the epic. Best-effort (warn + continue) like every
+	// other store/mail op here — the steps are already closed and the formula is
+	// genuinely done, so a close failure must not abort completion. M1: this is
+	// the formula-instance epic (af-<hex>), distinct from the GitHub work issue.
+	if err := store.Close(ctx, instanceID, "formula complete"); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not close formula-instance epic %s: %v\n", instanceID, err)
+	}
+
 	// D1: no fallback. Per H-4/D15, a missing caller file means there is no
 	// dispatcher waiting on WORK_DONE mail. Skip the send entirely. Pinned
 	// by TestDone_NoCallerFile_NoMail.

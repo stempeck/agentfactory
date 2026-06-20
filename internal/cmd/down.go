@@ -144,6 +144,20 @@ func cleanupAgentWorktree(cmd *cobra.Command, factoryRoot, agentName string) {
 	if meta == nil {
 		return
 	}
+	// Preserve an in-flight worktree (issue #392). This guard MUST run here, on the
+	// original meta, before the agent is deregistered below: deregistration narrows
+	// and persists meta.Agents, so for a single-agent worktree a check placed after
+	// it would iterate an empty list, miss the in-flight formula, and the worktree
+	// would be destroyed. Skipping both the deregistration and the worktree teardown
+	// also leaves the agent registered in meta.Agents on disk, so the next reboot's
+	// GC guard still sees the formula. `af down --reset` (resetAgent → ForceRemove)
+	// stays unguarded and force-removes.
+	if worktree.HasUnfinishedFormula(factoryRoot, meta) {
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"%s: kept worktree %s — in-flight formula present; use 'af down %s --reset' to force-remove\n",
+			agentName, meta.ID, agentName)
+		return
+	}
 	updated, empty, err := worktree.RemoveAgent(factoryRoot, meta.ID, agentName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: warning: worktree RemoveAgent: %v\n", agentName, err)

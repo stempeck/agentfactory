@@ -1,17 +1,21 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/formula"
+	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/session"
 	"github.com/stempeck/agentfactory/internal/worktree"
 )
@@ -28,7 +32,9 @@ A bare 'af up' (no positional args) is driven by .agentfactory/startup.json:
                     state unchanged (gates are set at 'af install --init' and
                     changed only via explicit 'af quality'/'af fidelity').
   start_dispatch:   true also starts the dispatcher ('af dispatch start').
-  watchdog_agents:  scope the watchdog to a subset (omit/null = all agents).
+  watchdog_agents:  REQUIRED to run the watchdog; names the explicit agents to
+                    monitor. Omit/empty ⇒ the watchdog does not start (issue #408;
+                    never watches all).
 
 A start set larger than max_worktrees is warned about (not aborted) before launch.
 Positional 'af up <names>' ignores startup.json and starts exactly those agents.`,
@@ -122,7 +128,18 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 	var skipped []skippedAgent
 
+	// Loud, one-time setup check (issue #371 D-NOEXEC/ADR-014): if the af-managed
+	// trailer hook can't actually execute (missing, non-exec bit, or a noexec
+	// mount), say so visibly rather than letting a silent stream of trailer-less
+	// commits go out. Never blocks startup.
+	checkGitHooksExecutable(root, cmd.ErrOrStderr())
+
 	allOK := true
+	// K8 (issue #392 / AC-4): accumulate each agent's worktree-resolution Outcome
+	// and formula-recovery result so the post-loop step can write a durable
+	// factory-root breadcrumb and escalate any ambiguous recovery — neither of
+	// which is visible from the per-agent stderr line under a bulk `af up`.
+	var runRecords []agentRunRecord
 	for _, name := range agents {
 		entry, ok := agentsCfg.Agents[name]
 		if !ok {
@@ -166,7 +183,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		wtPath, wtID, created, wtErr := worktree.ResolveOrCreate(root, name, creator, envWT, envWTID, worktree.CreateOpts{MaxWorktrees: factoryCfg.MaxWorktrees})
+		wtPath, wtID, outcome, wtErr := worktree.ResolveOrCreate(root, name, creator, envWT, envWTID, worktree.CreateOpts{MaxWorktrees: factoryCfg.MaxWorktrees})
 		if wtErr != nil {
 			// PR2-HIGH-2: a worktree-creation failure (cap, disk, git) is best-effort
 			// like every other af-up sub-action — warn, skip this agent, and continue
@@ -176,10 +193,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		if wtPath != "" {
-			if _, setupErr := worktree.SetupAgent(root, wtPath, name, created); setupErr != nil {
+			if _, setupErr := worktree.SetupAgent(root, wtPath, name, outcome.IsCreated()); setupErr != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: SetupAgent for %s in %s: %v\n", name, wtPath, setupErr)
 			}
-			if created {
+			if outcome.IsCreated() {
 				fmt.Fprintf(cmd.OutOrStdout(), "Created worktree %s for %s\n", wtID, name)
 			}
 		}
@@ -195,10 +212,30 @@ func runUp(cmd *cobra.Command, args []string) error {
 				continue
 			}
 		}
+		wireGitIdentity(mgr, root, wtPath)
 		os.Remove(filepath.Join(config.AgentDir(root, name), ".runtime", "dispatched"))
 		if wtPath != "" {
 			os.Remove(filepath.Join(config.AgentDir(wtPath, name), ".runtime", "dispatched"))
 		}
+		// K4 (issue #392): if the in-worktree .runtime/hooked_formula pointer was
+		// lost (worktree relocated/removed), rebind it from the durable
+		// formula-instance epic BEFORE the agent's first af prime runs — otherwise
+		// outputFormulaContext returns silently and the in-flight formula is not
+		// resumed. The agent dir is the worktree agent dir when running in a
+		// worktree, else the factory-root agent dir (mirrors the dispatched-marker
+		// removal above). Best-effort: never blocks or crashes af up (R12).
+		agentDir := config.AgentDir(root, name)
+		if wtPath != "" {
+			agentDir = config.AgentDir(wtPath, name)
+		}
+		rr := reconstructHookedFormula(cmd.Context(), agentDir, name, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		runRecords = append(runRecords, agentRunRecord{
+			Agent:     name,
+			Outcome:   outcome,
+			Recovered: rr.Recovered,
+			Ambiguous: rr.Ambiguous,
+			OpenCount: rr.OpenCount,
+		})
 		if err := mgr.Start(); err != nil {
 			if errors.Is(err, session.ErrAlreadyRunning) {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s: already running\n", session.SessionName(name))
@@ -233,11 +270,39 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// K8 (issue #392 / AC-4): surface the per-agent recovery outcomes durably so
+	// ambiguous recovery is never silent under an unattended bulk `af up`. Both
+	// actions are best-effort and non-fatal (C-5) — mirroring every other af-up
+	// sub-action — so a write or mail failure never aborts the start.
+	//
+	//   (a) A factory-root breadcrumb (.runtime/af_up_last_run) records each
+	//       agent's Outcome + any ambiguity. It lives at the FACTORY root (LOW-1),
+	//       which survives agent-worktree teardown — NOT the per-agent in-worktree
+	//       .runtime, which is the teardown-fragile state #392 is about.
+	//   (b) The durable AC-4 channel is the escalation mail: any agent with >1 open
+	//       formula instance (could not auto-resume) is escalated to the supervisor.
+	if err := writeUpLastRun(root, formatUpRunSummary(runRecords, time.Now())); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to write .runtime/af_up_last_run breadcrumb: %v\n", err)
+	}
+	var ambiguousAgents []string
+	for _, rec := range runRecords {
+		if rec.Ambiguous {
+			ambiguousAgents = append(ambiguousAgents, rec.Agent)
+		}
+	}
+	if len(ambiguousAgents) > 0 {
+		// Non-fatal, discarded return — matches recoverAgent (watchdog.go) and
+		// no-ops under isTestBinary() in unit tests.
+		_ = sendHandoffMail(escalationTarget,
+			fmt.Sprintf("af up: %d agent(s) with ambiguous formula recovery", len(ambiguousAgents)),
+			fmt.Sprintf("These agents had more than one open formula-instance epic and could not "+
+				"auto-resume: %s. Resolve manually; see .runtime/af_up_last_run for the run summary.",
+				strings.Join(ambiguousAgents, ", ")))
+	}
+
 	// Defined action order (Gap-9): agents → gates → dispatch → watchdog, each
 	// best-effort (warn+continue, never abort). Gates/dispatch are startup.json-driven
-	// and blanket-only so `af up <names>` stays byte-identical (C-4). The watchdog runs
-	// on every path; its scope is only sourced from startup.json on the blanket path.
-	var watchdogScope []string
+	// and blanket-only so `af up <names>` stays byte-identical (C-4).
 	if blanket {
 		// AC-3/AC-4: apply gates with the af-up-resolved root (R-7) — for the gate
 		// files AND as the fidelity active-formula formulaDir, so the guard checks
@@ -268,21 +333,49 @@ func runUp(cmd *cobra.Command, args []string) error {
 				allOK = false
 			}
 		}
-
-		// AC-6: scope the watchdog to the configured agents. Membership is checked
-		// here at the cmd layer (startup.go defers it per ADR-004); warn-only — a
-		// monitoring-scope typo must not fail the af up exit.
-		watchdogScope = startupCfg.WatchdogAgents
-		warnUnknownWatchdogAgents(cmd.ErrOrStderr(), watchdogScope, agentsCfg)
 	}
 
-	// Launch watchdog (best-effort)
-	launchWatchdog(cmd, t, root, watchdogScope)
+	// N5 (issue #408 Phase 3): startup.json.watchdog_agents is the SOLE watchdog
+	// scope source, applied on BOTH the blanket and positional `af up` paths (the
+	// --agents/--agent flags are gone). Membership is checked here at the cmd layer
+	// (startup.go defers it per ADR-004); warn-only — a monitoring-scope typo must
+	// not fail the af up exit.
+	watchdogScope := startupCfg.WatchdogAgents
+	warnUnknownWatchdogAgents(cmd.ErrOrStderr(), watchdogScope, agentsCfg)
+
+	// Launch watchdog (best-effort). N4: pre-checks the scope and skips session
+	// creation (notice + breadcrumb) on an empty/all-unknown scope; otherwise
+	// launches a bare `af watchdog` (the watchdog self-scopes from startup.json).
+	launchWatchdog(cmd, t, root, watchdogScope, agentsCfg)
 
 	if !allOK {
 		return fmt.Errorf("some agents failed to start")
 	}
 	return nil
+}
+
+// checkGitHooksExecutable verifies the af-managed prepare-commit-msg hook is
+// present AND actually executable in this environment (issue #371 D-NOEXEC). On a
+// noexec mount the exec bit is set but the kernel refuses to run the hook, which
+// silently drops the Co-authored-by trailer (Gap 2); this converts that silent
+// failure into a loud, visible setup error (ADR-014). It never blocks startup —
+// agents still run, just without the centralized trailer.
+func checkGitHooksExecutable(root string, errw io.Writer) {
+	hook := filepath.Join(config.GitHooksDir(root), "prepare-commit-msg")
+	info, err := os.Stat(hook)
+	if err != nil {
+		fmt.Fprintf(errw, "warning: git trailer hook missing (%s): the Co-authored-by trailer will not be applied — run `af install --init`\n", hook)
+		return
+	}
+	if info.Mode().Perm()&0111 == 0 {
+		fmt.Fprintf(errw, "warning: git trailer hook %s is not executable: the Co-authored-by trailer will not be applied\n", hook)
+		return
+	}
+	// Real exec probe: the hook no-ops (exit 0) with no args / no AF_COAUTHOR_* env,
+	// so a non-nil error here means the kernel refused to exec it (noexec mount).
+	if err := exec.Command(hook).Run(); err != nil {
+		fmt.Fprintf(errw, "warning: git trailer hook %s is present but not executable in this environment (noexec mount?): the Co-authored-by trailer will not be applied — %v\n", hook, err)
+	}
 }
 
 // warnUnknownWatchdogAgents warns (never blocks — same philosophy as the rest
@@ -354,15 +447,29 @@ func warnOmittedSinks(cmd *cobra.Command, root string, agentsCfg *config.AgentCo
 // has confirmed present-but-not-live, never on an ambiguous read. The (re)created
 // session is given AF_ROOT (W2) so the watchdog can resolve its factory root even
 // if its own cwd is later deleted.
-func launchWatchdog(cmd *cobra.Command, t cmdTmux, root string, scope []string) {
-	watchdogSession := session.WatchdogSessionName()
-	// Build the launch string ONCE so both the fresh-launch and zombie-recreate
-	// paths (which fall through to the same SendKeysDelayed below) carry the scope
-	// (R-6/Gap-6). scope == nil keeps the bare "af watchdog" (C-4 default).
-	watchdogCmd := "af watchdog"
-	if len(scope) > 0 {
-		watchdogCmd = "af watchdog --agents " + strings.Join(scope, ",")
+func launchWatchdog(cmd *cobra.Command, t cmdTmux, root string, scope []string, agentsCfg *config.AgentConfig) {
+	// N4 (issue #408 Phase 3): pre-check the scope and skip session creation when it
+	// is empty or all-unknown — the early, observable echo of the watchdog's own
+	// authoritative refusal (resolveWatchdogScope, Phase 2). Skipping prevents the
+	// zombie-recreate loop (af up keeps recreating a session whose `af watchdog`
+	// immediately self-refuses) and leaves the SAME namespaced breadcrumb the
+	// watchdog writes, so operators have one place to look. Best-effort: the skip
+	// never sets allOK=false and never changes af up's exit code (W1).
+	if skip, reason := watchdogLaunchSkip(scope, agentsCfg); skip {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"watchdog: not started — %s (issue #408; the watchdog never monitors all agents)\n", reason)
+		if err := writeWatchdogLastError(root, "af up: watchdog launch skipped — "+reason); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to write watchdog breadcrumb: %v\n", err)
+		}
+		return
 	}
+
+	watchdogSession := session.WatchdogSessionName()
+	// Launch a BARE `af watchdog` (issue #408 Phase 3): the watchdog self-scopes from
+	// startup.json.watchdog_agents (Phase 2) and the --agents flag no longer exists,
+	// so the launch string carries no scope argument. Both the fresh-launch and
+	// zombie-recreate paths fall through to the same SendKeysDelayed below.
+	watchdogCmd := "af watchdog"
 	if running, _ := t.HasSession(watchdogSession); running {
 		if t.IsAgentRunning(watchdogSession, "af") {
 			return // healthy — leave it undisturbed
@@ -382,5 +489,184 @@ func launchWatchdog(cmd *cobra.Command, t cmdTmux, root string, scope []string) 
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to start watchdog: %v\n", err)
 	} else {
 		fmt.Fprintf(cmd.OutOrStdout(), "Started %s\n", watchdogSession)
+	}
+}
+
+// watchdogLaunchSkip decides whether `af up` should skip launching the watchdog,
+// mirroring the watchdog's own refuse decision (resolveWatchdogScope, issue #408).
+// It reuses the Phase-1 buildWatchdogScope contract (blank-trimmed, non-nil empty
+// map) and the agents.json membership idiom (agentsCfg.Agents[name]). It returns
+// skip=true when the scope is empty, or when every configured name is unknown vs
+// agents.json. Transient-read guard (R1-L1): a nil agentsCfg (unreadable/absent
+// agents.json) is NOT treated as all-unknown — prefer launching the configured
+// non-empty scope over skipping on a flaky read. A successfully-parsed but EMPTY map
+// is NOT a transient read: it routes to the all-unknown skip below. (A
+// configured-but-not-running agent is still "known", so membership keys on
+// agents.json, never on a live session.)
+func watchdogLaunchSkip(scope []string, agentsCfg *config.AgentConfig) (skip bool, reason string) {
+	set := buildWatchdogScope(scope, "")
+	if len(set) == 0 {
+		return true, "no watchdog_agents configured in startup.json"
+	}
+	if agentsCfg == nil {
+		return false, "" // membership unvalidated (transient read) ⇒ launch the configured scope
+	}
+	// A successfully-parsed but EMPTY map is NOT a transient read: every configured
+	// name is unknown, so fall through to the all-unknown skip below (#408/PR#410).
+	var unknown []string
+	for name := range set {
+		if _, ok := agentsCfg.Agents[name]; ok {
+			return false, "" // ≥1 known name ⇒ launch
+		}
+		unknown = append(unknown, name)
+	}
+	sort.Strings(unknown)
+	return true, fmt.Sprintf("none of watchdog_agents {%s} exist in agents.json", strings.Join(unknown, ", "))
+}
+
+// recoveryResult is the per-agent outcome of reconstructHookedFormula, surfaced
+// so runUp can aggregate it into the K8 run-summary breadcrumb and decide whether
+// to escalate. The zero value means "nothing recovered, not ambiguous".
+type recoveryResult struct {
+	Recovered  bool   // exactly one in-flight instance was rebound
+	InstanceID string // the rebound epic ID when Recovered, else ""
+	Ambiguous  bool   // >1 open instance — could not auto-resume (the AC-4 signal)
+	OpenCount  int    // number of open in-flight instances found
+}
+
+// agentRunRecord captures, per agent, how `af up` resolved its worktree and
+// whether formula recovery was clean or ambiguous. It feeds the durable
+// factory-root breadcrumb (.runtime/af_up_last_run) and the supervisor
+// escalation mail (issue #392 K8 / AC-4).
+type agentRunRecord struct {
+	Agent     string
+	Outcome   worktree.Outcome
+	Recovered bool
+	Ambiguous bool
+	OpenCount int
+}
+
+// formatUpRunSummary renders the per-agent run records into the breadcrumb body.
+// It names every agent with its resolution Outcome and flags any agent whose
+// formula recovery was ambiguous (>1 open instance) so an operator scrolling
+// past a bulk `af up` can still find what could not auto-resume.
+func formatUpRunSummary(records []agentRunRecord, now time.Time) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "af up last run: %s\n", now.Format(time.RFC3339))
+	if len(records) == 0 {
+		b.WriteString("(no agents resolved a worktree this run)\n")
+		return b.String()
+	}
+	for _, rec := range records {
+		fmt.Fprintf(&b, "agent %s: outcome=%s recovered=%t", rec.Agent, rec.Outcome, rec.Recovered)
+		if rec.Ambiguous {
+			fmt.Fprintf(&b, " AMBIGUOUS: %d open formula instances — manual resolution required", rec.OpenCount)
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// writeUpLastRun writes the run-summary breadcrumb to the FACTORY-ROOT .runtime
+// (LOW-1): that directory persists across agent-worktree teardown, unlike the
+// per-agent in-worktree .runtime which is the very teardown-fragile state #392
+// is about. Mirrors the writeLastError idiom (MkdirAll 0o755 → WriteFile 0o644);
+// the caller warns-and-continues on error so a breadcrumb failure never fails
+// `af up` (C-5).
+func writeUpLastRun(root, content string) error {
+	runtimeDir := filepath.Join(root, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(runtimeDir, "af_up_last_run"), []byte(content), 0o644)
+}
+
+// reconstructHookedFormula rebinds a lost <agentDir>/.runtime/hooked_formula
+// pointer from the durable formula-instance epic (K4, issue #392). The pointer
+// is a git-ignored in-worktree cache; when a worktree is relocated or removed it
+// is lost, and the next `af prime` then returns silently (outputFormulaContext,
+// prime.go) — reporting "no active formula" even though the formula is still in
+// flight. This reconstruction runs in `af up` before the agent's first prime so
+// resume survives worktree relocation/removal.
+//
+// It is best-effort and self-scoped:
+//   - An already-present pointer is left untouched (the cache is intact).
+//   - It reads the agent's OWN formula-instance epics via the explicit
+//     Filter.Assignee overlay bypass (ADR-002) — never the cross-actor opt-out
+//     flag; a cross-actor read is forbidden (Sec-5a-2).
+//   - It keeps only epics with >=1 non-terminal (open OR blocked) child step.
+//     A default nil-Statuses child list returns exactly the non-terminal
+//     children, so counting them excludes both genuinely-finished formulas and
+//     the entire pre-K5 legacy population of OPEN epics whose children are all
+//     closed (the MED-1 backstop — "open" alone does not imply "in flight").
+//   - Exactly one qualifying instance -> rebind the pointer + stdout notice.
+//   - More than one -> a stderr WARNING and rebind nothing (operator resolves).
+//   - Zero -> silent (the genuinely-new-agent path, AC-5(ii); byte-identical to
+//     today).
+//
+// Any store/daemon error is reported and swallowed so `af up` is never blocked
+// or crashed (R12) — mirroring every other best-effort sub-action in the loop.
+//
+// It returns a recoveryResult so the caller can aggregate per-agent outcomes for
+// the K8 run-summary breadcrumb and the ambiguous-recovery escalation mail. All
+// stdout/stderr prints are unchanged (byte-identical to the pre-K8 behavior); the
+// return value is purely additive. The zero recoveryResult means "nothing
+// recovered, not ambiguous" — returned on every fast-path / error exit.
+func reconstructHookedFormula(ctx context.Context, agentDir, agentName string, out, errw io.Writer) recoveryResult {
+	if readHookedFormulaID(agentDir) != "" {
+		return recoveryResult{} // intact in-worktree cache — leave the existing fast path untouched
+	}
+
+	store, err := newIssueStore(agentDir, os.Getenv("AF_ACTOR"))
+	if err != nil {
+		fmt.Fprintf(errw, "warning: %s: formula-resume store unavailable: %v (continuing)\n", agentName, err)
+		return recoveryResult{}
+	}
+
+	// Self-scoped read: explicit Assignee suppresses the actor overlay; the
+	// default (non-IncludeClosed) filter already excludes terminal epics.
+	epics, err := store.List(ctx, issuestore.Filter{
+		Assignee: agentName,
+		Labels:   []string{"formula-instance"},
+	})
+	if err != nil {
+		fmt.Fprintf(errw, "warning: %s: formula-resume query failed: %v (continuing)\n", agentName, err)
+		return recoveryResult{}
+	}
+
+	var inFlight []string
+	for _, epic := range epics {
+		// nil Statuses (NOT IncludeClosed) => exactly the non-terminal children,
+		// counting ready AND blocked steps so a sequential formula momentarily at
+		// "0 ready" between closing step N and step N+1 becoming ready is not
+		// misread as finished (the L3 open-step filter).
+		//
+		// Assignee scopes this query to the agent's own steps, which — like the
+		// epic query above — suppresses the actor overlay (ADR-002). `af up` runs
+		// in the launcher's process, whose AF_ACTOR is frequently a different agent
+		// (e.g. a manager bringing up a specialist); without the explicit Assignee
+		// the overlay would hide every agent-assigned child, collapse the count to
+		// 0, and silently defeat resume in exactly that cross-actor case.
+		children, childErr := store.List(ctx, issuestore.Filter{Parent: epic.ID, Assignee: agentName})
+		if childErr != nil {
+			fmt.Fprintf(errw, "warning: %s: formula-resume child query for %s failed: %v (continuing)\n", agentName, epic.ID, childErr)
+			return recoveryResult{}
+		}
+		if len(children) >= 1 {
+			inFlight = append(inFlight, epic.ID)
+		}
+	}
+
+	switch len(inFlight) {
+	case 0:
+		// Silent: a genuinely-new agent, or a completed one (AC-5(ii)).
+		return recoveryResult{}
+	case 1:
+		persistFormulaInstanceID(agentDir, inFlight[0])
+		fmt.Fprintf(out, "Recovered in-flight formula %s for %s (rebound .runtime/hooked_formula)\n", inFlight[0], agentName)
+		return recoveryResult{Recovered: true, InstanceID: inFlight[0], OpenCount: 1}
+	default:
+		fmt.Fprintf(errw, "WARNING: %s: %d open formula instances — cannot auto-resume; resolve manually\n", agentName, len(inFlight))
+		return recoveryResult{Ambiguous: true, OpenCount: len(inFlight)}
 	}
 }

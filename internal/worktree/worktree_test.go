@@ -238,12 +238,14 @@ func TestCreate(t *testing.T) {
 		t.Errorf("meta.Branch: got %q, want prefix %q", metaFromDisk.Branch, "af/solver-")
 	}
 
-	// Verify Meta.Path is relative
-	if filepath.IsAbs(meta.Path) {
-		t.Errorf("meta.Path is absolute: %q, should be relative", meta.Path)
-	}
+	// Meta.Path for a freshly-Created worktree is relative to the factory root.
+	// (Issue #392 K1/F-2 relaxed the *invariant* so a relocated worktree may
+	// carry an ABSOLUTE path — see absWorktreePath / FindByGitRegistry — so the
+	// blanket `!filepath.IsAbs` assertion is dropped. Create itself still writes
+	// a relative path, asserted here via the relative-prefix check, which an
+	// absolute path could not satisfy.)
 	if !strings.HasPrefix(meta.Path, ".agentfactory/worktrees/") {
-		t.Errorf("meta.Path: got %q, want prefix %q", meta.Path, ".agentfactory/worktrees/")
+		t.Errorf("Create meta.Path: got %q, want relative prefix %q", meta.Path, ".agentfactory/worktrees/")
 	}
 
 	// Verify FindFactoryRoot from worktree context follows redirect
@@ -780,7 +782,7 @@ func TestCreate_WorktreeDirAlreadyExists(t *testing.T) {
 }
 
 func TestResolveOrCreate_EnvBranch(t *testing.T) {
-	path, id, created, err := ResolveOrCreate("/unused/root", "solver", "", "/some/worktree", "wt-abc123", CreateOpts{})
+	path, id, outcome, err := ResolveOrCreate("/unused/root", "solver", "", "/some/worktree", "wt-abc123", CreateOpts{})
 	if err != nil {
 		t.Fatalf("ResolveOrCreate: %v", err)
 	}
@@ -790,7 +792,7 @@ func TestResolveOrCreate_EnvBranch(t *testing.T) {
 	if id != "wt-abc123" {
 		t.Errorf("id: got %q, want %q", id, "wt-abc123")
 	}
-	if created {
+	if outcome.IsCreated() {
 		t.Error("created: got true, want false")
 	}
 }
@@ -814,7 +816,7 @@ func TestResolveOrCreate_DiskFallback(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	path, id, created, err := ResolveOrCreate(realDir, "solver", "manager", "", "", CreateOpts{})
+	path, id, outcome, err := ResolveOrCreate(realDir, "solver", "manager", "", "", CreateOpts{})
 	if err != nil {
 		t.Fatalf("ResolveOrCreate: %v", err)
 	}
@@ -824,7 +826,7 @@ func TestResolveOrCreate_DiskFallback(t *testing.T) {
 	if id != meta.ID {
 		t.Errorf("id: got %q, want %q", id, meta.ID)
 	}
-	if created {
+	if outcome.IsCreated() {
 		t.Error("created: got true, want false")
 	}
 }
@@ -843,11 +845,11 @@ func TestResolveOrCreate_CreatesWhenNoContext(t *testing.T) {
 	initGitRepo(t, realDir)
 	setupFactoryRoot(t, realDir)
 
-	path, id, created, err := ResolveOrCreate(realDir, "solver", "", "", "", CreateOpts{})
+	path, id, outcome, err := ResolveOrCreate(realDir, "solver", "", "", "", CreateOpts{})
 	if err != nil {
 		t.Fatalf("ResolveOrCreate: %v", err)
 	}
-	if !created {
+	if !outcome.IsCreated() {
 		t.Error("created: got false, want true")
 	}
 	if !strings.HasPrefix(id, "wt-") {
@@ -887,11 +889,11 @@ func TestResolveOrCreate_SelfAdoption(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	path, id, created, err := ResolveOrCreate(realDir, "manager", "", "", "", CreateOpts{})
+	path, id, outcome, err := ResolveOrCreate(realDir, "manager", "", "", "", CreateOpts{})
 	if err != nil {
 		t.Fatalf("ResolveOrCreate: %v", err)
 	}
-	if created {
+	if outcome.IsCreated() {
 		t.Error("created: got true, want false (self-adoption)")
 	}
 	if path != wtPath {
@@ -1216,6 +1218,126 @@ func TestGC_ForceRemoveRequiresCorrectSessionName(t *testing.T) {
 	}
 	if hasForceRemove && !hasAfPrefix {
 		t.Fatal("ATOMICITY VIOLATION: ForceRemove is reachable without correct session name check — would destroy all worktrees including live ones")
+	}
+}
+
+// TestGC_SkipsWorktreeWithHookedFormula verifies the #392 Phase 3 GC guard:
+// a worktree whose owner tmux session is dead is NOT force-removed when any of
+// its agents (owner OR a co-tenant in meta.Agents) has a non-empty
+// .runtime/hooked_formula pointer. Pure unit test: GC's `tmux has-session` for a
+// unique/nonexistent owner fails, so GC falls through to the HasUnfinishedFormula
+// guard, which `continue`s before ForceRemove — leaving the meta file intact.
+func TestGC_SkipsWorktreeWithHookedFormula(t *testing.T) {
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	if err := os.MkdirAll(WorktreesDir(realDir), 0o755); err != nil {
+		t.Fatalf("mkdir worktrees: %v", err)
+	}
+
+	// writeWT writes a meta and, when inflightAgent != "", a non-empty
+	// hooked_formula for that agent inside the resolved worktree path.
+	writeWT := func(id, owner string, agents []string, inflightAgent, content string) {
+		meta := &Meta{
+			ID:     id,
+			Owner:  owner,
+			Branch: "af/" + owner + "-" + id,
+			Path:   filepath.Join(".agentfactory", "worktrees", id),
+			Agents: agents,
+		}
+		if err := WriteMeta(realDir, meta); err != nil {
+			t.Fatalf("WriteMeta %s: %v", id, err)
+		}
+		if inflightAgent != "" {
+			rt := filepath.Join(realDir, meta.Path, ".agentfactory", "agents", inflightAgent, ".runtime")
+			if err := os.MkdirAll(rt, 0o755); err != nil {
+				t.Fatalf("mkdir runtime: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(rt, "hooked_formula"), []byte(content), 0o644); err != nil {
+				t.Fatalf("write hooked_formula: %v", err)
+			}
+		}
+	}
+
+	// Owner names are unique + nonexistent so no real `af-<owner>` tmux session is
+	// alive — GC's has-session check fails and the guard is reached.
+	// Case A: single-agent owner mid-formula.
+	writeWT("wt-gcskipa", "gcskip-owner-aaa", []string{"gcskip-owner-aaa"}, "gcskip-owner-aaa", "bd-epic-123")
+	// Case B (co-tenant / Gap-5): owner session dead, owner has NO formula, but a
+	// co-tenant in meta.Agents is mid-formula → worktree must still be preserved.
+	writeWT("wt-gcskipb", "gcskip-owner-bbb", []string{"gcskip-owner-bbb", "gcskip-cotenant-bbb"}, "gcskip-cotenant-bbb", "bd-epic-456")
+
+	if _, err := GC(realDir); err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+
+	if _, err := ReadMeta(realDir, "wt-gcskipa"); err != nil {
+		t.Errorf("single-agent in-flight worktree must survive GC (guard skips ForceRemove): %v", err)
+	}
+	if _, err := ReadMeta(realDir, "wt-gcskipb"); err != nil {
+		t.Errorf("co-tenant in-flight worktree must survive GC (Gap-5): %v", err)
+	}
+}
+
+// TestHasUnfinishedFormula pins the helper's contract directly (#392 Phase 3),
+// independent of the GC/`af down` call sites: it iterates all meta.Agents and a
+// pointer only protects when non-empty after strings.TrimSpace. Whitespace-only,
+// missing file, and missing .runtime dir all mean "not in flight" (removable).
+func TestHasUnfinishedFormula(t *testing.T) {
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+
+	// writePointer writes hooked_formula for agent under the worktree path.
+	writePointer := func(wtPath, agent, content string) {
+		rt := filepath.Join(wtPath, ".agentfactory", "agents", agent, ".runtime")
+		if err := os.MkdirAll(rt, 0o755); err != nil {
+			t.Fatalf("mkdir runtime: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(rt, "hooked_formula"), []byte(content), 0o644); err != nil {
+			t.Fatalf("write hooked_formula: %v", err)
+		}
+	}
+
+	mk := func(id string, agents []string) *Meta {
+		return &Meta{
+			ID:     id,
+			Owner:  agents[0],
+			Branch: "af/" + agents[0] + "-" + id,
+			Path:   filepath.Join(".agentfactory", "worktrees", id),
+			Agents: agents,
+		}
+	}
+
+	// Case 1: a co-tenant (not the first agent) has a non-empty pointer → true.
+	m1 := mk("wt-huf1", []string{"owner1", "cotenant1"})
+	writePointer(filepath.Join(realDir, m1.Path), "cotenant1", "bd-epic-1\n")
+	if !HasUnfinishedFormula(realDir, m1) {
+		t.Error("non-empty co-tenant pointer must report true")
+	}
+
+	// Case 2: only a whitespace-only pointer → false (removable), mirroring readHookedFormulaID.
+	m2 := mk("wt-huf2", []string{"owner2"})
+	writePointer(filepath.Join(realDir, m2.Path), "owner2", "  \n\t ")
+	if HasUnfinishedFormula(realDir, m2) {
+		t.Error("whitespace-only pointer must report false")
+	}
+
+	// Case 3: no .runtime dir / no pointer at all → false.
+	m3 := mk("wt-huf3", []string{"owner3", "cotenant3"})
+	if HasUnfinishedFormula(realDir, m3) {
+		t.Error("missing pointer must report false")
+	}
+
+	// Case 4: empty agents list → false.
+	m4 := mk("wt-huf4", []string{"owner4"})
+	m4.Agents = nil
+	if HasUnfinishedFormula(realDir, m4) {
+		t.Error("empty agents list must report false")
 	}
 }
 
@@ -2104,5 +2226,1098 @@ func TestMergeSkillsDir_SkipsSymlinksInFactory(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "skipping symlink") {
 		t.Errorf("expected warning about skipping symlink, got: %q", buf.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue #392 Phase 1: relocation-safe rediscovery via git's registry.
+// ---------------------------------------------------------------------------
+
+// countAfBranches returns the number of local `af/<agent>-*` branches.
+func countAfBranches(t *testing.T, dir, agent string) int {
+	t.Helper()
+	cmd := exec.Command("git", "branch", "--list", "af/"+agent+"-*")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git branch --list: %v", err)
+	}
+	count := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+// countAfWorktrees returns the number of git worktrees checked out on an
+// `af/<agent>-*` branch, per `git worktree list --porcelain`.
+func countAfWorktrees(t *testing.T, dir, agent string) int {
+	t.Helper()
+	cmd := exec.Command("git", "worktree", "list", "--porcelain")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git worktree list --porcelain: %v", err)
+	}
+	count := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "branch refs/heads/af/"+agent+"-") {
+			count++
+		}
+	}
+	return count
+}
+
+func TestResolveOrCreate_ReattachesViaGitRegistry_WhenMetaMissing(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	wtPath, meta, err := Create(realDir, "solver", CreateOpts{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Simulate the #392 condition: the non-durable sidecar is lost.
+	if err := os.Remove(metaPath(realDir, meta.ID)); err != nil {
+		t.Fatalf("removing meta sidecar: %v", err)
+	}
+	// Sanity: the meta fast path can no longer find it.
+	if m, err := FindByOwner(realDir, "solver"); err != nil || m != nil {
+		t.Fatalf("FindByOwner after sidecar delete: meta=%v err=%v, want nil/nil", m, err)
+	}
+
+	path, id, outcome, err := ResolveOrCreate(realDir, "solver", "", "", "", CreateOpts{})
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if outcome.IsCreated() {
+		t.Error("outcome.IsCreated(): got true, want false (should reattach via git registry, not fork)")
+	}
+	if path != wtPath {
+		t.Errorf("path: got %q, want %q (reattach to existing worktree)", path, wtPath)
+	}
+	if id != meta.ID {
+		t.Errorf("id: got %q, want %q (reattach to existing worktree)", id, meta.ID)
+	}
+
+	// Self-heal: the sidecar must be rewritten from the git registry.
+	healed, err := ReadMeta(realDir, meta.ID)
+	if err != nil {
+		t.Fatalf("ReadMeta after self-heal: %v", err)
+	}
+	if healed.Owner != "solver" {
+		t.Errorf("healed meta.Owner: got %q, want %q", healed.Owner, "solver")
+	}
+
+	// No new dir/branch: exactly one af/solver-* worktree and branch.
+	if n := countAfWorktrees(t, realDir, "solver"); n != 1 {
+		t.Errorf("af/solver-* worktrees: got %d, want 1 (no new worktree forked)", n)
+	}
+	if n := countAfBranches(t, realDir, "solver"); n != 1 {
+		t.Errorf("af/solver-* branches: got %d, want 1 (no new branch forked)", n)
+	}
+
+	// A second `af up` must also not fork (now via the healed sidecar fast path).
+	path2, id2, outcome2, err := ResolveOrCreate(realDir, "solver", "", "", "", CreateOpts{})
+	if err != nil {
+		t.Fatalf("ResolveOrCreate (2nd): %v", err)
+	}
+	if outcome2.IsCreated() || path2 != wtPath || id2 != meta.ID {
+		t.Errorf("2nd ResolveOrCreate: created=%v path=%q id=%q, want reattach to %q/%q",
+			outcome2.IsCreated(), path2, id2, wtPath, meta.ID)
+	}
+}
+
+func TestFindByGitRegistry_MultipleMatches_Warns(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	// Two distinct worktrees, both owned by "solver" → two af/solver-* branches.
+	if _, _, err := Create(realDir, "solver", CreateOpts{}); err != nil {
+		t.Fatalf("Create #1: %v", err)
+	}
+	if _, _, err := Create(realDir, "solver", CreateOpts{}); err != nil {
+		t.Fatalf("Create #2: %v", err)
+	}
+	if n := countAfWorktrees(t, realDir, "solver"); n != 2 {
+		t.Fatalf("setup: af/solver-* worktrees got %d, want 2", n)
+	}
+
+	var buf bytes.Buffer
+	old := stderrWriter
+	stderrWriter = &buf
+	defer func() { stderrWriter = old }()
+
+	meta, err := FindByGitRegistry(realDir, "solver")
+	if err != nil {
+		t.Fatalf("FindByGitRegistry: %v", err)
+	}
+	if meta != nil {
+		t.Errorf("FindByGitRegistry on >1 match: got meta %+v, want nil (no wrong-guess reattach)", meta)
+	}
+	if !strings.Contains(strings.ToLower(buf.String()), "warning") {
+		t.Errorf("expected a warning on >1 match, stderr was: %q", buf.String())
+	}
+}
+
+func TestResolveOrCreate_NewAgent_CreatesFresh(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	// A genuinely-new agent — no sidecar, no git branch — must get a fresh worktree.
+	path, id, outcome, err := ResolveOrCreate(realDir, "solver", "", "", "", CreateOpts{})
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if !outcome.IsCreated() {
+		t.Error("outcome.IsCreated(): got false, want true (genuinely-new agent gets a fresh worktree)")
+	}
+	if !strings.HasPrefix(id, "wt-") {
+		t.Errorf("id: got %q, want wt- prefix", id)
+	}
+	if path == "" {
+		t.Error("path is empty")
+	}
+	foundMeta, err := FindByOwner(realDir, "solver")
+	if err != nil {
+		t.Fatalf("FindByOwner: %v", err)
+	}
+	if foundMeta == nil || foundMeta.ID != id {
+		t.Errorf("FindByOwner after create: got %+v, want meta with ID %q", foundMeta, id)
+	}
+}
+
+// TestSling_WorktreeCreation_Unchanged proves that after the created-bool →
+// Outcome migration, ResolveOrCreate's create-vs-reattach behavior (the path
+// af sling depends on) is byte-for-byte unchanged: first call creates
+// (IsCreated()==true), self-adoption reattaches (IsCreated()==false), and
+// exactly one worktree exists.
+func TestSling_WorktreeCreation_Unchanged(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	path1, id1, outcome1, err := ResolveOrCreate(realDir, "solver", "", "", "", CreateOpts{})
+	if err != nil {
+		t.Fatalf("ResolveOrCreate (create): %v", err)
+	}
+	if !outcome1.IsCreated() {
+		t.Error("first ResolveOrCreate: IsCreated()=false, want true (create path)")
+	}
+
+	path2, id2, outcome2, err := ResolveOrCreate(realDir, "solver", "", "", "", CreateOpts{})
+	if err != nil {
+		t.Fatalf("ResolveOrCreate (reattach): %v", err)
+	}
+	if outcome2.IsCreated() {
+		t.Error("second ResolveOrCreate: IsCreated()=true, want false (self-adoption reattach)")
+	}
+	if path2 != path1 || id2 != id1 {
+		t.Errorf("self-adoption: got %q/%q, want same as create %q/%q", path2, id2, path1, id1)
+	}
+
+	if n := countAfWorktrees(t, realDir, "solver"); n != 1 {
+		t.Errorf("af/solver-* worktrees: got %d, want 1 (reattach must not fork)", n)
+	}
+}
+
+func TestFindByGitRegistry_PreservesCoTenants(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+	// Register the co-tenant and the lingering agent so SetupAgent / any
+	// agents.json intersection accepts them.
+	agentsJSON := `{"agents":{` +
+		`"solver":{"type":"autonomous","description":"Solves problems"},` +
+		`"reviewer":{"type":"autonomous","description":"Reviews"},` +
+		`"ghost":{"type":"autonomous","description":"Deregistered"}}}`
+	if err := os.WriteFile(filepath.Join(realDir, ".agentfactory", "agents.json"), []byte(agentsJSON), 0o644); err != nil {
+		t.Fatalf("write expanded agents.json: %v", err)
+	}
+
+	wtPath, meta, err := Create(realDir, "solver", CreateOpts{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// (a) CURRENT co-tenant "reviewer": a real per-agent dir with a matching
+	// .runtime/worktree_id, but NO af/reviewer-* branch and NO hooked_formula.
+	if _, err := SetupAgent(realDir, wtPath, "reviewer", false); err != nil {
+		t.Fatalf("SetupAgent(reviewer): %v", err)
+	}
+
+	// (b) LINGERING DEREGISTERED dir "ghost": dir present but worktree_id stale.
+	ghostRuntime := filepath.Join(wtPath, ".agentfactory", "agents", "ghost", ".runtime")
+	if err := os.MkdirAll(ghostRuntime, 0o755); err != nil {
+		t.Fatalf("mkdir ghost runtime: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ghostRuntime, "worktree_id"), []byte("wt-stale9\n"), 0o644); err != nil {
+		t.Fatalf("write ghost worktree_id: %v", err)
+	}
+
+	// Lose the sidecar so FindByGitRegistry must reconstruct Meta.Agents.
+	if err := os.Remove(metaPath(realDir, meta.ID)); err != nil {
+		t.Fatalf("removing meta sidecar: %v", err)
+	}
+
+	healed, err := FindByGitRegistry(realDir, "solver")
+	if err != nil {
+		t.Fatalf("FindByGitRegistry: %v", err)
+	}
+	if healed == nil {
+		t.Fatal("FindByGitRegistry returned nil, want a self-healed meta")
+	}
+
+	has := func(agents []string, name string) bool {
+		for _, a := range agents {
+			if a == name {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(healed.Agents, "solver") {
+		t.Errorf("Meta.Agents %v missing owner 'solver'", healed.Agents)
+	}
+	if !has(healed.Agents, "reviewer") {
+		t.Errorf("Meta.Agents %v missing current co-tenant 'reviewer' "+
+			"(must come from per-agent-dir+worktree_id, not branch inference)", healed.Agents)
+	}
+	if has(healed.Agents, "ghost") {
+		t.Errorf("Meta.Agents %v wrongly includes lingering deregistered 'ghost' "+
+			"(worktree_id mismatch must exclude it)", healed.Agents)
+	}
+	if len(healed.Agents) == 1 {
+		t.Errorf("Meta.Agents narrowed to %v — must never narrow to [self]", healed.Agents)
+	}
+	// ParentBranch recovered (never silently dropped).
+	if healed.ParentBranch != meta.ParentBranch {
+		t.Errorf("ParentBranch: got %q, want recovered %q", healed.ParentBranch, meta.ParentBranch)
+	}
+}
+
+func TestFindByGitRegistry_StalePath_FallsThroughToCreate(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	wtPath, meta, err := Create(realDir, "solver", CreateOpts{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Make the registry entry stale: remove the worktree dir on disk (git still
+	// lists it as prunable) and drop the sidecar.
+	if err := os.RemoveAll(wtPath); err != nil {
+		t.Fatalf("RemoveAll worktree dir: %v", err)
+	}
+	if err := os.Remove(metaPath(realDir, meta.ID)); err != nil {
+		t.Fatalf("removing meta sidecar: %v", err)
+	}
+
+	// Direct: FindByGitRegistry must NOT reattach to the stale path.
+	stale, err := FindByGitRegistry(realDir, "solver")
+	if err != nil {
+		t.Fatalf("FindByGitRegistry: %v", err)
+	}
+	if stale != nil {
+		t.Errorf("FindByGitRegistry on stale path: got %+v, want nil (validate path-on-disk before reattach)", stale)
+	}
+
+	// End-to-end: ResolveOrCreate must fall through to Create.
+	path, id, outcome, err := ResolveOrCreate(realDir, "solver", "", "", "", CreateOpts{})
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if !outcome.IsCreated() {
+		t.Error("outcome.IsCreated(): got false, want true (stale registry entry → fresh Create)")
+	}
+	if id == meta.ID {
+		t.Errorf("id: got stale %q, want a fresh worktree id", id)
+	}
+	if path == "" {
+		t.Error("path is empty after fall-through Create")
+	}
+}
+
+// --- Phase 1 (#386): worktree.Contains containment primitive ---
+
+// TestContains exercises the pure path-containment primitive across in-bounds,
+// parent/sibling escapes, the worktreeSymlinks allowlist (paths that resolve OUT
+// of the worktree but are EXPECTED in-bounds — Gap 3), a not-yet-created
+// candidate, and degenerate (empty/relative) inputs. It needs no git, so it
+// carries no t.Skip("git not available") guard.
+func TestContains(t *testing.T) {
+	// Build a realistic factory layout under an EvalSymlinks'd temp root so the
+	// symlink assertions are not flaky (macOS /var->/private/var; a symlinked
+	// $TMPDIR). Mirrors the existing t.TempDir()+EvalSymlinks idiom.
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+
+	factory := filepath.Join(base, "factory")
+	wtA := filepath.Join(factory, ".agentfactory", "worktrees", "wt-a")
+	wtB := filepath.Join(factory, ".agentfactory", "worktrees", "wt-b")
+
+	for _, d := range []string{
+		filepath.Join(factory, ".runtime"),
+		filepath.Join(factory, ".claude", "skills"),
+		filepath.Join(wtA, "src"),
+		filepath.Join(wtA, ".claude"),
+		wtB,
+	} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	// An in-bounds child file that actually exists.
+	childFile := filepath.Join(wtA, "src", "main.go")
+	if err := os.WriteFile(childFile, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	// The worktree's .runtime and .claude/skills are symlinks that resolve OUT of
+	// the worktree to the factory root (exactly what EnsureWorktreeLinks creates).
+	if err := os.Symlink(filepath.Join(factory, ".runtime"), filepath.Join(wtA, ".runtime")); err != nil {
+		t.Fatalf("symlink .runtime: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(factory, ".claude", "skills"), filepath.Join(wtA, ".claude", "skills")); err != nil {
+		t.Fatalf("symlink .claude/skills: %v", err)
+	}
+	// A real file behind the .runtime symlink so EvalSymlinks genuinely resolves
+	// the candidate OUT of the worktree — proving the allowlist is load-bearing.
+	if err := os.WriteFile(filepath.Join(factory, ".runtime", "state.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write runtime state: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		boundary  string
+		candidate string
+		want      bool
+		wantErr   bool
+	}{
+		{
+			name:      "in-bounds child file",
+			boundary:  wtA,
+			candidate: childFile,
+			want:      true,
+		},
+		{
+			name:      "boundary itself is in-bounds",
+			boundary:  wtA,
+			candidate: wtA,
+			want:      true,
+		},
+		{
+			name:      "parent escape (candidate is the factory root)",
+			boundary:  wtA,
+			candidate: factory,
+			want:      false,
+		},
+		{
+			name:      "sibling-worktree escape",
+			boundary:  wtA,
+			candidate: wtB,
+			want:      false,
+		},
+		{
+			// Through the allowlisted .runtime symlink: EvalSymlinks resolves this
+			// to factory/.runtime/state.json (OUT of wt-a), but the worktreeSymlinks
+			// allowlist keeps it in-bounds (Gap 3). WITHOUT the allowlist this row is
+			// false — that is what makes it the load-bearing test.
+			name:      "allowlisted .runtime symlink resolves out but stays in-bounds",
+			boundary:  wtA,
+			candidate: filepath.Join(wtA, ".runtime", "state.json"),
+			want:      true,
+		},
+		{
+			name:      "allowlisted .claude/skills symlink stays in-bounds",
+			boundary:  wtA,
+			candidate: filepath.Join(wtA, ".claude", "skills", "some-skill", "SKILL.md"),
+			want:      true,
+		},
+		{
+			// A cd/Write target that does not exist yet: EvalSymlinks errors with
+			// os.IsNotExist; the impl must resolve the deepest existing ancestor and
+			// re-append the tail rather than collapse to a false "out of bounds".
+			name:      "not-yet-created candidate under the worktree is in-bounds",
+			boundary:  wtA,
+			candidate: filepath.Join(wtA, "newdir", "newfile.txt"),
+			want:      true,
+		},
+		{
+			name:      "empty boundary is an error",
+			boundary:  "",
+			candidate: wtA,
+			wantErr:   true,
+		},
+		{
+			name:      "empty candidate is an error",
+			boundary:  wtA,
+			candidate: "",
+			wantErr:   true,
+		},
+		{
+			// filepath.Abs resolves a relative path against the test's cwd (the
+			// package dir), which is never under a fresh t.TempDir() — so this is
+			// deterministically out of bounds.
+			name:      "relative candidate resolving outside is out-of-bounds",
+			boundary:  wtA,
+			candidate: filepath.Join("some", "relative", "path"),
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Contains(tt.boundary, tt.candidate)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("Contains(%q, %q): expected error, got nil (result %v)", tt.boundary, tt.candidate, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Contains(%q, %q): unexpected error: %v", tt.boundary, tt.candidate, err)
+			}
+			if got != tt.want {
+				t.Errorf("Contains(%q, %q) = %v, want %v", tt.boundary, tt.candidate, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsBaseNonDivergent verifies the directional base-non-divergence ancestry
+// check added for issue #401 (Phase 1). isBaseNonDivergent must distinguish a
+// candidate branch that is built on top of the factory base (adoptable -> true)
+// from one that has diverged from it (not adoptable -> false), and must fail
+// closed (false) when the base branch is unresolvable (detached HEAD prints the
+// literal "HEAD"). The base is sourced in-layer from the factory root's HEAD,
+// so each sub-fixture leaves HEAD on the base branch (except the detached case).
+func TestIsBaseNonDivergent(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// git runs a git command in dir, failing the test on error.
+	git := func(t *testing.T, dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	// commit writes name as a file and commits it in dir.
+	commit := func(t *testing.T, dir, name, msg string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		git(t, dir, "add", name)
+		git(t, dir, "commit", "-m", msg)
+	}
+	// baseBranch returns dir's current HEAD branch name (host default branch may
+	// be main/master/af-*, so derive it rather than hardcoding "main").
+	baseBranch := func(t *testing.T, dir string) string {
+		t.Helper()
+		cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+		cmd.Dir = dir
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("rev-parse --abbrev-ref HEAD: %v", err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	// isAncestor reports the exit status of the raw git contract, so each fixture
+	// is self-proving independent of the helper under test.
+	isAncestor := func(t *testing.T, dir, base, candidate string) bool {
+		t.Helper()
+		cmd := exec.Command("git", "merge-base", "--is-ancestor", base, candidate)
+		cmd.Dir = dir
+		return cmd.Run() == nil
+	}
+
+	t.Run("divergent branch is not adoptable", func(t *testing.T) {
+		dir := t.TempDir()
+		realDir, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			t.Fatalf("eval symlinks: %v", err)
+		}
+		initGitRepo(t, realDir) // base branch + commit C1
+		base := baseBranch(t, realDir)
+		const candidate = "af/solver-div"
+		git(t, realDir, "branch", candidate, "HEAD") // candidate pinned at C1; HEAD stays on base
+		commit(t, realDir, "f2", "second on base")   // advance base to C2 (past candidate)
+
+		// Fixture self-check: base (C2) is NOT an ancestor of candidate (C1).
+		if isAncestor(t, realDir, base, candidate) {
+			t.Fatalf("fixture invalid: base %q unexpectedly an ancestor of %q", base, candidate)
+		}
+		if got := isBaseNonDivergent(realDir, candidate); got != false {
+			t.Errorf("isBaseNonDivergent(divergent) = %v, want false", got)
+		}
+	})
+
+	t.Run("ahead-of-base branch is adoptable", func(t *testing.T) {
+		dir := t.TempDir()
+		realDir, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			t.Fatalf("eval symlinks: %v", err)
+		}
+		initGitRepo(t, realDir) // base branch + commit C1
+		base := baseBranch(t, realDir)
+		const candidate = "af/solver-ahead"
+		git(t, realDir, "checkout", "-b", candidate)   // candidate at base tip (C1)
+		commit(t, realDir, "f2", "extra on candidate") // candidate advances to C2'
+		git(t, realDir, "checkout", base)              // restore HEAD to base (helper reads HEAD)
+
+		// Fixture self-check: base (C1) IS an ancestor of candidate (C2').
+		if !isAncestor(t, realDir, base, candidate) {
+			t.Fatalf("fixture invalid: base %q should be an ancestor of %q", base, candidate)
+		}
+		if got := isBaseNonDivergent(realDir, candidate); got != true {
+			t.Errorf("isBaseNonDivergent(ahead) = %v, want true", got)
+		}
+	})
+
+	t.Run("unresolvable base fails closed", func(t *testing.T) {
+		dir := t.TempDir()
+		realDir, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			t.Fatalf("eval symlinks: %v", err)
+		}
+		initGitRepo(t, realDir)
+		const candidate = "af/solver-detached"
+		git(t, realDir, "branch", candidate, "HEAD")
+		// Detach HEAD: `git rev-parse --abbrev-ref HEAD` now prints literal "HEAD",
+		// so the base is unresolvable and the helper must fail closed.
+		git(t, realDir, "checkout", "--detach", "HEAD")
+		if got := isBaseNonDivergent(realDir, candidate); got != false {
+			t.Errorf("isBaseNonDivergent(detached base) = %v, want false", got)
+		}
+	})
+}
+
+// mustRunGit runs a git command in dir, failing the test on error. Shared by the
+// FindByGitRegistry_Refuses* fixtures below (Issue #401 Phase 2): they build real
+// out-of-root / inconsistent-identity / divergent-base worktrees synthetically.
+func mustRunGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// assertGateRefused asserts the three observable effects of the isAdoptableFactoryWorktree
+// gate firing on an untrustworthy reattach candidate: FindByGitRegistry returns
+// (nil, nil) (fall through to Create), NO foreign wt-<suffix>.meta.json was written,
+// and a WARN mentioning the failing leg landed on stderrWriter.
+func assertGateRefused(t *testing.T, realDir, wtID string, meta *Meta, err error, stderr, legToken string) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("FindByGitRegistry: unexpected error %v (want nil — refusal is the (nil,nil) fall-through)", err)
+	}
+	if meta != nil {
+		t.Errorf("FindByGitRegistry: got meta %+v, want nil (untrustworthy candidate must not be adopted)", meta)
+	}
+	if _, statErr := os.Stat(metaPath(realDir, wtID)); !os.IsNotExist(statErr) {
+		t.Errorf("foreign sidecar %s exists (statErr=%v), want NOT written — the gate must precede WriteMeta", metaPath(realDir, wtID), statErr)
+	}
+	low := strings.ToLower(stderr)
+	if !strings.Contains(low, "warning") {
+		t.Errorf("expected a WARN on rejection, stderr was: %q", stderr)
+	}
+	if !strings.Contains(low, legToken) {
+		t.Errorf("expected WARN to mention %q (the failing leg), stderr was: %q", legToken, stderr)
+	}
+}
+
+// TestFindByGitRegistry_RefusesOutOfRoot isolates leg 1 (containment): a single
+// registry match whose path lives OUTSIDE WorktreesDir — even with a basename that
+// matches its branch-derived id — must not be self-healed as factory-owned.
+// Red-before-green: pre-fix the un-gated self-heal writes wt-abc123.meta.json and
+// returns a non-nil meta.
+func TestFindByGitRegistry_RefusesOutOfRoot(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	// An out-of-root location: a sibling temp dir, NOT under WorktreesDir(realDir).
+	outParent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("eval symlinks (out-of-root parent): %v", err)
+	}
+	const wtID = "wt-abc123" // basename intentionally == wtID so ONLY containment fails
+	extPath := filepath.Join(outParent, wtID)
+	branch := BranchName("solver", wtID) // af/solver-abc123
+	// Register the foreign worktree in realDir's git registry (single af/solver-* match).
+	mustRunGit(t, realDir, "worktree", "add", "--quiet", "-b", branch, extPath)
+
+	// Fixture self-check: the path is genuinely outside WorktreesDir.
+	if in, cerr := Contains(WorktreesDir(realDir), extPath); cerr != nil || in {
+		t.Fatalf("fixture invalid: %s should be outside %s (Contains=%v err=%v)", extPath, WorktreesDir(realDir), in, cerr)
+	}
+
+	var buf bytes.Buffer
+	old := stderrWriter
+	stderrWriter = &buf
+	defer func() { stderrWriter = old }()
+
+	meta, ferr := FindByGitRegistry(realDir, "solver")
+	assertGateRefused(t, realDir, wtID, meta, ferr, buf.String(), "not under")
+}
+
+// TestFindByGitRegistry_RefusesInconsistentIdentity isolates leg 2 (identity): an
+// in-root worktree whose on-disk basename disagrees with its branch-derived id (the
+// real-world salvage incident: branch af/solver-2e45ca → id wt-2e45ca, but a human
+// renamed the on-disk dir so its basename no longer matches the id) must not be
+// self-healed. Containment and non-divergence both pass; only identity fails.
+func TestFindByGitRegistry_RefusesInconsistentIdentity(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	if err := os.MkdirAll(WorktreesDir(realDir), 0o755); err != nil {
+		t.Fatalf("mkdir worktrees dir: %v", err)
+	}
+	const wtID = "wt-2e45ca"                                         // synthesized from branch suffix 2e45ca (6 hex)
+	branch := BranchName("solver", wtID)                             // af/solver-2e45ca
+	wtDir := filepath.Join(WorktreesDir(realDir), "salvaged-2e45ca") // basename != wtID
+	mustRunGit(t, realDir, "worktree", "add", "--quiet", "-b", branch, wtDir)
+
+	// Fixture self-check: in-root (containment passes) but basename inconsistent.
+	if in, cerr := Contains(WorktreesDir(realDir), wtDir); cerr != nil || !in {
+		t.Fatalf("fixture invalid: %s should be inside %s (Contains=%v err=%v)", wtDir, WorktreesDir(realDir), in, cerr)
+	}
+	if filepath.Base(wtDir) == wtID {
+		t.Fatalf("fixture invalid: basename %q should differ from id %q", filepath.Base(wtDir), wtID)
+	}
+
+	var buf bytes.Buffer
+	old := stderrWriter
+	stderrWriter = &buf
+	defer func() { stderrWriter = old }()
+
+	meta, ferr := FindByGitRegistry(realDir, "solver")
+	assertGateRefused(t, realDir, wtID, meta, ferr, buf.String(), "inconsistent identity")
+}
+
+// TestFindByGitRegistry_RefusesDivergentBase isolates leg 3 (base non-divergence): an
+// in-root, basename-consistent worktree on a branch the factory HEAD is NOT an ancestor
+// of (diverged) must not be self-healed. Containment and identity both pass.
+func TestFindByGitRegistry_RefusesDivergentBase(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir) // base branch + commit C1
+	setupFactoryRoot(t, realDir)
+
+	if err := os.MkdirAll(WorktreesDir(realDir), 0o755); err != nil {
+		t.Fatalf("mkdir worktrees dir: %v", err)
+	}
+	const wtID = "wt-d1f0ba"             // 6-hex suffix; basename == wtID so identity passes
+	branch := BranchName("solver", wtID) // af/solver-d1f0ba
+	wtDir := filepath.Join(WorktreesDir(realDir), wtID)
+	// Worktree branch pinned at C1; factory HEAD stays on the base branch.
+	mustRunGit(t, realDir, "worktree", "add", "--quiet", "-b", branch, wtDir)
+	// Advance the factory's base branch past C1 so base is no longer an ancestor of
+	// the candidate (the divergent-base condition). Commit in realDir (still on base).
+	if err := os.WriteFile(filepath.Join(realDir, "advance.txt"), []byte("advance"), 0o644); err != nil {
+		t.Fatalf("write advance.txt: %v", err)
+	}
+	mustRunGit(t, realDir, "add", "advance.txt")
+	mustRunGit(t, realDir, "commit", "-m", "advance base past candidate")
+
+	// Fixture self-check: base is NOT an ancestor of the candidate branch.
+	if isBaseNonDivergent(realDir, branch) {
+		t.Fatalf("fixture invalid: branch %q should be divergent from factory HEAD", branch)
+	}
+
+	var buf bytes.Buffer
+	old := stderrWriter
+	stderrWriter = &buf
+	defer func() { stderrWriter = old }()
+
+	meta, ferr := FindByGitRegistry(realDir, "solver")
+	assertGateRefused(t, realDir, wtID, meta, ferr, buf.String(), "diverged")
+}
+
+// TestResolveOrCreate_RefusesPoisonedFindByOwnerMeta proves the Phase-3 choke-point
+// ownership guard (CMP-1, issue #401 Six-Sigma Gap 1): a pre-existing poisoned
+// *.meta.json — Owner matches the agent, but Path points OUT-OF-ROOT — is adopted
+// by the FindByOwner fast paths (branch 2/3) on pre-Phase-3 code, *before*
+// FindByGitRegistry's Phase-2 gate ever runs. The guard must refuse the
+// non-contained candidate (WARN + fall through, never an error) and let
+// ResolveOrCreate Create a fresh in-root tree instead.
+func TestResolveOrCreate_RefusesPoisonedFindByOwnerMeta(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	// A directory OUTSIDE the factory's worktrees dir — the poisoned target.
+	// EvalSymlinks-canonical so Contains (which canonicalizes) compares cleanly.
+	foreign, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("eval symlinks (foreign): %v", err)
+	}
+	foreignWT := filepath.Join(foreign, "af", "solver-aaaaaa")
+
+	// Hand-write a poisoned sidecar: Owner is the agent, but Path is out-of-root.
+	// An absolute meta.Path is returned verbatim by AbsWorktreePath (issue #392),
+	// so it reaches the containment check unmodified.
+	poison := &Meta{
+		ID:     "wt-aaaaaa",
+		Owner:  "solver",
+		Branch: "af/solver-aaaaaa",
+		Path:   foreignWT,
+		Agents: []string{"solver"},
+	}
+	if err := WriteMeta(realDir, poison); err != nil {
+		t.Fatalf("WriteMeta(poison): %v", err)
+	}
+
+	// Sanity: pre-guard, FindByOwner resolves the poison, so branch 3 would adopt it.
+	if m, ferr := FindByOwner(realDir, "solver"); ferr != nil || m == nil || m.Path != foreignWT {
+		t.Fatalf("FindByOwner sanity: meta=%+v err=%v, want poison with Path=%q", m, ferr, foreignWT)
+	}
+
+	var buf bytes.Buffer
+	old := stderrWriter
+	stderrWriter = &buf
+	defer func() { stderrWriter = old }()
+
+	path, id, outcome, err := ResolveOrCreate(realDir, "solver", "", "", "", CreateOpts{})
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v (a non-contained candidate must fall through, never error)", err)
+	}
+
+	// The poisoned out-of-root tree must NOT be adopted; a fresh in-root tree is created.
+	if !outcome.IsCreated() {
+		t.Errorf("outcome.IsCreated(): got false, want true (poisoned meta must be refused, fresh tree created)")
+	}
+	if path == foreignWT {
+		t.Errorf("path: adopted the poisoned out-of-root path %q; want a fresh in-root tree", path)
+	}
+	if id == poison.ID {
+		t.Errorf("id: got poisoned id %q; want a fresh id", id)
+	}
+	if in, cerr := Contains(WorktreesDir(realDir), path); cerr != nil || !in {
+		t.Errorf("returned path %q is not under WorktreesDir(%q) (in=%v err=%v)",
+			path, WorktreesDir(realDir), in, cerr)
+	}
+}
+
+// --- Phase 4 (#401 CMP-5): behavioral proof via the PUBLIC entry points, the
+// drift interlock (Gap 5), and the AC-4-positive regression net (Gap 8). ---
+
+// TestResolveOrCreate_RefusesOutOfRootCandidate is the PUBLIC ResolveOrCreate
+// end-to-end analogue of TestFindByGitRegistry_RefusesOutOfRoot (which drives
+// FindByGitRegistry directly, leg-1 isolation). An external worktree registered
+// OUTSIDE WorktreesDir — with NO sidecar — must not be adopted on reattach:
+// ResolveOrCreate falls through to Create a fresh in-root tree, writing no foreign
+// sidecar. Red-before-green: against pre-#401 worktree.go the un-gated
+// FindByGitRegistry self-heals the foreign tree and ResolveOrCreate reattaches to it
+// (IsCreated()==false, path==foreign). (Maps to AC-1 / AC-5(i).)
+func TestResolveOrCreate_RefusesOutOfRootCandidate(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	// An out-of-root location: a sibling temp dir, NOT under WorktreesDir(realDir).
+	outParent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("eval symlinks (out-of-root parent): %v", err)
+	}
+	const wtID = "wt-abc123" // basename intentionally == wtID so ONLY containment fails
+	extPath := filepath.Join(outParent, wtID)
+	branch := BranchName("solver", wtID) // af/solver-abc123
+	mustRunGit(t, realDir, "worktree", "add", "--quiet", "-b", branch, extPath)
+
+	// Fixture self-checks: genuinely out-of-root, and no sidecar exists yet so the
+	// reattach decision must come from the git registry (the gated path).
+	if in, cerr := Contains(WorktreesDir(realDir), extPath); cerr != nil || in {
+		t.Fatalf("fixture invalid: %s should be outside %s (Contains=%v err=%v)", extPath, WorktreesDir(realDir), in, cerr)
+	}
+	if m, ferr := FindByOwner(realDir, "solver"); ferr != nil || m != nil {
+		t.Fatalf("fixture invalid: FindByOwner should be nil/nil pre-reattach, got meta=%v err=%v", m, ferr)
+	}
+
+	var buf bytes.Buffer
+	old := stderrWriter
+	stderrWriter = &buf
+	defer func() { stderrWriter = old }()
+
+	path, id, outcome, err := ResolveOrCreate(realDir, "solver", "", "", "", CreateOpts{})
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v (a non-contained candidate must fall through, never error)", err)
+	}
+	// The foreign out-of-root tree must NOT be adopted; a fresh in-root tree is created.
+	if !outcome.IsCreated() {
+		t.Errorf("outcome.IsCreated(): got false, want true (out-of-root candidate must be refused, fresh tree created)")
+	}
+	if path == extPath {
+		t.Errorf("path: adopted the foreign out-of-root path %q; want a fresh in-root tree", path)
+	}
+	if in, cerr := Contains(WorktreesDir(realDir), path); cerr != nil || !in {
+		t.Errorf("returned path %q is not under WorktreesDir(%q) (in=%v err=%v)",
+			path, WorktreesDir(realDir), in, cerr)
+	}
+	if id == wtID {
+		t.Errorf("id: got foreign id %q; want a fresh id", id)
+	}
+	// No foreign sidecar was written for the out-of-root tree (the gate precedes WriteMeta).
+	if _, statErr := os.Stat(metaPath(realDir, wtID)); !os.IsNotExist(statErr) {
+		t.Errorf("foreign sidecar %s exists (statErr=%v), want NOT written", metaPath(realDir, wtID), statErr)
+	}
+	// The refusal is observable: a WARN naming the failing (containment) leg.
+	if low := strings.ToLower(buf.String()); !strings.Contains(low, "not under") {
+		t.Errorf("expected a WARN mentioning the containment leg (\"not under\"), stderr was: %q", buf.String())
+	}
+}
+
+// TestFindByGitRegistry_AcceptsMissingOwnerMarkerWhenConsistent guards against
+// OVER-rejection (AC-4 co-tenant preservation / AC-5(ii)): an in-root,
+// basename-consistent, non-divergent worktree that has NO .runtime/worktree_owner
+// marker file must still be ADOPTED. The owner-marker leg is satisfied STRUCTURALLY
+// (containment + basename + non-divergence); the predicate never reads the
+// attacker-controllable worktree_owner file (security D5-2 REJECTED). This is the
+// positive inverse of assertGateRefused — adoption must SUCCEED.
+func TestFindByGitRegistry_AcceptsMissingOwnerMarkerWhenConsistent(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	if err := os.MkdirAll(WorktreesDir(realDir), 0o755); err != nil {
+		t.Fatalf("mkdir worktrees dir: %v", err)
+	}
+	const wtID = "wt-c0ffee"             // 6-hex suffix; basename == wtID so identity passes
+	branch := BranchName("solver", wtID) // af/solver-c0ffee
+	wtDir := filepath.Join(WorktreesDir(realDir), wtID)
+	// In-root, basename-consistent, and (no base advance) non-divergent. Built via raw
+	// `git worktree add`, so SetupAgent never runs and NO .runtime/worktree_owner exists.
+	mustRunGit(t, realDir, "worktree", "add", "--quiet", "-b", branch, wtDir)
+
+	// Fixture self-checks: all three structural legs pass, and the marker is absent.
+	if in, cerr := Contains(WorktreesDir(realDir), wtDir); cerr != nil || !in {
+		t.Fatalf("fixture invalid: %s should be inside %s (Contains=%v err=%v)", wtDir, WorktreesDir(realDir), in, cerr)
+	}
+	if filepath.Base(wtDir) != wtID {
+		t.Fatalf("fixture invalid: basename %q should equal id %q (identity leg must pass)", filepath.Base(wtDir), wtID)
+	}
+	if !isBaseNonDivergent(realDir, branch) {
+		t.Fatalf("fixture invalid: branch %q should be non-divergent from factory HEAD", branch)
+	}
+	markerPath := filepath.Join(wtDir, ".agentfactory", "agents", "solver", ".runtime", "worktree_owner")
+	if _, statErr := os.Stat(markerPath); !os.IsNotExist(statErr) {
+		t.Fatalf("fixture invalid: worktree_owner marker %s unexpectedly exists (statErr=%v); the missing-marker condition is the point of this test", markerPath, statErr)
+	}
+
+	var buf bytes.Buffer
+	old := stderrWriter
+	stderrWriter = &buf
+	defer func() { stderrWriter = old }()
+
+	meta, ferr := FindByGitRegistry(realDir, "solver")
+	if ferr != nil {
+		t.Fatalf("FindByGitRegistry: %v", ferr)
+	}
+	if meta == nil {
+		t.Fatalf("FindByGitRegistry returned nil; a consistent in-root tree with no owner-marker "+
+			"must be ADOPTED, not refused for the missing marker. stderr: %q", buf.String())
+	}
+	if meta.Owner != "solver" {
+		t.Errorf("meta.Owner: got %q, want %q", meta.Owner, "solver")
+	}
+	if meta.ID != wtID {
+		t.Errorf("meta.ID: got %q, want %q", meta.ID, wtID)
+	}
+	// Adoption self-heals the sidecar (the success counterpart to assertGateRefused's
+	// "no foreign sidecar" assertion).
+	if _, statErr := os.Stat(metaPath(realDir, wtID)); statErr != nil {
+		t.Errorf("sidecar %s not written after adoption: %v", metaPath(realDir, wtID), statErr)
+	}
+}
+
+// TestResolveOrCreate_AcceptsInRootLostSidecar is the AC-4 positive guard (the
+// design-doc's named "new positive guard"): a legitimate in-root worktree whose
+// non-durable sidecar was lost still REATTACHES (never forks). Behaviour is
+// identical to TestResolveOrCreate_ReattachesViaGitRegistry_WhenMetaMissing, which
+// it is modeled on; both are intentionally kept (the design-doc lists this name
+// explicitly as the AC-4-positive regression anchor).
+func TestResolveOrCreate_AcceptsInRootLostSidecar(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initGitRepo(t, realDir)
+	setupFactoryRoot(t, realDir)
+
+	wtPath, meta, err := Create(realDir, "solver", CreateOpts{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Fixture self-check: the created tree is genuinely in-root (legitimate co-tenant).
+	if in, cerr := Contains(WorktreesDir(realDir), wtPath); cerr != nil || !in {
+		t.Fatalf("fixture invalid: created path %q should be under %s (Contains=%v err=%v)", wtPath, WorktreesDir(realDir), in, cerr)
+	}
+
+	// Lose the non-durable sidecar (the #392 condition this positive guard protects).
+	if err := os.Remove(metaPath(realDir, meta.ID)); err != nil {
+		t.Fatalf("removing meta sidecar: %v", err)
+	}
+	if m, err := FindByOwner(realDir, "solver"); err != nil || m != nil {
+		t.Fatalf("FindByOwner after sidecar delete: meta=%v err=%v, want nil/nil", m, err)
+	}
+
+	path, id, outcome, err := ResolveOrCreate(realDir, "solver", "", "", "", CreateOpts{})
+	if err != nil {
+		t.Fatalf("ResolveOrCreate: %v", err)
+	}
+	if outcome.IsCreated() {
+		t.Error("outcome.IsCreated(): got true, want false (legitimate in-root tree must reattach, not fork)")
+	}
+	if path != wtPath {
+		t.Errorf("path: got %q, want %q (reattach to existing in-root worktree)", path, wtPath)
+	}
+	if id != meta.ID {
+		t.Errorf("id: got %q, want %q (reattach to existing in-root worktree)", id, meta.ID)
+	}
+
+	// Self-heal: the sidecar is rewritten from the git registry.
+	healed, err := ReadMeta(realDir, meta.ID)
+	if err != nil {
+		t.Fatalf("ReadMeta after self-heal: %v", err)
+	}
+	if healed.Owner != "solver" {
+		t.Errorf("healed meta.Owner: got %q, want %q", healed.Owner, "solver")
+	}
+
+	// No fork: exactly one af/solver-* worktree and branch.
+	if n := countAfWorktrees(t, realDir, "solver"); n != 1 {
+		t.Errorf("af/solver-* worktrees: got %d, want 1 (reattach must not fork)", n)
+	}
+	if n := countAfBranches(t, realDir, "solver"); n != 1 {
+		t.Errorf("af/solver-* branches: got %d, want 1 (reattach must not fork)", n)
+	}
+}
+
+// TestDriftGuard_GenerateIDSuffixIsWorktreeSuffix is the Gap-5 drift interlock. It
+// pins the cross-symbol contract that GenerateID's appended suffix is ALWAYS accepted
+// by isWorktreeSuffix. The CMP-1 containment (basename == id) and CMP-2 identity legs
+// both depend on this equivalence; TestGenerateID checks the wt-[0-9a-f]{6} shape but
+// NOT this isWorktreeSuffix<->GenerateID invariant, so without this guard a change to
+// either symbol could silently desynchronize them and let the identity leg rot. The
+// test is white-box (package worktree) so both the exported and unexported symbols are
+// in scope. Named with "DriftGuard" so the AC-1 `-run 'Refuses|Accepts|DriftGuard'`
+// filter catches it.
+func TestDriftGuard_GenerateIDSuffixIsWorktreeSuffix(t *testing.T) {
+	// GenerateID is randomized; assert the invariant across many draws, not one.
+	for i := 0; i < 256; i++ {
+		id := GenerateID()
+		suffix := strings.TrimPrefix(id, "wt-")
+		if suffix == id {
+			t.Fatalf("GenerateID() = %q lacks the %q prefix; the basename<->id contract is broken", id, "wt-")
+		}
+		if !isWorktreeSuffix(suffix) {
+			t.Fatalf("isWorktreeSuffix(strings.TrimPrefix(GenerateID(), %q)) = false for id %q; "+
+				"the id<->suffix contract drifted (identity/containment legs would silently rot)", "wt-", id)
+		}
 	}
 }

@@ -18,7 +18,9 @@ type StartupConfig struct {
 }
 
 func defaultStartupConfig() *StartupConfig {
-	// Agents/WatchdogAgents nil ⇒ "ALL" (the nil-vs-[] sentinel); gates default ⇒ no-op.
+	// Agents nil ⇒ "ALL" (the nil-vs-[] sentinel). WatchdogAgents nil/empty ⇒ the
+	// watchdog refuses to start / af up skips it (never "ALL") — issue #408 inverted
+	// that sentinel at the cmd layer. gates default ⇒ no-op.
 	return &StartupConfig{Quality: "default", Fidelity: "default"}
 }
 

@@ -1825,6 +1825,80 @@ func TestDone_FormulaCompletionGuard_NormalCompletion(t *testing.T) {
 	}
 }
 
+// TestDone_ClosesInstanceEpic (K5, issue #392 Phase 2): on genuine completion
+// the `formula-instance` epic is closed (becomes terminal), so K4's recovery
+// query reliably treats "open epic" as "in flight". The separate GitHub work
+// issue must be left untouched (M1).
+func TestDone_ClosesInstanceEpic(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	workDir := filepath.Join(dir, ".agentfactory", "agents", "manager")
+
+	mem := memstore.New()
+	ctx := t.Context()
+
+	// The durable formula-instance epic + a single (closed) child step, so
+	// runDoneCore takes the all-complete branch into sendWorkDoneAndCleanup.
+	instance, err := mem.Create(ctx, issuestore.CreateParams{
+		Title:  "Formula: test",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	step, err := mem.Create(ctx, issuestore.CreateParams{
+		Title:    "Step: done",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "manager",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+	if err := mem.Close(ctx, step.ID, ""); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+
+	// M1: a separate GitHub work issue (NOT a formula-instance) that must
+	// remain untouched by completion.
+	workIssue, err := mem.Create(ctx, issuestore.CreateParams{
+		Title: "Issue #392: af up reattach",
+		Type:  issuestore.TypeFeature,
+	})
+	if err != nil {
+		t.Fatalf("seed work issue: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+
+	if err := runDoneCore(ctx, workDir, false, ""); err != nil {
+		t.Fatalf("runDoneCore: %v", err)
+	}
+
+	// The formula-instance epic must be terminal.
+	got, err := mem.Get(ctx, instance.ID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if !got.Status.IsTerminal() {
+		t.Errorf("formula-instance epic status = %q, want terminal (closed) after completion", got.Status)
+	}
+
+	// M1: the work issue must be untouched (still non-terminal).
+	wi, err := mem.Get(ctx, workIssue.ID)
+	if err != nil {
+		t.Fatalf("get work issue: %v", err)
+	}
+	if wi.Status.IsTerminal() {
+		t.Errorf("work issue %s must NOT be closed by completion (M1), got status %q", workIssue.ID, wi.Status)
+	}
+}
+
 // setupTestFactoryForDone creates a minimal factory structure for done tests.
 func setupTestFactoryForDone(t *testing.T, agentName string) string {
 	t.Helper()

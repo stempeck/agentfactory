@@ -172,18 +172,18 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 		}
 	}
 
-	worktreePath, worktreeID, wtCreated, wtErr := worktree.ResolveOrCreate(root, agentName, creator, envWT, envWTID, worktree.CreateOpts{MaxWorktrees: factoryCfg.MaxWorktrees})
+	worktreePath, worktreeID, outcome, wtErr := worktree.ResolveOrCreate(root, agentName, creator, envWT, envWTID, worktree.CreateOpts{MaxWorktrees: factoryCfg.MaxWorktrees})
 	if wtErr != nil {
 		return fmt.Errorf("worktree creation failed for %s: %w", agentName, wtErr)
 	}
 	if worktreePath != "" {
-		wtAgentDir, setupErr := worktree.SetupAgent(root, worktreePath, agentName, wtCreated)
+		wtAgentDir, setupErr := worktree.SetupAgent(root, worktreePath, agentName, outcome.IsCreated())
 		if setupErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: worktree SetupAgent: %v\n", setupErr)
 		} else {
 			agentDir = wtAgentDir
 		}
-		if wtCreated {
+		if outcome.IsCreated() {
 			fmt.Fprintf(cmd.OutOrStdout(), "Created worktree %s for %s\n", worktreeID, agentName)
 		}
 	}
@@ -329,16 +329,16 @@ func runFormulaInstantiation(cmd *cobra.Command, root, wd string, args []string)
 	envWT := os.Getenv("AF_WORKTREE")
 	envWTID := os.Getenv("AF_WORKTREE_ID")
 	creator, _ := resolveAgentName(wd, root)
-	worktreePath, worktreeID, wtCreated, wtErr := worktree.ResolveOrCreate(root, agentName, creator, envWT, envWTID, worktree.CreateOpts{MaxWorktrees: fmFactoryCfg.MaxWorktrees})
+	worktreePath, worktreeID, outcome, wtErr := worktree.ResolveOrCreate(root, agentName, creator, envWT, envWTID, worktree.CreateOpts{MaxWorktrees: fmFactoryCfg.MaxWorktrees})
 	if wtErr != nil {
 		return fmt.Errorf("worktree creation failed for %s: %w", agentName, wtErr)
 	}
 	if worktreePath != "" {
-		if _, setupErr := worktree.SetupAgent(root, worktreePath, agentName, wtCreated); setupErr != nil {
+		if _, setupErr := worktree.SetupAgent(root, worktreePath, agentName, outcome.IsCreated()); setupErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: worktree SetupAgent: %v\n", setupErr)
 			return fmt.Errorf("worktree setup failed for %s: %w", agentName, setupErr)
 		}
-		if wtCreated {
+		if outcome.IsCreated() {
 			fmt.Fprintf(cmd.OutOrStdout(), "Created worktree %s for %s\n", worktreeID, agentName)
 		}
 	}
@@ -767,6 +767,7 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 			return err
 		}
 	}
+	wireGitIdentity(mgr, root, worktreePath)
 	if err := mgr.Start(); err != nil {
 		if err == session.ErrAlreadyRunning {
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: already running\n", session.SessionName(agentName))

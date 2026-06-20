@@ -891,11 +891,11 @@ func TestDown_Reset_BehavioralFreshStart(t *testing.T) {
 		t.Errorf("FindByAgent after reset should return nil, got: %+v", postMeta)
 	}
 
-	newPath, newID, created, err := worktree.ResolveOrCreate(realDir, "solver", "", "", "", worktree.CreateOpts{})
+	newPath, newID, outcome, err := worktree.ResolveOrCreate(realDir, "solver", "", "", "", worktree.CreateOpts{})
 	if err != nil {
 		t.Fatalf("ResolveOrCreate after reset: %v", err)
 	}
-	if !created {
+	if !outcome.IsCreated() {
 		t.Error("ResolveOrCreate should create new worktree (created=true) after reset, got false")
 	}
 	if newPath == "" {
@@ -990,5 +990,177 @@ func TestDown_SingleAgent_LeavesDispatch(t *testing.T) {
 	killOp := "KillSession " + session.DispatchSessionName()
 	if opRecorded(fake.ops, killOp) {
 		t.Errorf("`af down <agent>` must NOT tear down the dispatcher; ops=%v", fake.ops)
+	}
+}
+
+// --- Phase 3 (#392): in-flight worktree protection ---
+
+// TestDown_KeepsWorktreeWithInFlightFormula is the load-bearing single-tenant
+// assertion for the #392 HIGH-1 fix: a default `af down` on the SOLE agent of a
+// worktree carrying a non-empty .runtime/hooked_formula must NOT remove the
+// worktree and must NOT deregister the agent (RemoveAgent skipped), so a later
+// `af up` → `af prime` can resume. A co-tenant test would pass even with the
+// single-agent bug shipped (the `if empty` gate already protects co-tenants), so
+// this sole-agent case is the mandatory load-bearing test.
+func TestDown_KeepsWorktreeWithInFlightFormula(t *testing.T) {
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+
+	meta := &worktree.Meta{
+		ID:     "wt-inflight1",
+		Owner:  "solver",
+		Branch: "af/solver-inflight1",
+		Path:   ".agentfactory/worktrees/wt-inflight1",
+		Agents: []string{"solver"},
+	}
+	if err := worktree.WriteMeta(realDir, meta); err != nil {
+		t.Fatalf("WriteMeta: %v", err)
+	}
+
+	// In-flight pointer lives INSIDE the worktree path (absWorktreePath-resolved).
+	rt := filepath.Join(realDir, meta.Path, ".agentfactory", "agents", "solver", ".runtime")
+	if err := os.MkdirAll(rt, 0o755); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
+	}
+	hookedPath := filepath.Join(rt, "hooked_formula")
+	if err := os.WriteFile(hookedPath, []byte("bd-epic-789\n"), 0o644); err != nil {
+		t.Fatalf("write hooked_formula: %v", err)
+	}
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+
+	cleanupAgentWorktree(cmd, realDir, "solver")
+
+	if !strings.Contains(buf.String(), "in-flight formula present") {
+		t.Errorf("expected kept-worktree hint containing 'in-flight formula present', got: %q", buf.String())
+	}
+
+	// RemoveAgent must have been SKIPPED → meta.Agents still contains solver, so
+	// the next reboot's GC guard still sees the in-flight formula.
+	updated, err := worktree.ReadMeta(realDir, "wt-inflight1")
+	if err != nil {
+		t.Fatalf("meta must survive default down: %v", err)
+	}
+	if len(updated.Agents) != 1 || updated.Agents[0] != "solver" {
+		t.Errorf("meta.Agents must still contain solver (RemoveAgent skipped): got %v", updated.Agents)
+	}
+
+	// The formula pointer that `af prime` reads to resume must survive.
+	if _, err := os.Stat(hookedPath); err != nil {
+		t.Errorf("hooked_formula pointer must survive default down: %v", err)
+	}
+}
+
+// TestDownReset_RemovesInFlightWorktree verifies A1: `af down --reset`
+// (resetAgent → ForceRemove) still force-removes a worktree even when it has an
+// in-flight formula. The guard lives only at the two default destructive call
+// sites, NEVER inside Remove/ForceRemove — so --reset is unaffected.
+func TestDownReset_RemovesInFlightWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initTestGitRepo(t, realDir)
+	setupTestFactoryRoot(t, realDir)
+
+	installMemStore(t)
+	ctx := context.Background()
+
+	absPath, meta, err := worktree.Create(realDir, "solver", worktree.CreateOpts{})
+	if err != nil {
+		t.Fatalf("worktree.Create: %v", err)
+	}
+
+	// In-flight formula pointer inside the worktree.
+	wtRuntime := filepath.Join(absPath, ".agentfactory", "agents", "solver", ".runtime")
+	if err := os.MkdirAll(wtRuntime, 0o755); err != nil {
+		t.Fatalf("mkdir wt runtime: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wtRuntime, "hooked_formula"), []byte("bd-epic-xyz"), 0o644); err != nil {
+		t.Fatalf("write hooked_formula: %v", err)
+	}
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+
+	resetAgent(ctx, cmd, realDir, "solver")
+
+	if _, err := worktree.ReadMeta(realDir, meta.ID); err == nil {
+		t.Error("--reset must force-remove the in-flight worktree despite the formula (A1); meta still present")
+	}
+}
+
+// TestDownUp_PreservesAndResumes is the behavioral down→up assertion: after a
+// default `af down` keeps an in-flight worktree, a subsequent lookup (what
+// `af up` performs) still finds the worktree with the agent registered and the
+// formula pointer intact, so `af prime` can resume the formula.
+func TestDownUp_PreservesAndResumes(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	initTestGitRepo(t, realDir)
+	setupTestFactoryRoot(t, realDir)
+
+	absPath, meta, err := worktree.Create(realDir, "solver", worktree.CreateOpts{})
+	if err != nil {
+		t.Fatalf("worktree.Create: %v", err)
+	}
+
+	wtRuntime := filepath.Join(absPath, ".agentfactory", "agents", "solver", ".runtime")
+	if err := os.MkdirAll(wtRuntime, 0o755); err != nil {
+		t.Fatalf("mkdir wt runtime: %v", err)
+	}
+	hookedPath := filepath.Join(wtRuntime, "hooked_formula")
+	if err := os.WriteFile(hookedPath, []byte("bd-epic-555\n"), 0o644); err != nil {
+		t.Fatalf("write hooked_formula: %v", err)
+	}
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+
+	// Default `af down` — must KEEP the in-flight worktree.
+	cleanupAgentWorktree(cmd, realDir, "solver")
+	if !strings.Contains(buf.String(), "in-flight formula present") {
+		t.Errorf("default down should keep in-flight worktree, got: %q", buf.String())
+	}
+
+	// `af up` re-lookup: worktree survives, agent still registered.
+	found, err := worktree.FindByOwner(realDir, "solver")
+	if err != nil {
+		t.Fatalf("FindByOwner after down: %v", err)
+	}
+	if found == nil {
+		t.Fatal("worktree must survive default down so `af up` can resume")
+	}
+	if found.ID != meta.ID {
+		t.Errorf("worktree ID after down: got %q, want %q", found.ID, meta.ID)
+	}
+	if len(found.Agents) != 1 || found.Agents[0] != "solver" {
+		t.Errorf("agent must remain registered for resume: got Agents=%v", found.Agents)
+	}
+
+	// The pointer `af prime` reads (readHookedFormulaID) to resume is intact.
+	data, err := os.ReadFile(hookedPath)
+	if err != nil {
+		t.Fatalf("hooked_formula must survive for resume: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "bd-epic-555" {
+		t.Errorf("formula pointer content: got %q, want bd-epic-555", strings.TrimSpace(string(data)))
 	}
 }

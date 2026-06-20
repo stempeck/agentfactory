@@ -1,8 +1,8 @@
-# ADR-007: Hooks never block; enforcement is via mail to agent inbox
+# ADR-007: Hooks never block; enforcement is via mail to agent inbox; no escalation into a void
 
-**Status:** Accepted
+**Status:** Accepted (extended 2026-06-15 — "no escalation into a void"; see *Amendment* below)
 **Date:** 2026-03-23 (quality-gate `dac416a`); 2026-04-10
-(fidelity-gate `871e9f9`)
+(fidelity-gate `871e9f9`); extended 2026-06-15 (no-escalation-into-a-void)
 
 ## Context
 
@@ -71,10 +71,53 @@ This does not violate ADR-007's principle:
 Reference: `.designs/288/design-doc.md`, Gap 6 in
 `.designs/288/six_sigma_gaps.md`.
 
+## Amendment (2026-06-15): No escalation into a void
+
+**Status:** Accepted. Extends — does not supersede — the original decision;
+"hooks never block" and gate→own-inbox routing are unchanged.
+
+### Context
+
+The original decision covered *gate* feedback (to the agent's own inbox) but not
+**escalation to a third party**. Leaving that unspecified admits two failures:
+
+- An escalation sent fire-and-forget to a fixed agent that may not be running
+  lands in an unread inbox and is silently lost — the alert is never seen.
+- An escalation channel that can re-enter the condition it reports recurses,
+  delivering nothing and consuming resources without bound.
+
+### Decision
+
+An escalation MUST NOT go into a void:
+
+1. **No fire-and-forget to a recipient that may not be running.** Either target a
+   recipient guaranteed to be present, or make non-delivery a detectable, handled
+   condition — never silently discard the send result.
+2. **No self-referential channel.** The escalation path must not re-enter the
+   condition it reports; one failure yields at most one notification, never a
+   recursion or storm.
+
+This constrains the **delivery contract** of an escalation — it must reach
+something or fail loudly. It does not decide block-vs-inform or any enforcement
+mechanism.
+
+### Consequences
+
+- An escalation path may no longer assume its recipient exists: escalating to a
+  fixed agent requires either guaranteeing that agent is running or treating a
+  failed send as an error, not a no-op.
+- Enforcement that escalates must route through a channel that cannot trigger the
+  condition it reports.
+- "Hooks never block" and gate→own-inbox routing are unchanged.
+
 ## Corpus links
 
 - `subsystems/hooks.md` — full hooks shape
 - `seams.md#9` — "Quality gate → agent inbox (out-of-band mail)"
 - `history.md#theme-6` — hooks subsystem timeline
 - `invariants.md#INV-8` — drift test invariant (separate from this ADR)
+- `../gaps.md#gap-18` — #386 worktree-containment Practical Ceiling / accepted
+  residual: the interlock is bounded detect-and-correct (inform-not-block), not a
+  hermetic sandbox; consequence (c) of this amendment (guard logged-not-alerted,
+  no supervisor dependency) is recorded there.
 - Related ADRs: [ADR-008](ADR-008-embed-with-drift-test.md)
