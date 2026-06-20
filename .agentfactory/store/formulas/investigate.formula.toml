@@ -15,7 +15,7 @@ source = "cli"
 id = "orient"
 title = "Orient and scope"
 description = """
-Read the issue or question: ${issue}
+Read the issue or question: {{issue}}
 
 Investigate the codebase to understand the affected layers, files, and data flow.
 Produce a short written summary of what you found — affected files, the break point

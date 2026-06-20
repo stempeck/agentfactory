@@ -13,6 +13,8 @@ import (
 //go:embed install_hooks/quality-gate-prompt.txt
 //go:embed install_hooks/fidelity-gate.sh
 //go:embed install_hooks/fidelity-gate-prompt.txt
+//go:embed install_hooks/prepare-commit-msg
+//go:embed install_hooks/pre-commit
 var embeddedHooksForDriftTest embed.FS
 
 // TestInstallHooks_NoDrift asserts that the embedded install_hooks/ copies
@@ -37,6 +39,8 @@ func TestInstallHooks_NoDrift(t *testing.T) {
 		{"hooks/quality-gate-prompt.txt", "install_hooks/quality-gate-prompt.txt"},
 		{"hooks/fidelity-gate.sh", "install_hooks/fidelity-gate.sh"},
 		{"hooks/fidelity-gate-prompt.txt", "install_hooks/fidelity-gate-prompt.txt"},
+		{"hooks/prepare-commit-msg", "install_hooks/prepare-commit-msg"},
+		{"hooks/pre-commit", "install_hooks/pre-commit"},
 	}
 	for _, p := range pairs {
 		topData, err := os.ReadFile(filepath.Join(repoRoot, p.top))

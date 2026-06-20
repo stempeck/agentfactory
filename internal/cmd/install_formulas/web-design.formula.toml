@@ -1,13 +1,14 @@
 description = """
-Transform a GitHub issue, Jira issue, or problem-description document into an interactive, distinctively-designed web UI prototype through iterative exploration and human feedback.
+Transform a GitHub issue, GitHub PR, Jira issue, or problem-description document into an interactive, distinctively-designed web UI prototype through iterative exploration and human feedback.
 
 ## Overview
 This formula creates a design swarm that turns a *problem source* (not Gherkin
 scenarios) into multiple competing, fully-realized web UI design directions,
 presents them for human review, and iterates until a direction is agreed upon.
 
-It accepts ONE of three problem sources and performs its own breakdown:
+It accepts ONE of four problem sources and performs its own breakdown:
 - A **GitHub issue link** (fetched via the `gh` CLI)
+- A **GitHub PR link** (its branch's `ux.md`/`design-doc.md` is read as the spec)
 - A **Jira issue link** (fetched via the `jira` CLI or the Jira REST API)
 - A **problem_description_file.md** (read directly from the workspace)
 
@@ -68,12 +69,12 @@ version = 1
 
 [inputs]
 [inputs.source]
-description = "The problem source: a GitHub issue URL, a Jira issue URL (or KEY), or a path to a problem_description_file.md. This is the single required input — `af sling --agent web-design \"<link-or-path>\"` fills it automatically."
+description = "The problem source: a GitHub issue URL, a GitHub PR URL (its branch's ux.md/design-doc is read as the spec), a Jira issue URL (or KEY), or a path to a problem_description_file.md. This is the single required input — `af sling --agent web-design \"<link-or-path>\"` fills it automatically."
 type = "string"
 required = true
 
 [inputs.source_type]
-description = "Source type override: 'github', 'jira', 'file', or 'auto' (default: auto — detected from the source string)"
+description = "Source type override: 'github', 'pr', 'jira', 'file', or 'auto' (default: auto — detected from the source string)"
 type = "string"
 required = false
 default = "auto"
@@ -118,12 +119,13 @@ id = "intake-source"
 title = "Intake the problem source and normalize it into a Problem Brief"
 description = """
 **Entry criteria:** A problem source is available in `{{source}}` (a GitHub issue URL,
-a Jira issue URL/KEY, or a path to a problem_description_file.md).
+a GitHub PR URL, a Jira issue URL/KEY, or a path to a problem_description_file.md).
 
 **Actions:**
 
 1. **Determine the source type.** If `{{source_type}}` is `auto` (default), detect it:
    - Matches `github.com/.../issues/<n>` → `github`
+   - Matches `github.com/.../pull/<n>`   → `pr` (the spec lives on the PR's branch, not on `main`)
    - Matches an Atlassian/Jira URL (`*.atlassian.net/browse/<KEY>`) or a bare issue
      KEY like `PROJ-123` → `jira`
    - Ends in `.md` or resolves to an existing file in the workspace → `file`
@@ -137,6 +139,21 @@ a Jira issue URL/KEY, or a path to a problem_description_file.md).
      --jq '{title, body, labels: [.labels[].name], comments: [.comments[].body]}'
    ```
    Capture the title, body, labels, and any comments that add requirements.
+
+   **Pull request (`pr`):** the spec lives on the PR's branch, NOT on your
+   (main-based) worktree. Resolve the branch, fetch it, and read the UX/design
+   spec it carries (prefer `ux.md`; else `design-doc.md`; else the PR body):
+   ```bash
+   PR_NUM=$(printf '%s' "{{source}}" | grep -oE '/pull/[0-9]+' | grep -oE '[0-9]+' | head -1)
+   SRC_BRANCH=$(gh pr view "$PR_NUM" --json headRefName --jq '.headRefName')
+   git fetch origin "$SRC_BRANCH"
+   SPEC=$(gh pr diff "$PR_NUM" --name-only | grep -iE '(^|/)ux[.]md$' | head -1)
+   [ -z "$SPEC" ] && SPEC=$(gh pr diff "$PR_NUM" --name-only | grep -iE '(^|/)design-doc[.]md$' | head -1)
+   [ -n "$SPEC" ] && git show "origin/$SRC_BRANCH:$SPEC"   # the UX/design spec carried by the PR
+   gh pr view "$PR_NUM" --json title,body --jq '.title, .body'   # extra requirements/context
+   ```
+   If no `ux.md`/`design-doc.md` is in the PR, use the PR body + diff as the
+   requirements. Do NOT fabricate. Treat the spec you read as the problem source.
 
    **Jira (`jira`):** try, in order, until one succeeds:
    ```bash

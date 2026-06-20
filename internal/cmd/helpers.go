@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 
 	"github.com/stempeck/agentfactory/internal/checkpoint"
 	"github.com/stempeck/agentfactory/internal/config"
@@ -62,6 +64,10 @@ func respawnSession(opts RespawnOptions) error {
 	if opts.WorktreePath != "" {
 		_ = mgr.SetWorktree(opts.WorktreePath, opts.WorktreeID)
 	}
+	// Carry the git identity fallback + centralized trailer across respawns
+	// (handoff/compact-handoff/watchdog) — without this, respawned agents would
+	// commit without them (issue #371 G-B sibling-entrypoint).
+	wireGitIdentity(mgr, opts.FactoryRoot, opts.WorktreePath)
 	respawnCmd := opts.CmdPrefix + mgr.BuildStartupCommand()
 	tx := opts.Tx
 	if tx == nil {
@@ -69,6 +75,52 @@ func respawnSession(opts RespawnOptions) error {
 	}
 	_ = tx.ClearHistory(opts.PaneID)
 	return tx.RespawnPane(opts.PaneID, respawnCmd)
+}
+
+// detectGitIdentity reads the ambient git identity (user.name/user.email) as
+// resolved from dir — the cmd-layer I/O that feeds the pure config.ResolveIdentity
+// (ADR-004: the library does no shell-out). Either value is "" when unset.
+func detectGitIdentity(dir string) (name, email string) {
+	return gitConfigGet(dir, "user.name"), gitConfigGet(dir, "user.email")
+}
+
+func gitConfigGet(dir, key string) string {
+	c := exec.Command("git", "config", "--get", key)
+	if dir != "" {
+		c.Dir = dir
+	}
+	out, err := c.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// wireGitIdentity configures a session Manager's git identity fallback and the
+// centralized Co-authored-by trailer (issue #371). The default identity is drawn
+// from factory.json (default-filled to the C-3 constants); the author fallback is
+// applied ONLY when no ambient identity resolves (C-4 presence-gate), while the
+// trailer channel is always activated (centralized, AC-4/AC-5). Shared by every
+// Start-capable launch path so no entrypoint is missed (G-B).
+//
+// The presence-gate is checked at workDir — the directory where the agent will
+// actually commit (its worktree) — NOT the factory root: GIT_AUTHOR_* overrides
+// even a repo-local user.name unconditionally, so checking the wrong directory
+// could silently re-author a commit whose repo already has an identity (C-4). An
+// empty workDir falls back to the factory root.
+func wireGitIdentity(mgr *session.Manager, factoryRoot, workDir string) {
+	def := config.DefaultGitIdentity()
+	if cfg, err := config.LoadFactoryConfig(config.FactoryConfigPath(factoryRoot)); err == nil && cfg.GitIdentity != nil {
+		def = cfg.GitIdentity
+	}
+	if workDir == "" {
+		workDir = factoryRoot
+	}
+	ambientName, ambientEmail := detectGitIdentity(workDir)
+	if name, email, apply := config.ResolveIdentity(def, ambientName, ambientEmail); apply {
+		mgr.SetGitIdentity(name, email)
+	}
+	mgr.SetGitTrailer(config.GitHooksDir(factoryRoot), def.Name, def.Email)
 }
 
 func captureCheckpointWithFormula(ctx context.Context, cwd, notes string, mutate func(*checkpoint.Checkpoint)) error {

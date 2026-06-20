@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/session"
 )
 
@@ -38,6 +39,16 @@ func newTestCmd() (*cobra.Command, *bytes.Buffer) {
 	return cmd, &buf
 }
 
+// knownScope returns a single-name watchdog scope plus a matching agentsCfg so
+// launchWatchdog's N4 pre-check (issue #408) treats the name as known and proceeds
+// to the launch path. Shared by the launchWatchdog call-site tests that must keep
+// exercising session creation now that an empty/all-unknown scope is a skip.
+func knownScope(name string) ([]string, *config.AgentConfig) {
+	return []string{name}, &config.AgentConfig{
+		Agents: map[string]config.AgentEntry{name: {Type: "autonomous", Description: name}},
+	}
+}
+
 // TestDeadWatchdogReplaced: a present-but-dead watchdog (W1) must be killed and
 // recreated, and the new session must receive AF_ROOT (W2).
 func TestDeadWatchdogReplaced(t *testing.T) {
@@ -50,7 +61,8 @@ func TestDeadWatchdogReplaced(t *testing.T) {
 	fake.running[ws] = false
 
 	cmd, _ := newTestCmd()
-	launchWatchdog(cmd, fake, root, nil)
+	scope, agentsCfg := knownScope("alpha")
+	launchWatchdog(cmd, fake, root, scope, agentsCfg)
 
 	killIdx := opIndex(fake.ops, "KillSession "+ws)
 	if killIdx < 0 {
@@ -80,7 +92,8 @@ func TestHealthyWatchdogNotDisturbed(t *testing.T) {
 	fake.paneCommand[ws] = "af"
 
 	cmd, _ := newTestCmd()
-	launchWatchdog(cmd, fake, "/factory/root", nil)
+	scope, agentsCfg := knownScope("alpha")
+	launchWatchdog(cmd, fake, "/factory/root", scope, agentsCfg)
 
 	if hasOp(fake.ops, "KillSession "+ws) {
 		t.Fatalf("healthy watchdog must NOT be killed; ops=%v", fake.ops)

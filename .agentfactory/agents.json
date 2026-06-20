@@ -72,7 +72,7 @@
     },
     "web-design": {
       "type": "autonomous",
-      "description": "Transform a GitHub issue, Jira issue, or problem-description document into an interactive, distinctively-designed web UI prototype through iterative exploration and human feedback.",
+      "description": "Transform a GitHub issue, GitHub PR, Jira issue, or problem-description document into an interactive, distinctively-designed web UI prototype through iterative exploration and human feedback.",
       "directive": "Run af prime to load formula context.",
       "formula": "web-design"
     }

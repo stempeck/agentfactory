@@ -130,8 +130,14 @@ func TestLoadStartupConfig_MalformedJSON(t *testing.T) {
 }
 
 // Case 7: the install scaffold must parse correctly with its opinionated defaults.
+// This test mirrors the live scaffold seed in internal/cmd/install.go:113: the #408
+// watchdog-scope fix widened watchdog_agents to ["manager","supervisor"], but the
+// startup `agents` default stays manager-only (PR #410 T1/T3 — the autonomous
+// supervisor is not auto-started on a fresh install). It MUST stay in lockstep with
+// that literal; the drift-proof guard is TestInstallScaffold_StartupAgentsDefaultManagerOnly
+// (install_scaffold_test.go), which source-parses the REAL literal.
 func TestLoadStartupConfig_ScaffoldLoads(t *testing.T) {
-	scaffoldDir := writeStartupRoot(t, `{"agents":["manager"],"quality":"default","fidelity":"default","start_dispatch":true,"watchdog_agents":["mergepatrol"]}`)
+	scaffoldDir := writeStartupRoot(t, `{"agents":["manager"],"quality":"default","fidelity":"default","start_dispatch":true,"watchdog_agents":["manager","supervisor"]}`)
 
 	cfg, err := LoadStartupConfig(scaffoldDir)
 	if err != nil {
@@ -143,7 +149,7 @@ func TestLoadStartupConfig_ScaffoldLoads(t *testing.T) {
 	if !cfg.StartDispatch {
 		t.Error("start_dispatch = false, want true")
 	}
-	if !reflect.DeepEqual(cfg.WatchdogAgents, []string{"mergepatrol"}) {
-		t.Errorf("watchdog_agents = %v, want [mergepatrol]", cfg.WatchdogAgents)
+	if !reflect.DeepEqual(cfg.WatchdogAgents, []string{"manager", "supervisor"}) {
+		t.Errorf("watchdog_agents = %v, want [manager supervisor]", cfg.WatchdogAgents)
 	}
 }

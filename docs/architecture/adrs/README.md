@@ -21,7 +21,7 @@ anchored to file:line or commit SHA.
 | [004](ADR-004-library-env-hermeticity.md) | Library layer reads no env vars | Accepted | `invariants.md#INV-3`, commit `d020a5e` |
 | [005](ADR-005-runtime-precondition-over-types.md) | Runtime precondition, not type-level interlock, for session ↔ worktree | Accepted | `history.md` R-ENF-1, commit `b78e24f` |
 | [006](ADR-006-loopback-no-auth.md) | Python MCP server binds loopback only, no auth | Accepted | `invariants.md#INV-4`, `subsystems/py-issuestore.md` |
-| [007](ADR-007-hooks-never-block.md) | Hooks never block; enforcement via mail to agent inbox | Accepted | `subsystems/hooks.md`, `seams.md#9` |
+| [007](ADR-007-hooks-never-block.md) | Hooks never block; enforcement via mail to agent inbox; no escalation into a void | Accepted | `subsystems/hooks.md`, `seams.md#9` |
 | [008](ADR-008-embed-with-drift-test.md) | `go:embed` source-of-truth with mechanical drift test | Accepted | `invariants.md#INV-8`, commit `871e9f9` |
 | [009](ADR-009-package-var-seams.md) | Package-var seams for test swapping of binary-dependent callouts | Accepted | `idioms.md#9`, commits `c93f9ef`, `c3cf1f1` |
 | [010](ADR-010-endpoint-file-rendezvous.md) | MCP endpoint rendezvous via file under `.runtime/` | Accepted | `seams.md#2`, commit `ef0411c` |

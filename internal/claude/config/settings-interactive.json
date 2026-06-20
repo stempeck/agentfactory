@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$HOME/bin:$PATH\" && af containment-check"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "",

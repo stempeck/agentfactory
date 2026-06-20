@@ -177,6 +177,18 @@ Configuration lives in `.agentfactory/dispatch.json` (created by `af install --i
 | `mappings[].source` | No | `"issue"` | Resource type: `"issue"` or `"pr"` |
 | `mappings[].agent` | Yes | — | Agent to dispatch when labels match |
 
+### Watchdog
+
+The watchdog (`af watchdog`) is a long-lived polling loop that monitors agent tmux
+sessions for Claude crashes, known error patterns, and silence timeouts, then nudges
+or respawns the affected session (a circuit breaker stops respawning after repeated
+failures and escalates to the supervisor). `af up` launches it best-effort; you
+rarely run `af watchdog` by hand.
+
+**Scope comes solely from `startup.json.watchdog_agents`** — the explicit, bounded
+list of agents to monitor. There is no `--agents`/`--agent` flag and no "watch all"
+mode.
+
 ### Adding more agents manually (not recommended. use: agent-gen or agent-gen-all.sh)
 
 Edit `.agentfactory/agents.json` at the project root:
@@ -366,7 +378,8 @@ Runtime state lives in the agent's `.runtime/` directory:
 | `formula_caller` | `af sling` | Address of who dispatched the formula (for WORK_DONE mail) |
 | `session_id` | `af prime --hook` | Claude session ID (persisted at SessionStart) |
 
-This state enables crash recovery — if an agent restarts, `af prime` reads the hooked formula ID and resumes from the last unclosed step.
+This state enables crash recovery: when an agent restarts, `af prime` reads the
+hooked formula ID and resumes from the last unclosed step.
 
 ## Formula Succession
 

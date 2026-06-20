@@ -73,7 +73,15 @@ formula, injected by `af sling` at instantiation — never to a hardcoded recipi
   (eg. due to a lint ignore comment)
 - Changes in functionality that are likely intentional or are directly related
   to the broader change
-- Real issues, but on lines that the user did not modify in their pull request
+- Real issues on unmodified lines that are UNRELATED to this pull request's change.
+  EXCEPTION — do NOT treat as a false positive (these are real, in-scope findings) when a
+  finding on an unmodified line is a DIRECT CONSEQUENCE of this diff:
+    (a) stale-by-consequence — the diff made that line wrong (e.g. a docstring, comment, or
+        help/usage text whose subject the diff changed, renamed, or removed); or
+    (b) sin of omission — the diff required a companion edit on that line that was skipped
+        (e.g. help text or docs the change's own design specified).
+  These cannot be anchored inline (their line is outside the diff hunks), so they are
+  reported in the review BODY with a permalink (see phase-6) — NOT dropped.
 
 ## Anti-Patterns to Avoid
 
@@ -592,9 +600,11 @@ gh pr diff <number> --repo <owner/repo>
   (`side: RIGHT`) for added/modified lines.
 - Multi-line findings: use `start_line` (first line) plus `line` (last line),
   both with `side: RIGHT`.
-- A finding whose line is NOT in the diff (rare — the protocol already drops
-  issues on unmodified lines as false positives) cannot be inline-anchored:
-  put it in the review body instead, with a full-sha permalink.
+- A finding whose line is NOT in the diff cannot be inline-anchored: put it in the
+  review body instead, with a full-sha permalink. This is the expected home for
+  surviving diff-consequence findings (stale-by-consequence / sins of omission kept
+  per the False Positive carve-out) — they are REAL and MUST be reported in the body,
+  never silently dropped.
 
 **4. Build `$REVIEW_DIR/review-payload.json`:**
 One review submission carries the summary body plus ALL inline comments:

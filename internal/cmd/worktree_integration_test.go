@@ -214,6 +214,16 @@ func TestDownAgent_CleansUpWorktree(t *testing.T) {
 		exec.Command("tmux", "kill-session", "-t", sessionName).Run()
 	})
 
+	// Phase 3 / #392 AC-3: default `af down` now PRESERVES a worktree that has an
+	// in-flight formula (non-empty .runtime/hooked_formula). `sling --agent` above
+	// instantiates the specialist's formula and writes that pointer, so to exercise
+	// the default-down cleanup path we simulate a completed/idle agent by clearing
+	// the pointer (done.go removes it on genuine completion). Force-removal of an
+	// in-flight worktree is covered by TestDownReset_RemovesInFlightWorktree.
+	if err := os.Remove(filepath.Join(agentDir, ".runtime", "hooked_formula")); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("clearing hooked_formula: %v", err)
+	}
+
 	// Run af down solver
 	runAF(t, binary, workspace, "down", "solver")
 

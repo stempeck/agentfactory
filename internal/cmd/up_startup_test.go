@@ -43,9 +43,11 @@ func watchdogSendOp(ops []string) string {
 	return ""
 }
 
-// C-4: no startup.json ⇒ all agents start, a bare watchdog launches, no dispatcher
-// starts, and both gate files are left untouched.
-func TestRunUp_NoStartupConfig_AllStart_BareWatchdog(t *testing.T) {
+// C-4 + N4 (issue #408 Phase 3): no startup.json ⇒ all agents start, no dispatcher
+// starts, and both gate files are left untouched. With no watchdog_agents the scope
+// is empty, so the watchdog launch is SKIPPED with a notice + breadcrumb — never a
+// silent bare "watch all".
+func TestRunUp_NoStartupConfig_AllStart_WatchdogSkipped(t *testing.T) {
 	root := t.TempDir()
 	initTestGitRepo(t, root)
 	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
@@ -69,12 +71,16 @@ func TestRunUp_NoStartupConfig_AllStart_BareWatchdog(t *testing.T) {
 	if !agentTouched(out, "alpha") || !agentTouched(out, "bravo") {
 		t.Errorf("no startup.json must start ALL agents; out=%q", out)
 	}
-	send := watchdogSendOp(fake.ops)
-	if send == "" {
-		t.Fatalf("a watchdog SendKeysDelayed op must be recorded; ops=%v", fake.ops)
+	// N4: an empty watchdog scope SKIPS the launch — no session, a one-line notice,
+	// and the namespaced breadcrumb (never a silent bare "watch all").
+	if send := watchdogSendOp(fake.ops); send != "" {
+		t.Errorf("an empty watchdog scope must SKIP the launch (no send op); got %q", send)
 	}
-	if strings.Contains(send, "--agents") {
-		t.Errorf("no scope ⇒ bare 'af watchdog' (no --agents); got %q", send)
+	if !strings.Contains(out, "watchdog: not started") {
+		t.Errorf("an empty scope must print the skip notice; out=%q", out)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, ".runtime", "watchdog_last_error")); statErr != nil {
+		t.Errorf("the skip path must write the namespaced breadcrumb watchdog_last_error: %v", statErr)
 	}
 	if opRecorded(fake.ops, "NewSession "+dispatchSessionName) {
 		t.Errorf("no startup.json ⇒ no dispatcher should start; ops=%v", fake.ops)
@@ -131,8 +137,11 @@ func TestRunUp_ConfiguredSubset_GateDispatchScope(t *testing.T) {
 		t.Errorf("start_dispatch:true must launch the dispatcher; ops=%v", fake.ops)
 	}
 	send := watchdogSendOp(fake.ops)
-	if !strings.Contains(send, "af watchdog --agents manager") {
-		t.Errorf("watchdog_agents:[manager] must scope the launch; got %q", send)
+	if send == "" {
+		t.Fatalf("a known watchdog scope must LAUNCH the watchdog; ops=%v", fake.ops)
+	}
+	if strings.Contains(send, "--agents") {
+		t.Errorf("the launch must be a bare `af watchdog` (self-scopes from startup.json); got %q", send)
 	}
 }
 
@@ -439,8 +448,12 @@ func TestRunUp_WatchdogAgentsUnknownEntry_Warns(t *testing.T) {
 	if err != nil {
 		t.Errorf("unknown watchdog_agents entry must be warn-only, got err=%v", err)
 	}
-	if send := watchdogSendOp(fake.ops); !strings.Contains(send, "supervisor") {
-		t.Errorf("the known entry must still scope the watchdog; send=%q", send)
+	send := watchdogSendOp(fake.ops)
+	if send == "" {
+		t.Fatalf("a scope with >=1 known name must still LAUNCH the watchdog; ops=%v", fake.ops)
+	}
+	if strings.Contains(send, "--agents") {
+		t.Errorf("the launch must be a bare `af watchdog` (no --agents); got %q", send)
 	}
 }
 
@@ -470,8 +483,213 @@ func TestRunUp_WatchdogAgentsAllKnown_NoWarning(t *testing.T) {
 	if strings.Contains(out, "watchdog_agents") {
 		t.Errorf("all-known watchdog_agents must produce no membership warning; out=%q", out)
 	}
-	if send := watchdogSendOp(fake.ops); !strings.Contains(send, "--agents manager") {
-		t.Errorf("watchdog_agents:[manager] must scope the launch; send=%q", send)
+	send := watchdogSendOp(fake.ops)
+	if send == "" {
+		t.Fatalf("an all-known watchdog scope must LAUNCH the watchdog; ops=%v", fake.ops)
+	}
+	if strings.Contains(send, "--agents") {
+		t.Errorf("the launch must be a bare `af watchdog` (no --agents); send=%q", send)
+	}
+}
+
+// N4 (issue #408 Phase 3): a non-empty but ALL-UNKNOWN watchdog scope is the early,
+// observable echo of the watchdog's own refusal — `af up` SKIPS the launch (no
+// session), names the misconfiguration in a one-line notice, writes the namespaced
+// breadcrumb, and never aborts (best-effort, W1).
+func TestRunUp_WatchdogAgentsAllUnknown_Skipped(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
+	writeAFFile(t, root, "agents.json", `{"agents":{"supervisor":{"type":"autonomous","description":"s"}}}`)
+	writeAFFile(t, root, "startup.json", `{"watchdog_agents":["ghost"]}`)
+
+	t.Setenv("AF_WORKTREE", "")
+	t.Setenv("AF_WORKTREE_ID", "")
+	t.Chdir(root)
+
+	fake, _ := setupHermeticSessions(t)
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	err := runUp(cmd, nil)
+	out := buf.String()
+
+	if send := watchdogSendOp(fake.ops); send != "" {
+		t.Errorf("an all-unknown watchdog scope must SKIP the launch (no send op); got %q", send)
+	}
+	if !strings.Contains(out, "watchdog: not started") || !strings.Contains(out, "ghost") {
+		t.Errorf("the skip notice must name the all-unknown misconfiguration; out=%q", out)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, ".runtime", "watchdog_last_error")); statErr != nil {
+		t.Errorf("the all-unknown skip path must write the namespaced breadcrumb: %v", statErr)
+	}
+	// Best-effort: a watchdog-scope gap must NOT abort af up (the configured agent
+	// still started cleanly).
+	if err != nil {
+		t.Errorf("an all-unknown watchdog scope must be best-effort (no abort); got %v", err)
+	}
+}
+
+// AC-5 (issue #408 Phase 3): a fresh scaffold (manager + supervisor configured,
+// watchdog_agents = both, both present in the default agents.json) brings up a
+// scoped, FUNCTIONAL watchdog — a bare `af watchdog` is launched (the watchdog
+// self-scopes from startup.json, Phase 2), with NO "unknown agent" warning and NO
+// N4 skip breadcrumb. Mirrors the reconciled install scaffold seed (install.go N6).
+func TestRunUp_FreshScaffold_WatchdogLaunchesScoped(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
+	// The default agents.json seeded by `af install --init` (install.go:109).
+	writeAFFile(t, root, "agents.json",
+		`{"agents":{"manager":{"type":"interactive","description":"m"},"supervisor":{"type":"autonomous","description":"s"}}}`)
+	// The reconciled scaffold seed (install.go:113, N6): both names are real agents.
+	writeAFFile(t, root, "startup.json",
+		`{"agents":["manager","supervisor"],"quality":"default","fidelity":"default","start_dispatch":true,"watchdog_agents":["manager","supervisor"]}`)
+
+	t.Setenv("AF_WORKTREE", "")
+	t.Setenv("AF_WORKTREE_ID", "")
+	t.Chdir(root)
+
+	fake, _ := setupHermeticSessions(t)
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	err := runUp(cmd, nil)
+	out := buf.String()
+
+	// Functional launch: a bare `af watchdog` send op is recorded (NOT skipped).
+	send := watchdogSendOp(fake.ops)
+	if send == "" {
+		t.Fatalf("a fresh scaffold must LAUNCH the watchdog (not skip); ops=%v out=%q", fake.ops, out)
+	}
+	if strings.Contains(send, "--agents") {
+		t.Errorf("the launch must be a bare `af watchdog` (self-scopes from startup.json); got %q", send)
+	}
+	// No membership warning: both seeded names exist in agents.json.
+	if strings.Contains(out, "unknown agent") {
+		t.Errorf("a fresh scaffold names only real agents — no unknown-agent warning expected; out=%q", out)
+	}
+	// No N4 skip breadcrumb: the launch proceeded, so the skip path did not run.
+	if _, statErr := os.Stat(filepath.Join(root, ".runtime", "watchdog_last_error")); statErr == nil {
+		t.Errorf("a functional launch must NOT write the N4 skip breadcrumb watchdog_last_error")
+	}
+	// Best-effort: a clean fresh-scaffold af up must not error.
+	if err != nil {
+		t.Errorf("a clean fresh-scaffold af up must not error; got %v", err)
+	}
+}
+
+// W1 (issue #408 Phase 4 / AC-3, AC-6): a watchdog scope gap is a MONITORING gap,
+// not a START failure. An empty watchdog_agents scope must SKIP the launch and
+// write the durable refusal breadcrumb, yet must NOT flip allOK or change af up's
+// exit code — even though af up is otherwise clean. The empty-scope exit-code half
+// of W1 is unpinned by the P1 test (TestRunUp_NoStartupConfig_AllStart_WatchdogSkipped
+// discards runUp's error at :68); this names and asserts it directly, complementing
+// the all-unknown variant (TestRunUp_WatchdogAgentsAllUnknown_Skipped) which uses a
+// non-empty all-unknown scope.
+func TestRunUp_WatchdogRefusal_DoesNotAbortUp(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
+	writeAFFile(t, root, "agents.json", `{"agents":{"alpha":{"type":"autonomous","description":"a"}}}`)
+	// Present startup.json with one real configured agent but NO watchdog_agents —
+	// an EMPTY watchdog scope (the refusal case; complements the all-unknown variant).
+	writeAFFile(t, root, "startup.json", `{"agents":["alpha"]}`)
+
+	t.Setenv("AF_WORKTREE", "")
+	t.Setenv("AF_WORKTREE_ID", "")
+	t.Chdir(root)
+
+	fake, _ := setupHermeticSessions(t)
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	err := runUp(cmd, nil)
+	out := buf.String()
+
+	// The configured agent still started cleanly despite the watchdog scope gap.
+	if !agentTouched(out, "alpha") {
+		t.Errorf("the configured agent must start despite the watchdog scope gap; out=%q", out)
+	}
+	// W1: the watchdog gap must NOT abort af up — runUp returns nil (no aggregate
+	// "some agents failed to start"; allOK was not flipped).
+	if err != nil {
+		t.Errorf("a watchdog scope gap must be best-effort (no abort / clean exit code); got %v", err)
+	}
+	// The launch was SKIPPED (an empty scope is never a silent bare "watch all").
+	if send := watchdogSendOp(fake.ops); send != "" {
+		t.Errorf("an empty watchdog scope must SKIP the launch (no send op); got %q", send)
+	}
+	// The refusal stays observable: the no-abort must not silence the durable signal.
+	// R2-L1: the NAMESPACED breadcrumb <root>/.runtime/watchdog_last_error, NOT a
+	// per-agent last_error.
+	if _, statErr := os.Stat(filepath.Join(root, ".runtime", "watchdog_last_error")); statErr != nil {
+		t.Errorf("the refusal path must write the namespaced breadcrumb watchdog_last_error: %v", statErr)
+	}
+}
+
+// P2 (issue #408 Phase 4 / AC-1): the positional `af up <names>` path must never
+// launch an unscoped "watch all" watchdog. Phase 3 N5 moved the assignment
+// `watchdogScope = startupCfg.WatchdogAgents` OUT of the `if blanket` block
+// (up.go:343), so the positional path self-scopes from startup.json too. This pins
+// the launch-op layer: on the positional path the watchdog still LAUNCHES (the scope
+// is known/functional) as a BARE `af watchdog` (self-scopes from startup.json) — it
+// does NOT widen to "watch all" and does NOT append a positional/config name as
+// scope. (TestRunUp_PositionalArgsWin covers agent selection; this covers the
+// watchdog launch op.)
+func TestRunUp_PositionalArgs_WatchdogSelfScopes(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
+	writeAFFile(t, root, "agents.json",
+		`{"agents":{"manager":{"type":"autonomous","description":"m"},"supervisor":{"type":"autonomous","description":"s"}}}`)
+	// A KNOWN watchdog scope: both names are real agents (a functional watchdog).
+	writeAFFile(t, root, "startup.json",
+		`{"agents":["manager","supervisor"],"watchdog_agents":["manager","supervisor"]}`)
+
+	t.Setenv("AF_WORKTREE", "")
+	t.Setenv("AF_WORKTREE_ID", "")
+	t.Chdir(root)
+
+	fake, _ := setupHermeticSessions(t)
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	// Positional path: `af up manager` selects only manager, but the watchdog still
+	// self-scopes from startup.json (Phase 3 N5).
+	err := runUp(cmd, []string{"manager"})
+	out := buf.String()
+
+	if !agentTouched(out, "manager") {
+		t.Errorf("`af up manager` must start manager; out=%q", out)
+	}
+	if err != nil {
+		t.Errorf("a clean positional af up must not error; got %v", err)
+	}
+	// Not skipped incorrectly: the known scope must LAUNCH the watchdog.
+	send := watchdogSendOp(fake.ops)
+	if send == "" {
+		t.Fatalf("a known watchdog scope must LAUNCH on the positional path (not skip); ops=%v out=%q", fake.ops, out)
+	}
+	// Not widened: a bare `af watchdog` (self-scopes from startup.json) — no --agents
+	// flag (it no longer exists) and no positional/config name appended as scope.
+	if strings.Contains(send, "--agents") {
+		t.Errorf("the positional-path launch must be a bare `af watchdog` (self-scopes from startup.json); got %q", send)
+	}
+	if strings.Contains(send, "af watchdog manager") || strings.Contains(send, "af watchdog supervisor") {
+		t.Errorf("the positional-path watchdog must not append a name as scope (no widening to watch-all); got %q", send)
 	}
 }
 

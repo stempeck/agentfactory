@@ -328,6 +328,80 @@ feasible, or document the last-run date.
 
 ---
 
+## Accepted residuals (documented trade-offs)
+
+### GAP-18 — Worktree-containment interlock is bounded detect-and-correct, not a sandbox (#386 Practical Ceiling / accepted residual)
+
+**What:** The #386 worktree-containment interlock — the `PreToolUse` hook
+`af containment-check` (`internal/cmd/containment.go`) backed by the pure
+`worktree.Contains` primitive — is a *runtime location interlock for an
+autonomous LLM agent*, not a hermetic sandbox. Its **Practical Ceiling** is
+**bounded prevention** plus reliable post-hoc detection, and that ceiling is an
+**accepted residual**, not a defect. The accepted residuals:
+
+- **(a) Undecidable shell escapes are out of scope.** Only *literal*
+  `cd`/`pushd`/`git -C` and `Write`/`Edit` `file_path` targets are decidable
+  (`parseBashTarget`/`literalTarget`). `cd $(computed)`, `eval`, `bash -c`, and
+  `${VAR}` expansions are not — the guard raises the cost of escape and catches
+  the *habitual* drift that caused the incident, but it is a containment guard,
+  not a sandbox.
+- **(b) One action may execute before the same-loop correction.** Under
+  ADR-007's inform-not-block posture, the corrective lands *after* the drifting
+  call returns. AC-1's "remains within boundary throughout" is therefore met as
+  *detect + correct (bounded one-action latency)* — **bounded prevention**, not
+  hard pre-emptive prevention. A blocking PreToolUse `deny` was rejected for
+  contradicting ADR-007.
+- **(c) A silently-broken or absent guard is logged, not actively alerted.**
+  Failures are recorded to `<agentDir>/.runtime/containment_debug.log` + stderr
+  (`failObservable`), never escalated, because active alerting would require the
+  supervisor dependency that constraint C-3 forbids.
+- **(d) Effect-based crossings beyond the two declared EXPECTED cases**
+  (`git push origin <branch>`, `$HOME/.cache/...` writes) are out of scope.
+- **(e) The fix is NOT retroactive to a live, currently-running session.** An
+  agent picks up the hook only on **reprovision** (`af install --init`) **and** a
+  subsequent session **recycle** (restart). The very agent type that caused the
+  incident stays unprotected until it is reprovisioned and its session is
+  recycled — the interlock does not retrofit a live session in flight.
+- **(f) Persisted drift is covered only when the subsequent command carries a
+  resolvable path.** `resolveAgainst` (`containment.go:270-281`) uses the payload
+  `cwd` only as the resolution *base* for a relative target, never as the
+  effective target itself. A subsequent command from an already-drifted location
+  that carries a path resolvable against the drifted `cwd` (`git -C . status`, a
+  relative `Write`/`Edit` `file_path`) IS detected; a truly path-less subsequent
+  command (`af done`, bare `git status`, bare `make`) yields an empty effective
+  target and is silent. This path-less gap is the accepted H1 residual —
+  documented here, not "fixed" in `containment.go` (out of #386 scope).
+- **(g) Deliberate dual env+disk spoofing remains possible.** The
+  `AF_WORKTREE_ID` ↔ on-disk `worktree_id` cross-check WAS implemented in Phase 2
+  (`containment.go:115-134`, against `worktree.go:600`); it fails observably on a
+  mismatch and falls back to the filesystem-derived boundary. A residual remains
+  only for a *deliberately adversarial* agent that rewrites both the environment
+  anchor and the on-disk file in lockstep.
+
+**Anchors:** `internal/cmd/containment.go` (effective-target parse
+`parseBashTarget`/`literalTarget`; `resolveAgainst` L270-281; env-spoof
+cross-check L115-134; `failObservable`); `internal/cmd/containment_e2e_integration_test.go`
+(end-to-end production-path proof, incl. the persisted-drift and
+path-less-residual cases); `.designs/386/design-doc.md` L357-367 (Practical
+Ceiling, residuals a-d), L131-136 (Residual on AC-1 "throughout"), L125 (AC-8
+own-session delivery); [ADR-007](adrs/ADR-007-hooks-never-block.md) (hooks never
+block; 2026-06-15 "no escalation into a void" amendment).
+
+**Why it matters:** AC-1's "remains within boundary throughout" is met as
+detect + correct, not hard prevention. A future self-referential or six-sigma
+gate must not mistake "habitual drift caught" for "all escape paths closed" and
+"fix" the deliberate sub-hard-block posture — doing so would contradict ADR-007.
+This entry records the trade-off so the ceiling is read as designed, not as a
+regression.
+
+**Recommended resolution:** None at the architecture level — these are accepted
+trade-offs of the ADR-007 inform-not-block posture. The only operator follow-up
+is (e): reprovision (`af install --init`) then recycle the affected sessions so
+the hook is actually live for them. Residuals (a)/(f)/(g) are out-of-scope
+hardening, not open bugs.
+
+---
+
 ## Meta
 
 This list is not exhaustive — these are the gaps surfaced by the current

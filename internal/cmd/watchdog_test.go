@@ -244,9 +244,10 @@ func writeTestAgentsConfig(t *testing.T, root, json string) {
 }
 
 // TestWatchdog_PollSilenceRespectsAgentType drives the actual poll loop with a
-// mixed fleet and asserts at the loop level (not via the isolated helper) that
-// an idle interactive agent is never silence-nudged while an autonomous agent
-// still is. This is the regression guard for issue #302.
+// mixed fleet under a nil scope and asserts at the loop level (not via the
+// isolated helper) that a nil/empty scope is fail-closed: NO agent (interactive
+// OR autonomous) is silence-nudged (issue #408). The interactive-vs-autonomous
+// distinction is exercised by TestWatchdog_PollScopeFiltersAgents (populated scope).
 func TestWatchdog_PollSilenceRespectsAgentType(t *testing.T) {
 	root := t.TempDir()
 	writeTestAgentsConfig(t, root, `{
@@ -272,8 +273,8 @@ func TestWatchdog_PollSilenceRespectsAgentType(t *testing.T) {
 	failures := make(map[string]int)
 	const threshold = 2
 
-	// Several ticks so silence trips for every agent regardless of map order.
-	// nil scope = monitor all agents (the legacy "" single-agent behavior).
+	// Several ticks so silence would trip for every agent regardless of map order.
+	// nil/empty scope monitors NOTHING (fail-closed, issue #408) — no agent is polled.
 	for i := 0; i < 4; i++ {
 		pollAgents(&cobra.Command{}, root, nil, agentStates, failures, threshold)
 	}
@@ -282,10 +283,10 @@ func TestWatchdog_PollSilenceRespectsAgentType(t *testing.T) {
 	workerSession := session.SessionName("factoryworker")
 
 	if nudged[managerSession] != 0 {
-		t.Errorf("interactive agent 'manager' must NOT be silence-nudged, got %d nudges", nudged[managerSession])
+		t.Errorf("nil scope must monitor nothing: 'manager' got %d nudges, want 0", nudged[managerSession])
 	}
-	if nudged[workerSession] == 0 {
-		t.Error("autonomous agent 'factoryworker' must still be silence-nudged (no #298 regression), got 0 nudges")
+	if nudged[workerSession] != 0 {
+		t.Errorf("nil scope must monitor nothing: 'factoryworker' got %d nudges, want 0", nudged[workerSession])
 	}
 }
 
@@ -341,11 +342,15 @@ func TestWatchdog_PollScopeFiltersAgents(t *testing.T) {
 }
 
 func TestBuildWatchdogScope(t *testing.T) {
-	if scope := buildWatchdogScope(nil, ""); scope != nil {
-		t.Errorf("no flags must yield nil scope (all), got %v", scope)
+	if scope := buildWatchdogScope(nil, ""); scope == nil {
+		t.Error("no flags must yield a non-nil no-scope set (monitor nothing), got nil")
+	} else if len(scope) != 0 {
+		t.Errorf("no flags must yield an EMPTY no-scope set, got %v", scope)
 	}
-	if scope := buildWatchdogScope([]string{"  ", ""}, ""); scope != nil {
-		t.Errorf("only-blank entries must yield nil scope (all), got %v", scope)
+	if scope := buildWatchdogScope([]string{"  ", ""}, ""); scope == nil {
+		t.Error("only-blank entries must yield a non-nil no-scope set, got nil")
+	} else if len(scope) != 0 {
+		t.Errorf("only-blank entries must yield an EMPTY no-scope set, got %v", scope)
 	}
 
 	scope := buildWatchdogScope([]string{"a", " b "}, "c")

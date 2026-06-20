@@ -103,12 +103,14 @@ func runInstallInit(cmd *cobra.Command) error {
 
 	// 3. Write starter configs (only if they don't exist — idempotent)
 	starterConfigs := map[string]string{
-		"factory.json":   `{"type":"factory","version":1,"name":"agentfactory","max_worktrees":4}`,
+		// Built from the in-code defaults (incl. the C-3 git_identity) so the on-disk
+		// literal cannot drift from internal/config's constants (issue #371 Gap-6).
+		"factory.json":   config.DefaultFactoryConfigJSON(),
 		"agents.json":    `{"agents":{"manager":{"type":"interactive","description":"Interactive agent for human-supervised work","directive":"Read your memory and docs, and prove it."},"supervisor":{"type":"autonomous","description":"Autonomous agent for independent task execution","directive":"Read your memory and docs, and prove it."}}}`,
 		"messaging.json": `{"groups":{"all":["manager","supervisor"]}}`,
 		"dispatch.json":  `{"repos":[],"trigger_label":"agentic","notify_on_complete":"manager","mappings":[],"interval_seconds":300,"retry_after_seconds":1800}`,
 		// Opinionated defaults for fresh installs (see TestLoadStartupConfig_ScaffoldLoads).
-		"startup.json": `{"agents":["manager"],"quality":"default","fidelity":"default","start_dispatch":true,"watchdog_agents":["mergepatrol"]}`,
+		"startup.json": `{"agents":["manager"],"quality":"default","fidelity":"default","start_dispatch":true,"watchdog_agents":["manager","supervisor"]}`,
 	}
 
 	for name, content := range starterConfigs {
@@ -191,6 +193,15 @@ func runInstallInit(cmd *cobra.Command) error {
 		return fmt.Errorf("writing fidelity-gate-prompt.txt: %w", err)
 	}
 
+	// 6b. Render the af-managed git hooks (issue #371): the centralized
+	// Co-authored-by trailer + a delegating pre-commit. They live in a dir
+	// distinct from the Claude gate hooks and are activated per session via
+	// core.hooksPath (so nothing is written to .git/). Rendered at install time
+	// (not lazily) to avoid a first-commit race.
+	if err := renderGitHooks(config.GitHooksDir(cwd)); err != nil {
+		return err
+	}
+
 	// Enable fidelity gate by default for new factories
 	fidelityToggle := filepath.Join(configDir, ".fidelity-gate")
 	if _, err := os.Stat(fidelityToggle); os.IsNotExist(err) {
@@ -248,6 +259,28 @@ func runInstallInit(cmd *cobra.Command) error {
 	}
 
 	fmt.Fprintln(cmd.OutOrStdout(), "Factory initialized successfully.")
+	return nil
+}
+
+// renderGitHooks writes the af-managed git hooks (issue #371) — the centralized
+// Co-authored-by trailer and the delegating pre-commit — from the embedded
+// install_hooks/ copies into gitHooksDir at mode 0755. Extracted from
+// runInstallInit so it can be unit-tested without the Python 3.12 / MCP server
+// dependencies that runInstallInit requires (mirrors writeFormulas).
+func renderGitHooks(gitHooksDir string) error {
+	if err := os.MkdirAll(gitHooksDir, 0755); err != nil {
+		return fmt.Errorf("creating git hooks directory: %w", err)
+	}
+	for _, name := range []string{"prepare-commit-msg", "pre-commit"} {
+		data, err := hooksFS.ReadFile("install_hooks/" + name)
+		if err != nil {
+			return fmt.Errorf("reading embedded %s: %w", name, err)
+		}
+		// 0755 is mandatory: a non-executable hook is silently skipped by git.
+		if err := os.WriteFile(filepath.Join(gitHooksDir, name), data, 0755); err != nil {
+			return fmt.Errorf("writing %s: %w", name, err)
+		}
+	}
 	return nil
 }
 
