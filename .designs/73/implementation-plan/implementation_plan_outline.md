@@ -375,3 +375,239 @@ make test
   scope (expands the dispatch blast radius); the only safe fix is documentation.
 - **Net-new scope is a policy, not a bug** (ADR-017): do not add an auto-migration of existing
   empty `dispatch.json` installs; name the opt-in path instead.
+
+---
+
+# Peer Review
+
+**Review Date**: 2026-06-28
+**Reviewer**: Claude Code (rootcause-review skill, adapted for an implementation plan outline)
+**Original Outline Date**: 2026-06-28
+**Method**: Independent verification in a fresh session (reached via `af done && af handoff`, so
+the reviewer did not author the outline). Every code reference was re-checked against the actual
+worktree by four parallel read-only sub-agents (one per file cluster: `internal/config`,
+`internal/cmd/install.go`+`detect_default_branch.go`+templates, `up.go`+cmd `dispatch.go`+`config_set.go`,
+tests+CI+docs) plus direct reviewer greps. Files read at HEAD of `af/rapid-soldesign-plan-7605ca`.
+
+## Review Summary
+
+**Overall Verdict**: **PARTIALLY VALIDATED** (sound plan; three concrete, actionable defects)
+**Confidence Level**: **High** (all anchors independently re-read against current code)
+
+The outline is high-quality and reference-dense. Its component→phase mapping is complete (K1–K9
+all placed; AC-5 correctly scoped out), its dependency ordering is correct and honestly labelled
+(compile-independent P1/P2 sequenced only for acceptance), its acceptance criteria are mechanical
+bash (not prose), and it **correctly corrects the design-doc** on the `install.go:176` mis-citation.
+However, three defects must be addressed before phase extraction — one of them (the `//go:build
+integration` tag on the existing test) makes a Phase-1 acceptance check a **false green** and
+weakens the "or CI reddens" safety claim.
+
+## Architecture Elevation Pre-Check
+
+The mandatory elevation gate is **satisfied upstream**. `design-doc.md` L63–86 carries an
+"Architecture Elevation Verdict" = **Frame correct — one Frame-lift OFFERED** (repo
+self-derivation), and that lift was **adopted** as component K2 (design-doc Decisions table
+L260; outline Phase 1 K2). Per the skill's elevation table, "Frame-lift offered → confirm the
+analysis captured the lift": confirmed (K2 is a first-class phase-1 component, with `Repos`
+kept editable for the multi-repo edge). No frame defect; proceeding to claim validation.
+
+## Claim-by-Claim Validation (code references)
+
+### Cluster A — `internal/config` (config.go, dispatch.go, startup.go)
+**Status**: **VALIDATED** (1 trivial off-by-one)
+- `DefaultFactoryConfigJSON()` struct→`json.Marshal`→string pattern — config.go:111–123 ✓ (the K1/K5 model).
+- `DispatchConfig`/`DispatchMapping`/`Workflow` structs + JSON tags — dispatch.go:17–27 / 29–35 / 42–45 ✓.
+- `validateDispatchConfig` fills `NotifyOnComplete`→"manager" — dispatch.go:181–183 ✓; `const defaultNotifyAgent="manager"` at :15 ✓.
+- `ValidateDispatchConfig` (cross-file) signature :93, unknown-agent error :100–103, import-cycle comment :130–136 ✓.
+- `phaseResolvesAlone` helper — dispatch.go:256 ✓.
+- `StartDispatch bool json:"start_dispatch"` — startup.go:18 ✓.
+- **Off-by-one (cosmetic):** `DefaultGitIdentity()` is config.go:**88–90**, not 88–91.
+
+### Cluster B — `internal/cmd/install.go`, `detect_default_branch.go`, templates
+**Status**: **VALIDATED** (outline corrects the design-doc here)
+- `runInstallInit` :97; starter-config map :139–148; write-if-absent guard :150–157 ✓.
+- agents.json literal (manager+supervisor ONLY) — install.go:**143** ✓.
+- dispatch.json empty literal (`repos:[]`,`mappings:[]`) — install.go:**145**, and it is the **only** such literal ✓.
+- **Disputed `:176` resolved in the outline's favor:** install.go:176 is `store, err := mcpstore.New(cwd, "")`, **not** a dispatch literal. The outline's D-a correction is right; the design-doc was wrong.
+- `detect_default_branch.go` is a valid K2/K3 template: `detectBranchTimeout=5*time.Second` (:14), `branchNameAllowlist` regex (:21), `runGitDetect` seam (:34–44), `gh repo view --json` (:67) with git fallback ✓. (Outline's "L14, 21" ↔ "5s timeout, allowlist regex" mapping is accurate.)
+- Four role templates exist and are embedded via `//go:embed roles/*.md.tmpl` (templates.go:10) ✓.
+
+### Cluster C — `internal/cmd/up.go`, cmd `dispatch.go`, `config_set.go`
+**Status**: **VALIDATED** (K9 hoist safety confirmed)
+- `startupCfg` read up.go:82; `blanket:=len(args)==0` :92 ✓.
+- `if startupCfg.StartDispatch { startDispatch(...) }` nested **inside** `if blanket {` (gate :306, call :330–335) — positional `af up <name>` does NOT reach it today ✓. **Single** `startDispatch` call site in up.go → hoist is safe ✓.
+- Dispatch-loop hard-fail `if err := ValidateDispatchConfig(...); err != nil { return err }` — cmd dispatch.go:146–148 ✓.
+- `startDispatch` idempotent: already-running no-op :1322–1325; unconfigured skip on `ErrNotFound`/`ErrMissingField` :1328–1331 ✓.
+- `dispatchStatusJSON{ DispatcherRunning; Entries }` :1458–1461; `runDispatchStatus` :1356 ✓ (K8 extends additively).
+- Write path strict `ValidateDispatchConfig` — config_set.go:89–90 ✓ (K6 must not touch).
+
+### Cluster D — tests, CI, docs
+**Status**: **PARTIALLY VALIDATED** (two defects — see Errors Found)
+- `dispatch_workflow_test.go:212–257` cross-file validation tests exist (good K7 model; pair of explicit cases, not a slice table, but cross-file) ✓.
+- `.github/workflows/test.yml`: unit job runs `make test` (:68), integration runs `make test-integration` (:124), regen runs `make check-regen` (:140); **no job exercises `af install --init` dispatch validity** ✓ (confirms the CI-gap rationale for landing K7 in the unit tier).
+- `USING_AGENTFACTORY.md`: documents label-triggering by example; **two-label requirement NOT explicitly stated**, **net-new scope NOT stated** ✓ (both docs-1/docs-2 gaps are real); `af install --agents` recursion into quickstart confirmed at ~:634 ✓.
+- ✗ **`formula_drift_test.go` path is wrong** (Error 2).
+- ✗ **`install_integration_test.go` is `//go:build integration`** (Error 1).
+
+### Two-label requirement (Phase 3 substrate) — **VALIDATED by reviewer grep**
+`triggerLabel` is passed as `--label` to `gh issue list` (cmd dispatch.go:301) and `gh pr list`
+(:320) — a hard query pre-filter. Confirmed by the in-code comment at dispatch.go:1080
+("the item drops out of the trigger-label query because agentic is gone") and the W-8 note at
+:387 ("callers pass ONLY the configured trigger_label and workflows[].phases labels"). The
+Gap-2 two-label documentation requirement is well-founded.
+
+## Code Reference Verification (summary table)
+
+| Reference (outline) | Claimed | Actual | Status |
+|---------------------|---------|--------|--------|
+| `install.go:145` | only dispatch.json literal | only dispatch.json literal | ✅ VALIDATED |
+| `install.go:176` | `mcpstore.New` (not a literal) | `mcpstore.New(cwd, "")` | ✅ VALIDATED (corrects design-doc) |
+| `install.go:143` | agents.json mgr+supervisor only | confirmed | ✅ VALIDATED |
+| `up.go:306,330` | StartDispatch gated in `blanket` | confirmed; single call site | ✅ VALIDATED |
+| cmd `dispatch.go:146–148` | loop hard-fail | confirmed | ✅ VALIDATED |
+| cmd `dispatch.go:1322–1325` | idempotent no-op | confirmed | ✅ VALIDATED |
+| `config_set.go:89–90` | strict write path | confirmed | ✅ VALIDATED |
+| `config.go:88–91` | `DefaultGitIdentity()` | actually :88–90 | ⚠️ off-by-one (cosmetic) |
+| `internal/config/formula_drift_test.go` | drift model file | lives in `internal/cmd/` | ❌ INVALIDATED (wrong path) |
+| `install_integration_test.go:66–72` | "or CI reddens" via the ACs | `//go:build integration`; not run by `make test` | ❌ PARTIALLY INVALIDATED (Error 1) |
+
+## Dependency / Logic Chain Review
+
+| Link | Assessment | Status |
+|------|------------|--------|
+| P1 foundational (depends on nothing new) | K1–K5 touch only config.go + install.go | ✅ sound |
+| P1 ⟂ P2 (no compile dependency) | K9/K6/K8 touch up.go + dispatch.go/dispatchStatusJSON; no symbol overlap with P1 | ✅ verified |
+| P2 acceptance depends on P1 (semantic) | `af up manager` AC needs a valid default → sequencing justified, not over-claimed | ✅ honest |
+| P3 depends on P1 ∧ P2 | K7 pins K1/K5 output + cross-validates; exercises K6/K9 behaviors | ✅ sound |
+| Intra-P1 topo K3→K1→K2→K4→K5 | leaf validators first, K4 wires, K5 same write | ✅ acyclic, correct |
+
+The phase numbering follows dependency order (not merely the design narrative), satisfying the
+formula's own anti-pattern guard. Each phase is self-contained (objective, prereqs, refs,
+current-state, changes, bash ACs, gotchas).
+
+## Environment Verification
+
+**Environment**: local worktree `wt-7605ca` (no live GitHub/gh required for the static checks).
+**Tests performed**:
+1. `grep` for the trigger-label query → confirmed `--label triggerLabel` at cmd dispatch.go:301/320.
+2. `head -1 internal/cmd/install_integration_test.go` → `//go:build integration` (confirmed Error 1).
+3. `Makefile` targets → `test:` = `go test ./...` (:59, no tag); `test-integration:` = `go test -tags=integration` (:74). Confirms the integration-tagged test is invisible to `make test`.
+4. `find . -name formula_drift_test.go` → `./internal/cmd/formula_drift_test.go` (confirmed Error 2).
+5. `grep 'func TestInstall'` → multiple un-tagged `TestInstall*` in `install_test.go` (these mask Error 1's false-green; see below).
+
+## Falsification Attempts
+
+- **"A design-doc component was dropped."** Tried to find an unmapped K#. Result: refuted — K1–K9 are all placed (P1: K1–K5; P2: K6/K8/K9; P3: K7), AC-5 explicitly and correctly scoped out (formula layer).
+- **"The compile-independence claim is false."** Tried to find a shared symbol forcing P1-before-P2 at compile time. Result: refuted — the file/symbol sets are disjoint.
+- **"The K9 hoist double-starts the dispatcher."** Tried to find a second `startDispatch` caller. Result: refuted — single call site + idempotent already-running no-op.
+- **"AC #6 actually catches the broken existing test."** Tried to confirm `go test ./internal/cmd/ -run 'TestInstall'` exercises the updated assertions. Result: **succeeded in falsifying** — the assertion-bearing test is `//go:build integration`, so without `-tags=integration` it is excluded; the command still prints `ok` because other un-tagged `TestInstall*` match. This is Error 1.
+
+## Gaps Identified
+
+1. **G-1 (MED) — K8's four-state `config_state` is not fully derivable at status time.** The outline
+   (carrying design-doc K8) promises `ok | empty_by_design | discovery_failed | references_unprovisioned_agents`.
+   `references_unprovisioned_agents` is detectable (ValidateDispatchConfig). But on disk,
+   `discovery_failed` and `empty_by_design` are **identical** (`repos:[]`) — `af up`/`af dispatch
+   status` read only the persisted dispatch.json and cannot recover *why* `repos` is empty. The
+   implementer must either (a) have install persist a breadcrumb (e.g. a one-line marker when K2
+   discovery fails) so the status command can distinguish the two, or (b) collapse to a 3-state
+   taxonomy (`ok | empty | references_unprovisioned_agents`). Phase 2 AC #4 only asserts
+   `has("config_state")`, so it would pass even if `discovery_failed` is never reachable — the AC
+   does not protect the promised distinction. Recommend the outline note this and pick (a) or (b).
+2. **G-2 (LOW) — K6's mechanism is under-specified vs the call it "relaxes."** The dispatch-loop
+   call (dispatch.go:146) is a single `ValidateDispatchConfig(...) → error`. "Skip-and-warn the
+   offending mapping(s) and dispatch the rest" cannot be done by relaxing that boolean; it needs a
+   per-mapping filter (drop mappings whose `agent` is absent from `agentsCfg`, warn per drop, then
+   validate/dispatch the remainder). The outline's prose does say "drop the offending mapping(s)",
+   so the intent is right, but the "Required Changes" wording "replace the hard `return err` with
+   skip-and-warn" understates that a new helper (filter-to-known-agents) is the actual unit of work.
+   A one-line clarification would prevent a literal-minded implementer from merely swallowing the error.
+3. **G-3 (LOW) — Phase 1 AC #2 depends on `gh`/`git` remote-parsing not yet written.** AC #2 asserts
+   `repos==["acme/widget"]` from a `git@github.com:acme/widget.git` remote in a throwaway temp repo.
+   In that environment `gh repo view` will fail (no auth / not a real GH repo) and discovery must
+   fall through to `git remote get-url origin` normalization. The AC is correct *only if* K2's
+   fallback handles the `git@host:o/r.git` shape (the gotcha lists it, so this is a consistency note,
+   not a defect): keep AC #2 and the K2 fallback spec in lockstep.
+
+## Errors Found
+
+1. **E-1 (MED→HIGH for fidelity) — `install_integration_test.go` build tag breaks two Phase-1 claims.**
+   The file is `//go:build integration` (line 1); its `repos:[]`/`mappings:[]` assertions live in
+   `TestInstallInit_CreatesDispatchJson` (L22, asserts at ~L66–72). Consequences:
+   - **Phase 1 AC #6** (`go test ./internal/cmd/ -run 'TestInstall' -count=1 # Expected: ok`) is a
+     **false green**: without `-tags=integration` the updated test does not compile in, yet the
+     command prints `ok` because other un-tagged `TestInstall*` tests (in `install_test.go`) match
+     the `-run` filter. The AC must be `go test -tags=integration ./internal/cmd/ -run
+     'TestInstallInit_CreatesDispatchJson' -count=1` (or `make test-integration`).
+   - **Phase 1 AC #7 / the "or CI reddens" gotcha**: `make test` (`go test ./...`, no tag) will
+     **not** run the integration test, so leaving it un-updated stays green under the unit tier. The
+     break only reddens the **integration** CI job (test.yml:96–124, `make test-integration`). The
+     outline should state the tag explicitly and route the "verify the updated test" AC through the
+     integration tag/tier. (K7 itself is correctly placed in the un-tagged unit tier and is unaffected.)
+2. **E-2 (LOW) — wrong package path for the drift-test model.** Phase 3 "Current State" cites
+   `internal/config/formula_drift_test.go`; the file is at **`internal/cmd/formula_drift_test.go`**.
+   An implementer would not find the model where pointed. Fix the path (and note it is the ADR-008
+   source-vs-installed drift pattern, `TestFormulaDriftSourceVsInstalled`).
+
+## Solution / Plan Assessment
+
+**Plan adequacy**: **Adequate** (sound, systemic) — pending the E-1/E-2 corrections and the G-1 note.
+**Systemic**: **Yes.** Single-source `DefaultDispatchConfigJSON`/`DefaultAgentsConfigJSON` (K1/K5)
+removes the last inline-literal drift surface; the default is valid-by-construction on **every** init
+path via one `runInstallInit` write; K7 is a golden+cross-file **mechanical** drift gate in the unit
+tier. No hardcoded one-off; new label/agent renames are caught by K7, not by manual vigilance.
+**Completeness**: addresses bare-init AND quickstart parity in one write; the only residuals are
+correctly scoped out (AC-5 formula layer; installed-base via opt-in; exotic remotes fail-loud).
+**Risk**: low. The largest residual is E-1 — a fidelity gap in *how the plan verifies itself*, not in
+the fix's architecture.
+
+### Enforcement Analysis
+1. **Can the original failure (empty/invalid default, broken zero-touch) still occur after this plan?**
+   NO on the happy path — the default is valid-by-construction and K7 fails CI on drift; the documented
+   `af up manager` auto-starts via K9. Residual: an install where K2 discovery fails ships `repos:[]`
+   (fail-loud, by design), and G-1's status nuance.
+2. **Enforcement type:**
+   - [x] Mechanical interlock (K1/K5 struct marshaling = compile-checked field shape; K7 golden+cross-file CI test)
+   - [x] Runtime guard (K3 regex at the write boundary; K6 skip-and-warn; K8 pre-flight)
+   - [ ] Instruction/configuration
+   - [ ] Advisory only
+3. **Enforcement Score: 8/10.** Strong, code-level. Docked 2: (a) E-1 means the bare-init parity
+   assertion partly rides on an integration-tagged test that `make test` doesn't run (K7 in the unit
+   tier mitigates but does not fully replace the install-level integration assertion); (b) G-1's
+   `discovery_failed` state is not mechanically derivable as promised.
+4. **What a tighter interlock looks like:** route the updated bare-init assertion explicitly through
+   `-tags=integration` in Phase 1's AC (so the parity check is actually executed), and make K7's
+   unit-tier cross-file test the authoritative drift gate (already specified) so the safety net does
+   not depend on the integration tier alone.
+
+Score ≥ 7 → the enforcement gate does not force "Needs revision"; the required changes are the three
+documentation/AC corrections below, not an architectural redesign.
+
+## Final Verdict
+
+**Plan soundness**: **VALIDATED** (component coverage, dependency order, systemic fix all confirmed)
+**Code-reference accuracy**: **PARTIALLY VALIDATED** (1 wrong path, 1 build-tag-blind AC, 1 cosmetic off-by-one; all other anchors exact)
+**Recommendation**: **Proceed to human review — with three corrections applied first.** This is the
+end of Mode A; the human reviewer should require, before any `design-phase-impl` (Mode B) extraction:
+- **(must) E-1**: rewrite Phase 1 AC #6 to `go test -tags=integration ./internal/cmd/ -run
+  'TestInstallInit_CreatesDispatchJson'` and add an explicit note that the existing test is
+  `//go:build integration` (breaks only under `make test-integration`, not `make test`).
+- **(must) E-2**: correct the drift-model path to `internal/cmd/formula_drift_test.go`.
+- **(should) G-1**: note in Phase 2 that `discovery_failed` vs `empty_by_design` needs an install-time
+  breadcrumb or a 3-state taxonomy; tighten AC #4 beyond `has("config_state")`.
+- **(nice) G-2/G-3 + cosmetic off-by-one**: clarify K6 needs a filter helper; keep AC #2 and the K2
+  fallback in lockstep; fix `DefaultGitIdentity()` to :88–90.
+
+None of these change the architecture or the phase structure; they harden the plan's self-verification.
+
+## Reviewer Notes
+
+- The outline's single best move is correcting the design-doc's `install.go:176` mis-citation and
+  the unflagged existing-test breakage — exactly the "design describes target, not current state"
+  discipline the formula demands. Both are firsthand-confirmed correct.
+- The companion-doc staleness warning (outline L73–79: `dependencies.md`/`integration.md`/`security.md`
+  describe the superseded `af install --agents` K5 mechanism) is accurate and valuable — `af install
+  --agents` does recurse into quickstart (USING_AGENTFACTORY.md ~:634) and refuses from a worktree, so
+  the in-`runInstallInit` seed is the right mechanism.
+- E-1 is the one finding I would not let through silently: an acceptance criterion that prints `ok`
+  without running the test it names is worse than no criterion, because it manufactures false confidence.
