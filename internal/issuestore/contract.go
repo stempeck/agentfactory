@@ -1073,8 +1073,13 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 		store := factory("agent-Y")
 
 		// Direction 1 — positive: explicit Assignee for a DIFFERENT actor
-		// than the store overlay. Today: memstore returns 0 (bug),
-		// mcpstore returns 1 (correct). Post-fix: both return 1.
+		// than the store overlay. memstore is the reference and is already
+		// correct (memstore.go:162 matches the explicit Assignee
+		// unconditionally); with IncludeAllAgents:false both adapters return
+		// the single agent-X issue here. The real-store divergence lives on
+		// the {Assignee, IncludeAllAgents:true} axis and is exercised by
+		// Direction 4 below — pre-fix the real Python store returned the
+		// wrong (cross-agent) set there; post-fix both adapters agree.
 		seeded, err := store.Create(ctx, CreateParams{
 			Title: "explicit-wins", Type: TypeTask, Assignee: "agent-X",
 		})
@@ -1125,6 +1130,65 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 		}
 		if contains(titles, "explicit-wins") {
 			t.Errorf("Direction 3: no-Assignee + actor=agent-Y must NOT return agent-X's issue (overlay applies); got %v", titles)
+		}
+
+		// Direction 4 — the {Assignee, IncludeAllAgents:true} combination
+		// (Gap 6). The operator opt-out flag does NOT suppress an explicit
+		// Assignee: store.go:151-167 says IncludeAllAgents "has NO effect when
+		// Assignee is non-empty," and ADR-002 §"sanctioned opt-out" bypasses
+		// the actor overlay (and therefore this flag) whenever an explicit
+		// Assignee is present. This is the exact cell where the real Python
+		// store historically diverged from memstore: pre-fix store.py:237
+		// gated the assignee WHERE clause on `not include_all_agents`, so the
+		// real store dropped the filter and returned BOTH agents' issues;
+		// memstore (the reference) returns only agent-X's. Post-fix both
+		// agree. Pinned for List AND Ready — Ready feeds the Floor's step
+		// columns and shares _list_filter_clause with List. Fixtures reused:
+		// "explicit-wins" (agent-X, seeded above) and "agent-Y-own" (agent-Y,
+		// seeded in Direction 3).
+		got, err = store.List(ctx, Filter{
+			Assignee:         "agent-X",
+			IncludeAllAgents: true,
+		})
+		if err != nil {
+			t.Fatalf("List Direction 4: %v", err)
+		}
+		if len(got) != 1 || got[0].ID != seeded.ID {
+			t.Fatalf("Direction 4 (List): explicit Assignee=agent-X with IncludeAllAgents:true must return ONLY agent-X's issue; got %d issues (%v)",
+				len(got), titlesOf(got))
+		}
+		d4titles := titlesOf(got)
+		if !contains(d4titles, "explicit-wins") {
+			t.Errorf("Direction 4 (List): must contain agent-X's 'explicit-wins'; got %v", d4titles)
+		}
+		if contains(d4titles, "agent-Y-own") {
+			t.Errorf("Direction 4 (List): IncludeAllAgents:true must NOT leak agent-Y's 'agent-Y-own' past an explicit Assignee; got %v", d4titles)
+		}
+
+		// Direction 4 (Ready) — same combination on the Ready path (Gap 6).
+		// No MoleculeID: Steps is every ready, non-terminal issue matching the
+		// filter; both seeded tasks are dependency-free and non-terminal, so
+		// only the explicit-Assignee clause scopes the result. Complementary
+		// to Ready_actor_scoping (contract.go:959-1008), which pins the
+		// DEFAULT (no-Assignee) overlay path — a different truth-table row, so
+		// the two cannot contradict.
+		rr, err := store.Ready(ctx, Filter{
+			Assignee:         "agent-X",
+			IncludeAllAgents: true,
+		})
+		if err != nil {
+			t.Fatalf("Ready Direction 4: %v", err)
+		}
+		if len(rr.Steps) != 1 || rr.Steps[0].ID != seeded.ID {
+			t.Fatalf("Direction 4 (Ready): explicit Assignee=agent-X with IncludeAllAgents:true must return ONLY agent-X's step; got %d steps (%v)",
+				len(rr.Steps), titlesOf(rr.Steps))
+		}
+		rtitles := titlesOf(rr.Steps)
+		if !contains(rtitles, "explicit-wins") {
+			t.Errorf("Direction 4 (Ready): must contain agent-X's 'explicit-wins' step; got %v", rtitles)
+		}
+		if contains(rtitles, "agent-Y-own") {
+			t.Errorf("Direction 4 (Ready): IncludeAllAgents:true must NOT leak agent-Y's step past an explicit Assignee; got %v", rtitles)
 		}
 	})
 }

@@ -1,0 +1,5 @@
+.gotmp/
+# Built afweb binary at the module root only — anchored so it does not also
+# swallow the cmd/afweb/ source package (which it did as a bare `afweb` pattern).
+/afweb
+*.test

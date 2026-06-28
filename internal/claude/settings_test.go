@@ -156,6 +156,78 @@ func TestEnsureSettings_Interactive(t *testing.T) {
 	}
 }
 
+// TestEnsureSettings_DeniesAskUserQuestion proves the AskUserQuestion hard-disable
+// (issue af-69d8bf24) propagates into every generated agent's .claude/settings.json,
+// for BOTH role types.
+//
+//	Scenario: AskUserQuestion is denied fleet-wide
+//	  Given an agent of any role type (interactive or autonomous)
+//	  When EnsureSettings writes its .claude/settings.json
+//	  Then the settings carry a permissions.deny entry for "AskUserQuestion"
+//
+// Motivation: in some environments the built-in AskUserQuestion tool auto-selects its
+// DEFAULT option and times out as if the human answered, fabricating false approvals.
+// Denying the tool by name blocks all of its uses, forcing agents to ask in plain text
+// and wait for a real reply. EnsureSettings copies the embedded template verbatim, so a
+// deny rule in the template is the propagation mechanism this test guards.
+func TestEnsureSettings_DeniesAskUserQuestion(t *testing.T) {
+	cases := []struct {
+		name     string
+		roleType RoleType
+	}{
+		{"Interactive", Interactive},
+		{"Autonomous", Autonomous},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := EnsureSettings(dir, tc.roleType); err != nil {
+				t.Fatalf("EnsureSettings(%s) error: %v", tc.name, err)
+			}
+
+			settingsPath := filepath.Join(dir, ".claude", "settings.json")
+			data, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatalf("reading settings.json: %v", err)
+			}
+
+			var parsed map[string]interface{}
+			if err := json.Unmarshal(data, &parsed); err != nil {
+				t.Fatalf("settings.json is not valid JSON: %v", err)
+			}
+
+			permsRaw, ok := parsed["permissions"]
+			if !ok {
+				t.Fatalf("%s settings.json missing top-level \"permissions\" block", tc.name)
+			}
+			perms, ok := permsRaw.(map[string]interface{})
+			if !ok {
+				t.Fatalf("%s settings.json \"permissions\" is not an object", tc.name)
+			}
+			denyRaw, ok := perms["deny"]
+			if !ok {
+				t.Fatalf("%s settings.json permissions missing \"deny\" array", tc.name)
+			}
+			deny, ok := denyRaw.([]interface{})
+			if !ok {
+				t.Fatalf("%s settings.json permissions.deny is not an array", tc.name)
+			}
+
+			found := false
+			for _, entry := range deny {
+				if s, ok := entry.(string); ok && s == "AskUserQuestion" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("%s settings.json permissions.deny must contain \"AskUserQuestion\", got: %v", tc.name, deny)
+			}
+		})
+	}
+}
+
 func TestEnsureSettings_CreatesDirectory(t *testing.T) {
 	dir := t.TempDir()
 	claudeDir := filepath.Join(dir, ".claude")

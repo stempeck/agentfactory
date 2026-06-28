@@ -1,5 +1,8 @@
 # Binaries
 /af
+# Phase 5: the optional web console binary, built at the repo root via `make build-webui`
+# (-o ../webui from the web/ module). Anchored like /af so it is never committed.
+/webui
 *.exe
 
 # Build
@@ -59,15 +62,20 @@ state.json
 CLAUDE.local.md
 .claude/skills/**
 .claude/memory-summary-hook.sh
-!.claude/skills/github-issue/
-!.claude/skills/github-issue/SKILL.md
-!.claude/skills/formula-create/
-!.claude/skills/formula-create/SKILL.md
-!.claude/skills/formula-create/*.md
+!.claude/skills/agentic-skill-eval/
+!.claude/skills/agentic-skill-eval/**
+!.claude/skills/architecture-docs/
+!.claude/skills/architecture-docs/**
 !.claude/skills/documentation-update/
-!.claude/skills/documentation-update/SKILL.md
+!.claude/skills/documentation-update/**
+!.claude/skills/formula-create/
+!.claude/skills/formula-create/**
+!.claude/skills/github-issue/
+!.claude/skills/github-issue/**
+!.claude/skills/improve-agent/
+!.claude/skills/improve-agent/**
 !.claude/skills/rapid-implement/
-!.claude/skills/rapid-implement/SKILL.md
+!.claude/skills/rapid-implement/**
 
 # IMPLREADME/NEXTSTEPS/GHERKINSCENARIOS are generated locally
 IMPLREADME.md
@@ -87,21 +95,21 @@ test_results.txt
 
 # Used by pro-version agents
 !.claude/skills/design-plan-impl
-!.claude/skills/design-plan-impl/SKILL.md
+!.claude/skills/design-plan-impl/**
 !.claude/skills/rootcause-analysis/
-!.claude/skills/rootcause-analysis/SKILL.md
+!.claude/skills/rootcause-analysis/**
 !.claude/skills/rootcause-implementfix/
-!.claude/skills/rootcause-implementfix/SKILL.md
+!.claude/skills/rootcause-implementfix/**
 !.claude/skills/rootcause-review/
-!.claude/skills/rootcause-review/SKILL.md
+!.claude/skills/rootcause-review/**
 !.claude/skills/ultra-implement/
-!.claude/skills/ultra-implement/SKILL.md
+!.claude/skills/ultra-implement/**
 !.claude/skills/improve-skill/
-!.claude/skills/improve-skill/SKILL.md
+!.claude/skills/improve-skill/**
 !.claude/skills/github-upstreamer/
-!.claude/skills/github-upstreamer/SKILL.md
+!.claude/skills/github-upstreamer/**
 !.claude/skills/formula-clean/
-!.claude/skills/formula-clean/SKILL.md
+!.claude/skills/formula-clean/**
 
 # check-skills parity (af-13234830 Phase 3 / Gap 5): every source skill under
 # internal/cmd/install_skills/ must have a TRACKED installed copy here, or a clean
@@ -117,3 +125,7 @@ test_results.txt
 !.claude/skills/plan-work/**
 !.claude/skills/terraform-fix/
 !.claude/skills/terraform-fix/**
+!.claude/skills/architecture-elevation/
+!.claude/skills/architecture-elevation/**
+!.claude/skills/six-sigma-challenge/
+!.claude/skills/six-sigma-challenge/**

@@ -168,11 +168,14 @@ af sling --agent your-agent-name "do the thing"
 
 ### Batch regeneration
 
-To regenerate all specialist agents from formulas:
+To regenerate all specialist agents from formulas and re-bootstrap the factory, run the redeploy command from the main project checkout:
 
 ```bash
-./agent-gen-all.sh          # regenerate all + rebuild
+af install --agents          # regenerate all + rebuild, then bootstrap
+af up                        # agents are stopped during regen — restart them
 ```
+
+See `USING_AGENTFACTORY.md` for preconditions, data-safety, and `--no-build` notes.
 
 ## Included Formulas
 
@@ -191,6 +194,63 @@ To regenerate all specialist agents from formulas:
 | `/formula-create` | Create a formula TOML from a SKILL.md |
 | `/github-issue` | Create well-documented GitHub issues from current (or specified) context |
 | `/documentation-update` | Audit and update a documentation file (.md) against the codebase |
+
+## Web Console (optional)
+
+Agentfactory ships an **optional** web console for managing the factory (the Floor view, slinging
+tasks, dispatch status, settings, and design prototypes). It is a separate Go module under `web/`
+and is **not** required to run `af`.
+
+**Build and install (best-effort):**
+
+```bash
+make build-webui          # builds ./web/cmd/afweb -> ./webui at the repo root
+make install              # installs af and, if present, copies webui to ~/.local/bin/webui
+```
+
+Inside the container, `quickstart.sh` launches the console **iff** the `webui` binary is present
+(`$HOME/.local/bin/webui`) and stays silent when it is absent — the factory bootstrap never depends
+on it. A second launch finds the already-running server (via its `.runtime/webui_server.json`
+rendezvous + start-lock) and no-ops, so relaunching is safe.
+
+### Remote access — loopback-only (do NOT publish the port)
+
+The console binds **loopback only** (`127.0.0.1`). This is deliberate and load-bearing: the control
+plane can stop/sling agents and edit config, so an exposed socket is a remote-code-execution and
+irreversible-loss risk (cross-review **CR-1**).
+
+**Do not** publish the port. The container is started **without** `-p`/`--publish`
+(`quickdocker.sh`/`Dockerfile` never expose it), and that must stay true — adding `-p` turns an
+unauthenticated loopback control plane into an open one.
+
+**Standard path — `quickdocker.sh <repo> --web`.** When your laptop is also the docker host, just run:
+
+```bash
+quickdocker.sh user/myrepo --web    # -> 🔗 Open your factory:  http://127.0.0.1:<HOSTPORT>/
+```
+
+This stands up a detached, idempotent, `127.0.0.1`-only bridge to the console's in-container loopback
+and prints a clickable URL — no SSH, no reading port files, no container rebuild. The full operator
+runbook (access, `--shell`, prerequisites, multiple factories, restart, security, troubleshooting) is
+[`web/README.md`](web/README.md).
+
+**Alternative — operator SSH local-forward (headless / remote docker hosts).** When the docker host is
+*not* your workstation (a remote or headless server, where the `--web` bridge cannot reach a local
+browser), reach the console with an operator **SSH local-forward**, which keeps the socket on loopback
+at both ends:
+
+```bash
+# Find the console's port from inside the container (printed at startup, or read the rendezvous file):
+cat .runtime/webui_server.json     # -> {"transport":"tcp","address":"127.0.0.1:PORT",...}
+
+# From your workstation, forward a local port to the container's loopback console port:
+ssh -L 127.0.0.1:8888:127.0.0.1:PORT user@host
+# then open http://127.0.0.1:8888/ in your browser
+```
+
+When the bind is ever non-loopback (not the default), the console additionally requires a
+session token (printed at startup) as defense-in-depth — but that is **not** a license to publish
+the port; the socket stays loopback whether you reach it via the `--web` bridge or the SSH forward.
 
 ## Architecture
 

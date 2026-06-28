@@ -19,6 +19,7 @@ Create an instruction set workflow (formula) with `/formula-create /path/to/your
 1. IFF you haven't setup AgentFactory, run: `./quickdocker.sh <github-repo-path>`
 1a. IFF you haven't setup AgentFactory, when the above completes, run: `claude` and make sure to authenticate.
 2. IFF you have AgentFactory setup, run: `docker exec -it -u dev "af_ghusername_repo" bash`, then: `./quickstart.sh`
+2a. To **redeploy** agents after that initial setup (regenerate every specialist template and re-bootstrap the factory in one command), run from your project root (e.g. `~/af/myproject`): `af install --agents`. This is the one-command replacement for the manual two-script ritual — it runs **both** `agent-gen-all.sh` then `quickstart.sh`, non-interactively, so quickstart's usual terminal `exec bash` / manual `exit` is handled automatically (no manual `exit` needed). It operates on an **already-initialized factory**: `agent-gen-all.sh` runs first and aborts if `.agentfactory/store/formulas/` is absent, *before* `quickstart.sh` could bootstrap a cold factory — so for a first-time / cold-start setup run steps 1–2 (`quickdocker.sh` / `quickstart.sh`) first, then use `af install --agents` for subsequent redeploys. It is the **same command** described under *Batch regeneration with `af install --agents`* below — see there for the `af up` restart reminder, data-safety rule, and `--no-build` semantics.
 3. (optionally) enable the quality gate: `af quality on` (the `fidelity` gate is on by default and only fires when an agent is running a formula to keep it honest)
 
 ### iOS Projects
@@ -86,6 +87,7 @@ From the manager's Claude session, just talk to it. The manager can:
 - Send tasks to the supervisor: `af mail send supervisor -s "Fix auth bug" -m "..."`
 - Broadcast to all agents: `af mail send @all -s "Status" -m "..."`
 - Check for replies: `af mail inbox`
+- Sling agents to do work: `af sling --agent rapid-implement "<my-github-issue-link>"`
 
 Mail delivery is automatic — the `UserPromptSubmit` hook injects new mail on every prompt.
 
@@ -130,7 +132,7 @@ af formula agent-gen <name> -o                             # Dry run — print r
 af formula agent-gen <name> --delete 
 ```
 
-### Dispatch Commands
+### Dispatch Commands & Configuration
 
 ```bash
 af dispatch                          # Run one dispatch cycle (check GitHub issues, dispatch to agents)
@@ -154,12 +156,17 @@ Configuration lives in `.agentfactory/dispatch.json` (created by `af install --i
     {
       "labels": ["bug"],
       "source": "issue",
-      "agent": "factoryworker"
+      "agent": "rapid-implement"
     },
     {
       "labels": ["reviewer"],
       "source": "pr",
-      "agent": "reviewer"
+      "agent": "ultra-review"
+    },
+    {
+      "labels": ["incremental-fix"],
+      "source": "pr",
+      "agent": "rapid-increment"
     }
   ]
 }
@@ -177,6 +184,59 @@ Configuration lives in `.agentfactory/dispatch.json` (created by `af install --i
 | `mappings[].source` | No | `"issue"` | Resource type: `"issue"` or `"pr"` |
 | `mappings[].agent` | Yes | — | Agent to dispatch when labels match |
 
+#### Workflows (multi-phase pipelines)
+
+A **workflow** turns a single operator-applied label into an ordered, multi-phase
+pipeline: the dispatcher walks the item through each phase, slings the phase's agent,
+waits for that formula instance to complete, then swaps the label to the next phase —
+all autonomously, with no formula edits. Add a `workflows` array alongside `mappings`.
+Each phase is just an existing **mapping label**, so `mappings[]` remains the single
+source of truth for which agent runs each phase.
+
+```json
+{
+  "repos": ["myorg/myrepo"],
+  "trigger_label": "agentic",
+  "notify_on_complete": "manager",
+  "interval_seconds": 300,
+  "retry_after_seconds": 1800,
+  "remove_trigger_after_dispatch": true,
+  "mappings": [
+    {
+      "labels": ["design"],
+      "source": "issue",
+      "agent": "design-v3"
+    },
+    {
+      "labels": ["build"],
+      "source": "issue",
+      "agent": "rapid-implement"
+    }
+  ],
+  "workflows": [
+    {
+      "label": "feature-workflow",
+      "phases": ["design", "build"]
+    }
+  ]
+}
+```
+
+With this config, label an issue `agentic` + `feature-workflow`: the dispatcher adds the
+`design` label and slings `design-v3`; when that instance completes it swaps `design`→
+`build` and slings `rapid-implement`; when the final phase completes it removes the last phase
+label and `agentic`, then notifies `notify_on_complete`.
+
+| Field | Required | Default | Description |
+|-------|:--------:|---------|-------------|
+| `workflows[].label` | Yes | — | The operator-applied GitHub label that starts the pipeline. Must NOT equal `trigger_label` or any `mappings[].label` |
+| `workflows[].phases` | Yes | — | Ordered list of existing mapping labels, one per phase. Each must resolve to an agent on the phase label **alone** (a single-label mapping), and all phases must share the same `source` |
+
+Validation rules (enforced when the config loads): every phase must back a single-label
+mapping whose agent has a formula; phases run top-to-bottom; a phase label may not equal
+the `trigger_label` or the workflow's own label; and in v1 all phases of one workflow
+must be the same `source` (all `issue` or all `pr`).
+
 ### Watchdog
 
 The watchdog (`af watchdog`) is a long-lived polling loop that monitors agent tmux
@@ -186,8 +246,7 @@ failures and escalates to the supervisor). `af up` launches it best-effort; you
 rarely run `af watchdog` by hand.
 
 **Scope comes solely from `startup.json.watchdog_agents`** — the explicit, bounded
-list of agents to monitor. There is no `--agents`/`--agent` flag and no "watch all"
-mode.
+list of agents to monitor. There is no "watch all" mode.
 
 ### Adding more agents manually (not recommended. use: agent-gen or agent-gen-all.sh)
 
@@ -562,17 +621,25 @@ Step 2 writes the template directly to the AF source tree (`--af-src`) and rebui
 
 Step 3 is the reverse flow (ADR-015): promoting the formula TOML to ship with agentfactory. The template is already in the AF source tree from step 2 thanks to `--af-src`.
 
-### Batch regeneration with agent-gen-all.sh
+### Batch regeneration with `af install --agents`
 
-Regenerates all specialist agents from promoted formulas. Run from your target project — the script auto-detects the AF source from its own location.
+Regenerates all specialist agents from promoted formulas and re-bootstraps the factory in one command. Run from the **main project checkout** (not a worktree — `af install --agents` refuses to run from one), e.g. `~/af/myproject`:
 
 ```bash
 cd ~/af/myproject
-~/projects/agentfactory/agent-gen-all.sh
+af install --agents
 af up
 ```
 
-**Customer formulas are safe.** The script syncs formulas from the AF source tree but preserves any customer-created formulas (those not in the AF source's `internal/cmd/install_formulas/`). Pass `--no-build` to skip the `make install` step.
+`af install --agents` runs **both** scripts in order — `agent-gen-all.sh` (regenerate every specialist template + rebuild) **then** `quickstart.sh` (full bootstrap) — non-interactively, so quickstart's terminal `exec bash` exits on its own (no manual `exit`). It operates on an **already-initialized factory**: `agent-gen-all.sh` runs first and aborts if `.agentfactory/store/formulas/` is absent, so for a first-time / cold-start setup run `quickdocker.sh` / `quickstart.sh` first (see the setup section above) — it is the *same command at both moments*.
+
+**Agents are stopped during regeneration — run `af up` to restart them.** The wrapped `agent-gen-all.sh` runs `af down --all` and nothing restarts the agents, so even on full success they are left down; once `af install --agents` finishes you bring them back up with `af up`.
+
+**Customer formulas are safe — with one rule.** The redeploy loop is data-safe for **new** customer formulas (those not in the AF source's `internal/cmd/install_formulas/` are preserved). But **edits to shipped formulas must be made (and promoted) in `internal/cmd/install_formulas/`** (ADR-015) — otherwise the `-nt` sync overwrites your edits with the AF source copy on the next redeploy.
+
+**About `--no-build`.** `quickstart.sh` always rebuilds and reinstalls the `af` binary (it has no build-skip flag), so every successful `af install --agents` lands a fresh binary and `af prime`'s embedded identity is always current — a reliability win, not a stale-identity risk. `--no-build` skips **only** `agent-gen-all.sh`'s *duplicate* rebuild (the binary is then built once by quickstart instead of twice); it is not a "skip the rebuild" lever.
+
+**Behavioral verification (what the unit tests do not cover).** A green unit test confirms `af install --agents` *dispatched* to the scripts, not that the factory is healthy, and the command is **not transactional** — a mid-run failure can leave agents down and the factory half-regenerated, so check the streamed exit code and end-state. To verify behavior end-to-end after a redeploy on a cold-started factory: run `af up`, dispatch work with `af sling`, and confirm an agent produces a PR using its current identity. This e2e check cannot run in CI because the scripts are non-hermetic.
 
 ## Important: One Factory Per Repo
 
@@ -603,6 +670,18 @@ The fidelity gate is ON by default — `af install --init` creates `.fidelity-ga
 ### Agent can't see project files
 
 Agent working directory is `<project>/.agentfactory/agents/<agent-name>/`. The role template injects the factory root and working directory as absolute paths.
+
+### Mouse wheel scrolls Claude, and I can't select text by dragging
+
+This is expected (Issue #412). Agent sessions are started with tmux `mouse on` so the
+wheel scrolls **Claude's own conversation view** (its scrollback) instead of being
+translated into arrow keys by the outer terminal. The trade-off is that `mouse on`
+captures click-drag, so a normal drag no longer makes a native terminal text
+selection. **To select/copy text the usual way, hold `Shift` while you click and
+drag** — this bypasses tmux's mouse handling and gives you your terminal's native
+selection. (If you ever attach and the wheel does *not* scroll Claude, check the
+session: `tmux show-options -t af-<agent> -v mouse` should report `on`; `af up`
+also prints a `warning:` to stderr if the option failed to apply.)
 
 ### Disclaimer
 The contributors to this project take no responsibility for your agent (or their respective LLMs) actions.

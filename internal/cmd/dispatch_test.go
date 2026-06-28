@@ -421,12 +421,13 @@ func TestFormatDispatchStatus(t *testing.T) {
 	now := time.Now().UTC()
 
 	tests := []struct {
-		name       string
-		running    bool
-		entries    map[string]dispatchEntry
-		agentState map[string]bool
-		wantHas    []string
-		wantNot    []string
+		name          string
+		running       bool
+		entries       map[string]dispatchEntry
+		agentState    map[string]bool
+		phaseComplete map[string]bool
+		wantHas       []string
+		wantNot       []string
 	}{
 		{
 			name:    "running with entries",
@@ -444,7 +445,10 @@ func TestFormatDispatchStatus(t *testing.T) {
 				"owner/repo#2": {Agent: "writer", DispatchedAt: now.Add(-30 * time.Minute), ItemURL: "https://github.com/owner/repo/issues/2", Source: "pr"},
 			},
 			agentState: map[string]bool{"writer": false},
-			wantHas:    []string{"STOPPED", "owner/repo#2", "writer", "completed", "pr"},
+			// K9 demotion: an idle non-workflow agent is availability-only ("idle"),
+			// NOT "completed" — completion is read from the store, not tmux absence.
+			wantHas: []string{"STOPPED", "owner/repo#2", "writer", "idle", "pr"},
+			wantNot: []string{"completed"},
 		},
 		{
 			name:       "running with no entries",
@@ -464,7 +468,7 @@ func TestFormatDispatchStatus(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			out := formatDispatchStatus(tc.running, tc.entries, tc.agentState)
+			out := formatDispatchStatus(tc.running, tc.entries, tc.agentState, tc.phaseComplete)
 			for _, want := range tc.wantHas {
 				if !strings.Contains(out, want) {
 					t.Errorf("formatDispatchStatus output missing %q\ngot: %s", want, out)
@@ -567,6 +571,145 @@ func TestDispatchStop_NotRunning(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not running") {
 		t.Errorf("error = %q, want it to contain %q", err.Error(), "not running")
+	}
+}
+
+func TestDispatchStatus_JSON_SchemaSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	afDir := filepath.Join(dir, ".agentfactory")
+	os.MkdirAll(afDir, 0o755)
+	os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{"type":"factory","version":1}`), 0o644)
+
+	// Hermetic tmux: dispatcher + agent sessions are absent by default, so
+	// dispatcher_running / agent_running are false (still emitted as keys). The returned
+	// memstore is the SAME one runDispatchStatus reads via newIssueStore — seed it so the
+	// workflow entry's PhaseInstanceID resolves to a terminal+complete instance, which is
+	// what makes the omitempty phase_complete key actually render (and thus be frozen).
+	_, store := setupHermeticSessions(t)
+	complete := seedClosedEpic(t, store, config.CloseReasonFormulaComplete)
+
+	state := &dispatchState{Dispatched: map[string]dispatchEntry{
+		// Non-workflow entry: pins the original 6-key contract (the additive
+		// workflow/phase/phase_complete keys are omitempty and absent here).
+		"owner/repo#1": {
+			Agent:        "mgr",
+			DispatchedAt: time.Unix(1700000000, 0).UTC(),
+			ItemURL:      "https://github.com/owner/repo/issues/1",
+			Source:       "issue",
+		},
+		// Workflow entry: freezes the additive keys. PhaseInstanceID resolves to the
+		// terminal+complete instance above, so phase_complete serializes true.
+		"owner/repo#2": {
+			Agent:           "engineer",
+			DispatchedAt:    time.Unix(1700000000, 0).UTC(),
+			ItemURL:         "https://github.com/owner/repo/issues/2",
+			Source:          "issue",
+			Workflow:        "soldesign",
+			Phase:           "design",
+			PhaseInstanceID: complete.ID,
+		},
+	}}
+	if err := saveDispatchState(dir, state); err != nil {
+		t.Fatalf("saveDispatchState: %v", err)
+	}
+
+	origDir, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("json", false, "")
+	_ = cmd.Flags().Set("json", "true")
+	var buf strings.Builder
+	cmd.SetOut(&buf)
+	if err := runDispatchStatus(cmd, nil); err != nil {
+		t.Fatalf("runDispatchStatus: %v", err)
+	}
+	out := strings.TrimSpace(buf.String())
+
+	// Top-level key set is frozen.
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &top); err != nil {
+		t.Fatalf("unmarshal %q: %v", out, err)
+	}
+	wantTop := map[string]bool{"dispatcher_running": true, "entries": true}
+	if len(top) != len(wantTop) {
+		t.Errorf("top-level key count = %d, want %d (%q)", len(top), len(wantTop), out)
+	}
+	for k := range wantTop {
+		if _, ok := top[k]; !ok {
+			t.Errorf("missing top-level key %q in %q", k, out)
+		}
+	}
+	for k := range top {
+		if !wantTop[k] {
+			t.Errorf("unexpected top-level key %q in %q", k, out)
+		}
+	}
+
+	// Per-entry key set is frozen.
+	var entries []map[string]json.RawMessage
+	if err := json.Unmarshal(top["entries"], &entries); err != nil {
+		t.Fatalf("unmarshal entries: %v", err)
+	}
+	// Entries are sorted by key: [0] = non-workflow #1, [1] = workflow #2.
+	if len(entries) != 2 {
+		t.Fatalf("want 2 entries, got %d (%q)", len(entries), out)
+	}
+
+	// entries[0] (non-workflow) keeps EXACTLY the original 6-key contract — the additive
+	// workflow/phase/phase_complete keys are omitempty and must NOT appear here.
+	wantEntry := map[string]bool{
+		"issue": true, "agent": true, "agent_running": true,
+		"item_url": true, "source": true, "dispatched_at": true,
+	}
+	if len(entries[0]) != len(wantEntry) {
+		t.Errorf("non-workflow entry key count = %d (%v), want %d", len(entries[0]), keysOf(entries[0]), len(wantEntry))
+	}
+	for k := range wantEntry {
+		if _, ok := entries[0][k]; !ok {
+			t.Errorf("missing non-workflow entry key %q in %q", k, out)
+		}
+	}
+	for k := range entries[0] {
+		if !wantEntry[k] {
+			t.Errorf("unexpected non-workflow entry key %q in %q", k, out)
+		}
+	}
+
+	// entries[1] (workflow) freezes the expanded 9-key contract: the 6 base keys PLUS the
+	// additive workflow / phase / phase_complete keys.
+	wantEntryWorkflow := map[string]bool{
+		"issue": true, "agent": true, "agent_running": true,
+		"item_url": true, "source": true, "dispatched_at": true,
+		"workflow": true, "phase": true, "phase_complete": true,
+	}
+	if len(entries[1]) != len(wantEntryWorkflow) {
+		t.Errorf("workflow entry key count = %d (%v), want %d", len(entries[1]), keysOf(entries[1]), len(wantEntryWorkflow))
+	}
+	for k := range wantEntryWorkflow {
+		if _, ok := entries[1][k]; !ok {
+			t.Errorf("missing workflow entry key %q in %q", k, out)
+		}
+	}
+	for k := range entries[1] {
+		if !wantEntryWorkflow[k] {
+			t.Errorf("unexpected workflow entry key %q in %q", k, out)
+		}
+	}
+
+	// Value-level guard: the entries reflect the seeded dispatch-state.json.
+	var parsed dispatchStatusJSON
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("unmarshal typed: %v", err)
+	}
+	e := parsed.Entries[0]
+	if e.Issue != "owner/repo#1" || e.Agent != "mgr" || e.Source != "issue" {
+		t.Errorf("entry = %+v, want issue=owner/repo#1 agent=mgr source=issue", e)
+	}
+	we := parsed.Entries[1]
+	if we.Issue != "owner/repo#2" || we.Workflow != "soldesign" || we.Phase != "design" || !we.PhaseComplete {
+		t.Errorf("workflow entry = %+v, want issue=owner/repo#2 workflow=soldesign phase=design phase_complete=true", we)
 	}
 }
 
@@ -838,4 +981,93 @@ func TestDispatchCycleLock(t *testing.T) {
 		t.Fatalf("acquire after release failed: %v", err)
 	}
 	defer lk2.Release()
+}
+
+// TestDispatchStatus_ShowsRealPhaseAndCompletion proves the K9 contract: `af dispatch
+// status` reports a workflow phase's completion from the recorded instance epic via the
+// store (instanceComplete), NOT from tmux session absence. A terminal+complete instance
+// reads phase_complete=true even though the agent's tmux session is absent; a
+// terminal-but-reset-closed instance reads phase_complete=false (a --reset also closes the
+// epic terminally, which a bare IsTerminal() would misread as completion).
+func TestDispatchStatus_ShowsRealPhaseAndCompletion(t *testing.T) {
+	dir := t.TempDir()
+	afDir := filepath.Join(dir, ".agentfactory")
+	os.MkdirAll(afDir, 0o755)
+	os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{"type":"factory","version":1}`), 0o644)
+
+	// setupHermeticSessions returns the SAME memstore that runDispatchStatus'
+	// newIssueStore(root, dispatchStoreActor) yields. Agent sessions are absent by
+	// default in the fake tmux, so completion can only come from the store, never tmux.
+	_, store := setupHermeticSessions(t)
+
+	complete := seedClosedEpic(t, store, config.CloseReasonFormulaComplete) // instanceComplete == true
+	notComplete := seedClosedEpic(t, store, config.CloseReasonResetSling)   // terminal but NOT complete
+
+	state := &dispatchState{Dispatched: map[string]dispatchEntry{
+		"owner/repo#1": { // completed per the store; agent tmux ABSENT
+			Agent:           "engineer",
+			DispatchedAt:    time.Unix(1700000000, 0).UTC(),
+			ItemURL:         "https://github.com/owner/repo/issues/1",
+			Source:          "issue",
+			Workflow:        "soldesign",
+			Phase:           "design",
+			PhaseInstanceID: complete.ID,
+		},
+		"owner/repo#2": { // terminal-but-reset-closed ⇒ NOT complete
+			Agent:           "engineer",
+			DispatchedAt:    time.Unix(1700000000, 0).UTC(),
+			ItemURL:         "https://github.com/owner/repo/issues/2",
+			Source:          "issue",
+			Workflow:        "soldesign",
+			Phase:           "design",
+			PhaseInstanceID: notComplete.ID,
+		},
+	}}
+	if err := saveDispatchState(dir, state); err != nil {
+		t.Fatalf("saveDispatchState: %v", err)
+	}
+
+	origDir, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("json", false, "")
+	_ = cmd.Flags().Set("json", "true")
+	var buf strings.Builder
+	cmd.SetOut(&buf)
+	if err := runDispatchStatus(cmd, nil); err != nil {
+		t.Fatalf("runDispatchStatus: %v", err)
+	}
+
+	var parsed dispatchStatusJSON
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &parsed); err != nil {
+		t.Fatalf("unmarshal %q: %v", buf.String(), err)
+	}
+	byKey := map[string]dispatchStatusEntry{}
+	for _, e := range parsed.Entries {
+		byKey[e.Issue] = e
+	}
+
+	c1, ok := byKey["owner/repo#1"]
+	if !ok {
+		t.Fatalf("missing entry owner/repo#1 in %q", buf.String())
+	}
+	if !c1.PhaseComplete {
+		t.Errorf("owner/repo#1 phase_complete = false, want true (instanceComplete on a closed-complete instance, agent tmux absent)")
+	}
+	if c1.AgentRunning {
+		t.Errorf("owner/repo#1 agent_running = true, want false — completion must NOT come from tmux presence")
+	}
+	if c1.Workflow != "soldesign" || c1.Phase != "design" {
+		t.Errorf("owner/repo#1 workflow/phase = %q/%q, want soldesign/design (read off the record)", c1.Workflow, c1.Phase)
+	}
+
+	c2, ok := byKey["owner/repo#2"]
+	if !ok {
+		t.Fatalf("missing entry owner/repo#2 in %q", buf.String())
+	}
+	if c2.PhaseComplete {
+		t.Errorf("owner/repo#2 phase_complete = true, want false (terminal-but-reset-closed must read NOT complete)")
+	}
 }

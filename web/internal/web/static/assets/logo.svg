@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30" width="30" height="30" role="img" aria-label="AgentFactory">
+  <defs>
+    <linearGradient id="afg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF2E97"/>
+      <stop offset="1" stop-color="#20E5FF"/>
+    </linearGradient>
+  </defs>
+  <rect x="1.5" y="1.5" width="27" height="27" rx="7" fill="#15131F" stroke="url(#afg)" stroke-width="1.5"/>
+  <path d="M15 6 L23 23 H19.2 L17.8 19.5 H12.2 L10.8 23 H7 Z M13.4 16.4 H16.6 L15 12.2 Z"
+        fill="url(#afg)"/>
+</svg>

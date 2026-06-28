@@ -193,11 +193,24 @@ def issuestore_get(engine, args):
 def _list_filter_clause(args):
     """Build WHERE clauses and params for List / Ready filtering.
 
-    Rules (store.go:138-145):
+    Authoritative contract: the `Filter` type in
+    internal/issuestore/store.go:151-167, and ADR-002
+    (docs/architecture/adrs/ADR-002-includeallagents-idiom.md).
+
+    Rules:
       - statuses nil/empty → non-terminal set.
       - statuses non-empty → OR of listed values.
       - include_closed=True AND statuses nil → include terminal too.
-      - include_all_agents=False AND assignee != "" → filter assignee=?
+      - assignee present → ALWAYS filter by assignee. An explicit assignee
+        wins; include_all_agents does NOT suppress an explicit assignee. The
+        store.go `Filter` contract states IncludeAllAgents "has NO effect
+        when Assignee is non-empty," and ADR-002 bypasses the actor overlay
+        — and therefore that opt-out — whenever an explicit assignee is set.
+        The actor overlay is constructed in Go (mcpstore); this store has no
+        actor concept and only executes the assignee Go already resolved.
+        (This keeps the real store equivalent to the memstore reference,
+        memstore.go:162, and is pinned cross-adapter by RunStoreContract's
+        ExplicitAssigneeWinsOverActorOverlay Direction 4.)
     """
     clauses = []
     params = {}
@@ -233,8 +246,13 @@ def _list_filter_clause(args):
         params["itype"] = issue_type
 
     assignee = args.get("assignee", "")
-    include_all_agents = bool(args.get("include_all_agents", False))
-    if assignee and not include_all_agents:
+    include_all_agents = bool(args.get("include_all_agents", False))  # noqa: F841 — retained on the wire; removal is the deferred category-elimination (.designs/458)
+    # An explicit assignee ALWAYS scopes the result; include_all_agents does
+    # NOT suppress it. Authorities: internal/issuestore/store.go:151-167
+    # `Filter` ("IncludeAllAgents has NO effect when Assignee is non-empty")
+    # and ADR-002. The actor overlay is resolved in Go (mcpstore); this store
+    # only executes the assignee it is handed.
+    if assignee:
         clauses.append("assignee = :assignee")
         params["assignee"] = assignee
 

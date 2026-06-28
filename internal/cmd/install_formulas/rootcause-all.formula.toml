@@ -1,0 +1,852 @@
+description = """
+## Overview
+Systematic root cause analysis on problems using 5-whys, fishbone diagrams,
+and hypothesis testing. Each concern is investigated independently by a sub-agent
+to prevent premature conclusions.
+
+Requirements come from the assigned bead — which may contain an inline problem
+description, a path to a problem definition file, or a link to a GitHub issue.
+
+This formula guides an agent through the rootcause-all analysis process:
+1. Read the problem, extract ALL concerns, write concerns table
+2. Spawn parallel sub-agents to independently investigate each concern
+3. Collect verdicts, synthesize root causes from VALIDATED concerns only
+4. Document solution with implementation steps and enforcement levels
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| issue | cli | The issue ID assigned to this agent |
+
+## Failure Modes
+
+| Situation | Action |
+|-----------|--------|
+| Problem description unclear | Mail Supervisor for clarification, do not guess |
+| Sub-agent stuck | Re-launch the investigation for that concern |
+| All concerns INVALIDATED | Re-read problem, check if concerns were misidentified, mail Supervisor |
+| Tests fail | Fix them. Do not proceed with failures. |
+| Context filling up | Use af handoff to cycle to fresh session |
+| Blocked on external | Mail Supervisor, mark yourself stuck |
+
+## Anti-Patterns to Avoid
+
+| Anti-Pattern | Prevention |
+|--------------|------------|
+| Jumping to conclusions before investigating ALL concerns | Every concern gets its own sub-agent; no verdict until investigation completes |
+| Pre-judging concerns as "Note only" or "Out-of-scope" | ALL concerns start PENDING and get full investigation |
+| Single-threaded investigation | Launch ALL concern investigations in parallel |
+| Investigating execution mechanics when problem is content-related | If similar functionality works, investigate what differs in content/instructions |
+| Creating separate NEXTSTEPS.md | Everything goes in rootcause_analysis.md |
+| Trusting assumptions without evidence | Each concern must have evidence-based verdict |
+
+## !IMPORTANT - MANDATORY Exact Step Execution
+Execute each formula step EXACTLY as written, in order, with no modifications.
+Every step produces a file artifact at a known path. `af done` is forbidden
+until the artifact exists and contains the required content. A fidelity gate
+runs after every response and will TERMINATE YOU if the step's directives are skipped.
+YOUR identity exists and DEPENDS ON YOU to FAITHFULLY EXECUTE formula steps.
+"""
+formula = "rootcause-all"
+version = 1
+
+# ============================================================================
+# PRE-WORK INVARIANT STEPS
+# ============================================================================
+
+[[steps]]
+id = "load-context"
+title = "Load context and understand analysis assignment"
+description = """
+Initialize your session and understand the problem you're assigned to analyze.
+
+**1. Prime your environment:**
+```bash
+af prime                    # Load role context
+```
+
+**2. Read your assigned issue:**
+```bash
+af bead show {{issue}}           # Full issue details
+```
+
+**3. Check inbox for additional context:**
+```bash
+af mail inbox
+# Read any HANDOFF or assignment messages
+```
+
+**4. Extract requirements from the bead:**
+The bead is your source of truth. It may provide requirements in one of three forms:
+
+- **Inline requirements**: The bead description itself contains the problem description. Extract it directly.
+- **Problem file path**: The bead references a file (e.g., `IMPLREADME.md`). Read it completely.
+- **GitHub issue link**: The bead contains a URL (e.g., `https://github.com/org/repo/issues/123`).
+  Fetch the issue via `gh issue view <number> --repo <org/repo>` and extract the problem from it.
+
+Whichever form, capture the full problem description — this is your analysis input.
+
+**5. Identify analysis inputs:**
+- **Problem**: The bug, failure, or system issue to analyze
+- **Error messages**: Any error output or logs
+- **Reproduction steps**: How to trigger the problem
+- **Acceptance criteria**: What "fixed" looks like
+- **Context files**: Any referenced artifacts
+
+**6. Verify you can proceed:**
+- No unresolved blockers on the issue
+- You understand the problem
+- Required context is available
+
+If blocked or unclear, mail Supervisor immediately:
+```bash
+af mail send supervisor -s "HELP: Unclear problem requirements" -m "Issue: {{issue}}
+Question: <what you need clarified>"
+```
+
+**Exit criteria:** You understand the problem and can begin analysis."""
+
+[[steps]]
+id = "branch-setup"
+title = "Set up working branch"
+needs = ["load-context"]
+description = """
+Ensure you're on a clean feature branch ready for work.
+
+**1. Check current branch state:**
+```bash
+git status
+git branch --show-current
+```
+
+**2. If not on a feature branch, create one:**
+```bash
+# Standard naming: agent/<your-name> or feature/<issue-id>
+git checkout -b agent/<name>
+```
+
+**3. Ensure clean working state:**
+```bash
+git status                  # Should show "working tree clean"
+git stash list              # Should be empty
+```
+
+If dirty state from previous work:
+```bash
+# If changes are relevant to this issue:
+git add -u && git reset HEAD -- .agentfactory/ 2>/dev/null || true
+git commit -m "WIP: <description>"
+
+# If changes are unrelated cruft:
+git stash push -m "unrelated changes before {{issue}}"
+# Or discard if truly garbage:
+git checkout -- .
+```
+
+**4. Sync with main:**
+```bash
+git fetch origin
+git rebase origin/{{default_branch}}      # Get latest, rebase your branch
+```
+
+If rebase conflicts:
+- Resolve them carefully
+- Test after resolution
+- If stuck, mail Supervisor
+
+**Exit criteria:** You're on a clean feature branch, rebased on latest main."""
+
+[[steps]]
+id = "validate-contract"
+title = "Validate incoming design contract"
+needs = ["branch-setup"]
+description = """
+Gate: Inspect any incoming design contract or specification for completeness.
+
+**Purpose (Poka-yoke):** Catch missing or ambiguous requirements BEFORE work starts,
+not after hours of investigation.
+
+**1. Check if a design contract exists:**
+The bead may reference a design document, spec, or proposal. If so, verify it contains:
+- Clear problem statement
+- Acceptance criteria (what "fixed" looks like)
+- Error messages or reproduction steps
+
+**2. If a design contract exists:**
+- Read it fully
+- Flag any ambiguities or missing sections
+- If critical information is missing, mail Supervisor:
+```bash
+af mail send supervisor -s "HELP: Incomplete problem specification" -m "Issue: {{issue}}
+Missing: <what's missing from the specification>"
+```
+
+**3. If NO design contract exists:**
+This is normal for many assignments. The bead description or problem file IS your spec.
+Skip this gate — close this step and continue.
+
+**Exit criteria:** Problem specification validated (or confirmed absent), ready to proceed."""
+
+[[steps]]
+id = "preflight-tests"
+title = "Verify tests pass on main"
+needs = ["validate-contract"]
+description = """
+Check if the codebase is healthy BEFORE starting your work.
+
+**The Scotty Principle:** Don't walk past a broken warp core. But also don't
+let someone else's mess consume your entire mission.
+
+**1. Check tests on main:**
+```bash
+git stash                   # Save your branch state
+git checkout origin/{{default_branch}}
+# Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
+# Then run it. Examples: make test, npm test, cargo test, go test ./...
+```
+
+**2. If tests PASS:**
+```bash
+git checkout -              # Back to your branch
+git stash pop               # Restore state
+```
+Continue to phase-1-problem-intake step.
+
+**3. If tests FAIL on main:**
+
+Make a judgment call:
+
+| Situation | Action |
+|-----------|--------|
+| Quick fix (<15 min) | Fix it, commit to main, then continue |
+| Medium fix (15-60 min) | Fix if it blocks your work, else file bead |
+| Big fix (>1 hour) | File bead, notify Supervisor, proceed with your work |
+
+**Quick fix path:**
+```bash
+# Fix the issue
+git add <files>
+git commit -m "fix: <description> (pre-existing failure)"
+git push origin {{default_branch}}
+git checkout -
+git stash pop
+git rebase origin/{{default_branch}}      # Get your fix
+```
+
+**File and proceed path:**
+```bash
+af bead create --title "Pre-existing test failure: <description>" \
+  --type bug --priority 1
+
+af mail send supervisor -s "NOTICE: Main has failing tests" \
+  -m "Found pre-existing test failures on main.
+Filed: <bead-id>
+Proceeding with my assigned work ({{issue}})."
+
+git checkout -
+git stash pop
+```
+
+**Context consideration:**
+If fixing pre-existing failures consumed significant context:
+```bash
+af handoff -s "Fixed pre-existing failures, ready for assigned work" \
+  -m "Issue: {{issue}}
+Fixed: <what you fixed>
+Ready to start: phase-1-problem-intake step"
+```
+Fresh session continues from phase-1-problem-intake.
+
+**Exit criteria:** Tests pass on main (or issue filed), ready to begin analysis."""
+
+# ============================================================================
+# DOMAIN STEPS (from .claude/skills/rootcause-all/SKILL.md)
+# ============================================================================
+
+[[steps]]
+id = "phase-1-problem-intake"
+title = "Phase 1: Problem Intake and Concerns Enumeration"
+needs = ["preflight-tests"]
+description = """
+
+Read the problem completely and enumerate ALL concerns. Do NOT skip this phase.
+Do NOT jump to conclusions.
+
+**Critical Principle: No Premature Conclusions.**
+Every concern must be independently investigated and explicitly marked as
+VALIDATED or INVALIDATED. You may NOT conclude root cause until ALL concerns
+have a verdict other than PENDING.
+
+**1. Read the problem file/requirements completely**
+   - Extract: error messages, reproduction steps, acceptance criteria
+   - Note: any referenced artifacts or context files
+
+**2. Verify the build compiles:**
+```bash
+# Discover the project's build command from CLAUDE.md, Makefile, package.json, etc.
+# Then run it to verify compilation.
+```
+
+Read CLAUDE.md for architecture context if not already done.
+
+**3. Enumerate ALL concerns from the problem**
+
+Extract EVERY concern, issue, observation, failed attempt, or hypothesis mentioned.
+
+**ALL concerns start as "Investigate" with verdict "PENDING".**
+
+Do NOT pre-judge any concern as "Out-of-scope" or "Note only" — that determination
+comes AFTER investigation.
+
+**4. Write the concerns table to `$OUTPUT_DIR/rootcause_analysis.md` IMMEDIATELY**
+
+Anchor the output directory at the repository root via `git rev-parse --show-toplevel`
+so artifacts land in the committed tree regardless of your current working directory
+(default: `<repo-root>/.analysis/{{issue}}`):
+```bash
+OUTPUT_DIR="$(git rev-parse --show-toplevel)/.analysis/{{issue}}"
+mkdir -p "$OUTPUT_DIR"
+```
+
+Create the file with this structure:
+```markdown
+# Root Cause Analysis: [Brief Problem Description]
+
+**Date**: YYYY-MM-DD
+**Status**: Investigating
+**Problem File**: [path to problem file or bead reference]
+
+## Concerns from Problem File
+
+| # | Concern | Verdict | Evidence Link |
+|---|---------|---------|---------------|
+| 1 | [First concern extracted] | PENDING | [rootcause_concern_1.md] |
+| 2 | [Second concern extracted] | PENDING | [rootcause_concern_2.md] |
+| N | [Nth concern extracted] | PENDING | [rootcause_concern_N.md] |
+
+## Synthesized Root Cause(s)
+_To be completed after all concerns are investigated_
+
+## Solution
+_To be completed after root causes are identified_
+```
+
+**This file MUST exist before proceeding to Phase 2.**
+
+**Anti-patterns:**
+- Do NOT determine root cause before investigating ALL concerns
+- Do NOT mark anything as "Note only" before investigation
+- Do NOT skip any concern — every one gets a sub-agent
+
+**Exit criteria:** Problem file read, ALL concerns enumerated, `$OUTPUT_DIR/rootcause_analysis.md`
+created with concerns table (all PENDING)."""
+
+[[steps]]
+id = "phase-2-parallel-investigation"
+title = "Phase 2: Parallel Concern Investigation"
+needs = ["phase-1-problem-intake"]
+description = """
+
+Spawn one sub-agent per concern to investigate independently. This is CRITICAL —
+do NOT investigate concerns sequentially or skip any.
+
+**1. For EACH concern in the table, spawn an independent sub-agent:**
+
+First resolve `$OUTPUT_DIR` to its absolute path (`echo "$OUTPUT_DIR"`) and substitute
+that literal absolute path into each sub-agent's prompt — sub-agents run in their own
+working directory and cannot rely on your shell variable.
+
+Launch ALL concern investigations in parallel by including multiple Agent tool calls
+in a single message. Each sub-agent gets this prompt:
+
+```
+"Investigate ROOT CAUSE CONCERN #N: [concern description]
+
+Context: [Brief problem summary from problem file]
+
+Your task:
+1. Investigate ONLY this specific concern
+2. Apply 5-whys analysis with evidence from the codebase
+3. Search for relevant code, tests, logs, and documentation
+4. Use build/test commands as needed (check CLAUDE.md for project commands)
+5. Write your complete findings to: $OUTPUT_DIR/rootcause_concern_N.md
+
+Your output file ($OUTPUT_DIR/rootcause_concern_N.md) MUST contain:
+- The specific concern being investigated
+- 5-whys analysis with code references (file:line)
+- Evidence gathered (code snippets, test results, log output)
+- Your verdict: VALIDATED or INVALIDATED
+- Justification for the verdict
+
+Template:
+# Concern #N Investigation: [concern description]
+
+**Investigated by**: Sub-agent
+**Date**: YYYY-MM-DD
+
+## Verdict: [VALIDATED | INVALIDATED]
+
+## Summary
+[One paragraph summary of findings]
+
+## 5-Whys Analysis
+
+### Why #1: [question]
+[Answer with evidence - file:line references]
+
+### Why #2: [question]
+[Answer with evidence]
+
+[Continue until root cause or invalidation]
+
+## Evidence Gathered
+
+| Finding | Source | Evidence |
+|---------|--------|----------|
+| [what] | [file:line] | [snippet] |
+
+## Tests Performed
+
+| Test | Command | Result |
+|------|---------|--------|
+| [what] | [command] | [PASS/FAIL + output] |
+
+## Conclusion
+[Why this concern is VALIDATED or INVALIDATED, with evidence references]
+
+Return your verdict (VALIDATED or INVALIDATED) with a one-sentence summary."
+```
+
+**2. Wait for ALL sub-agents to complete**
+
+Monitor background tasks. Each writes to its respective `$OUTPUT_DIR/rootcause_concern_N.md`.
+
+**CRITICAL:** Do NOT proceed to synthesis until ALL sub-agents have completed.
+Every concern must have a verdict before you can synthesize.
+
+**Anti-patterns:**
+- Do NOT pre-judge concerns
+- Do NOT skip any concern
+- Do NOT investigate concerns yourself — the sub-agents do the work
+- Single-threaded investigation defeats the purpose — launch ALL in parallel
+
+**Context management:** If you have many concerns (>6), consider using `af handoff`
+after launching sub-agents and collecting results:
+```bash
+af handoff -s "Concern investigations complete" -m "Issue: {{issue}}
+All N concern investigations written to $OUTPUT_DIR/rootcause_concern_*.md
+Ready for: phase-3-synthesis step"
+```
+
+**Exit criteria:** ALL concern investigation files exist ($OUTPUT_DIR/rootcause_concern_N.md),
+each with a VALIDATED or INVALIDATED verdict."""
+
+[[steps]]
+id = "phase-3-synthesis"
+title = "Phase 3: Synthesis"
+needs = ["phase-2-parallel-investigation"]
+description = """
+
+Read all investigation files and synthesize root causes from VALIDATED concerns only.
+
+**1. Read ALL concern investigation files:**
+```bash
+ls "$OUTPUT_DIR"/rootcause_concern_*.md
+```
+Read each file completely.
+
+**2. Update the concerns table in `$OUTPUT_DIR/rootcause_analysis.md`:**
+
+For each concern, update the verdict column based on the sub-agent's findings:
+- **VALIDATED** — Confirmed as contributing to the problem (with evidence)
+- **INVALIDATED** — Disproven or not relevant (with evidence)
+
+**You may NOT conclude root cause until ALL concerns have a verdict other than PENDING.**
+
+**3. Synthesize root causes from VALIDATED concerns only:**
+
+Update `$OUTPUT_DIR/rootcause_analysis.md` with:
+
+```markdown
+## Synthesized Root Cause(s)
+
+Based on investigation of N concerns:
+- X concerns VALIDATED as contributing factors
+- Y concerns INVALIDATED
+
+### Primary Root Cause
+[From validated concern #X — link to rootcause_concern_X.md]
+
+### Contributing Factors
+[From other validated concerns]
+
+## Fishbone Diagram
+                            [PROBLEM]
+                                ▲
+            ┌───────────────────┼───────────────────┐
+            │                   │                   │
+      [VALIDATED]         [VALIDATED]        [INVALIDATED]
+      Concern #X          Concern #Y          Concern #Z
+            │                   │                   │
+      [evidence]          [evidence]          [ruled out]
+```
+
+**4. If ALL concerns are INVALIDATED:**
+Re-read the problem file. Check if:
+- Concerns were misidentified
+- The problem description is incomplete
+- Additional investigation areas exist
+Mail Supervisor if stuck.
+
+**Anti-pattern:** Do NOT investigate working systems when the problem is about
+inadequate output. If similar functionality works, investigate what differs in
+the content/instructions, not the execution mechanics. Before finalizing any
+finding, ask: "Does this directly address the acceptance criteria?"
+
+**Exit criteria:** All verdicts updated, root causes synthesized from VALIDATED
+concerns only, fishbone diagram included."""
+
+[[steps]]
+id = "phase-4-solution-documentation"
+title = "Phase 4: Solution and Documentation"
+needs = ["phase-3-synthesis"]
+description = """
+
+Document the solution based on validated root causes. Everything goes in
+`$OUTPUT_DIR/rootcause_analysis.md` — do NOT create a separate NEXTSTEPS.md.
+
+**Single Solution Requirement:** If multiple approaches are viable, evaluate them
+during analysis and select ONE. Do not present OPTIONS for downstream skills to
+choose from. The implementer should receive a single, concrete solution with a
+single "Files to Modify" table.
+
+**1. Document the solution in `$OUTPUT_DIR/rootcause_analysis.md`:**
+
+```markdown
+## Solution
+
+### Files to Modify
+| File | Change |
+|------|--------|
+| [path/to/file] | [Description of change] |
+
+### Implementation Steps
+1. [Step based on validated root causes]
+2. [Include code snippets showing exact changes]
+
+### Enforcement Level
+| Step | Level | Notes |
+|------|-------|-------|
+| [Step description] | [Interlock/Guard/Instruction/Advisory] | [why this level] |
+```
+
+**2. Enforcement-Level Check:**
+After writing the solution, classify each implementation step:
+- **Interlock**: Code makes the failure impossible
+- **Runtime guard**: Code detects and blocks at runtime
+- **Instruction**: Relies on an actor interpreting text correctly
+- **Advisory**: Comments, docs, or warnings only
+
+**If the primary fix is Instruction or Advisory level**, also describe what a
+code-level interlock would look like. The downstream `/rootcause-review` gates
+on enforcement level.
+
+```markdown
+**If primary fix is Instruction or Advisory:**
+What would code-level enforcement look like?
+[Describe the interlock or runtime guard that would make the failure impossible]
+```
+
+**3. Add verification steps:**
+
+```markdown
+### Verification Steps
+1. [Command to run after changes]
+2. [Expected outcome]
+
+### Code Convention Issues (if any)
+[Note any convention inconsistencies discovered during analysis]
+```
+
+**4. Commit the analysis.**
+The analysis lives at the repository root (`$OUTPUT_DIR`, i.e. `<repo-root>/.analysis/{{issue}}/`)
+and IS the deliverable. Commit it so it lands in your PR:
+```bash
+OUTPUT_DIR="$(git rev-parse --show-toplevel)/.analysis/{{issue}}"
+git add "$OUTPUT_DIR"
+git commit -m "analysis: root cause analysis for {{issue}}"
+```
+
+**Success Criteria (from rootcause-all skill):**
+1. ALL concerns investigated (no PENDING verdicts remain)
+2. Each concern has its own `$OUTPUT_DIR/rootcause_concern_N.md` file with evidence
+3. `$OUTPUT_DIR/rootcause_analysis.md` contains updated verdicts, synthesized root causes,
+   solution with files to modify, implementation steps, and verification steps
+4. Root cause(s) drawn ONLY from VALIDATED concerns
+5. Solution addresses the validated root causes
+6. Everything in ONE document — no separate NEXTSTEPS.md
+
+**Exit criteria:** Complete analysis committed with solution, enforcement levels,
+and verification steps."""
+
+# ============================================================================
+# POST-WORK INVARIANT STEPS
+# ============================================================================
+
+[[steps]]
+id = "self-review"
+title = "Self-review changes"
+needs = ["phase-4-solution-documentation"]
+description = """
+Review your own changes before running tests.
+
+**1. Review the diff:**
+```bash
+git diff origin/{{default_branch}}...HEAD     # All changes vs main
+git log --oneline origin/{{default_branch}}..HEAD  # All commits
+```
+
+**2. Check for common issues:**
+
+| Category | Look For |
+|----------|----------|
+| Bugs | Off-by-one, null handling, edge cases |
+| Security | Injection, auth bypass, exposed secrets |
+| Style | Naming, formatting, code organization |
+| Completeness | Missing error handling, incomplete paths |
+| Cruft | Debug prints, commented code, TODOs |
+
+**3. Fix issues found:**
+Don't just note them - fix them now. Amend or add commits as needed.
+
+**4. Verify no unintended changes:**
+```bash
+git diff --stat origin/{{default_branch}}...HEAD
+# Only files relevant to {{issue}} should appear
+```
+
+If you accidentally modified unrelated files, remove those changes.
+
+**Exit criteria:** Changes are clean, reviewed, and ready for testing."""
+
+[[steps]]
+id = "run-tests"
+title = "Run tests and verify coverage"
+needs = ["self-review"]
+description = """
+Verify your changes don't break anything and are properly tested.
+
+**1. Run the full test suite:**
+```bash
+# Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
+# Then run it. Examples: make test, npm test, cargo test, go test ./...
+```
+
+**ALL TESTS MUST PASS.** Do not proceed with failures.
+
+**2. If tests fail:**
+- Read the failure output carefully
+- Determine if your change caused it:
+  - If yes: Fix it. Return to implement step if needed.
+  - If no (pre-existing): File a bead, but still must pass for your PR
+
+```bash
+# Check if failure exists on main:
+git stash
+git checkout {{default_branch}}
+# Run the same test command you discovered above
+git checkout -
+git stash pop
+```
+
+**3. Verify test coverage for new code:**
+- New features should have tests
+- Bug fixes should have regression tests
+- If you added significant code without tests, add them now
+
+**4. Validate terraform if .tf files were modified:**
+```bash
+# Check if any .tf files were changed in this branch
+TF_CHANGED=$(git diff --name-only origin/{{default_branch}}...HEAD -- '*.tf' | head -1)
+if [ -n "$TF_CHANGED" ]; then
+  echo "Terraform files modified — running validation..."
+  TF_DIR=$(dirname "$TF_CHANGED")
+  (cd "$TF_DIR" && terraform validate) || { echo "FAIL: terraform validate failed"; exit 1; }
+  terraform fmt -check -recursive "$TF_DIR" || { echo "FAIL: terraform fmt check failed — run 'terraform fmt'"; exit 1; }
+  echo "Terraform validation passed."
+fi
+```
+
+**5. Run any other quality checks:**
+```bash
+# Linting (if configured)
+golangci-lint run ./...
+
+# Build check
+go build ./...
+```
+
+**Exit criteria:** All tests pass, terraform valid (if applicable), new code has appropriate test coverage."""
+
+[[steps]]
+id = "self-verify"
+title = "Verify analysis matches requirements"
+needs = ["run-tests"]
+description = """
+Gate: Verify the analysis output matches what was requested (Jidoka).
+
+**Purpose:** Catch incomplete or off-target analysis BEFORE submission.
+
+**1. Re-read the original requirements** from the bead or problem file.
+
+**2. Verify the analysis covers everything requested:**
+
+| Check | Pass? |
+|-------|-------|
+| All concerns from the problem are addressed (no PENDING verdicts) | |
+| Root causes are drawn ONLY from VALIDATED concerns | |
+| Solution includes "Files to Modify" table | |
+| Implementation steps include code snippets | |
+| Enforcement level is classified for each step | |
+| Verification steps are present | |
+| No separate NEXTSTEPS.md exists | |
+
+**3. If a design contract or spec was provided (from validate-contract step):**
+- Verify the analysis addresses the acceptance criteria from the contract
+- Verify the solution scope matches what was requested
+
+**4. If NO design contract exists:**
+This is typical. Verify instead that:
+- The analysis addresses the problem described in the bead
+- The solution is actionable by a downstream implementer
+
+**5. If ANY check fails:**
+Go back and fix the gap. Do NOT proceed with an incomplete analysis.
+
+**Exit criteria:** Analysis verified against original requirements, all checks pass."""
+
+[[steps]]
+id = "cleanup-workspace"
+title = "Clean up workspace"
+needs = ["self-verify"]
+description = """
+Ensure workspace is pristine before handoff.
+
+**Note:** The rootcause-all process creates analysis files in `<repo-root>/.analysis/{{issue}}/`
+which are the actual deliverables — `rootcause_analysis.md` and `rootcause_concern_*.md`
+are committed as part of the work product and should NOT be deleted.
+
+**1. Check for uncommitted changes:**
+```bash
+git status
+```
+Must show "working tree clean". If not:
+- Commit legitimate changes
+- Discard garbage: `git checkout -- .`
+
+**2. Check for untracked files:**
+```bash
+git status --porcelain
+```
+Should be empty. If not:
+- Add to .gitignore if appropriate
+- Remove if temporary: `rm <file>`
+- Commit if needed
+
+**3. Check stash:**
+```bash
+git stash list
+```
+Should be empty. If not:
+- Pop and commit: `git stash pop && git add -u && git reset HEAD -- .agentfactory/ 2>/dev/null || true && git commit`
+- Or drop if garbage: `git stash drop`
+
+**4. Push your branch:**
+```bash
+git push -u origin $(git branch --show-current)
+```
+
+**5. Verify nothing left behind:**
+```bash
+git status                  # Clean
+git stash list              # Empty
+git log origin/{{default_branch}}..HEAD   # Your commits
+git diff origin/{{default_branch}}...HEAD # Your changes (expected)
+```
+
+**Exit criteria:** Branch pushed, workspace clean, no cruft."""
+
+[[steps]]
+id = "prepare-for-review"
+title = "Prepare work for review"
+needs = ["cleanup-workspace"]
+description = """
+Verify work is complete and ready for review.
+
+**Note:** Do NOT close the issue. The Supervisor will close it after successful merge.
+This enables conflict-resolution retries without reopening closed issues.
+
+**1. Verify the issue shows your work:**
+```bash
+af bead show {{issue}}
+# Status should still be 'in_progress' (you're working on it)
+```
+
+**2. Add completion notes:**
+```bash
+af bead update {{issue}} --notes "Implemented: root cause analysis for {{issue}}.
+Analysis artifacts in .analysis/{{issue}}/
+Includes: rootcause_analysis.md with concerns table, synthesized root causes,
+solution with enforcement levels, and per-concern investigation files."
+```
+
+**Exit criteria:** Issue updated with completion notes."""
+
+[[steps]]
+id = "submit-and-exit"
+title = "Submit PR and exit"
+needs = ["prepare-for-review"]
+description = """
+Create a PR and signal completion.
+
+**Ephemeral Agent Model:**
+Once you submit, you're done. The Supervisor will:
+1. Review and merge your PR
+2. Handle rebasing (mechanical rebases done automatically)
+3. Close your issue after successful merge
+4. Create conflict-resolution tasks if needed (fresh agent handles those)
+
+**1. Create a pull request:**
+```bash
+gh pr create --title "analysis: root cause analysis ({{issue}})" \
+  --body "Root cause analysis for {{issue}}.
+See .analysis/{{issue}}/rootcause_analysis.md for synthesized findings and solution."
+```
+
+**2. Complete the formula:**
+```bash
+af done
+```
+
+`af done` closes the current formula step and — since this is the last step —
+mails WORK_DONE to the Supervisor and cleans up the checkpoint.
+
+**3. You're done:**
+Your PR is open and the Supervisor knows you're done.
+Your workspace can be cleaned up - all work is pushed to origin.
+
+If you have context remaining, you may:
+- Pick up new work from `af prime`
+- Or use `af handoff` to cycle to a fresh session
+
+If the Supervisor needs conflict resolution, it will dispatch a fresh agent.
+You do NOT need to wait around.
+
+**Exit criteria:** PR created, Supervisor notified via WORK_DONE, agent done."""
+
+[vars]
+[vars.issue]
+description = "The issue ID assigned to this agent"
+required = true
+source = "cli"

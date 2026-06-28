@@ -1,0 +1,80 @@
+/* ============================================================================
+   variables.css — Direction A · "NEON BAZAAR" (FINAL)
+   DESIGN TOKENS ONLY. The factory as a dense night-market of competing
+   illuminated signs; each agent is a glowing shop-sign on a scannable grid.
+   Single approved direction — tokens live under :root (no .exp-a scoping).
+   Every component rule in main.css references these via var().
+   ========================================================================== */
+
+/* Web fonts with full offline fallback stacks declared on the families below,
+   so the UI looks right even if the network is unavailable. */
+@import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Sora:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap');
+
+:root{
+  /* ---- base surfaces (deep blue-violet ink — never pure #000) ---- */
+  --ink:#0B0A14;            /* base background */
+  --panel:#15131F;          /* card / panel surface */
+  --panel-2:#1C1929;        /* raised inset surface */
+  --line:#2A2640;           /* borders / rules */
+  --line-soft:#221F33;      /* faint separators */
+
+  /* ---- polychromatic neon (the aesthetic risk: 4 live accents) ---- */
+  --neon-magenta:#FF2E97;   /* primary brand */
+  --neon-cyan:#20E5FF;      /* secondary / data */
+  --neon-violet:#B26BFF;    /* tertiary / accents */
+  --signage-amber:#FFC24B;  /* highlights / GATE badge */
+
+  /* ---- text ---- */
+  --text:#EDEAFF;
+  --muted:#9A93B5;          /* contrast-checked muted text */
+
+  /* ---- destructive — deliberately NOT the magenta brand ---- */
+  --danger:#FF5630;         /* red-orange, destructive ONLY */
+
+  /* ---- accessibility focus = the cyan accent ---- */
+  --focus:#20E5FF;
+
+  /* ---- type stacks (full fallbacks so it reads right offline) ---- */
+  --font-display:"Chakra Petch","Bahnschrift","Segoe UI Semibold",system-ui,sans-serif;
+  --font-body:"Sora","Segoe UI",Roboto,system-ui,Helvetica,Arial,sans-serif;
+  --font-mono:"Space Mono",ui-monospace,"SFMono-Regular","Cascadia Mono",Consolas,monospace;
+
+  /* ---- type scale 13 / 15 / 20 / 32 / 48 ---- */
+  --t-xs:13px;
+  --t-sm:15px;
+  --t-md:20px;
+  --t-lg:32px;
+  --t-xl:48px;
+
+  /* ---- spacing scale (consistent rhythm; polish over v1) ---- */
+  --space-1:4px;
+  --space-2:6px;
+  --space-3:8px;
+  --space-4:11px;
+  --space-5:14px;
+  --space-6:18px;
+  --space-7:22px;
+  --space-8:26px;
+  --space-9:32px;
+  --space-10:44px;
+
+  /* ---- radii ---- */
+  --r:12px;                 /* card radius */
+  --r-sm:8px;
+  --r-xs:6px;
+
+  /* ---- layout ---- */
+  --maxw:1280px;
+  --topbar-h:104px;         /* sticky offset for the filter row */
+
+  /* ---- elevation ---- */
+  --shadow-pop:0 14px 40px rgba(0,0,0,.55);
+  --shadow-dialog:0 0 0 1px rgba(255,86,48,.25), 0 24px 70px rgba(0,0,0,.6);
+
+  /* ---- the night-market ambient field (radial neon haze on the ink) ---- */
+  --field:
+    radial-gradient(1100px 540px at 12% -8%, rgba(255,46,151,.10), transparent 60%),
+    radial-gradient(1000px 520px at 92% -4%, rgba(32,229,255,.09), transparent 60%),
+    radial-gradient(900px 700px at 60% 120%, rgba(178,107,255,.08), transparent 60%),
+    var(--ink);
+}

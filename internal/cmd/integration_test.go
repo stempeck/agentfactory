@@ -44,11 +44,24 @@ func findRepoRoot(t *testing.T) string {
 // ModuleNotFoundError during server start.
 func requirePython3WithServerDeps(t *testing.T) {
 	t.Helper()
+	// Route the missing-dep decision through realStoreGateDecision (the pure,
+	// unit-tested predicate in realstore_gate_test.go). afRequireRealStore is the
+	// CI signal captured in TestMain before NeutralizeAFEnv wiped it. Under the
+	// gating integration lane (AF_REQUIRE_REAL_STORE=1) a missing dep HARD-FAILS,
+	// so this real-store gate — incl. the sole #458 Gap-1 catcher
+	// TestAgentsListIntegration_OwnInstancePerAgent — can never silently no-op →
+	// green under CI Python/venv drift. Locally (signal unset) it stays a friendly
+	// skip, matching internal/issuestore/mcpstore/mcpstore_test.go. t.Skipf and
+	// t.Fatalf share func(string, ...any), so one selector covers both probes.
+	fail := t.Skipf
+	if realStoreGateDecision(afRequireRealStore, true) == realStoreFatal {
+		fail = t.Fatalf
+	}
 	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 not available")
+		fail("python3 not available")
 	}
 	if out, err := exec.Command("python3", "-c", "import aiohttp, sqlalchemy").CombinedOutput(); err != nil {
-		t.Skipf("python3 missing server deps (aiohttp/sqlalchemy): %s", out)
+		fail("python3 missing server deps (aiohttp/sqlalchemy): %s", out)
 	}
 }
 

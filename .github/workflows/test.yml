@@ -47,14 +47,63 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+      # Issue #435: this lane's header declares "no external backend on PATH", yet
+      # TestWebBridgeHostListenerRoundTrip (internal/cmd/quickdocker_test.go) extracts and
+      # runs quickdocker.sh's REAL host-listener ladder, which binds a loopback socket via
+      # socat OR python3. Without one of those on PATH the ladder exit 1's binding nothing
+      # and the test times out — making the lane's pass/fail depend on incidental runner
+      # tooling (the self-hosted pool is heterogeneous). This step GUARANTEES python3 (the
+      # ladder's universal fallback, already a de-facto hard dependency per
+      # quickdocker.sh:138-139), mirroring the integration job below. This is a deliberate,
+      # DECLARED exception to the lane's hermeticity — not contract drift. (The test itself
+      # fast-skips when neither tool is present, so a dev machine without python3 is
+      # unaffected; in CI this step ensures the round-trip is exercised, never skipped.)
+      - name: install python 3.12 (host listener tool for quickdocker.sh round-trip; Issue #435)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: go build
         run: go build ./...
       - name: make test
         run: make test
 
+  web-unit:
+    name: web-unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      # The web console lives in its OWN Go module (web/go.mod, module
+      # github.com/stempeck/agentfactory-web) and is INVISIBLE to the root `unit` job's
+      # `go build ./...` / `make test` (a nested go.mod is not covered by the root module's ./...).
+      # This job compiles + tests it directly — including the Phase-5 guards
+      # TestExtractability_OwnModule_NoInternalImport and TestEntrypoint_WebuiAbsent_NoOp.
+      - name: web build
+        run: cd web && go build ./...
+      - name: web test
+        run: cd web && go test ./... -count=1
+      # Exercise the installed-artifact path: `make build-webui` runs `cd web && go build
+      # -o ../webui ./cmd/afweb`, producing the named `webui` binary the container bootstrap
+      # (quickstart.sh install_af) installs to ~/.local/bin/webui. The plain `cd web && go
+      # build ./...` step above compiles the module but discards its output, so it never
+      # exercises this `-o ../webui` path. (Issue #425 Phase 0 design AC: "make build-webui
+      # runs in CI and the produced binary is the one installed (no stale copy).")
+      - name: build-webui artifact
+        run: make build-webui && test -x webui
+
   integration:
     name: integration
     runs-on: ubuntu-latest
+    # Gap-4 (issue #458): arm mcpstore_test.go's no-silent-skip guard so a missing
+    # python3/aiohttp/sqlalchemy HARD-FAILS this gating lane (t.Fatal) instead of
+    # silently skipping green — a green skip here would say nothing about the real
+    # store, the failure mode #458 calls out. Set ONLY on this job; `unit` and
+    # `web-unit` run against memstore and must NOT be affected. Mirrors the unit
+    # job's Issue #435 "never silently skipped" guarantee precedent.
+    env:
+      AF_REQUIRE_REAL_STORE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

@@ -65,7 +65,7 @@ YOUR identity exists and DEPENDS ON YOU to FAITHFULLY EXECUTE formula steps.
   `design-feedback-N`; both name the same gate.
 """
 formula = "web-design"
-version = 1
+version = 2
 
 [inputs]
 [inputs.source]
@@ -1358,4 +1358,62 @@ system (for quality gates).
 - design-contract.yaml exists in `{{output_dir}}/final/`
 - All screens have elements with accessible roles and names
 - Contract committed and pushed
+"""
+
+[[steps]]
+id = "submit-and-exit"
+title = "Submit PR and exit"
+needs = ["generate-contract"]
+description = """
+Open a pull request for the finalized design, then signal completion. Without this step the
+formula stops at "pushed to a branch" and a human must open the PR by hand — the gap this closes.
+
+**Operational note:** run `git`/`gh`/`af` from the agent working directory (the one containing
+`.runtime/`); `cd` back if a command moves you. All artifacts are already committed and pushed by
+finalize-prototype and generate-contract — this step only opens the PR.
+
+**1. Ensure the branch is pushed (no-op if already up to date):**
+```bash
+BRANCH=$(git branch --show-current)
+git push origin "$BRANCH"
+```
+
+**2. Open a PR against the default branch — idempotent (skip if one already exists):**
+```bash
+EXISTING=$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url // empty')
+if [ -n "$EXISTING" ]; then
+  echo "PR already open for $BRANCH: $EXISTING — not creating a duplicate."
+  PR_URL="$EXISTING"
+else
+  PR_URL=$(gh pr create --title "design: web UI prototype (web-design)" --body "Interactive web UI design prototype generated via the web-design formula.
+
+## Finalized artifacts
+- Prototype:        {{output_dir}}/final/index.html
+- Design decisions: {{output_dir}}/design-decisions.md
+- Prototype guide:  {{output_dir}}/prototype-guide.md
+- Design contract:  {{output_dir}}/final/design-contract.yaml
+
+Source: {{source}}
+Open {{output_dir}}/final/index.html to view. Ready for implementation review.
+
+Note: this branch carries the full design history (all iterations + final/); the finalized
+deliverable is {{output_dir}}/final/.")
+fi
+echo "PR: $PR_URL"
+```
+
+**3. Verify the PR exists before completing (do NOT close this step without it):**
+```bash
+[ -n "$PR_URL" ] || { echo "HARD STOP: no PR URL — NOT running af done."; exit 1; }
+```
+
+**4. Complete the formula:**
+```bash
+af done
+```
+`af done` closes this final step and mails WORK_DONE to the manager, with the PR open.
+
+**Exit criteria:**
+- A pull request is open against the default branch for this design (PR_URL non-empty)
+- WORK_DONE mailed to the manager via `af done`
 """

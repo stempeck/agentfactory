@@ -123,7 +123,7 @@ func readDarwinMemAvailableMB() (uint64, error) {
 	return (freePages + inactivePages) * pageSize / (1024 * 1024), nil
 }
 
-// tmuxClient is the exact union of the 11 *tmux.Tmux methods that Manager.Start()
+// tmuxClient is the exact union of the 13 *tmux.Tmux methods that Manager.Start()
 // and Manager.Stop() call. Typing Manager.tmux to this interface is the seam that
 // lets tests inject a fake; the compile assertion below guarantees the real
 // client still satisfies it.
@@ -133,6 +133,8 @@ type tmuxClient interface {
 	KillSession(name string) error
 	NewSession(name, workDir string) error
 	SetEnvironment(session, key, value string) error
+	SetOption(session, name, value string) error
+	ShowOption(session, name string) (string, error)
 	WaitForShellReady(session string, timeout time.Duration) error
 	SendKeysDelayed(session, keys string, delayMs int) error
 	WaitForCommand(session string, excludeCommands []string, timeout time.Duration) error
@@ -333,6 +335,19 @@ func (m *Manager) Start() error {
 		if m.buildHost.MountPath != "" {
 			_ = m.tmux.SetEnvironment(sessionID, "AF_HOST_MOUNT", m.buildHost.MountPath)
 		}
+	}
+
+	// Enable mouse so the wheel scrolls Claude's conversation viewport instead of
+	// being translated to arrow keys by the outer terminal's alternate-scroll
+	// (Issue #412, Fix A). Session-scoped — agent sessions only, never promoted to
+	// global. Best-effort: a failed apply must never abort session creation.
+	_ = m.tmux.SetOption(sessionID, "mouse", "on")
+	// Best-effort read-back: a silent apply failure would leave the wheel scrolling
+	// broken with no signal (Issue #412 Gap 7). Surface a single stderr warning if
+	// the option did not take, mirroring the warning idiom used above. A read error
+	// is itself swallowed (warn-or-stay-silent) — this must never abort Start().
+	if v, err := m.tmux.ShowOption(sessionID, "mouse"); err == nil && v != "on" {
+		fmt.Fprintf(os.Stderr, "warning: mouse option did not take for %s (got %q, want \"on\") — wheel scrollback may not work\n", sessionID, v)
 	}
 
 	// Wait for shell to be ready

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -68,7 +69,10 @@ Examples:
 
 func init() {
 	slingCmd.Flags().StringVar(&slingFormulaName, "formula", "", "Formula name to instantiate")
-	slingCmd.Flags().StringSliceVar(&slingVars, "var", nil, "Variable in key=val format (repeatable)")
+	// StringArrayVar (not StringSliceVar): each --var is taken verbatim as one element,
+	// so a comma in a value (e.g. --var pr_uri=a,b) is preserved instead of being
+	// CSV-split into a malformed second var. --var is repeatable for multiple variables.
+	slingCmd.Flags().StringArrayVar(&slingVars, "var", nil, "Variable in key=val format (repeatable)")
 	slingCmd.Flags().StringVar(&slingAgent, "agent", "", "Agent to dispatch to or launch")
 	slingCmd.Flags().BoolVar(&slingNoLaunch, "no-launch", false, "Create beads only, skip tmux session launch")
 	slingCmd.Flags().BoolVar(&slingReset, "reset", false, "Force-reset target agent: close beads, remove worktree (even if dirty), clean all runtime state")
@@ -136,7 +140,7 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 		if err := mgr.Stop(); err != nil && err != session.ErrNotRunning {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to stop %s: %v\n", agentName, err)
 		}
-		if err := resetAgentState(cmd.Context(), cmd.OutOrStdout(), root, agentName, "reset by af sling --reset"); err != nil {
+		if err := resetAgentState(cmd.Context(), cmd.OutOrStdout(), root, agentName, config.CloseReasonResetSling); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: reset incomplete for %s: %v\n", agentName, err)
 		}
 	} else if !slingNoLaunch {
@@ -287,7 +291,7 @@ func runFormulaInstantiation(cmd *cobra.Command, root, wd string, args []string)
 			if err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "%s: warning: cannot initialize store for bead cleanup: %v\n", slingAgent, err)
 			} else {
-				closedCount := closeAgentBeads(cmd.Context(), store, slingAgent, "reset by af sling --formula --reset")
+				closedCount := closeAgentBeads(cmd.Context(), store, slingAgent, config.CloseReasonResetFormulaSling)
 				if closedCount > 0 {
 					fmt.Fprintf(cmd.OutOrStdout(), "  %s: closed %d formula beads\n", slingAgent, closedCount)
 				}
@@ -523,6 +527,14 @@ func instantiateFormulaWorkflow(params InstantiateParams, w io.Writer) (string, 
 		return "", nil, agentName, err
 	}
 
+	// 6.1. Persist the resolved variables on a dedicated metadata child bead so
+	// an external read model (`af agents list --json`) can surface "what inputs
+	// was this agent given" (AC-1(ii) / H-2). This is strictly additive and
+	// FAIL-OPEN: it runs on the AC-8 hot path (every interactive AND dispatched
+	// run reaches here), so persisting inputs — a read-model convenience — must
+	// never break instantiation. Any failure is logged and swallowed (H-P2).
+	persistResolvedVars(ctx, store, instanceID, agentName, resolvedVars, w)
+
 	// 7. Add DAG dependencies
 	if err := addStepDependencies(ctx, store, f, stepIDs); err != nil {
 		return instanceID, stepIDs, agentName, err
@@ -578,6 +590,58 @@ func expandStepVars(f *formula.Formula, vars map[string]string) {
 
 // instantiateFormula creates the parent bead and step beads via the issue store.
 // Returns the instance bead ID and a map of step ID → bead ID.
+// persistResolvedVars writes the resolved formula variables as JSON onto a
+// dedicated metadata bead so machine consumers of `af agents list --json` can
+// report the inputs an agent was slung with (H-2). The carrier:
+//   - is keyed to the instance by the unique label resolvedVarsInstanceLabel
+//     (NOT by Parent: instanceID). Keying via a label rather than parentage keeps
+//     the carrier out of the formula's step DAG: a child bead would inflate
+//     Ready.TotalSteps (corrupting af prime's "Step X of N" on every run) and
+//     could be reported as the active step by `af step current`. This preserves
+//     GAP-1's intent — a dedicated, instance-keyed, queryable metadata bead — and
+//     mirrors the existing orphan, labeled "assignment" bead above;
+//   - holds the map in Description, NOT Notes — Notes is a whole-field overwrite
+//     target (`af bead update`, GAP-1) and would be silently clobbered;
+//   - is closed immediately so it never lingers in open-work listings.
+//
+// It is entirely FAIL-OPEN (H-P2): marshal failure, store.Create failure, a
+// store.Close failure, or a panic are caught, logged to w, and swallowed — the
+// caller's instantiation result is identical to the pre-feature behavior. This
+// is mandatory because the function runs for every interactive `af sling` AND
+// every autonomous `af dispatch` auto-sling (the AC-8 success path).
+func persistResolvedVars(ctx context.Context, store issuestore.Store, instanceID, assignee string, vars map[string]string, w io.Writer) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(w, "warning: resolved_vars persistence panicked (ignored): %v\n", r)
+		}
+	}()
+
+	data, err := json.Marshal(vars)
+	if err != nil {
+		fmt.Fprintf(w, "warning: could not marshal resolved_vars (ignored): %v\n", err)
+		return
+	}
+
+	carrier, err := store.Create(ctx, issuestore.CreateParams{
+		Type:        issuestore.TypeTask,
+		Title:       "resolved-vars",
+		Description: string(data),
+		Assignee:    assignee,
+		Labels:      []string{resolvedVarsLabel, resolvedVarsInstanceLabel(instanceID)},
+	})
+	if err != nil {
+		fmt.Fprintf(w, "warning: could not persist resolved_vars (ignored): %v\n", err)
+		return
+	}
+
+	if err := store.Close(ctx, carrier.ID, "resolved_vars metadata carrier"); err != nil {
+		// Non-fatal: an open carrier is still readable (agents.go reads with
+		// IncludeClosed) and, being label-keyed not Parent-keyed, never pollutes
+		// the formula DAG even while open.
+		fmt.Fprintf(w, "warning: could not close resolved_vars carrier (ignored): %v\n", err)
+	}
+}
+
 func instantiateFormula(ctx context.Context, store issuestore.Store, f *formula.Formula, sortedIDs []string, slingAgent string) (string, map[string]string, error) {
 	// Create parent formula instance bead
 	parent, err := store.Create(ctx, issuestore.CreateParams{

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/stempeck/agentfactory/internal/fsutil"
 )
 
 // StartupConfig holds the contents of .agentfactory/startup.json. Unlike the
@@ -44,6 +46,22 @@ func LoadStartupConfig(root string) (*StartupConfig, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// SaveStartupConfig validates then atomically writes the startup config to path
+// via fsutil.WriteFileAtomic. It does not assume the file pre-exists — the
+// absent-file-⇒-defaults invariant (C-4) lives in LoadStartupConfig, and Save is
+// free to create the file. Mirrors SaveBuildHostConfig (config.go).
+func SaveStartupConfig(path string, cfg *StartupConfig) error {
+	if err := validateStartupConfig(cfg); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling startup config: %w", err)
+	}
+	data = append(data, '\n')
+	return fsutil.WriteFileAtomic(path, data, 0644)
 }
 
 // validateStartupConfig fills gate defaults in place and rejects bad gate enums.

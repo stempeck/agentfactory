@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/formula"
 	"github.com/stempeck/agentfactory/internal/issuestore/mcpstore"
@@ -1389,3 +1391,366 @@ func TestInstallInit_BuildHostAutoDetectLogic(t *testing.T) {
 	})
 }
 
+// TestInstallAgentsDispatchesToSeam asserts `af install --agents` invokes both
+// ADR-009 script seams in order (agent-gen THEN quickstart), each receiving the
+// resolved afSrc and the project CWD, and that an agent-gen failure aborts before
+// quickstart. The seams' real bodies exec the scripts (af down --all, rebuild);
+// we override both — the established cmd-layer pattern (cf. installNoopLaunchSession,
+// sling_test.go:44-51; newIssueStore overrides in reset_test.go).
+//
+// NOTE on stdin: the quickstart seam signature has no stdin parameter; the real
+// body sets c.Stdin = nil internally (verified separately by AC 3b's source grep).
+// This unit test can only assert quickstart was INVOKED (and after agent-gen).
+func TestInstallAgentsDispatchesToSeam(t *testing.T) {
+	// flag-state hygiene: cobra binds --agents/--no-build to persistent package
+	// vars that survive across rootCmd.Execute() calls. This is the first test to
+	// flip a persistent install flag through Execute(), so reset it (and restore
+	// via Cleanup) or it cross-contaminates the TestInstallRole_* siblings.
+	installAgentsFlag = false
+	installNoBuildFlag = false
+	t.Cleanup(func() { installAgentsFlag = false; installNoBuildFlag = false })
+
+	// restore the real seams after the test
+	origAgentGen := runAgentGenScript
+	origQuickstart := runQuickstartScript
+	t.Cleanup(func() {
+		runAgentGenScript = origAgentGen
+		runQuickstartScript = origQuickstart
+	})
+
+	// source-resolution hygiene: the --af-src flag var and compiled root must be
+	// empty so each subtest's t.Setenv("AF_SOURCE_ROOT", ...) is the sole resolver
+	// input (Guard 2 now refuses an unresolvable source).
+	origAFSrcFlag := agentGenAFSrc
+	origCompiled := compiledSourceRoot
+	agentGenAFSrc = ""
+	compiledSourceRoot = ""
+	t.Cleanup(func() { agentGenAFSrc = origAFSrcFlag; compiledSourceRoot = origCompiled })
+
+	t.Run("happy_path_order_and_args", func(t *testing.T) {
+		installAgentsFlag = false
+		installNoBuildFlag = false
+
+		var events []string
+		var agentGenAFSrc, agentGenDir, quickstartAFSrc, quickstartDir string
+		var wantCwd string // cwd as the seam sees it (== getWd() in runInstallAgents)
+
+		runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error {
+			wantCwd, _ = os.Getwd() // seam runs while chdir'd into the factory dir
+			events = append(events, "agentgen")
+			agentGenAFSrc, agentGenDir = afSrc, projectDir
+			return nil
+		}
+		runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string) error {
+			events = append(events, "quickstart")
+			quickstartAFSrc, quickstartDir = afSrc, projectDir
+			return nil
+		}
+
+		// Guard 2 requires a resolvable source tree, so provide a valid afSrc.
+		// afSrc is the resolved source dir; projectDir stays the operator CWD.
+		wantAFSrc := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"}, nil)
+		t.Setenv("AF_SOURCE_ROOT", wantAFSrc)
+
+		dir := setupFactoryDir(t)
+		out, err := runInstallInDir(t, dir, "--agents")
+		if err != nil {
+			t.Fatalf("install --agents failed: %v\noutput: %s", err, out)
+		}
+
+		// (a) call ORDER: agent-gen BEFORE quickstart
+		if len(events) != 2 || events[0] != "agentgen" || events[1] != "quickstart" {
+			t.Fatalf("call order = %v, want [agentgen quickstart]", events)
+		}
+
+		// (b/d) afSrc: resolved once, same value to both seams, non-empty. With a
+		// valid AF_SOURCE_ROOT (Guard 2 requires a resolvable source tree) afSrc is
+		// the resolved source dir, NOT the cwd.
+		if agentGenAFSrc == "" {
+			t.Error("agent-gen seam received empty afSrc")
+		}
+		if agentGenAFSrc != quickstartAFSrc {
+			t.Errorf("afSrc mismatch: agentgen=%q quickstart=%q", agentGenAFSrc, quickstartAFSrc)
+		}
+		if agentGenAFSrc != wantAFSrc {
+			t.Errorf("afSrc = %q, want resolved source %q", agentGenAFSrc, wantAFSrc)
+		}
+
+		// (b/d) projectDir: the operator CWD, same to both seams.
+		if agentGenDir != wantCwd {
+			t.Errorf("agent-gen projectDir = %q, want cwd %q", agentGenDir, wantCwd)
+		}
+		if agentGenDir != quickstartDir {
+			t.Errorf("projectDir mismatch: agentgen=%q quickstart=%q", agentGenDir, quickstartDir)
+		}
+		// (e) quickstart invoked (its presence in events already proves this). The
+		// c.Stdin=nil redirect itself is internal to the real seam and is covered by
+		// AC 3b's source grep, not assertable through this override.
+	})
+
+	t.Run("agentgen_failure_aborts_before_quickstart", func(t *testing.T) {
+		installAgentsFlag = false
+		installNoBuildFlag = false
+
+		quickstartCalled := false
+		runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error {
+			return fmt.Errorf("agent-gen boom")
+		}
+		runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string) error {
+			quickstartCalled = true
+			return nil
+		}
+
+		// Guard 2 needs a resolvable source so execution reaches the agent-gen seam.
+		afSrc := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"}, nil)
+		t.Setenv("AF_SOURCE_ROOT", afSrc)
+
+		dir := setupFactoryDir(t)
+		_, err := runInstallInDir(t, dir, "--agents")
+		if err == nil {
+			t.Fatal("expected error when agent-gen fails, got nil")
+		}
+		if !strings.Contains(err.Error(), "agent-gen boom") {
+			t.Errorf("error should propagate agent-gen failure, got: %v", err)
+		}
+		// (f) abort: quickstart must NOT run after an agent-gen failure.
+		if quickstartCalled {
+			t.Error("quickstart was called despite agent-gen failure — must abort before quickstart")
+		}
+	})
+}
+
+// --- Phase 2 guard test helpers ------------------------------------------------
+
+// newAFSourceDir builds a throwaway but VALID AF source tree for the --agents
+// guard tests: a go.mod whose module path contains "agentfactory" (so
+// validateAFSource accepts it → resolveAFSource returns fallback=false), the
+// named scripts Guard 2 stats, and an internal/cmd/install_formulas/ dir that
+// Guard 6 reads. `formulas` maps basename → content written under that dir (nil
+// for none). It returns the EvalSymlinks'd path — the same canonical form
+// resolveAFSource hands the guards — kept SEPARATE from the project dir so
+// Guard 3's sameDir warning never fires.
+func newAFSourceDir(t *testing.T, scripts []string, formulas map[string]string) string {
+	t.Helper()
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "go.mod"),
+		[]byte("module github.com/stempeck/agentfactory\n\ngo 1.24\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range scripts {
+		if err := os.WriteFile(filepath.Join(src, s), []byte("#!/bin/bash\ntrue\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ifDir := filepath.Join(src, "internal", "cmd", "install_formulas")
+	if err := os.MkdirAll(ifDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range formulas {
+		if err := os.WriteFile(filepath.Join(ifDir, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	real, err := filepath.EvalSymlinks(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return real
+}
+
+// writeProjectFormula drops a *.formula.toml into the project's on-disk
+// FormulasDir (.agentfactory/store/formulas), the dir Guard 6 iterates.
+func writeProjectFormula(t *testing.T, dir, name, content string) {
+	t.Helper()
+	fd := config.FormulasDir(dir)
+	if err := os.MkdirAll(fd, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fd, name), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestInstallAgentsRefusesWorktree asserts Guard 1: running `af install --agents`
+// from inside a worktree (a .factory-root redirect under config.ConfigDir) errors
+// with "not a worktree" and invokes NEITHER script seam.
+func TestInstallAgentsRefusesWorktree(t *testing.T) {
+	installAgentsFlag = false
+	installNoBuildFlag = false
+	t.Cleanup(func() { installAgentsFlag = false; installNoBuildFlag = false })
+
+	origAgentGen := runAgentGenScript
+	origQuickstart := runQuickstartScript
+	t.Cleanup(func() { runAgentGenScript = origAgentGen; runQuickstartScript = origQuickstart })
+
+	var agentGenCalled, quickstartCalled bool
+	runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error {
+		agentGenCalled = true
+		return nil
+	}
+	runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string) error {
+		quickstartCalled = true
+		return nil
+	}
+
+	dir := setupFactoryDir(t)
+	// Plant the worktree redirect marker the same way runInstallInit detects it.
+	marker := filepath.Join(config.ConfigDir(dir), ".factory-root")
+	if err := os.WriteFile(marker, []byte("/some/real/factory/root\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runInstallInDir(t, dir, "--agents")
+	if err == nil {
+		t.Fatalf("expected refusal running --agents inside a worktree, got nil\noutput: %s", out)
+	}
+	if !strings.Contains(err.Error(), "not a worktree") {
+		t.Errorf("error should say 'not a worktree', got: %v", err)
+	}
+	if agentGenCalled || quickstartCalled {
+		t.Errorf("worktree refusal must NOT call seams: agentGen=%v quickstart=%v", agentGenCalled, quickstartCalled)
+	}
+}
+
+// TestInstallAgentsRefusesSourceFallback asserts Guard 2: when the AF source tree
+// is unresolvable (resolveAFSource returns fallback=true and the fallback dir has
+// no agent-gen-all.sh), the command errors with remediation guidance and invokes
+// NEITHER seam.
+func TestInstallAgentsRefusesSourceFallback(t *testing.T) {
+	installAgentsFlag = false
+	installNoBuildFlag = false
+	t.Cleanup(func() { installAgentsFlag = false; installNoBuildFlag = false })
+
+	// Hermetic source resolution: no --af-src flag, no env, no compiled root, so
+	// resolveAFSource falls back to factoryRoot (which has no scripts).
+	origAFSrcFlag := agentGenAFSrc
+	origCompiled := compiledSourceRoot
+	agentGenAFSrc = ""
+	compiledSourceRoot = ""
+	t.Setenv("AF_SOURCE_ROOT", "")
+	t.Cleanup(func() { agentGenAFSrc = origAFSrcFlag; compiledSourceRoot = origCompiled })
+
+	origAgentGen := runAgentGenScript
+	origQuickstart := runQuickstartScript
+	t.Cleanup(func() { runAgentGenScript = origAgentGen; runQuickstartScript = origQuickstart })
+
+	var agentGenCalled, quickstartCalled bool
+	runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error {
+		agentGenCalled = true
+		return nil
+	}
+	runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string) error {
+		quickstartCalled = true
+		return nil
+	}
+
+	dir := setupFactoryDir(t) // no go.mod → resolveAFSource fallback=true
+	out, err := runInstallInDir(t, dir, "--agents")
+	if err == nil {
+		t.Fatalf("expected refusal when AF source is unresolvable, got nil\noutput: %s", out)
+	}
+	if !strings.Contains(err.Error(), "AF_SOURCE_ROOT") {
+		t.Errorf("error should offer AF_SOURCE_ROOT remediation, got: %v", err)
+	}
+	if agentGenCalled || quickstartCalled {
+		t.Errorf("source-fallback refusal must NOT call seams: agentGen=%v quickstart=%v", agentGenCalled, quickstartCalled)
+	}
+}
+
+// TestInstallAgentsWarnsShippedFormulaEdit asserts Guard 6 across all three cases:
+// (a) a project formula that differs by content from its on-disk source
+// counterpart → WARN, both seams still invoked; (b) a net-new customer formula
+// with no source counterpart → NO warning; (c) a resolved afSrc missing a required
+// script → REFUSE, neither seam invoked.
+func TestInstallAgentsWarnsShippedFormulaEdit(t *testing.T) {
+	installAgentsFlag = false
+	installNoBuildFlag = false
+	t.Cleanup(func() { installAgentsFlag = false; installNoBuildFlag = false })
+
+	origAFSrcFlag := agentGenAFSrc
+	origCompiled := compiledSourceRoot
+	agentGenAFSrc = ""
+	compiledSourceRoot = ""
+	t.Cleanup(func() { agentGenAFSrc = origAFSrcFlag; compiledSourceRoot = origCompiled })
+
+	origAgentGen := runAgentGenScript
+	origQuickstart := runQuickstartScript
+	t.Cleanup(func() { runAgentGenScript = origAgentGen; runQuickstartScript = origQuickstart })
+
+	var agentGenCalled, quickstartCalled bool
+	runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error {
+		agentGenCalled = true
+		return nil
+	}
+	runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string) error {
+		quickstartCalled = true
+		return nil
+	}
+
+	t.Run("edited_shipped_formula_warns_and_proceeds", func(t *testing.T) {
+		installAgentsFlag = false
+		installNoBuildFlag = false
+		agentGenCalled, quickstartCalled = false, false
+
+		afSrc := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"},
+			map[string]string{"shipped.formula.toml": "SOURCE ORIGINAL\n"})
+		t.Setenv("AF_SOURCE_ROOT", afSrc)
+
+		dir := setupFactoryDir(t)
+		writeProjectFormula(t, dir, "shipped.formula.toml", "LOCAL EDIT — differs from source\n")
+
+		out, err := runInstallInDir(t, dir, "--agents")
+		if err != nil {
+			t.Fatalf("edited shipped formula must WARN, not error: %v\noutput: %s", err, out)
+		}
+		if !strings.Contains(out, "shipped.formula.toml") || !strings.Contains(out, "overwrite") {
+			t.Errorf("expected clobber warning naming the formula, got output: %s", out)
+		}
+		if !agentGenCalled || !quickstartCalled {
+			t.Errorf("warning must still invoke both seams: agentGen=%v quickstart=%v", agentGenCalled, quickstartCalled)
+		}
+	})
+
+	t.Run("net_new_customer_formula_no_warning", func(t *testing.T) {
+		installAgentsFlag = false
+		installNoBuildFlag = false
+		agentGenCalled, quickstartCalled = false, false
+
+		afSrc := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"}, nil)
+		t.Setenv("AF_SOURCE_ROOT", afSrc)
+
+		dir := setupFactoryDir(t)
+		writeProjectFormula(t, dir, "customer.formula.toml", "brand new customer formula\n")
+
+		out, err := runInstallInDir(t, dir, "--agents")
+		if err != nil {
+			t.Fatalf("net-new customer formula must not error: %v\noutput: %s", err, out)
+		}
+		if strings.Contains(out, "overwrite") {
+			t.Errorf("net-new customer formula must NOT produce a clobber warning, got: %s", out)
+		}
+		if !agentGenCalled || !quickstartCalled {
+			t.Errorf("both seams must run for a net-new formula: agentGen=%v quickstart=%v", agentGenCalled, quickstartCalled)
+		}
+	})
+
+	t.Run("absent_script_refuses_neither_seam", func(t *testing.T) {
+		installAgentsFlag = false
+		installNoBuildFlag = false
+		agentGenCalled, quickstartCalled = false, false
+
+		// Valid go.mod (validateAFSource passes → fallback=false) but agent-gen-all.sh
+		// ABSENT — the stale-but-valid moved-checkout edge Guard 2's os.Stat catches.
+		afSrc := newAFSourceDir(t, []string{"quickstart.sh"}, nil)
+		t.Setenv("AF_SOURCE_ROOT", afSrc)
+
+		dir := setupFactoryDir(t)
+		out, err := runInstallInDir(t, dir, "--agents")
+		if err == nil {
+			t.Fatalf("absent agent-gen-all.sh must refuse, got nil\noutput: %s", out)
+		}
+		if agentGenCalled || quickstartCalled {
+			t.Errorf("absent-script refusal must NOT call seams: agentGen=%v quickstart=%v", agentGenCalled, quickstartCalled)
+		}
+	})
+}

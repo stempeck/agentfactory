@@ -13,9 +13,10 @@ import (
 )
 
 // fakeTmux is the single hermetic tmux double for issue #309 Phase 2. It
-// satisfies BOTH the internal/session tmuxClient (11 methods) and the
-// internal/cmd cmdTmux (9 methods) seam interfaces — the 15-method distinct
-// union — recording every would-be op in order and returning benign values. It
+// satisfies BOTH the internal/session tmuxClient (13 methods, incl. the #412
+// Phase-4 ShowOption read-back) and the internal/cmd cmdTmux (9 methods) seam
+// interfaces — the 17-method distinct union — recording every would-be op in
+// order and returning benign values. It
 // performs NO real I/O, never sleeps, and never shells out; a default-suite test
 // that installs it via setupHermeticSessions cannot reach the real tmux server.
 //
@@ -72,6 +73,19 @@ func (f *fakeTmux) SetEnvironment(sess, key, value string) error {
 }
 
 // --- tmuxClient-only methods ---
+
+func (f *fakeTmux) SetOption(sess, name, value string) error {
+	f.record(fmt.Sprintf("SetOption %s %s=%s", sess, name, value))
+	return nil
+}
+
+// ShowOption models a successful apply for this no-op recorder fake: it returns
+// "on" so the Issue #412 best-effort mouse read-back in Manager.Start() stays
+// silent on the cmd-side hermetic paths (a return of "" would trip the warning).
+func (f *fakeTmux) ShowOption(sess, name string) (string, error) {
+	f.record(fmt.Sprintf("ShowOption %s %s", sess, name))
+	return "on", nil
+}
 
 func (f *fakeTmux) IsClaudeRunning(sess string) bool {
 	f.record("IsClaudeRunning " + sess)
