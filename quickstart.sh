@@ -292,6 +292,22 @@ install_af() {
     mkdir -p "$HOME/.local/bin"
     cp "$SCRIPT_DIR/af" "$HOME/.local/bin/af"
 
+    # Build + install the optional web console (separate web/ module: web/go.mod) so the phase-5
+    # launch guard's [ -x "$HOME/.local/bin/webui" ] test is true and the console actually starts.
+    # Done here (not the Dockerfile) because this site already has the cloned repo + Go toolchain on
+    # hand. Best-effort: a failed web build must NEVER abort the factory bootstrap (mirrors the
+    # install_claude warn-don't-abort posture). `make build-webui` builds ./webui into the repo root
+    # but does NOT install it, so build fresh (avoids installing a stale copy left by a prior branch)
+    # THEN install. CWD is still "$SCRIPT_DIR" here (set above), where build-webui's -o ../webui lands;
+    # `install -m 0755` is a deliberate deviation from the adjacent `cp af` — it sets the exec bit the
+    # guard gates on in a single step.
+    if make build-webui 2>/dev/null && [ -f webui ]; then
+        install -m 0755 webui "$HOME/.local/bin/webui"
+        log_info "Installed webui to ~/.local/bin/webui"
+    else
+        log_warn "build-webui failed or produced no binary; web UI will be skipped"
+    fi
+
     export PATH="$HOME/.local/bin:$HOME/go/bin:$PATH"
 
     if command_exists af; then
@@ -534,6 +550,45 @@ parse_args() {
 # Main
 #------------------------------------------------------------------------------
 
+configure_login_init() {
+    log_step "Installing webui login-shell restart guard"
+
+    # Resolve the factory root (the cloned target repo under WORKSPACE_DIR) so the guard can PIN
+    # AF_ROOT. At `docker start`, PID-1 `bash --login` starts with CWD=$HOME, NOT the factory root,
+    # so the guard must NOT rely on $PWD (Phase-4 / Gap 8). This runs IN the container on every
+    # quickstart, so it reaches existing/customer containers on upgrade — unlike the create-time
+    # quickdocker.sh Step 7 guard, which never reaches an already-running container.
+    local factory_root=""
+    for d in "$WORKSPACE_DIR"/*/; do
+        [ -d "$d/.git" ] && { factory_root="${d%/}"; break; }
+    done
+    if [ -z "$factory_root" ]; then
+        log_warn "No factory root under $WORKSPACE_DIR; skipping webui login-shell guard"
+        return 0
+    fi
+
+    local profile="$HOME/.bash_profile"
+    local begin="# BEGIN agentfactory webui login guard"
+    local end="# END agentfactory webui login guard"
+    touch "$profile"
+    # Idempotent (replaceable) + dedup: strip our block and any legacy create-time block.
+    sed -i "/$begin/,/$end/d" "$profile" 2>/dev/null || true
+    sed -i "/# >>> phase4 webui login-init relaunch guard/,/# <<< phase4 webui login-init relaunch guard/d" "$profile" 2>/dev/null || true
+    {
+        echo "$begin"
+        echo "# bash --login (container PID 1 on docker start) reads ~/.bash_profile, NOT ~/.bashrc,"
+        echo "# so the optional web console is relaunched here on every restart (AC-2). AF_ROOT is"
+        echo "# PINNED because a login shell starts at \$HOME, not the repo (Phase-4 / Gap 8)."
+        echo "# Idempotent: webui's rendezvous.Ensure no-ops if a healthy server is already up."
+        echo "[ -f \"\$HOME/.bashrc\" ] && . \"\$HOME/.bashrc\""
+        echo "if [ -x \"\$HOME/.local/bin/webui\" ]; then"
+        echo "    AF_ROOT=\"\${AF_ROOT:-$factory_root}\" nohup \"\$HOME/.local/bin/webui\" >/tmp/webui.log 2>&1 &"
+        echo "fi"
+        echo "$end"
+    } >> "$profile"
+    log_success "Installed webui login-shell restart guard (AF_ROOT pinned to $factory_root)"
+}
+
 main() {
     parse_args "$@"
 
@@ -600,6 +655,47 @@ main() {
     configure_git_defaults
     configure_shell
     configure_factory
+    configure_login_init
+
+    # Phase 5 (C0): best-effort, IFF-available web console launch — driven from the container
+    # bootstrap, NOT from `af up`/up.go, so af-core keeps ZERO UI knowledge (cross-review H-3).
+    # Mirrors the watchdog/dispatcher warn-don't-abort posture: when the binary is absent we skip
+    # silently and the factory bootstrap proceeds normally; when present we launch it detached and
+    # it owns its own rendezvous + start-lock (.runtime/webui_server.json) so repeated launches are
+    # idempotent. The socket stays loopback (never -p-published; CR-1) — reach it via SSH
+    # local-forward (see README "Web Console").
+    # >>> phase5 webui launch guard >>>
+    if [ -x "$HOME/.local/bin/webui" ]; then
+        # Export AF_ROOT so the detached webui's served root is deterministic rather than
+        # CWD-dependent (Gap 8). At bootstrap $PWD is the factory root (configure_factory cd'd
+        # here first); the persistent login-init relaunch guard (quickdocker*.sh Step 7) pins
+        # AF_ROOT to the known repo path instead, since a login shell starts at $HOME.
+        AF_ROOT="${AF_ROOT:-$PWD}" nohup "$HOME/.local/bin/webui" >/tmp/webui.log 2>&1 &
+        # Honest status: the detached webui binds its loopback listener and publishes its
+        # rendezvous file (.runtime/webui_server.json) ASYNCHRONOUSLY, so a success log at
+        # spawn time would lie if the bind fails (port conflict) or startup panics. The
+        # rendezvous file is written only AFTER the listener binds — poll for it (bounded)
+        # before claiming success, and downgrade to a warning on timeout.
+        webui_rendezvous="${AF_ROOT:-$PWD}/.runtime/webui_server.json"
+        webui_ready=""
+        webui_attempts=0
+        while [ "$webui_attempts" -lt 25 ]; do
+            if [ -f "$webui_rendezvous" ]; then
+                webui_ready=1
+                break
+            fi
+            webui_attempts=$((webui_attempts + 1))
+            sleep 0.2
+        done
+        if [ -n "$webui_ready" ]; then
+            log_success "Web UI started (optional)"
+        else
+            log_warn "Web UI launch attempted but did not confirm binding within 5s (see /tmp/webui.log); continuing"
+        fi
+    else
+        log_info "webui binary not present; skipping optional web UI"
+    fi
+    # <<< phase5 webui launch guard <<<
 
     # Done!
     echo ""

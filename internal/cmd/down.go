@@ -204,7 +204,7 @@ func preResetScan(cmd *cobra.Command, factoryRoot string, agents []string) {
 }
 
 func resetAgent(ctx context.Context, cmd *cobra.Command, factoryRoot, agentName string) error {
-	return resetAgentState(ctx, cmd.OutOrStdout(), factoryRoot, agentName, "reset by af down --reset")
+	return resetAgentState(ctx, cmd.OutOrStdout(), factoryRoot, agentName, config.CloseReasonResetDown)
 }
 
 func closeAgentBeads(ctx context.Context, store issuestore.Store, agentName, reason string) int {

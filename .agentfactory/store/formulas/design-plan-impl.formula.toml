@@ -1,0 +1,974 @@
+description = """
+## Overview
+Convert design skill output into an executable implementation plan outline —
+Mode A ONLY. Phase extraction into IMPLREADME files (Mode B) is NOT this
+formula's job: it belongs to the separate `design-phase-impl` formula, which is
+dispatched AFTER a human has reviewed the outline this formula produces.
+
+Requirements come from the assigned bead — which contains a PULL REQUEST link
+(e.g. https://github.com/org/repo/pull/360), a GitHub issue link referencing
+such a PR, or a BRANCH NAME. The referenced branch carries the design artifacts
+(design-doc.md + dimension docs). Like soldesign-engineer, this formula MERGES
+that branch into its own fresh working branch, performs its work on top, and
+pushes its own branch with a PR summarizing the implementation_plan_outline
+content it created.
+
+This formula guides an agent through the design-plan-impl Mode A process:
+1. Resolve the input PR/branch and merge it into a fresh working branch
+2. Discover and read all design artifacts (design-doc.md + dimension docs)
+3. Parallel codebase investigation — one sub-agent per design phase
+4. Cross-reference design assumptions against actual codebase state
+5. Construct self-contained implementation plan outline
+6. Verify outline quality
+7. Push the branch and open a PR summarizing the outline
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| issue | cli | The issue ID assigned to this agent |
+
+## Failure Modes
+
+| Situation | Action |
+|-----------|--------|
+| Design doc not found | Mail Supervisor for clarification, do not guess |
+| Codebase investigation reveals design doc is wrong | Document discrepancies in outline, do not silently fix design |
+| Tests fail | Fix them. Do not proceed with failures. |
+| Context filling up | Use af handoff to cycle to fresh session |
+| Blocked on external | Mail Supervisor, mark yourself stuck |
+| Unsure what to do | Mail Supervisor, don't guess |
+
+## Anti-Patterns to Avoid
+
+| Anti-Pattern | Prevention |
+|--------------|------------|
+| Trusting design doc descriptions of current code | Design describes target state, not current state. Always read actual files. |
+| Saying "see data.md" without line numbers | Always include document + section + line range |
+| Writing acceptance criteria as prose | Write bash commands with expected outputs |
+| Skipping gotchas for "simple" phases | Investigate every phase; note findings |
+| Sequential file reading in investigation | Use parallel sub-agents |
+| Extracting IMPLREADMEs after the outline | Mode B belongs to design-phase-impl — STOP after the outline is verified and pushed |
+| Creating phases that aren't self-contained | Each phase must stand alone |
+| Numbering phases to match design doc when dependencies differ | Number by dependency order |
+| Planning for one environment but not the other | Deployment audit catches parity gaps |
+| Routing all phases to *implement | Classify workstreams; route to specialized skills or agents |
+| Assuming a specific file exists | Locate design artifacts from the merged input branch's diff, not guessed paths |
+
+## !IMPORTANT - MANDATORY Exact Step Execution
+Execute each formula step EXACTLY as written, in order, with no modifications.
+Every step produces a file artifact at a known path. `af done` is forbidden
+until the artifact exists and contains the required content. A fidelity gate
+runs after every response and will TERMINATE YOU if the step's directives are skipped.
+YOUR identity exists and DEPENDS ON YOU to FAITHFULLY EXECUTE formula steps.
+"""
+formula = "design-plan-impl"
+version = 1
+skills = ["rootcause-review"]
+
+# ============================================================================
+# PRE-WORK INVARIANT STEPS
+# ============================================================================
+
+[[steps]]
+id = "load-context"
+title = "Load context and understand planning assignment"
+description = """
+Initialize your session and understand the design doc you're assigned to plan.
+
+**1. Prime your environment:**
+```bash
+af prime                    # Load role context
+```
+
+**2. Read your assigned issue:**
+```bash
+af bead show {{issue}}           # Full issue details
+```
+
+**3. Check inbox for additional context:**
+```bash
+af mail inbox
+# Read any HANDOFF or assignment messages
+```
+
+**4. Extract the input reference from the bead:**
+The bead is your source of truth. It contains the planning input in one of three forms —
+resolve each to SRC_BRANCH (the branch carrying the design artifacts):
+
+- **Pull request link** (e.g. `https://github.com/org/repo/pull/360`):
+  ```bash
+  PR_NUM=$(echo "<bead-input>" | grep -oE '[0-9]+$')
+  SRC_BRANCH=$(gh pr view "$PR_NUM" --json headRefName --jq '.headRefName')
+  ```
+- **GitHub issue link** (e.g. `https://github.com/org/repo/issues/123`): find the PR referencing it:
+  ```bash
+  ISSUE_NUM=$(echo "<bead-input>" | grep -oE '[0-9]+$')
+  SRC_BRANCH=$(gh pr list --search "$ISSUE_NUM" --json headRefName --jq '.[0].headRefName')
+  ```
+- **Branch name** (e.g. `af/design-v7-e29187`): use it directly:
+  ```bash
+  SRC_BRANCH="<bead-input>"
+  ```
+
+**MODE classification (drives branch-setup, cleanup-workspace, and submit-and-exit):**
+- Input contains `/pull/` → **MODE=pr** — you work ON that PR: its branch is the
+  shared work surface; you push your work back to it and post the summary as a
+  PR comment. NO new PR is created. Record PR_NUM as well.
+- Issue link or branch name → **MODE=issue** — fresh branch + new PR (classic behavior).
+
+**5. Identify planning inputs:**
+- **SRC_BRANCH**: The branch to merge in branch-setup — it carries the design-doc.md
+  and dimension analyses. Do NOT read design artifacts yet; they arrive via the merge.
+- **Output directory** (known after merge): `{design_dir}/implementation-plan/` for the outline
+
+**6. Verify you can proceed:**
+- SRC_BRANCH resolved and non-empty (`git ls-remote --heads origin "$SRC_BRANCH"` returns a ref)
+- No unresolved blockers on the issue
+- You understand what design you're planning
+
+If blocked or unclear, mail Supervisor immediately:
+```bash
+af mail send supervisor -s "HELP: Cannot resolve input PR/branch" -m "Issue: {{issue}}
+Question: <what you need clarified>"
+```
+
+**Exit criteria:** SRC_BRANCH and MODE resolved; SRC_BRANCH verified to exist on origin."""
+
+[[steps]]
+id = "branch-setup"
+title = "Set up working branch"
+needs = ["load-context"]
+description = """
+Ensure you're on a clean feature branch ready for work.
+
+**1. Check current branch state:**
+```bash
+git status
+git branch --show-current
+```
+
+**2. If not on a feature branch, create one:**
+```bash
+# Standard naming: agent/<your-name> or feature/<issue-id>
+git checkout -b agent/<name>
+```
+
+**3. Ensure clean working state:**
+```bash
+git status                  # Should show "working tree clean"
+git stash list              # Should be empty
+```
+
+If dirty state from previous work:
+```bash
+# If changes are relevant to this issue:
+git add -A && git commit -m "WIP: <description>"
+
+# If changes are unrelated cruft:
+git stash push -m "unrelated changes before {{issue}}"
+# Or discard if truly garbage:
+git checkout -- .
+```
+
+**4. MODE=pr — point your branch AT the PR head (skip main sync):**
+The PR branch is the shared work surface. Your local branch keeps its unique
+worktree name (this is what makes per-agent worktrees safe — only the remote
+ref is shared); you re-point it at the PR head:
+```bash
+git fetch origin "$SRC_BRANCH"
+git reset --hard origin/"$SRC_BRANCH"
+```
+Do NOT rebase onto origin/{{default_branch}} and do NOT merge {{default_branch}} in — diverging or
+rewriting the PR's history breaks the push-back. Staleness vs {{default_branch}} is the
+merger's concern, not yours. Skip to action 6.
+
+**5. MODE=issue — sync with main, then merge the input branch:**
+```bash
+git fetch origin
+git rebase origin/{{default_branch}}      # Get latest, rebase your branch
+git fetch origin "$SRC_BRANCH"
+git merge origin/"$SRC_BRANCH" --no-edit
+```
+If rebase or merge conflicts: resolve carefully (incoming design artifacts under
+`.designs/` should win), then re-verify a clean tree. If stuck, mail Supervisor.
+
+**6. Verify the branch carries design artifacts (mechanical check, both modes):**
+```bash
+git diff --name-only origin/{{default_branch}}...HEAD -- '*design-doc.md'
+```
+At least one design-doc.md must appear. If empty, the input does not carry a
+design — mail Supervisor before proceeding; do NOT guess a design path.
+
+**Exit criteria:** Clean working branch — MODE=pr: local branch reset to the PR
+head; MODE=issue: fresh branch on latest main with SRC_BRANCH merged — and a
+design-doc.md present in the branch diff."""
+
+[[steps]]
+id = "validate-contract"
+title = "Inspect incoming design contract"
+needs = ["branch-setup"]
+description = """
+**MANDATORY GATE CHECK** — Inspect the incoming design contract before starting work.
+
+This is a Poka-yoke gate: catch input problems before they propagate through the
+entire planning workflow.
+
+**1. Locate the design doc the merged branch delivered, and verify it exists:**
+```bash
+DESIGN_DOC=$(git diff --name-only origin/{{default_branch}}...HEAD -- '*design-doc.md' | head -1)
+test -n "$DESIGN_DOC" || DESIGN_DOC=$(ls -t .designs/*/design-doc.md 2>/dev/null | head -1)
+test -f "$DESIGN_DOC" && echo "EXISTS: $DESIGN_DOC" || echo "MISSING"
+DESIGN_DIR=$(dirname "$DESIGN_DOC")
+```
+Record DESIGN_DIR — it is `{design_dir}` for all later steps.
+
+**2. If the design doc exists, verify it contains:**
+- [ ] Executive Summary or Problem Statement
+- [ ] Constraints section
+- [ ] Implementation Plan with phases
+- [ ] Dimension analyses referenced (api.md, data.md, etc.)
+
+Note any structural gaps — these will be documented as gotchas in the outline.
+
+**3. If NO design doc exists:**
+- The input branch did not deliver a design — this is a contract violation, not
+  a soft gap. Mail Supervisor and do NOT proceed on guessed requirements.
+
+**4. If the design doc is malformed or incomplete:**
+Mail Supervisor before proceeding:
+```bash
+af mail send supervisor -s "HELP: Design doc incomplete" -m "Issue: {{issue}}
+Design doc: <path>
+Missing: <what's missing>"
+```
+
+**Exit criteria:** Design doc verified (or absence noted). Input quality assessed."""
+
+[[steps]]
+id = "preflight-tests"
+title = "Verify tests pass on main"
+needs = ["validate-contract"]
+description = """
+Check if the codebase is healthy BEFORE starting your work.
+
+**The Scotty Principle:** Don't walk past a broken warp core. But also don't
+let someone else's mess consume your entire mission.
+
+**1. Check tests on main:**
+```bash
+git stash                   # Save your branch state
+git checkout origin/{{default_branch}}
+# Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
+# Then run it. Examples: make test, npm test, cargo test, go test ./...
+```
+
+**2. If tests PASS:**
+```bash
+git checkout -              # Back to your branch
+git stash pop               # Restore state
+```
+Continue to phase-1-discover-artifacts step.
+
+**3. If tests FAIL on main:**
+
+Make a judgment call:
+
+| Situation | Action |
+|-----------|--------|
+| Quick fix (<15 min) | Fix it, commit to main, then continue |
+| Medium fix (15-60 min) | Fix if it blocks your work, else file bead |
+| Big fix (>1 hour) | File bead, notify Supervisor, proceed with your work |
+
+**Quick fix path:**
+```bash
+# Fix the issue
+git add <files>
+git commit -m "fix: <description> (pre-existing failure)"
+git push origin {{default_branch}}
+git checkout -
+git stash pop
+git rebase origin/{{default_branch}}      # Get your fix
+```
+
+**File and proceed path:**
+```bash
+af bead create --title "Pre-existing test failure: <description>" \
+  --type bug --priority 1
+
+af mail send supervisor -s "NOTICE: Main has failing tests" \
+  -m "Found pre-existing test failures on main.
+Filed: <bead-id>
+Proceeding with my assigned work ({{issue}})."
+
+git checkout -
+git stash pop
+```
+
+**Context consideration:**
+If fixing pre-existing failures consumed significant context:
+```bash
+af handoff -s "Fixed pre-existing failures, ready for assigned work" \
+  -m "Issue: {{issue}}
+Fixed: <what you fixed>
+Ready to start: phase-1-discover-artifacts step"
+```
+Fresh session continues from phase-1-discover-artifacts.
+
+**Exit criteria:** Tests pass on main (or issue filed), ready to begin planning work."""
+
+# ============================================================================
+# DOMAIN STEPS (from .claude/skills/design-plan-impl/SKILL.md)
+# ============================================================================
+
+[[steps]]
+id = "phase-1-discover-artifacts"
+title = "Phase 1: Discover Design Artifacts"
+needs = ["preflight-tests"]
+description = """
+
+Read the design doc and discover all companion documents.
+
+**Entry:** Design doc path identified from load-context.
+
+**1. Read the input design-doc.md fully.**
+
+**2. Extract from the design doc:**
+- All phases with acceptance criteria, deliverables, dependencies, effort ratings
+- Success criteria / metrics table
+- Constraint list
+- Appendix links to dimension docs
+
+**3. Discover all companion documents in the same directory:**
+```bash
+ls {design_dir}/*.md
+```
+Expected files (not all will exist):
+```
+api.md, data.md, ux.md, scale.md, security.md, integration.md,
+dependencies.md, conflict-matrix.md, constraint-verification.md,
+problem-summary.md, mermaid.md, skillset.md, createall-skill.md
+```
+Read whatever is present.
+
+**4. Check for existing implementation plans:**
+```bash
+ls {design_dir}/implementation-plan/ 2>/dev/null
+```
+- Gap analyses, prior plans, or existing outlines provide additional context
+- These are NOT authoritative over the design doc
+
+**Checkpoint:** You have the complete design picture (phases, dimensions,
+constraints, conflicts, dependencies).
+
+**Exit criteria:** Design doc read, all companion docs discovered and read,
+complete design picture assembled."""
+
+[[steps]]
+id = "phase-2-investigate-codebase"
+title = "Phase 2: Parallel Codebase Investigation"
+needs = ["phase-1-discover-artifacts"]
+description = """
+
+**This is the critical step.** The design doc describes the TARGET state. The
+codebase IS the CURRENT state. The gap between them defines the actual work.
+
+**1. Launch one sub-agent per phase** using the Agent tool with
+`subagent_type=Explore`. Each agent investigates:
+
+1. What files does this phase modify or create? (from design-doc deliverables + dimension docs)
+2. What is the ACTUAL current state of those files? (read them, check line numbers, verify assumptions)
+3. What already exists that the design assumes doesn't? (prevents duplicate work)
+4. What's different from what the design assumes? (prevents wrong assumptions)
+5. Are there hidden issues? (latent bugs, undocumented types, patterns the design missed)
+6. What are the exact file paths and line numbers for everything this phase touches?
+
+Sub-agent prompt template:
+```
+Investigate Phase {N} "{phase_name}" from this design doc. The phase specifies:
+{phase_deliverables_and_acceptance_criteria}
+
+The relevant dimension docs say:
+{relevant_dimension_excerpts}
+
+Search the codebase to answer:
+1. Do the target files exist? What's in them? (read with exact line numbers)
+2. Does any of the "deliverable" code already exist?
+3. What patterns exist in the codebase that the phase should follow?
+4. Are there hidden issues (latent bugs, undocumented types, edge cases)?
+5. What are the exact import paths, class names, and function signatures?
+
+Report findings with file paths and line numbers for everything.
+```
+
+**2. Additionally, launch one "Deployment & Environment Audit" sub-agent**
+in the same parallel batch:
+```
+Investigate the deployment pipeline and environment parity.
+
+The design doc introduces these changes per phase:
+{For each phase, one line listing: phase number, title, and what it adds/modifies}
+
+Search the codebase to answer:
+1. Glob for all deploy scripts (*deploy*.sh, Makefile, CI/CD configs)
+2. Glob for all terraform environments (terraform/*/main.tf)
+3. For each environment (local, staging, prod), catalog what infrastructure exists
+4. Check which environments/targets the design doc addresses vs. ignores
+5. Identify parity gaps
+6. For each deploy script, check if it handles what the design introduces
+Report all findings with file paths.
+```
+
+**3. Run all phase agents + the deployment audit agent in parallel**
+(single message, multiple Agent tool calls).
+
+**Anti-pattern:** Do NOT investigate sequentially. Parallel sub-agents are the
+single biggest efficiency gain.
+
+**Context management:** Parallel investigation is the heaviest phase. If context
+is filling after collecting all sub-agent results:
+```bash
+af handoff -s "Codebase investigation complete" -m "Issue: {{issue}}
+Completed: parallel investigation for all phases + deployment audit
+All sub-agent findings captured in conversation
+Ready for: phase-3-cross-reference step"
+```
+
+**Exit criteria:** Ground-truth codebase state for every phase's target area AND
+a complete picture of the deployment pipeline."""
+
+[[steps]]
+id = "phase-3-cross-reference"
+title = "Phase 3: Cross-Reference and Synthesize"
+needs = ["phase-2-investigate-codebase"]
+description = """
+
+Merge the design spec with the investigation findings.
+
+**Entry:** All phase investigations and deployment audit complete.
+
+**For each phase, perform these synthesis operations:**
+
+1. **Adjust scope**: If the design says "create X" but X already exists, change to "modify X"
+
+2. **Add gotchas**: Issues found by investigation that the design didn't anticipate
+
+3. **Refine acceptance criteria**: Add bash verification commands based on actual file paths
+
+4. **Map design references**: Note exact document, section, and line numbers from dimension docs
+
+5. **Identify phase 0 candidates**: Urgent fixes that should be done BEFORE the design
+   phases (e.g., latent bugs in code the design modifies)
+
+6. **Build dependency chain**: Which phases depend on which, based on actual file
+   dependencies (not just design-doc ordering)
+
+7. **Classify workstreams** — categorize each phase by primary domain:
+   - **Infrastructure** (Terraform, deploy scripts, cloud resources) → recommend `*terraform`
+   - **Backend** (API, data models, middleware, migrations) → recommend `*implement`
+   - **Frontend UI** (pages, components, design exploration needed) → recommend `*design`
+   - **Frontend implementation** (clear spec, no design exploration) → recommend `*implement`
+   - **Manual/Human** (console config, third-party setup, credential rotation) → no skill; emit as checklist. Mark Recommended Skill as `manual`.
+   - **Test/Verification** (E2E tests, integration validation) → recommend `*implement` for test code
+   - If a single design-doc phase spans multiple domains, **split it into sub-phases** — one per domain.
+
+8. **Flag deployment gaps** — using the deployment audit results:
+   - For every environment in the repo, verify the design doc addresses it
+   - If environment-specific infrastructure is changed for one environment but not another,
+     **add a parity phase** to the outline
+   - If deploy scripts need updates for new features, add that to the relevant phase
+
+**Anti-pattern:** Do NOT number phases to match design doc when dependencies differ.
+Implementation ordering comes from actual code dependencies, not narrative order.
+
+**Exit criteria:** Every phase has adjusted scope, gotchas, refined ACs, design
+references, workstream classification, and deployment coverage."""
+
+[[steps]]
+id = "phase-4-construct-outline"
+title = "Phase 4: Construct the Implementation Plan Outline"
+needs = ["phase-3-cross-reference"]
+description = """
+
+Write the implementation plan outline document.
+
+**Entry:** Cross-reference synthesis complete for all phases.
+
+**1. Create the output directory:**
+```bash
+mkdir -p "{design_dir}/implementation-plan"
+```
+
+**2. Write `{design_dir}/implementation-plan/implementation_plan_outline.md`**
+with this exact structure:
+
+```markdown
+# Implementation Plan Outline: {Design Title}
+
+**Date**: {YYYY-MM-DD}
+**Source**: {path to design-doc.md}
+**Purpose**: Self-contained phase extraction guide for creating focused
+             IMPLREADME_PHASE{X}.md files
+**Usage**: Phases are extracted one at a time by the design-phase-impl agent
+           (`af sling --agent design-phase-impl "<PR-or-branch with this file>"`),
+           which always extracts the NEXT pending phase
+
+---
+
+## How To Use This Document
+
+Each phase below is a **self-contained extraction unit**. Workflow:
+
+1. `af sling --agent design-plan-impl "<PR-or-branch with design-doc.md>"` — produces this outline (Mode A)
+2. Human reviews this outline (optionally `/peer-review {this_file}` first)
+3. `af sling --agent design-phase-impl "<PR-or-branch containing this file>"` — extracts the NEXT pending phase into an IMPLREADME (Mode B)
+4. Use the phase's **Recommended Skill** to implement
+5. Repeat steps 3-4 until every phase has an IMPLREADME and an implementation
+   (Skill-level equivalent of step 3, used by automated loops like soldesign-engineer: `/design-plan-impl {this_file} {N}`)
+
+**Phase dependency chain:**
+{ASCII dependency diagram}
+
+{Explanation of which phases can run in parallel}
+
+## Deployment Coverage
+
+| Target | Scripts/Config | Covered By Phase | Gap? |
+|--------|---------------|-----------------|------|
+| {env} | {paths} | Phase {N} | {Yes/No} |
+
+---
+
+## Phase {N}: {Title}
+
+### Objective
+{One sentence: what this phase achieves and why it matters}
+
+### Prerequisites
+{Which phases must complete first, or "None"}
+
+### Recommended Skill or Agent
+`{*terraform | *implement | *design | manual}` — {rationale}
+
+### Design References
+| Document | Section | Lines | What It Specifies |
+|----------|---------|-------|-------------------|
+| {doc} | {section} | L{start}-{end} | {what} |
+
+### Current State (files to read for context)
+| File | Lines | What's There |
+|------|-------|-------------|
+| {path} | L{start}-{end} or "Full file" | {description} |
+
+### Required Changes
+**File {N}: `{path}`**
+- **L{line}**: {specific change description}
+{code sketch if helpful}
+
+### Acceptance Criteria
+```bash
+# {N}. {description}
+{bash command}
+# Expected: {value}
+```
+
+### Gotchas (from codebase investigation)
+- {nuance that only surfaces from reading actual code}
+
+---
+```
+
+**Rules for each phase section:**
+- **Design References**: Exact document name, section heading, and line numbers.
+  Not "see data.md" but "data.md, Data Model section, L58-102"
+- **Current State**: Exact file paths and line ranges from investigation.
+  Describe what IS there today, not what SHOULD be there.
+- **Required Changes**: Specific files and modifications. Include code sketches
+  for non-obvious changes. Note modifications vs. new files.
+- **Acceptance Criteria**: Runnable bash commands with expected outputs. Use the
+  project's actual test/lint commands plus generic tools like `grep -c`, `test -f`, `curl`.
+- **Gotchas**: MUST be non-empty for every phase that modifies existing code.
+- **Recommended Skill**: Must match workstream classification from Phase 3.
+
+**3. Commit the outline:**
+```bash
+git add "{design_dir}/implementation-plan/"
+git commit -m "plan: implementation outline for {{issue}}"
+```
+
+**Exit criteria:** implementation_plan_outline.md written with all required phase sections."""
+
+[[steps]]
+id = "gate-0-verify-outline"
+title = "GATE 0: Verify Outline Quality"
+needs = ["phase-4-construct-outline"]
+description = """
+**MANDATORY GATE CHECK** — Do NOT close this step until ALL checks pass.
+
+
+Run this verification:
+
+```bash
+# 1. File exists
+test -f "{design_dir}/implementation-plan/implementation_plan_outline.md" && echo "PASS" || echo "FAIL"
+```
+
+Then verify each item:
+- [ ] Every phase from design-doc.md is represented (possibly reordered or split)
+- [ ] Every phase section has ALL 8 subsections (Objective, Prerequisites, Recommended Skill, Design References, Current State, Required Changes, Acceptance Criteria, Gotchas)
+- [ ] Design References include line numbers, not just document names
+- [ ] Current State reflects actual codebase (from sub-agent investigation), not design assumptions
+- [ ] Acceptance Criteria are bash commands, not prose descriptions
+- [ ] Gotchas section is non-empty for every phase that modifies existing code
+- [ ] Phase dependency chain is a valid DAG (no cycles)
+- [ ] Every deployment target in the repo is covered by at least one phase
+- [ ] Each phase has a Recommended Skill annotation
+- [ ] Phases spanning multiple domains have been split into domain-specific sub-phases
+- [ ] For each risk in the design-doc's Risk Registry, the mitigation action appears in the relevant phase
+
+**If ANY check FAILS**: Go back and fix the outline. Do NOT proceed.
+**If ALL checks PASS**: Close this step and continue.
+
+**Context management:** If context is filling after outline verification:
+```bash
+af handoff -s "Outline verified, ready for post-work verification" -m "Issue: {{issue}}
+Outline: {design_dir}/implementation-plan/implementation_plan_outline.md
+Status: All verification checks passed
+Ready for: self-review step"
+```
+
+**Exit criteria:** All outline verification checks pass."""
+
+
+# ============================================================================
+# POST-WORK INVARIANT STEPS
+# ============================================================================
+
+[[steps]]
+id = "self-review"
+title = "Self-review changes"
+needs = ["gate-0-verify-outline"]
+description = """
+Review your own changes before running tests.
+
+**1. Review the diff:**
+```bash
+git diff origin/{{default_branch}}...HEAD     # All changes vs main
+git log --oneline origin/{{default_branch}}..HEAD  # All commits
+```
+
+**2. Check for common issues:**
+
+| Category | Look For |
+|----------|----------|
+| Bugs | Off-by-one, null handling, edge cases |
+| Security | Injection, auth bypass, exposed secrets |
+| Style | Naming, formatting, code organization |
+| Completeness | Missing error handling, incomplete paths |
+| Cruft | Debug prints, commented code, TODOs |
+
+**3. Fix issues found:**
+Don't just note them - fix them now. Amend or add commits as needed.
+
+**4. Verify no unintended changes:**
+```bash
+git diff --stat origin/{{default_branch}}...HEAD
+# Only files relevant to {{issue}} should appear
+```
+
+If you accidentally modified unrelated files, remove those changes.
+
+**Exit criteria:** Changes are clean, reviewed, and ready for testing."""
+
+[[steps]]
+id = "run-tests"
+title = "Run tests and verify coverage"
+needs = ["self-review"]
+description = """
+Verify your changes don't break anything and are properly tested.
+
+**1. Run the full test suite:**
+```bash
+# Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
+# Then run it. Examples: make test, npm test, cargo test, go test ./...
+```
+
+**ALL TESTS MUST PASS.** Do not proceed with failures.
+
+**2. If tests fail:**
+- Read the failure output carefully
+- Determine if your change caused it:
+  - If yes: Fix it. Return to the relevant domain step if needed.
+  - If no (pre-existing): File a bead, but still must pass for your PR
+
+```bash
+# Check if failure exists on main:
+git stash
+git checkout {{default_branch}}
+# Run the same test command you discovered above
+git checkout -
+git stash pop
+```
+
+**3. Verify test coverage for new code:**
+- New features should have tests
+- Bug fixes should have regression tests
+- If you added significant code without tests, add them now
+
+**4. Validate terraform if .tf files were modified:**
+```bash
+# Check if any .tf files were changed in this branch
+TF_CHANGED=$(git diff --name-only origin/{{default_branch}}...HEAD -- '*.tf' | head -1)
+if [ -n "$TF_CHANGED" ]; then
+  echo "Terraform files modified — running validation..."
+  TF_DIR=$(dirname "$TF_CHANGED")
+  (cd "$TF_DIR" && terraform validate) || { echo "FAIL: terraform validate failed"; exit 1; }
+  terraform fmt -check -recursive "$TF_DIR" || { echo "FAIL: terraform fmt check failed — run 'terraform fmt'"; exit 1; }
+  echo "Terraform validation passed."
+fi
+```
+
+**5. Run any other quality checks:**
+```bash
+# Discover project-specific linting/build checks from CLAUDE.md, Makefile, etc.
+# Then run them.
+```
+
+**Exit criteria:** All tests pass, terraform valid (if applicable), new code has appropriate test coverage."""
+
+[[steps]]
+id = "self-verify"
+title = "Verify output matches design contract"
+needs = ["run-tests"]
+description = """
+**MANDATORY GATE CHECK** — Jidoka gate: verify the work product matches the
+design contract before proceeding.
+
+**1. If a design contract was identified in validate-contract:**
+Re-read the original design-doc.md and verify:
+- [ ] Every phase from the design doc is represented in the outline
+- [ ] The outline's dependency ordering respects actual code dependencies
+- [ ] Acceptance criteria in the outline are mechanically verifiable
+- [ ] No design-doc requirements were dropped or silently ignored
+
+For each requirement from the design contract:
+- Document the evidence (which outline section)
+- If any requirement is NOT addressed: go back and fix before proceeding
+
+**2. If no design contract was identified in validate-contract:**
+- Skip this gate (no contract to verify against)
+- Close this step with reason: "N/A — no formal design contract"
+
+**MANDATORY EXIT PROTOCOL — af handoff required:**
+Do NOT run `af done` alone to close this step. You MUST use `af done && af handoff`.
+`af done && af handoff` closes this step AND cycles to a fresh session so the next
+step (peer review) runs with INDEPENDENT context — not contaminated by the session
+that authored and self-verified the outline. Independent context is the whole point
+of the peer review; a reviewer who just wrote the document cannot see its blind spots.
+
+```bash
+af done && af handoff -s "Outline self-verified, ready for peer review" -m "Issue: {{issue}}
+Outline: {design_dir}/implementation-plan/implementation_plan_outline.md
+MODE/branch: MODE=<pr|issue>; SRC_BRANCH=$SRC_BRANCH; PR_NUM=$PR_NUM (if MODE=pr)
+Ready for: peer-review-outline step (/rootcause-review of the outline)"
+```
+
+Running `af done` instead of the compound `af done && af handoff` is a fidelity violation.
+
+**Exit criteria:** All design contract requirements verified as addressed in the
+outline (or gate skipped due to no contract); step closed via `af done && af handoff`."""
+
+[[steps]]
+id = "peer-review-outline"
+title = "Peer review the implementation plan outline"
+needs = ["self-verify"]
+description = """
+Independently peer-review the implementation plan outline. You reached this step via
+`af done && af handoff`, so this session did not author the outline — the review is genuinely independent.
+
+**YOUR DIRECTIVE:** Invoke the skill using the Skill tool and let it do the work:
+```
+Skill(skill: "rootcause-review", args: "{design_dir}/implementation-plan/implementation_plan_outline.md")
+```
+Do NOT read the SKILL.md and follow it manually, and do NOT impose your own review
+criteria — invoke it via the Skill tool and faithfully execute whatever it instructs.
+The target is an implementation plan outline rather than a rootcause analysis; the skill adapts.
+
+The skill appends a "# Peer Review" section to the outline (it never modifies existing
+content). Then close with `af done` — no handoff; the next step (cleanup-workspace)
+commits and pushes the outline with the appended review:
+```bash
+af done
+```
+
+**Exit criteria:** The rootcause-review skill has run and appended its "# Peer Review" section to the outline."""
+
+[[steps]]
+id = "cleanup-workspace"
+title = "Clean up workspace"
+needs = ["peer-review-outline"]
+description = """
+Ensure workspace is pristine before handoff.
+
+**Note:** The design-plan-impl process creates planning documents in
+`{design_dir}/implementation-plan/` which are the actual deliverables — these
+should NOT be deleted. They are committed as part of the work product.
+
+**1. Check for uncommitted changes:**
+```bash
+git status
+```
+Must show "working tree clean". If not:
+- Commit legitimate changes
+- Discard garbage: `git checkout -- .`
+
+**2. Check for untracked files:**
+```bash
+git status --porcelain
+```
+Should be empty. If not:
+- Add to .gitignore if appropriate
+- Remove if temporary: `rm <file>`
+- Commit if needed
+
+**3. Check stash:**
+```bash
+git stash list
+```
+Should be empty. If not:
+- Pop and commit: `git stash pop && git add -A && git commit`
+- Or drop if garbage: `git stash drop`
+
+**4. Push your branch (mode-aware):**
+- **MODE=pr** — push to the PR's branch with an explicit refspec (your local
+  name differs from the remote branch):
+```bash
+git push origin HEAD:"$SRC_BRANCH"
+```
+  Rejected as non-fast-forward → the PR head moved while you worked:
+  `git pull --rebase origin "$SRC_BRANCH"`, re-run the test suite, push again.
+  If it still fails, mail manager — do NOT force-push.
+- **MODE=issue**:
+```bash
+git push -u origin $(git branch --show-current)
+```
+
+**5. Verify nothing left behind:**
+```bash
+git status                  # Clean
+git stash list              # Empty
+git log origin/{{default_branch}}..HEAD   # Your commits
+git diff origin/{{default_branch}}...HEAD # Your changes (expected)
+```
+
+**Exit criteria:** Branch pushed, workspace clean, no cruft."""
+
+[[steps]]
+id = "prepare-for-review"
+title = "Prepare work for review"
+needs = ["cleanup-workspace"]
+description = """
+Verify work is complete and ready for review.
+
+**Note:** Do NOT close the issue. The Supervisor will close it after successful merge.
+This enables conflict-resolution retries without reopening closed issues.
+
+**1. Verify the issue shows your work:**
+```bash
+af bead show {{issue}}
+# Status should still be 'in_progress' (you're working on it)
+```
+
+**2. Add completion notes:**
+```bash
+af bead update {{issue}} --notes "Implemented: design-plan-impl Mode A planning for {{issue}}.
+Artifact: {design_dir}/implementation-plan/implementation_plan_outline.md
+(phase outline with dependency chain, workstream classification, recommended skills).
+Source design branch merged: $SRC_BRANCH
+Next: human review of the outline, then dispatch design-phase-impl to extract phases."
+```
+
+**Exit criteria:** Issue updated with completion notes."""
+
+[[steps]]
+id = "submit-and-exit"
+title = "Submit PR and exit"
+needs = ["prepare-for-review"]
+description = """
+Create a PR and signal completion.
+
+**Ephemeral Agent Model:**
+Once you submit, you're done. The Supervisor will:
+1. Review and merge your PR
+2. Handle rebasing (mechanical rebases done automatically)
+3. Close your issue after successful merge
+4. Create conflict-resolution tasks if needed (fresh agent handles those)
+
+**1. Deliver (mode-aware):**
+
+**MODE=pr** — do NOT create a PR. Your work is already on the input PR's branch
+(pushed in cleanup-workspace). Post the summary AS A COMMENT on that PR:
+```bash
+gh pr comment "$PR_NUM" --body "## design-plan-impl: implementation plan outline added
+
+## Outline Summary
+- Outline: {design_dir}/implementation-plan/implementation_plan_outline.md
+- Phases (<N> total): <one line per phase: number — title — recommended skill>
+- Dependency chain: <the outline's phase dependency chain>
+- Deployment coverage: <targets covered; any gaps>
+
+## Next Step
+Review the outline. After approval, extract phases one at a time via:
+af sling --agent design-phase-impl '<this PR URL>'
+"
+```
+Then skip to step 2.
+
+**MODE=issue** — create a pull request whose body SUMMARIZES the outline you
+created. The PR is the human review surface — build the body FROM the outline content:
+```bash
+gh pr create --title "plan: implementation plan outline for {{issue}}" \
+  --body "Implementation plan outline (Mode A) for {{issue}}.
+
+## Source
+- Design branch merged: $SRC_BRANCH
+- Design doc: <design-doc path>
+
+## Outline Summary
+- Outline: {design_dir}/implementation-plan/implementation_plan_outline.md
+- Phases (<N> total): <one line per phase: number — title — recommended skill>
+- Dependency chain: <the outline's phase dependency chain>
+- Deployment coverage: <targets covered; any gaps>
+
+## Next Step
+Review the outline. After approval, extract phases one at a time via:
+af sling --agent design-phase-impl '<this PR URL>'
+"
+```
+
+**2. Complete the formula:**
+```bash
+af done
+```
+
+`af done` closes the current formula step and — since this is the last step —
+mails WORK_DONE to the Supervisor and cleans up the checkpoint.
+
+**3. You're done:**
+Your PR is open and the Supervisor knows you're done.
+Your workspace can be cleaned up - all work is pushed to origin.
+
+If you have context remaining, you may:
+- Pick up new work from `af prime`
+- Or use `af handoff` to cycle to a fresh session
+
+If the Supervisor needs conflict resolution, it will dispatch a fresh agent.
+You do NOT need to wait around.
+
+**Exit criteria:** PR created, Supervisor notified via WORK_DONE, agent done."""
+
+[vars]
+[vars.issue]
+description = "The issue ID assigned to this agent"
+required = true
+source = "cli"

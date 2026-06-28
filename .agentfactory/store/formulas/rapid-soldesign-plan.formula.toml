@@ -1,0 +1,770 @@
+description = """
+## Overview
+Autonomous multi-agent rapid design refinement from a GitHub issue URI.
+
+This formula automates a streamlined multi-agent workflow: dispatch an analyst
+(rootcause-all) and a designer (design-v7) in parallel, then orchestrate a single
+cross-review round between them. Both agents stay alive with full context
+throughout the cross-review, preserving the unique knowledge each agent builds
+during its initial investigation. After the cross-review, artifacts are committed
+to a PR and both agents are released; a design-plan-impl agent then converts the
+PR's design into an implementation plan.
+
+## Workflow
+1. Parse GitHub issue, validate gh auth, create problem summary
+2. Dispatch analyst + designer agents in parallel, create gate bead
+3. Await completion mail from both agents (event-driven — woken by their mail)
+4. Cross-review round 1: analyst reviews design, designer incorporates
+5. Commit artifacts, open PR, record PR link; both agents af done
+6. Dispatch design-plan-impl agent with the PR link
+7. Finalize: verify output, send completion mail
+
+## Key Design Decisions
+- Two persistent agents retain accumulated context for richer cross-pollination
+- The analyst stays alive through the single cross-review round (no early af done),
+  so its investigation context is available when the designer incorporates findings
+- One cross-review round, then commit + PR — the pipeline stays lean
+- The implementation plan is produced by a fresh agent dispatched off the PR
+- Event-driven coordination: the orchestrator is woken by each sub-agent's completion
+  mail (the af mail inject hook delivers it on wake). The orchestrator therefore does
+  NOT poll, sleep, nudge, or send keepalives — sub-agents simply mail when done, and
+  the orchestrator advances on wake. Agent liveness is the factory watchdog's job.
+
+## User Touchpoints
+- Fully autonomous after dispatch — no human approval gate
+- Completion notification via mail when the implementation plan is ready
+
+## Event-Driven Wait Protocol (applies to every "await" action below)
+The orchestrator never busy-waits. When an action says "wait for signal X":
+1. Check your inbox once: `af mail inbox --json`.
+2. If the awaited signal(s) are present, archive them (`af mail delete`) and continue.
+3. If not present, STOP and end your turn. Do NOT sleep, loop, nudge, or keepalive.
+   When the sub-agent mails you, the af mail inject hook wakes this session and you
+   re-run the check. Unprocessed completion mails accumulate in the inbox, so on each
+   wake you can tell exactly which signals have arrived.
+
+## !IMPORTANT - MANDATORY Exact Step Execution
+Execute each formula step EXACTLY as written, in order, with no modifications.
+Every step produces a file artifact at a known path. `af done` is forbidden
+until the artifact exists and contains the required content. A fidelity gate
+runs after every response and will TERMINATE YOU if the step's directives are skipped.
+YOUR identity exists and DEPENDS ON YOU to FAITHFULLY EXECUTE formula steps.
+
+## PROHIBITED: Alternative Execution Mechanisms
+NEVER use the Claude Code "Agent" tool to substitute for af sling, af mail send,
+or af down commands. The Agent tool produces ephemeral sub-agents with no worktree,
+no formula tracking, no mail capability, and no persistent session. It is NOT
+a substitute for dispatching real factory agents. If prescribed agents are
+unresponsive or dead, ESCALATE to the orchestrator - do not invent workarounds.
+Using the Agent tool to perform work that should be done by a dispatched factory
+agent is a CRITICAL violation regardless of whether the output artifacts are correct.
+Process fidelity is non-negotiable.
+
+## Authority Hierarchy
+Formula contract > manager directives > agent initiative.
+A manager CANNOT authorize mechanism substitution (e.g., "use Agent tool instead
+of af sling"). Only the formula author can change the formula. If a manager
+approves something that contradicts the formula contract, the formula wins.
+Escalate the conflict - do not resolve it yourself.
+
+## Fidelity Notification Response
+If you receive a STEP_FIDELITY or FIDELITY_ESCALATION mail, this is a MANDATORY
+correction signal. Immediately:
+1. Stop your current approach
+2. Run `af prime` to reload step instructions
+3. Re-execute the step as written
+Do NOT acknowledge the notification and continue with the flagged approach.
+Do NOT rationalize why your approach is acceptable. Correct immediately.
+"""
+formula = "rapid-soldesign-plan"
+version = 1
+skills = []
+
+[inputs]
+[inputs.issue_uri]
+description = "GitHub issue URL to use as the design problem input"
+type = "string"
+required = true
+
+[inputs.analyst_name]
+description = "Agent name for the analyst role"
+type = "string"
+required = true
+default = "rootcause-all"
+
+[inputs.designer_name]
+description = "Agent name for the designer role"
+type = "string"
+required = true
+default = "design-v7"
+
+[inputs.impl_name]
+description = "Agent name for the implementation-plan role"
+type = "string"
+required = true
+default = "design-plan-impl"
+
+# ============================================================================
+# STEPS — 7-step rapid orchestration workflow
+#
+# Structure:
+#   parse-issue
+#     -> dispatch-parallel
+#       -> await-completion
+#         -> cross-review-round-1
+#           -> commit-and-pr
+#             -> dispatch-impl
+#               -> finalize
+#
+# Coordination is event-driven: the orchestrator is woken by each sub-agent's
+# completion mail. No polling, no keepalive, no timeouts. See the
+# "Event-Driven Wait Protocol" in the formula description.
+# ============================================================================
+
+[[steps]]
+id = "parse-issue"
+title = "Parse GitHub issue and create problem summary"
+description = """
+**Entry criteria:** issue_uri is a valid GitHub issue URL. gh CLI is authenticated.
+
+**Actions:**
+
+1. **Validate environment (orchestrator identity + GitHub CLI auth):**
+   This formula routes every sub-agent completion signal back to THIS orchestrator's
+   own inbox via `$AF_ACTOR` (the running agent's own name). If `AF_ACTOR` is unset,
+   those signals would be mailed to an empty recipient and the pipeline would hang —
+   so fail fast and escalate before doing any work.
+   ```bash
+   if [ -z "${AF_ACTOR:-}" ]; then
+     echo "CRITICAL: AF_ACTOR is unset — cannot route sub-agent completion signals."
+     af mail send {{orchestrator}} -s "ABORT: AF_ACTOR unset for rapid-soldesign-plan" \
+       -m "AF_ACTOR is empty in this session; sub-agent signals cannot be routed. Aborting formula."
+     exit 1
+   fi
+   echo "Orchestrator identity (AF_ACTOR): $AF_ACTOR"
+
+   gh auth status || {
+     echo "ERROR: gh CLI not authenticated. Run 'gh auth login' first."
+     exit 1
+   }
+   ```
+
+2. **Fetch GitHub issue content:**
+   ```bash
+   ISSUE_JSON=$(gh issue view "{{issue_uri}}" --json number,title,body,labels)
+   ISSUE_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.number')
+   ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
+   ISSUE_BODY=$(echo "$ISSUE_JSON" | jq -r '.body')
+   ```
+
+3. **Truncate issue body to 50000 characters to prevent context exhaustion:**
+   ```bash
+   ISSUE_BODY_TRUNCATED=$(echo "$ISSUE_BODY" | head -c 50000)
+   if [ ${#ISSUE_BODY} -gt 50000 ]; then
+     ISSUE_BODY_TRUNCATED="${ISSUE_BODY_TRUNCATED}\\n\\n[TRUNCATED — full issue at {{issue_uri}}]"
+   fi
+   ```
+
+4. **Create problem summary file:**
+   Write `problem-summary-<issue-number>.md` with the extracted issue content.
+   This file is what the analyst and designer agents will receive as their
+   problem input.
+
+5. **Generate design-refinement-progress.md:**
+   ```markdown
+   # Rapid Design Refinement Progress: <ISSUE_TITLE>
+
+   **Status**: In Progress
+   **Issue**: {{issue_uri}}
+   **Started**: <timestamp>
+
+   ## Agents
+   | Role | Agent | Status | Started | Completed |
+   |------|---------|--------|---------|-----------|
+   | Analyst | Pending | Not dispatched | - | - |
+   | Designer | Pending | Not dispatched | - | - |
+   | Impl | Pending | Not dispatched | - | - |
+
+   ## Cross-Review Progress
+   | Round | Exchange | Status | Timestamp |
+   |-------|----------|--------|-----------|
+   | 1 | Analyst reviews design-doc | Pending | - |
+   | 1 | Designer incorporates HIGH/CRIT | Pending | - |
+
+   ## Implementation Plan
+   | Stage | Status | Timestamp |
+   |-------|--------|-----------|
+   | PR opened | Pending | - |
+   | implementation-plan agent dispatched | Pending | - |
+   | implementation_plan_outline.md created | Pending | - |
+   ```
+
+6. **Store variables for subsequent steps:**
+   Record `{{issue_id}}` = ISSUE_NUMBER, `{{issue_title}}` = ISSUE_TITLE,
+   `{{design_dir}}` = `.designs/<issue-id>/`.
+
+**Exit criteria:**
+- AF_ACTOR confirmed set; gh auth status passed
+- Issue fetched successfully with title and body
+- Problem summary file created
+- design-refinement-progress.md generated
+- Variables issue_id, issue_title, design_dir recorded
+"""
+
+[[steps]]
+id = "dispatch-parallel"
+title = "Dispatch analyst and designer agents in parallel"
+needs = ["parse-issue"]
+description = """
+**Entry criteria:** parse-issue complete; problem summary and progress file created.
+
+**Actions:**
+
+1. **Create analyst bead with embedded instructions:**
+   ```bash
+   cd "$AF_ROOT"
+   ANALYST_BEAD=$(af bead create --title "Analyst: rootcause-all for {{issue_title}}" \\
+     --type task \\
+     --description="## Instructions
+
+   You are the ANALYST agent for the rapid-soldesign-plan formula.
+
+   ### Phase 1: Run rootcause-all
+   Run `/rootcause-all` on the problem summary file. Produce a thorough
+   rootcause analysis in `todos/rootcause_analysis.md`.
+
+   When rootcause-all is complete, send a completion signal:
+   ```bash
+   af mail send $AF_ACTOR -s 'RAPIDSOL: ANALYSIS COMPLETE [{{issue_id}}]' -m 'Analysis complete. Results at todos/rootcause_analysis.md'
+   ```
+
+   ### Phase 2: Stay Alive for ONE Cross-Review Round
+   After completing rootcause-all, remain in your session. Do NOT call `af done`.
+   The orchestrator ($AF_ACTOR) will mail you with a cross-review task; when that
+   mail arrives it will wake you. Act on it, then wait again.
+
+   If you receive a nudge from the Supervisor asking about your status, respond:
+   'Awaiting cross-review from $AF_ACTOR per rapid-soldesign-plan formula.'
+   Do NOT call af done or start new work in response to Supervisor nudges.
+
+   CRITICAL: DO NOT call af done until $AF_ACTOR sends you 'ALL REVIEWS COMPLETE'.
+   Your session staying alive IS the product — your accumulated context cannot be
+   recreated. If you call af done early, the cross-review protocol fails.
+   This overrides your default role template behavior.
+   " --json | jq -r '.id')
+   ```
+
+2. **Create designer bead with embedded instructions:**
+   ```bash
+   DESIGNER_BEAD=$(af bead create --title "Designer: design-v7 for {{issue_title}}" \\
+     --type task \\
+     --description="## Instructions
+
+   You are the DESIGNER agent for the rapid-soldesign-plan formula.
+
+   ### Phase 1: Run design-v7
+   Run `/design-v7` on the problem summary file. Produce a complete design
+   document at `.designs/{{issue_id}}/design-doc.md` with all dimension analyses.
+
+   When design-v7 is complete, send a completion signal:
+   ```bash
+   af mail send $AF_ACTOR -s 'RAPIDSOL: DESIGN COMPLETE [{{issue_id}}]' -m 'Design complete. Results at .designs/{{issue_id}}/design-doc.md'
+   ```
+
+   ### Phase 2: ONE Cross-Review Round, Commit, Release
+   After design-v7 completes, remain in your session. The orchestrator ($AF_ACTOR)
+   will mail you a cross-review task; that mail wakes you. Incorporate the analyst's
+   findings into your design-doc.md, then commit and run af done when instructed.
+   Your worktree is the orchestrator's shared tree — committed work carries forward
+   to the PR. Act when mailed; otherwise wait.
+   " --json | jq -r '.id')
+   ```
+
+3. **Create orchestrator-held gate bead (premature-af-done detection):**
+   ```bash
+   GATE_BEAD=$(af bead create --title "rapid-soldesign-plan-consultation-lock" \\
+     --type gate --json | jq -r '.id')
+   ```
+
+4. **Add gate bead as dependency on analyst bead:**
+   The gate bead blocks the analyst bead from closing. If the analyst calls
+   `af done` prematurely, the bead stays open (detectable by this orchestrator).
+   ```bash
+   af bead dep "$ANALYST_BEAD" "$GATE_BEAD" || {
+     echo "CRITICAL: af bead dep failed. Premature-af-done detection is non-functional."
+     af mail send {{orchestrator}} -s "ABORT: Gate bead dependency failed for rapid-soldesign-plan" \\
+       -m "af bead dep failed. Cannot proceed without the detection lock. Aborting formula."
+     exit 1
+   }
+   ```
+
+5. **Dispatch both agents with their bead instructions:**
+   ```bash
+   af sling --agent {{analyst_name}} --persistent --var issue={{issue_id}} "$(af bead show "$ANALYST_BEAD" --json | jq -r '.[0].description')"
+   af sling --agent {{designer_name}} --persistent --var issue={{issue_id}} "$(af bead show "$DESIGNER_BEAD" --json | jq -r '.[0].description')"
+   ```
+
+5a. **Verify both agent sessions started (one-time check, not a poll):**
+  ```bash
+  sleep 5
+  if ! tmux has-session -t "af-{{analyst_name}}" 2>/dev/null; then
+    echo "CRITICAL: af sling failed - analyst session not found"
+    af mail send {{orchestrator}} -s "ESCALATE: af sling failed for {{analyst_name}}" \
+      -m "Agent dispatch failed. tmux session af-{{analyst_name}} does not exist."
+    exit 1
+  fi
+  if ! tmux has-session -t "af-{{designer_name}}" 2>/dev/null; then
+    echo "CRITICAL: af sling failed - designer session not found"
+    af mail send {{orchestrator}} -s "ESCALATE: af sling failed for {{designer_name}}" \
+      -m "Agent dispatch failed. tmux session af-{{designer_name}} does not exist."
+    exit 1
+  fi
+  echo "Both agent sessions verified alive."
+  ```
+
+6. **Update progress file:**
+   Update design-refinement-progress.md with agent names and "Dispatched" status.
+
+**Exit criteria:**
+- Analyst bead created with rootcause-all + stay-alive instructions
+- Designer bead created with design-v7 + single-round + commit instructions
+- Gate bead created and added as dependency on analyst bead
+- Both agents dispatched via af sling --persistent and sessions verified
+- If af bead dep fails, formula aborted (hard stop)
+"""
+
+[[steps]]
+id = "await-completion"
+title = "Await initial-analysis completion mail from both agents"
+needs = ["dispatch-parallel"]
+description = """
+**Entry criteria:** Both agents dispatched and working.
+
+This is event-driven (see the Event-Driven Wait Protocol). Both agents mail the
+orchestrator when their initial work is done; each mail wakes this session. Do NOT
+poll, sleep, nudge, or keepalive.
+
+**Actions:**
+
+1. **On wake, check the inbox for BOTH completion signals:**
+   ```bash
+   ANALYSIS=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: ANALYSIS COMPLETE")) | .id' | head -1)
+   DESIGN=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: DESIGN COMPLETE")) | .id' | head -1)
+   ```
+
+2. **Decision:**
+   - **If BOTH `$ANALYSIS` and `$DESIGN` are non-empty:** archive them and proceed to
+     action 3.
+     ```bash
+     af mail delete "$ANALYSIS"; af mail delete "$DESIGN"
+     echo "Both initial outputs complete."
+     ```
+   - **If either is empty:** STOP and end your turn. Leave any received signal in the
+     inbox (do not delete a lone signal — it must still be present on the next wake).
+     You will be re-woken when the remaining agent mails you.
+
+3. **Verify both initial artifacts exist on the shared worktree:**
+   Analyst and designer share this orchestrator's worktree, so their files are
+   readable on disk without committing. Cross-review reads them directly.
+   ```bash
+   if [ ! -f "${AF_WORKTREE:-.}/{{design_dir}}design-doc.md" ]; then
+     echo "VERIFICATION FAILED: {{design_dir}}design-doc.md missing despite DESIGN COMPLETE signal"
+     af mail send {{orchestrator}} -s "ESCALATE: Designer signalled complete but design-doc.md is missing"
+     exit 1
+   fi
+   if [ ! -f "${AF_WORKTREE:-.}/todos/rootcause_analysis.md" ]; then
+     echo "WARNING: todos/rootcause_analysis.md missing despite ANALYSIS COMPLETE signal"
+     af mail send {{orchestrator}} -s "WARNING: Analyst signalled complete but rootcause_analysis.md is missing"
+   fi
+   ```
+
+4. **Update progress file** with "Analysis Complete" and "Design Complete" status,
+   then `af done` to advance.
+
+**Exit criteria:**
+- RAPIDSOL: ANALYSIS COMPLETE signal received and archived
+- RAPIDSOL: DESIGN COMPLETE signal received and archived
+- design-doc.md present on the shared worktree (verified)
+- Progress file updated
+"""
+
+[[steps]]
+id = "cross-review-round-1"
+title = "Cross-review round 1: analyst reviews design, designer incorporates"
+needs = ["await-completion"]
+description = """
+**Entry criteria:** Both initial analyses complete.
+
+Event-driven throughout (see the Event-Driven Wait Protocol). The orchestrator mails
+a task, then waits to be woken by the reply mail. Do NOT poll, sleep, nudge, or keepalive.
+
+**Actions:**
+
+1. **Analyst liveness check before assigning review (one-time check):**
+   ```bash
+   if ! tmux has-session -t "af-{{analyst_name}}" 2>/dev/null; then
+     af mail send {{orchestrator}} -s "CRITICAL: Analyst session died before cross-review" \
+       -m "Analyst called af done or session crashed. Context LOST. Options: A) skip cross-review, B) re-dispatch (degraded), C) abort."
+     exit 1
+   fi
+   ```
+
+2. **Assign the analyst's review (only if not already assigned this round):**
+   If `{{design_dir}}cross-review/analyst-review-design.md` does NOT yet exist and you
+   have not already mailed the round-1 review task, mail it now:
+   ```bash
+   af mail send {{analyst_name}} -s "RAPIDSOL" -m "CROSS-REVIEW ROUND 1: Read the designer's design-doc.md at {{design_dir}}design-doc.md — Write your review to {{design_dir}}cross-review/analyst-review-design.md using the structured review format (CRITICAL/HIGH/LOW sections). When done, send: af mail send $AF_ACTOR -s 'RAPIDSOL: REVIEW WRITTEN [{{issue_id}}] [round 1]'"
+   ```
+   Then STOP and end your turn — the analyst's reply mail will wake you.
+
+3. **On wake, check for the analyst review signal:**
+   ```bash
+   REVIEW=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: REVIEW WRITTEN.*round 1")) | .id' | head -1)
+   ```
+   - If empty: STOP and end your turn (you were woken by other mail; keep waiting).
+   - If non-empty: `af mail delete "$REVIEW"` and continue to action 4.
+
+4. **Assign the designer to incorporate findings:**
+   ```bash
+   af mail send {{designer_name}} -s "RAPIDSOL" -m "CROSS-REVIEW ROUND 1: Read the analyst's rootcause_analysis.md at todos/rootcause_analysis.md — Also read the analyst's review at {{design_dir}}cross-review/analyst-review-design.md — Incorporate all CRITICAL and HIGH findings into your design-doc.md. Log changes to {{design_dir}}cross-review/designer-update-log.md. When done, send: af mail send $AF_ACTOR -s 'RAPIDSOL: DESIGN UPDATED [{{issue_id}}]'"
+   ```
+   Then STOP and end your turn — the designer's reply mail will wake you.
+
+5. **On wake, check for the designer update signal:**
+   ```bash
+   UPDATED=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: DESIGN UPDATED")) | .id' | head -1)
+   ```
+   - If empty: STOP and end your turn (keep waiting).
+   - If non-empty: `af mail delete "$UPDATED"`, update the progress file with round-1
+     completion, and `af done` to advance.
+
+**Exit criteria:**
+- Analyst review written to cross-review/analyst-review-design.md
+- RAPIDSOL: REVIEW WRITTEN [round 1] signal received and archived
+- Designer incorporated HIGH/CRIT findings into design-doc.md
+- RAPIDSOL: DESIGN UPDATED signal received and archived
+- Progress file updated
+"""
+
+[[steps]]
+id = "commit-and-pr"
+title = "Commit artifacts, open PR, release both agents"
+needs = ["cross-review-round-1"]
+description = """
+**Entry criteria:** Cross-review round 1 complete. Designer has updated design-doc.md.
+
+Event-driven throughout. Do NOT poll, sleep, nudge, or keepalive.
+
+**Actions:**
+
+1. **Assign the designer to commit the cross-reviewed design (if not already done):**
+   If `HEAD:{{design_dir}}design-doc.md` is not yet committed and you have not already
+   mailed the commit task, mail it now:
+   ```bash
+   af mail send {{designer_name}} -s "RAPIDSOL" -m "Cross-review complete. Commit your work now: git add {{design_dir}}design-doc.md {{design_dir}}cross-review/ {{design_dir}}*.md && git commit -m 'rapid-soldesign-plan: cross-reviewed design for {{issue_title}}' && git push origin HEAD. When done, send: af mail send $AF_ACTOR -s 'RAPIDSOL: DESIGNER COMMITTED [{{issue_id}}]'"
+   ```
+   Then STOP and end your turn — the designer's reply mail will wake you.
+
+2. **On wake, check for the designer commit signal:**
+   ```bash
+   COMMITTED=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: DESIGNER COMMITTED")) | .id' | head -1)
+   ```
+   - If empty: STOP and end your turn (keep waiting).
+   - If non-empty: `af mail delete "$COMMITTED"` and continue.
+
+3. **Verify the design doc is committed on HEAD (shared worktree):**
+   ```bash
+   if ! git -C "$AF_ROOT" cat-file -e "HEAD:{{design_dir}}design-doc.md" 2>/dev/null; then
+     echo "COMMIT VERIFICATION FAILED: {{design_dir}}design-doc.md not committed on HEAD"
+     af mail send {{orchestrator}} -s "ESCALATE: Commit verification failed — design-doc.md is not on HEAD"
+     exit 1
+   fi
+   echo "Path verification: design-doc.md committed on HEAD at {{design_dir}}"
+   ```
+
+4. **Finalize the design commit and clean stray .agentfactory/ artifacts:**
+   IMPORTANT: Only commit files under {{design_dir}} and the progress file.
+   Do NOT commit anything under .agentfactory/ — agent CLAUDE.md files,
+   checkpoint files, runtime artifacts, and agent workspace files do not
+   belong in the design PR.
+   ```bash
+   cd "$AF_ROOT"
+   git add {{design_dir}}
+   git add .designs/{{issue_id}}/design-refinement-progress.md
+   git reset HEAD -- .agentfactory/ 2>/dev/null || true
+   git diff --cached --quiet || git commit -m "rapid-soldesign-plan: design artifacts for #{{issue_id}} ({{issue_title}})"
+   git push origin HEAD
+   ```
+
+5. **Write the PR description, then create (or reuse) the PR and record its URL:**
+   Write `{{design_dir}}cross-review/pr-body.md` summarizing this run from the committed
+   artifacts under `{{design_dir}}` and the GitHub issue (`gh issue view {{issue_uri}}`):
+   ```markdown
+   ## Issue
+   Design for #{{issue_id}} - {{issue_title}}
+   {{issue_uri}}
+
+   <problem statement>
+
+   ## Root cause
+   - <validated root cause, from design-doc.md>
+
+   ## Proposed solution
+   - <what the solution comprises, from design-doc.md>
+
+   ## Cross-review
+   - <findings, from cross-review/analyst-review-design.md and designer-update-log.md>
+
+   ## Artifacts
+   - {{design_dir}}design-doc.md
+   - {{design_dir}}cross-review/
+   ```
+   ```bash
+   cd "$AF_ROOT"
+   BRANCH=$(git rev-parse --abbrev-ref HEAD)
+   PR_URL=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null)
+   if [ -z "$PR_URL" ]; then
+     PR_URL=$(gh pr create \
+       --title "design: {{issue_title}} (#{{issue_id}})" \
+       --body "$(cat "${AF_WORKTREE:-.}/{{design_dir}}cross-review/pr-body.md")" 2>&1)
+   fi
+   echo "PR_URL=$PR_URL"
+   ```
+   Record `{{pr_url}}` = PR_URL for downstream steps. If PR_URL is empty or not a
+   URL, escalate and abort:
+   ```bash
+   case "$PR_URL" in
+     https://*) echo "PR recorded: $PR_URL" ;;
+     *) af mail send {{orchestrator}} -s "ESCALATE: PR creation failed in rapid-soldesign-plan" \
+          -m "gh pr create did not return a URL: $PR_URL"; exit 1 ;;
+   esac
+   ```
+
+6. **Close orchestrator-held gate bead (allows analyst bead to close):**
+   ```bash
+   af bead close "{{gate_bead}}"
+   ```
+
+7. **Release both agents — assign each to signal DONE and run af done (if not already):**
+   ```bash
+   af mail send {{analyst_name}} -s "RAPIDSOL" -m "ALL REVIEWS COMPLETE AND COMMITTED — Send: af mail send $AF_ACTOR -s 'RAPIDSOL: ANALYST DONE [{{issue_id}}]' then run af done. The cross-review round is finished. Thank you for staying alive through the process."
+   af mail send {{designer_name}} -s "RAPIDSOL" -m "ALL REVIEWS COMPLETE AND COMMITTED — Send: af mail send $AF_ACTOR -s 'RAPIDSOL: DESIGNER DONE [{{issue_id}}]' then run af done. The cross-review round is finished."
+   ```
+   Then STOP and end your turn — the agents' DONE mails will wake you.
+
+8. **On wake, check for BOTH DONE signals and af down whoever has reported:**
+   The sub-agents send these explicit signals to this orchestrator's own inbox
+   ($AF_ACTOR) — note that their WORK_DONE mails go to the supervisor, not here.
+   ```bash
+   ADONE=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: ANALYST DONE")) | .id' | head -1)
+   DDONE=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: DESIGNER DONE")) | .id' | head -1)
+   if [ -n "$ADONE" ]; then af mail delete "$ADONE"; af down {{analyst_name}} 2>/dev/null || true; fi
+   if [ -n "$DDONE" ]; then af mail delete "$DDONE"; af down {{designer_name}} 2>/dev/null || true; fi
+   ```
+   - If BOTH have now been received (across this and prior wakes — i.e. both sessions are
+     gone): update the progress file with the PR link and `af done` to advance.
+     ```bash
+     if ! tmux has-session -t "af-{{analyst_name}}" 2>/dev/null && ! tmux has-session -t "af-{{designer_name}}" 2>/dev/null; then
+       echo "Both agents released."
+     else
+       echo "Still awaiting a DONE signal — ending turn."
+       exit 0
+     fi
+     ```
+   - Otherwise: STOP and end your turn (keep waiting for the remaining DONE mail).
+
+**Exit criteria:**
+- Designer committed cross-reviewed design-doc.md on HEAD (verified)
+- Design artifacts committed and pushed (no .agentfactory/ files included)
+- PR created or existing PR URL captured; {{pr_url}} recorded (non-empty URL)
+- Gate bead closed (analyst bead can now close)
+- Both analyst and designer sent DONE signals, ran af done, and were af down'd
+- Progress file updated with PR link
+"""
+
+[[steps]]
+id = "dispatch-impl"
+title = "Dispatch implementation-plan agent with the PR link"
+needs = ["commit-and-pr"]
+description = """
+**Entry criteria:** PR opened and {{pr_url}} recorded. Analyst and designer released.
+
+Event-driven (see the Event-Driven Wait Protocol). The implementation-plan agent is
+autonomous: given the PR link it reads the PR, produces the implementation plan, and
+pushes its results back to the PR. It needs NO task instructions. It signals completion
+to this orchestrator (the dispatch caller) via the standard WORK_DONE mail, which wakes
+this session.
+
+**Actions:**
+
+1. **Re-derive the PR URL defensively (in case {{pr_url}} is unset):**
+   ```bash
+   cd "$AF_ROOT"
+   BRANCH=$(git rev-parse --abbrev-ref HEAD)
+   PR_URL="{{pr_url}}"
+   case "$PR_URL" in
+     https://*) : ;;
+     *) PR_URL=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null) ;;
+   esac
+   if [ -z "$PR_URL" ]; then
+     echo "CRITICAL: No PR URL available to hand to {{impl_name}}."
+     af mail send {{orchestrator}} -s "ESCALATE: No PR URL for implementation-plan dispatch"
+     exit 1
+   fi
+   echo "Dispatching {{impl_name}} with PR_URL=$PR_URL"
+   ```
+
+2. **Dispatch {{impl_name}} with the PR link — nothing else (only if not already dispatched):**
+   The agent is designed to take a PR link and run: it reads the PR, does its job, and
+   pushes its results back to the PR. Do NOT add task instructions, skill invocations,
+   or checkout steps — that is the agent's job, not the formula's.
+   ```bash
+   af sling --agent {{impl_name}} --reset "$PR_URL"
+   ```
+
+3. **Verify the {{impl_name}} session started (one-time check):**
+   ```bash
+   sleep 5
+   if ! tmux has-session -t "af-{{impl_name}}" 2>/dev/null; then
+     echo "CRITICAL: af sling failed - {{impl_name}} session not found after start"
+     af mail send {{orchestrator}} -s "ESCALATE: implementation-plan dispatch failed" \
+       -m "af sling --agent {{impl_name}} completed but tmux session af-{{impl_name}} does not exist."
+     exit 1
+   fi
+   echo "{{impl_name}} session verified alive."
+   ```
+   Then STOP and end your turn — the agent's WORK_DONE mail will wake you.
+
+4. **On wake, check for the WORK_DONE mail from {{impl_name}}:**
+   When {{impl_name}} finishes its formula, its final `af done` mails
+   `WORK_DONE: <instance>` to this orchestrator (the dispatch caller). That is the
+   completion signal — no custom signal is injected into the agent.
+   ```bash
+   DONE=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("WORK_DONE")) | .id' | head -1)
+   ```
+   - If empty: STOP and end your turn (keep waiting).
+   - If non-empty: `af mail delete "$DONE"`, update the progress file, and `af done`
+     to advance.
+
+**Exit criteria:**
+- {{impl_name}} dispatched via `af sling --agent {{impl_name}} --reset "$PR_URL"` (no instruction text)
+- {{impl_name}} session verified alive
+- WORK_DONE mail from {{impl_name}} received and archived
+- Progress file updated
+"""
+
+[[steps]]
+id = "finalize"
+title = "Finalize: verify output, send completion mail"
+needs = ["dispatch-impl"]
+description = """
+**Entry criteria:** implementation-plan agent complete. implementation_plan_outline.md created on the PR branch.
+
+**Actions:**
+
+1. **Verify implementation_plan_outline.md exists and has Phase N: headings:**
+   The outline is committed by {{impl_name}} on the PR branch. Fetch and inspect it.
+   ```bash
+   cd "$AF_ROOT"
+   BRANCH=$(git rev-parse --abbrev-ref HEAD)
+   git fetch origin "$BRANCH" 2>/dev/null || true
+   # The implementation-plan agent decides where to write; locate the outline by name
+   # on the PR branch rather than assuming a fixed path.
+   OUTLINE_PATH=$(git -C "$AF_ROOT" ls-tree -r --name-only "origin/$BRANCH" 2>/dev/null | grep -E 'implementation_plan_outline\\.md$' | head -1)
+   if [ -n "$OUTLINE_PATH" ]; then
+     OUTLINE_BODY=$(git -C "$AF_ROOT" show "origin/$BRANCH:$OUTLINE_PATH" 2>/dev/null)
+   else
+     OUTLINE_BODY=""
+   fi
+   if [ -z "$OUTLINE_BODY" ]; then
+     echo "WARNING: implementation_plan_outline.md not found on PR branch."
+     af mail send {{orchestrator}} -s "WARNING: implementation_plan_outline.md missing after implementation-plan agent" \
+       -m "{{impl_name}} completed (WORK_DONE) but no implementation_plan_outline.md is on the PR branch. Manual review recommended."
+   elif ! echo "$OUTLINE_BODY" | grep -qE '^## Phase [0-9]+:'; then
+     echo "WARNING: implementation_plan_outline.md missing '## Phase N:' headings."
+     af mail send {{orchestrator}} -s "WARNING: Plan outline missing phase headings" \
+       -m "The implementation_plan_outline.md does not have ## Phase N: headings. Manual review recommended."
+   else
+     echo "Verified: implementation_plan_outline.md has Phase N: headings."
+   fi
+   ```
+
+2. **Release the {{impl_name}} agent:**
+   ```bash
+   af down {{impl_name}} 2>/dev/null || true
+   ```
+
+3. **Update progress file with completion:**
+   ```markdown
+   **Status**: COMPLETE
+   **Completed**: <timestamp>
+   ```
+
+4. **Send completion mail to {{orchestrator}} with PR link:**
+   ```bash
+   cd "$AF_ROOT"
+   BRANCH=$(git rev-parse --abbrev-ref HEAD)
+   PR_URL="{{pr_url}}"
+   case "$PR_URL" in
+     https://*) : ;;
+     *) PR_URL=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null) ;;
+   esac
+   af mail send {{orchestrator}} -s "RAPIDSOL: COMPLETE [{{issue_id}}]" -m "
+   Rapid design refinement complete for {{issue_title}}.
+
+   ## PR
+   $PR_URL
+
+   ## Output
+   - Design document: {{design_dir}}design-doc.md
+   - Implementation plan: implementation_plan_outline.md (pushed to the PR branch by {{impl_name}})
+   - Cross-review artifacts: {{design_dir}}cross-review/
+
+   ## Next Step
+   Hand the implementation_plan_outline.md to your implementation workflow to begin
+   phase-by-phase implementation.
+   "
+   ```
+
+**Exit criteria:**
+- implementation_plan_outline.md verified present (or warning escalated) with Phase N: headings
+- {{impl_name}} agent released (af down)
+- Progress file updated to COMPLETE
+- RAPIDSOL: COMPLETE mail sent to {{orchestrator}} with PR link
+"""
+
+[vars]
+[vars.analyst_bead]
+description = "Bead ID for the analyst agent's work"
+default = ""
+source = "deferred"
+
+[vars.designer_bead]
+description = "Bead ID for the designer agent's work"
+default = ""
+source = "deferred"
+
+[vars.gate_bead]
+description = "Orchestrator-held gate bead ID (premature-af-done detection)"
+default = ""
+source = "deferred"
+
+[vars.issue_id]
+description = "GitHub issue number extracted from issue_uri"
+default = ""
+source = "deferred"
+
+[vars.issue_title]
+description = "GitHub issue title"
+default = ""
+source = "deferred"
+
+[vars.design_dir]
+description = "Design directory path (.designs/<issue-id>/)"
+default = ""
+source = "deferred"
+
+[vars.pr_url]
+description = "PR URL recorded after the design artifacts are pushed (handed to the implementation-plan agent)"
+default = ""
+source = "deferred"

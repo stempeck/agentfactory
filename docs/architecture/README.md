@@ -22,7 +22,7 @@ the shape before diving into citations.
 | [`overview.md`](./overview.md) | C4 L1 system-context diagram + trust-direction sketch + index into the corpus. |
 | [`containers.md`](./containers.md) | C4 L2 container diagram: `af` process, Python MCP server, agent sessions, shared filesystem. |
 | [`flows/`](./flows/) | Sequence diagrams for the three load-bearing flows: `af up`, `af sling --agent` dispatch, and the `af done` WORK_DONE cascade. |
-| [`adrs/`](./adrs/) | 12 Nygard-format ADRs capturing the key decisions (MCP over SQLite, `IncludeAllAgents` idiom, no identity overrides, loopback-no-auth, hooks-never-block, etc.) with Context / Decision / Consequences and links back to the corpus. |
+| [`adrs/`](./adrs/) | 19 Nygard-format ADRs capturing the key decisions (MCP over SQLite, `IncludeAllAgents` idiom, no identity overrides, loopback-no-auth, hooks-never-block, no-customer-repo-mutations, no-container-recreation, etc.) with Context / Decision / Consequences and links back to the corpus. |
 
 ## Detailed corpus
 

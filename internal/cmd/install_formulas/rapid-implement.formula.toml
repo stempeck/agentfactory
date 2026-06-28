@@ -241,8 +241,8 @@ let someone else's mess consume your entire mission.
 ```bash
 git stash                   # Save your branch state
 git checkout origin/{{default_branch}}
-# Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
-# Then run it. Examples: make test, npm test, cargo test, go test ./...
+# Done = every non-integration test suite in the repo has run (per CLAUDE.md / the Makefile).
+# A single top-level command often skips a separately-tested sub-module — run those too.
 ```
 
 **2. If tests PASS:**
@@ -565,8 +565,8 @@ description = """
 Run the FULL test suite and SAVE the output — this is a judging artifact.
 
 ```bash
-# Discover the project's full-suite test command and save output to test_results.txt.
-# Example (Go): go test ./... -v 2>&1 | tee test_results.txt
+# Done = every non-integration test suite in the repo has run, output to test_results.txt (per CLAUDE.md / the Makefile).
+# A single top-level command often skips a separately-tested sub-module — run those too.
 ```
 
 **CRITICAL:** `test_results.txt` MUST exist with the full test output. Do NOT skip this.
@@ -681,8 +681,8 @@ Verify your changes don't break anything and are properly tested.
 
 **1. Run the full test suite:**
 ```bash
-# Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
-# Then run it. Examples: make test, npm test, cargo test, go test ./...
+# Done = every non-integration test suite in the repo has run (per CLAUDE.md / the Makefile).
+# A single top-level command often skips a separately-tested sub-module — run those too.
 ```
 
 **ALL TESTS MUST PASS.** Do not proceed with failures.

@@ -32,6 +32,8 @@ anchored to file:line or commit SHA.
 | [015](ADR-015-formula-three-location-lifecycle.md) | Three-location formula lifecycle with ordered sync | Accepted | Extends ADR-008; `discover.go:18-42`, `install.go:22-23`, issue #139 |
 | [016](ADR-016-no-skill-provenance-in-formulas.md) | No skill provenance annotations in formulas | Accepted | `formula-create/skillmd-mode.md:79,137`; 60 annotations across 8 formulas |
 | [017](ADR-017-no-customer-repo-mutations.md) | af infrastructure commands must not delete customer data | Accepted | `internal/cmd/formula.go:102-108`; designs 170/173 incident history |
+| [018](ADR-018-tests-never-disturb-running-factory.md) | Tests must never disturb a running factory | Accepted | `internal/session/names.go:7-12`; issues #309/#316/#317 |
+| [019](ADR-019-no-container-recreation.md) | af changes must never require recreating or destroying an existing factory container | Accepted | `quickdocker.sh:325-337,486-493`; `.designs/425` Rev-2; issue #428 |
 
 ---
 

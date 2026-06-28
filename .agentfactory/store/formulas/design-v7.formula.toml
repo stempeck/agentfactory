@@ -1,0 +1,1764 @@
+description = """
+## Overview
+Sub-agent-based design orchestration that captures verbatim source in the main
+context, then spawns three parallel sub-agents (Design Dimensions Analyst,
+Architecture Elevation Analyst, Six-Sigma Gap Analyst) using Claude Code's
+native Agent tool. Each sub-agent runs in its own context window with an
+independent analytical lens. A fourth sub-agent (Fidelity Verifier) runs
+sequentially after the first three to verify all codebase claims. The main
+context synthesizes all outputs into a unified design-doc with AC traceability,
+elevation verdict integration, six-sigma caveats, dependency graph, and risk
+registry.
+
+Requirements come from the assigned bead — which may contain an inline design
+problem statement, a path to a requirements document, or a link to a GitHub
+issue. Before any paraphrase, the verbatim source is captured to `source.md`
+so that later phases re-ground against raw text, not a paraphrase. A Decision
+History check (ADRs, prior designs, recent git changes) is performed before
+sub-agent launch so that designs respect existing architectural decisions.
+
+## Persona
+
+Methodical designer operating through parallel independent analysis. The single
+most common failure mode: a paraphrase loses a requirement clause in Phase 1,
+and every subsequent self-referential gate validates the now-incomplete design.
+The second most common: all analysis shares the same frame, so frame-level
+errors propagate unchallenged. This skill defends against both by (a) capturing
+verbatim source before any analysis, and (b) running three independent analyses
+that cannot see each other's output.
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| issue | cli | The issue/design-request ID assigned to this agent |
+
+## Supervisor Communication Contract
+
+| Inbound message | When sent | Expected response |
+|-----------------|-----------|-------------------|
+| HELP: unclear requirements | Agent blocked on ambiguous input | Clarification or decision |
+| NOTICE: main has failing tests | Pre-existing failures found | Acknowledgment |
+| Stuck/blocked notification | Agent can't proceed | Unblocking help or reassignment |
+| WORK_DONE (via `af done`) | All formula steps complete | Process merge, close issue |
+
+## Failure Modes
+
+| Situation | Action |
+|-----------|--------|
+| Constraints unclear | Mail Supervisor for clarification, do not guess |
+| AC has no owning dimension | STOP. Return to gate-a-verification and add coverage. |
+| Source Re-grounding gate fails | STOP. Return to the failing phase. Do not paper over. |
+| Sub-agent failed / missing output | Re-spawn that sub-agent only (not all three). |
+| Elevation verdict = Frame-lift required | Re-read elevation revisions, redesign affected dimensions. May require re-spawning Sub-agent 1. |
+| Elevation verdict = Frame artificial | Return to Phase 1, reframe the problem around abstraction removal. Re-run Phase 2. |
+| Cross-dimension conflict unresolvable | Document options, mail Supervisor for decision |
+| Tests fail | Fix them. Do not proceed with failures. |
+| Context filling up | Use `af handoff` to cycle to fresh session |
+| Blocked on external | Mail Supervisor, mark yourself stuck |
+| Scope unclear | Default to 'medium' unless problem is obviously small or large |
+
+## Anti-Patterns to Avoid
+
+| Anti-pattern | Prevention |
+|--------------|------------|
+| Paraphrasing requirements then validating against the paraphrase | Verbatim `source.md` + re-grounding gates that require re-pasting from source |
+| Serializing sub-agents (launch one, wait, launch next) | ALL THREE Phase 2 sub-agents MUST launch in a SINGLE Agent tool message |
+| Letting sub-agents see each other's output | Each sub-agent reads ONLY source.md, verification.md, and codebase-snapshot.md |
+| Skipping the synthesis gate (concatenating sub-agent outputs) | Phase 3 synthesizes, not concatenates — conflicts resolved, gaps addressed |
+| Paraphrasing source in sub-agent prompts | Sub-agents read source.md directly; prompts say WHERE to read, not WHAT it says |
+| Proceeding after Frame-lift required without redesigning | Honor the elevation verdict fully |
+| Marking feasible gaps as "future work" | Every feasible gap must be closed in the design |
+| Running elevation after synthesis | Elevation interrogates the frame BEFORE design decisions |
+| Skipping Decision History Check (Step 1.3c) | Always run ADR search, prior design search, and recent git history before launching sub-agents |
+| Covering an AC "generally" without checking each clause | Gates require per-clause YES/NO enumeration |
+| Committing design artifacts without verifying AC coverage | AC Traceability table required in design-doc.md |
+
+## !IMPORTANT - MANDATORY Exact Step Execution
+Execute each formula step EXACTLY as written, in order, with no modifications.
+Every step produces a file artifact at a known path. `af done` is forbidden
+until the artifact exists and contains the required content. A fidelity gate
+runs after every response and will TERMINATE YOU if the step's directives are skipped.
+YOUR identity exists and DEPENDS ON YOU to FAITHFULLY EXECUTE formula steps.
+"""
+formula = "design-v7"
+version = 1
+
+# ============================================================================
+# PRE-WORK INVARIANT STEPS
+# ============================================================================
+
+[[steps]]
+id = "load-context"
+title = "Load context and understand design assignment"
+description = """
+Initialize your session and understand the design problem you're assigned.
+
+**1. Prime your environment:**
+```bash
+af prime                    # Load role context
+```
+
+**2. Read your assigned issue:**
+```bash
+af bead show {{issue}}           # Full issue details
+```
+
+**3. Check inbox for additional context:**
+```bash
+af mail inbox
+# Read any HANDOFF or assignment messages
+```
+
+**4. Extract requirements from the bead:**
+The bead is your source of truth. It may provide requirements in one of three forms:
+
+- **Inline requirements**: The bead description itself contains the design problem. Extract requirements directly.
+- **Proposal document path**: The bead references a file (e.g., `docs/design-request.md`). Read it completely.
+- **GitHub issue link**: The bead contains a URL (e.g., `https://github.com/org/repo/issues/123`).
+  Fetch the issue via `gh issue view <number> --repo <org/repo>` and extract requirements from it.
+
+Whichever form, capture the full requirements — this is your spec. You will quote it VERBATIM into `source.md` at phase-1-source-capture. Do not paraphrase yet.
+
+**5. Identify design inputs:**
+- **Problem**: The core design problem or feature request
+- **Context**: Existing code, architecture, constraints mentioned
+- **Scope**: Size hint if provided ('small', 'medium', 'large'). Default: medium
+- **Output directory**: Where to create design artifacts, anchored at the repository root. Default: `<repo-root>/.designs/{{issue}}`
+
+**6. Verify you can proceed:**
+- No unresolved blockers on the issue
+- You understand the design problem
+- Required context is available
+
+If blocked or unclear, mail Supervisor immediately:
+```bash
+af mail send supervisor -s "HELP: Unclear design requirements" -m "Issue: {{issue}}
+Question: <what you need clarified>"
+```
+
+**Exit criteria:** You understand the design problem and have the raw source text ready to quote verbatim."""
+
+[[steps]]
+id = "branch-setup"
+title = "Set up working branch"
+needs = ["load-context"]
+description = """
+Ensure you're on a clean feature branch ready for work.
+
+**1. Check current branch state:**
+```bash
+git status
+git branch --show-current
+```
+
+**2. If not on a feature branch, create one:**
+```bash
+# Standard naming: agent/<your-name> or feature/<issue-id>
+git checkout -b agent/<name>
+```
+
+**3. Ensure clean working state:**
+```bash
+git status                  # Should show "working tree clean"
+git stash list              # Should be empty
+```
+
+If dirty state from previous work:
+```bash
+# If changes are relevant to this issue:
+git add -A && git commit -m "WIP: <description>"
+
+# If changes are unrelated cruft:
+git stash push -m "unrelated changes before {{issue}}"
+# Or discard if truly garbage:
+git checkout -- .
+```
+
+**4. Sync with main:**
+```bash
+git fetch origin
+git rebase origin/{{default_branch}}      # Get latest, rebase your branch
+```
+
+If rebase conflicts:
+- Resolve them carefully
+- Test after resolution
+- If stuck, mail Supervisor
+
+**Exit criteria:** You're on a clean feature branch, rebased on latest main."""
+
+[[steps]]
+id = "validate-contract"
+title = "Validate incoming design contract (if present)"
+needs = ["branch-setup"]
+description = """
+Gate: incoming design contract inspection (Poka-yoke).
+
+design-v7 PRODUCES a design contract — it rarely consumes one. But if prior
+work on this issue already produced design artifacts, you must inspect them
+before overwriting.
+
+Check for an existing design contract for this issue:
+```bash
+ls .designs/{{issue}}/design-doc.md 2>/dev/null || echo "No prior design contract found"
+ls .designs/{{issue}}/source.md 2>/dev/null || echo "No prior source.md found"
+```
+
+**If prior design artifacts EXIST:**
+- Read `design-doc.md` and `source.md` completely (if present)
+- Decide: is this a revision/extension of prior work, or a fresh design?
+- If REVISION: preserve `source.md` if still accurate, update it if the spec changed. Preserve AC numbering if the same ACs still apply.
+- If FRESH DESIGN: move or delete the prior artifacts (`mv .designs/{{issue}}/ .designs/{{issue}}.old/`) so they don't contaminate the new design. Mail Supervisor noting the decision.
+
+**If NO prior artifacts exist:**
+- This is acceptable — most design work starts fresh.
+- Close this step with reason "No prior design contract found"
+- Proceed to `preflight-tests`.
+
+**Exit criteria:** Prior design state reviewed and either preserved, archived, or confirmed absent."""
+
+[[steps]]
+id = "preflight-tests"
+title = "Verify tests pass on main"
+needs = ["validate-contract"]
+description = """
+Check if the codebase is healthy BEFORE starting your work.
+
+**The Scotty Principle:** Don't walk past a broken warp core. But also don't
+let someone else's mess consume your entire mission.
+
+**1. Check tests on main:**
+```bash
+git stash                   # Save your branch state
+git checkout origin/{{default_branch}}
+# Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
+# Then run it. Examples: make test, npm test, cargo test, go test ./...
+```
+
+**2. If tests PASS:**
+```bash
+git checkout -              # Back to your branch
+git stash pop               # Restore state
+```
+Continue to phase-1-source-capture step.
+
+**3. If tests FAIL on main:**
+
+Make a judgment call:
+
+| Situation | Action |
+|-----------|--------|
+| Quick fix (<15 min) | Fix it, commit to main, then continue |
+| Medium fix (15-60 min) | Fix if it blocks your work, else file bead |
+| Big fix (>1 hour) | File bead, notify Supervisor, proceed with your work |
+
+**Quick fix path:**
+```bash
+# Fix the issue
+git add <files>
+git commit -m "fix: <description> (pre-existing failure)"
+git push origin {{default_branch}}
+git checkout -
+git stash pop
+git rebase origin/{{default_branch}}      # Get your fix
+```
+
+**File and proceed path:**
+```bash
+af bead create --title "Pre-existing test failure: <description>" \
+  --type bug --priority 1
+
+af mail send supervisor -s "NOTICE: Main has failing tests" \
+  -m "Found pre-existing test failures on main.
+Filed: <bead-id>
+Proceeding with my assigned work ({{issue}})."
+
+git checkout -
+git stash pop
+```
+
+**Context consideration:**
+If fixing pre-existing failures consumed significant context:
+```bash
+af handoff -s "Fixed pre-existing failures, ready for assigned work" \
+  -m "Issue: {{issue}}
+Fixed: <what you fixed>
+Ready to start: phase-1-source-capture step"
+```
+Fresh session continues from phase-1-source-capture.
+
+**Exit criteria:** Tests pass on main (or issue filed), ready to begin design work."""
+
+# ============================================================================
+# DOMAIN STEPS (from .claude/skills/design-v7/SKILL.md)
+# ============================================================================
+
+[[steps]]
+id = "phase-1-source-capture"
+title = "Phase 1: Source Capture, Codebase Investigation, and Snapshot"
+needs = ["preflight-tests"]
+description = """
+
+Before ANY paraphrase, interpretation, or "understanding in own words," capture
+the raw source verbatim and investigate the codebase. This step produces three
+files: `source.md` (verbatim requirements), investigation notes, and
+`codebase-snapshot.md` (verified ground truth for sub-agents).
+
+**Entry criteria:** Requirements extracted from bead (inline / proposal file / GitHub issue URL).
+
+**1. Create output directory:**
+```bash
+OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
+mkdir -p "$OUTPUT_DIR"
+```
+
+**2. Write `$OUTPUT_DIR/source.md`** — the verbatim source capture:
+
+```markdown
+# source.md — Verbatim Source Capture
+
+## Source References
+- [ ] Source 1: `[URL or path]` — fetched at `[timestamp]`
+
+## Problem Statement (verbatim)
+```
+[paste EXACT problem statement from the source — no edits, no cleanup]
+```
+
+## Acceptance Criteria (verbatim)
+Each AC gets its own heading. Preserve source numbering.
+
+### AC-[id]
+> [verbatim quote of the acceptance criterion]
+
+## Constraints (verbatim)
+### C-[id]
+> [verbatim quote]
+
+### C-[id] [inferred]
+> [quote of source text the inference is drawn from]
+>
+> Inference: [the constraint as you understand it]
+
+## Additional Context (verbatim)
+```
+[verbatim "additional context," "background," "affected areas" from the source]
+```
+
+## Sign-off
+- [ ] Every AC from the source is quoted above under its own heading.
+- [ ] Every constraint from the source is quoted or marked [inferred] with its source text.
+- [ ] Nothing in this file has been summarized or paraphrased.
+```
+
+**Gate 1.2:** `source.md` must contain at least one direct quote under each of:
+problem statement, every AC, every constraint. If any section has zero quoted
+text, STOP and re-fetch the source. Do NOT paraphrase to fill the section.
+
+**3. Investigate the codebase (skip for greenfield designs):**
+
+For bug fixes, enhancements, or refactors, read the affected code areas:
+- List each file read and its relevance to the problem.
+- Verify that functions, types, and variables named in the source exist at their stated locations.
+- Note existing patterns in the affected code that the design must follow.
+- Record the current names of all functions and types that will be referenced.
+
+**4. Write `$OUTPUT_DIR/codebase-snapshot.md`** — verified ground truth for sub-agents:
+
+Before launching sub-agents, capture verified ground truth so they work from
+facts, not imagination. Include ALL applicable sections:
+
+1. **Package tree**: Run `find . -type f -name "*.go" -not -path "*/vendor/*" | head -200` from the codebase root. Paste the full output.
+
+2. **Module identity**: Run `head -5 go.mod`. Paste the output.
+
+3. **Referenced formulas**: For every formula mentioned in the problem statement or ACs, read the actual formula file and paste: formula name and version, total step count (run `grep -c '^\\[\\[steps\\]\\]' <file>`), complete step list with step IDs.
+
+4. **Referenced CLI commands**: For every CLI tool referenced, run `<tool> --help` and paste the FULL output. For specific subcommands, run `<tool> <subcommand> --help` and paste ALL flags and options.
+
+5. **Referenced file verification**: For every file path mentioned in the problem or existing documentation, verify it exists with `ls -la <path>`. Record EXISTS or DOES NOT EXIST.
+
+6. **Referenced types and functions**: For every struct, interface, or function named in the problem statement, grep for its definition and paste the actual signature with file:line.
+
+7. **Dynamic values**: For any runtime values captured, mark them with ⚡ and note: "Dynamic — value as of snapshot time, will change."
+
+**Gate 1.3b:** `codebase-snapshot.md` must exist and contain at least sections 1 and 2. If the problem references formulas, section 3 is required. If it references CLI commands, section 4 is required.
+
+**Step 1.3c: Decision History Check → `codebase-snapshot.md` § Decision History**
+
+Sub-agents receive codebase facts but need project decision history to avoid
+contradicting existing architectural choices. Without this step, designs can
+violate ADRs or reverse recent deliberate changes.
+
+1. **ADR search**: Run `find docs/architecture/adrs -name "ADR-*.md" -o -name "adr-*.md" 2>/dev/null`
+   and read any ADRs whose title or content relates to the problem domain keywords.
+   For each relevant ADR, paste its title, status, and the key decision verbatim.
+
+2. **Prior design search**: Run `ls .designs/` and identify any prior designs on the same
+   or related issues. For each relevant prior design, read its `design-doc.md` and paste:
+   - The problem it addressed
+   - Key decisions made (from the Decisions Made table)
+   - Whether it was implemented (check git log for related commits)
+
+3. **Recent git history**: Run `git log --oneline -30 -- <affected-files>` for each file
+   area mentioned in the problem statement. Note any commits that deliberately added,
+   removed, or changed patterns relevant to the design. Paste the commit messages.
+
+4. **Write findings**: Append a `## Decision History` section to `codebase-snapshot.md`:
+
+   ```markdown
+   ## Decision History
+
+   ### ADRs
+   [For each relevant ADR: title, status, verbatim key decision quote]
+   [Or: "No relevant ADRs found in docs/architecture/adrs/"]
+
+   ### Prior Designs
+   [For each relevant design: path, problem, key decisions, implementation status]
+   [Or: "No prior designs found for this problem domain"]
+
+   ### Recent Deliberate Changes
+   [For each relevant commit: hash, message, what pattern was added/removed/changed]
+   [Or: "No recent deliberate changes to affected files"]
+   ```
+
+**Gate 1.3c:** The `## Decision History` section MUST exist in `codebase-snapshot.md`
+before launching sub-agents. If ADRs or prior designs exist in the affected domain,
+they MUST appear with verbatim quotes. An empty section (all three sub-sections say
+"none found") is valid only if the searches were actually run and returned nothing —
+record the search commands and their output.
+
+**5. Determine scope:**
+
+| Scope | Dimensions to Analyze | Depth |
+|-------|----------------------|-------|
+| Small | Data, API, Integration only | Shallow (1-2 options each) |
+| Medium | All 6 dimensions | Standard (2-3 options each) |
+| Large | All 6 dimensions | Deep (3-4 options each) |
+
+Record the scope in `source.md` or a separate note.
+
+**Anti-pattern:** Do NOT paraphrase or "clean up" the source text in `source.md`.
+The later Source Re-grounding Gates depend on the raw text being intact.
+
+**Exit criteria:** `$OUTPUT_DIR/source.md` exists with verbatim quotes. Gate 1.2 passes.
+`$OUTPUT_DIR/codebase-snapshot.md` exists with verified ground truth and Decision History
+section. Gates 1.3b and 1.3c pass. Scope determined."""
+
+[[steps]]
+id = "gate-a-verification"
+title = "GATE A (Phase 1.4): Forced-Enumeration Constraint + AC Verification Table"
+needs = ["phase-1-source-capture"]
+description = """
+
+**MANDATORY GATE CHECK** — Do NOT close this step until the check passes.
+
+This is the PRIMARY gate of Phase 1. Every row must be filled by COPYING
+from `source.md` and assigning a dimension owner.
+
+**Entry criteria:** `source.md` and `codebase-snapshot.md` exist.
+
+**1. Produce `$OUTPUT_DIR/verification.md` with TWO tables:**
+
+### Table A — Constraint Verification
+| C-id | Verbatim text (copy from source.md) | My interpretation | Prohibits | Requires | Dimension owner(s) | Relaxation impact |
+|------|-------------------------------------|-------------------|-----------|----------|---------------------|-------------------|
+| C-1  | "[copy/paste]"                      | [prose]           | [list]    | [list]   | Data / Security     | [what changes]    |
+
+### Table B — AC Verification
+| AC-id | Verbatim text (copy from source.md) | My interpretation | What evidence proves it works? | Dimension owner(s) |
+|-------|-------------------------------------|-------------------|-------------------------------|---------------------|
+| AC-a  | "[copy/paste]"                      | [prose]           | [test name or observable]      | API / Integration   |
+
+**2. Gate 1.4 (FORCING FUNCTION) — run each check, do NOT close until all pass:**
+
+```bash
+OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
+# Count AC- headings in source.md
+SOURCE_ACS=$(grep -c "^### AC-" "$OUTPUT_DIR/source.md")
+# Count AC rows in verification.md Table B (rows start with "| AC-")
+VERIFIED_ACS=$(grep -c "^| AC-" "$OUTPUT_DIR/verification.md")
+echo "source.md ACs: $SOURCE_ACS"
+echo "verification.md ACs: $VERIFIED_ACS"
+[ "$SOURCE_ACS" = "$VERIFIED_ACS" ] || { echo "FAIL: AC counts do not match"; exit 1; }
+
+# Count constraint headings
+SOURCE_CS=$(grep -c "^### C-" "$OUTPUT_DIR/source.md")
+VERIFIED_CS=$(grep -c "^| C-" "$OUTPUT_DIR/verification.md")
+echo "source.md Cs: $SOURCE_CS"
+echo "verification.md Cs: $VERIFIED_CS"
+[ "$SOURCE_CS" = "$VERIFIED_CS" ] || { echo "FAIL: Constraint counts do not match"; exit 1; }
+
+echo "GATE A (count equality) passed."
+```
+
+**Additional manual checks (the bash check is necessary but not sufficient):**
+- Every row's "verbatim text" column MUST be a direct copy (use quotation marks). Paraphrase FAILS the gate.
+- Every row MUST have at least one dimension owner. An unowned AC/constraint WILL be missed.
+
+**If FAIL:** STOP. Add missing rows, re-copy verbatim text, assign owners. Do NOT proceed.
+**If PASS:** Close this step and continue.
+
+**Exit criteria:** `$OUTPUT_DIR/verification.md` exists. Every AC and constraint
+from `source.md` is in the verification tables with an assigned dimension owner."""
+
+[[steps]]
+id = "phase-2-parallel-analysis"
+title = "Phase 2: Parallel Multi-Perspective Analysis (3 Sub-Agents)"
+needs = ["gate-a-verification"]
+description = """
+
+**CRITICAL INSTRUCTION: Spawn ALL THREE sub-agents in a SINGLE message.**
+
+Use Claude Code's Agent tool three times in the SAME response. Each sub-agent
+runs in its own context window. They cannot see each other's output. This
+independence is the entire point — three analysts with the same source material
+but different analytical lenses produce genuinely independent findings.
+
+All three sub-agents use `subagent_type: "general-purpose"` and
+`run_in_background: true`.
+
+**Entry:** `source.md` and `verification.md` exist with all ACs and constraints captured.
+**Exit:** All three sub-agent output files exist in `$OUTPUT_DIR/`.
+
+Set the output directory variable for sub-agent prompts:
+```bash
+OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
+```
+
+Determine the scope from your Phase 1 analysis (small / medium / large).
+
+---
+
+## Sub-agent 1: Design Dimensions Analyst
+
+**Agent tool parameters:**
+- `subagent_type`: `"general-purpose"`
+- `run_in_background`: `true`
+- `description`: `"Design Dimensions Analyst"`
+
+**Prompt** (fill in $OUTPUT_DIR and SCOPE before passing):
+
+```
+You are the DESIGN DIMENSIONS ANALYST. Your job is to analyze a design problem across
+6 structured dimensions and produce implementation-ready analysis artifacts.
+
+## Source Material
+
+Read the verbatim source capture at: $OUTPUT_DIR/source.md
+Read the verification table at: $OUTPUT_DIR/verification.md
+Read the codebase snapshot at: $OUTPUT_DIR/codebase-snapshot.md
+
+Read ALL files completely before beginning analysis.
+
+IMPORTANT: codebase-snapshot.md contains a **Decision History** section with ADRs, prior
+designs, and recent git changes. Before proposing any option that adds, removes, or changes
+an existing pattern, check the Decision History for constraints. An option that contradicts
+an ADR or reverses a deliberate recent change MUST be marked REJECTED with the ADR/design
+citation.
+
+## Scope
+
+[SCOPE — set by main context based on user input]
+
+Scope table:
+- Small: Data, API, Integration only. Shallow (1-2 options each).
+- Medium: All 6 dimensions. Standard (2-3 options each).
+- Large: All 6 dimensions. Deep (3-4 options each).
+
+## Your Analysis Process
+
+### Step 1: Dimension Analysis
+
+For each dimension required by scope, produce a file at $OUTPUT_DIR/<dimension>.md:
+
+D1. API & Interface Design → api.md
+  CLI flags/subcommands, function signatures, config interface, error messages, naming,
+  discoverability.
+
+D2. Data Model → data.md
+  Types, relationships, storage format, schema, migrations, lifecycle.
+  CONSTRAINT-SENSITIVE: this dimension most often violates storage constraints.
+  Double-check options against source.md before proposing SQL, DBs, or migrations.
+
+D3. User Experience → ux.md
+  Workflow ergonomics, happy path, failure messages, discoverability.
+
+D4. Scalability → scale.md
+  Performance at scale, bottlenecks, caching.
+  CONSTRAINT-SENSITIVE: scale optimizations may introduce dependencies that violate
+  simplicity constraints.
+
+D5. Security → security.md
+  Threat model, attack surface, validation.
+
+D6. Integration → integration.md
+  How it fits the existing system, call sites that change, tests that change.
+
+For EACH dimension file, include:
+- 2-3 options (per scope depth) with trade-offs for each
+- For each option: recommended or REJECTED (with C-id, AC-id, or ADR citation if rejected)
+- Reversibility rating: Easy / Moderate / Difficult
+- Dependencies produced: what this dimension provides to and requires from others
+- Risks identified: severity + mitigation
+
+Rules:
+- An option that violates ANY constraint: mark REJECTED: violates [C-id]
+- An option that fails any AC this dimension owns: mark REJECTED: fails [AC-id]
+- An option that contradicts an ADR in the Decision History: mark REJECTED: contradicts [ADR-NNN]
+- An option that reverses a deliberate recent change (from Decision History): mark REJECTED: reverses [commit/design ref]
+
+### Step 2: Pre-Synthesis Audit → audit.md
+
+Re-read source.md (NOT verification.md, NOT any dimension file). Read it top to bottom.
+
+Produce $OUTPUT_DIR/audit.md with THREE tables:
+
+Table A — Constraint Audit:
+| Dimension | Recommendation | C1 | C2 | C3 | Status |
+For each dimension, check whether its recommended option complies with every constraint.
+
+Table B — AC Coverage Audit:
+| AC-id | Verbatim text (re-copy from source.md) | Owner dimension(s) | Which option chosen? | Does that option satisfy every clause? | Evidence |
+For EACH AC: list its clauses individually and state YES/NO per clause. A single "Yes"
+for the whole AC is NOT acceptable — clause-by-clause enumeration required.
+
+Table C — Additional Context Coverage:
+| Context item (verbatim from source.md) | Reflected in dimension(s) / dismissed with rationale |
+
+If ANY row fails: return to the failing dimension, fix, and re-audit.
+
+### Step 3: Cross-Dimension Conflict Matrix → conflicts.md
+
+Build the NxN matrix. Legend: (none) no conflict, T tension (trade-off needed),
+X direct conflict (resolution required).
+
+CRITICAL RULE: Every cell in the matrix requires justification.
+- For T or X cells: document Nature / Impact / Resolution Options / Chosen Resolution + rationale.
+- For (none) cells: write a 1-2 sentence justification explaining WHY these dimensions do not conflict.
+
+ELEVATION-LEVEL CONFLICTS (REQUIRED section after the matrix):
+After completing the NxN matrix, analyze whether any NEW abstraction or component
+proposed by one dimension conflicts with a recommendation from another dimension.
+
+### Step 4: Dependency Graph → dependencies.md
+
+Produce:
+- Component dependencies (code-level)
+- Component build order (critical path table)
+- Verify no circular dependencies
+- Flag risks on the critical path
+
+## Output Files
+
+Write ALL output files to $OUTPUT_DIR/:
+- One file per analyzed dimension (api.md, data.md, ux.md, scale.md, security.md, integration.md)
+- audit.md
+- conflicts.md
+- dependencies.md
+
+## Rules
+
+- Do NOT read any other analysis files in $OUTPUT_DIR/ besides source.md, verification.md, and codebase-snapshot.md.
+- Do NOT produce design-doc.md — that is the main context's job.
+- Be thorough. Read actual code if the source references existing code.
+- Every claim must trace to source.md.
+
+## Codebase Fidelity Rule (MANDATORY)
+
+You may ONLY cite file paths, line numbers, function names, struct fields, CLI commands,
+formula step names, and package names that meet ONE of:
+  (a) They appear in codebase-snapshot.md (verified by main context), OR
+  (b) You personally Read the file in this session and confirmed it exists
+
+If you want to reference something NOT in the snapshot, you MUST Read the actual file
+FIRST. If the file does not exist, DO NOT reference it.
+
+For claims you cannot verify: write "[UNVERIFIED]" inline.
+
+FORBIDDEN: Inventing plausible-sounding file paths, step names, or package structures
+based on what "should" exist.
+
+QUANTITIES AND TIMING: Claims about counts, intervals, or capabilities MUST cite the
+specific source. If you cannot point to where the number comes from, mark it [UNVERIFIED].
+
+DYNAMIC VALUES: Values marked with ⚡ in codebase-snapshot.md are runtime values that
+change over time. Do not state them as fixed facts.
+```
+
+---
+
+## Sub-agent 2: Architecture Elevation Analyst
+
+**Agent tool parameters:**
+- `subagent_type`: `"general-purpose"`
+- `run_in_background`: `true`
+- `description`: `"Architecture Elevation Analyst"`
+
+**Prompt** (fill in $OUTPUT_DIR before passing):
+
+```
+You are the ARCHITECTURE ELEVATION ANALYST. Your job is to interrogate the FRAME of
+the design problem — whether the concern exists because of an abstraction that could be
+removed — before mapping enforcement within the concern.
+
+## Source Material
+
+Read the verbatim source capture at: $OUTPUT_DIR/source.md
+Read the verification table at: $OUTPUT_DIR/verification.md
+Read the codebase snapshot at: $OUTPUT_DIR/codebase-snapshot.md
+
+Read ALL files completely before beginning analysis.
+
+IMPORTANT: codebase-snapshot.md contains a **Decision History** section with ADRs, prior
+designs, and recent git changes. These represent deliberate architectural decisions. Your
+elevation candidates MUST NOT contradict active ADRs. If an ADR constrains a potential
+lift, cite it in the Self-Challenge (Q3) and let it succeed or fail on its merits.
+
+## Your Analysis Process
+
+### Phase 0: Why Does This Concern Exist?
+
+Before mapping where policy is enforced, interrogate whether the concern itself is
+structural — a symptom of an abstraction that could be eliminated.
+
+Q0.1 — Concerning abstractions: List every abstraction in the codebase that EXISTS
+BECAUSE OF this concern, with file:line.
+
+Q0.2 — Counterfactual: For each listed abstraction, answer: if removed, would the
+concern still exist? If NO, it is a Frame-lift candidate.
+
+Q0.3 — Simpler-system comparison: Name a concrete simpler system that lacks this
+concern. State what it does differently with file:line or spec citation.
+
+Output — Concerning Abstractions table (REQUIRED, even if empty):
+
+| Abstraction | file:line | Would removal eliminate the concern? (YES/NO + why) | Simpler system lacking this pattern |
+
+### Phase 1: Ownership Map
+
+Enumerate EVERY location in the codebase where the policy is currently enforced.
+Read actual code — do not rely on source.md's summary.
+
+| Layer | Location (file:line) | Enforcement | Policy carried |
+
+Enforcement scale: mechanical (impossible), runtime (detects & blocks),
+instruction (text convention), advisory (hopes).
+
+If N > 1 locations carry the same invariant, ownership is duplicated — flag it.
+
+### Phase 2: Elimination Candidates
+
+List all candidates. Candidate 0 (from Phase 0) is listed FIRST.
+
+For each candidate, produce:
+- Altitude: abstraction removal / schema invariant / handle separation / single interface
+  method / compile-time constraint
+- Target boundary: specific file / type / interface / schema
+- Invariant carried
+- Deletion ledger: lines, types, sites the lift would REMOVE (cite each)
+- Addition ledger: types, methods, tests the lift would ADD (cite each)
+- Category elimination: does the lift eliminate an entire category of runtime decision? YES/NO
+
+Subtraction gate (PASS if EITHER dimension true):
+- Dimension 1 (artifacts): deletions > additions
+- Dimension 2 (categories): eliminates an entire category of runtime decision
+
+### Phase 3: Self-Challenge
+
+Attempt to reject every surviving candidate. ALL FIVE questions:
+
+Q1 — Does the target boundary exist in this codebase's topology?
+Q2 — Does the language/framework/runtime support the proposed invariant?
+Q3 — Does an ADR or user-signed decision decline this migration?
+Q4 — Does the lift create a worse defect class?
+Q5 — Does the lift step OUTSIDE the concern's named domain?
+
+Grounding audit table per candidate:
+| # | Question | Rejection succeeds? | Grounding provided | Grounding passes? |
+
+Decision:
+- Candidate 0 passes all rejections → Frame artificial
+- Any candidate passes with all rejections failing → Frame-lift required
+- >=1 rejection counts → Frame-lift offered
+- All candidates fail → Frame correct (with grounded constraint)
+
+### Phase 4: Write the Assessment
+
+Write to: $OUTPUT_DIR/elevation_assessment.md
+
+Use this structure:
+
+# Architecture Elevation Assessment
+
+**Date**: [today]
+**Target**: $OUTPUT_DIR/source.md
+**Mode**: advisory
+**Verdict**: [Frame artificial | Frame-lift required | Frame-lift offered | Frame correct]
+
+## Phase 0 — Concerning Abstractions
+[Table from Phase 0]
+
+## Ownership Map
+[Table from Phase 1]
+
+## Elimination Candidates
+[Table from Phase 2 with subtraction gate results]
+
+## Self-Challenge
+[Grounding audit table per surviving candidate]
+
+## Verdict
+[Verdict with explicit rationale]
+
+## Rules
+
+- Do NOT read any other analysis files in $OUTPUT_DIR/ besides source.md, verification.md, and codebase-snapshot.md.
+- Do NOT produce design-doc.md.
+- Concrete or nothing: every verdict must name a specific file, type, interface, schema, or language-spec section.
+- Read actual code. Build the Ownership Map from source, not from summaries.
+- Every existing mechanism cited MUST include a file:line reference.
+
+## Codebase Fidelity Rule (MANDATORY)
+
+Same rules as Dimensions Analyst: only cite what you verify via codebase-snapshot.md or
+Read. Mark unverified claims [UNVERIFIED]. Do not invent paths or counts.
+```
+
+---
+
+## Sub-agent 3: Six-Sigma Gap Analyst
+
+**Agent tool parameters:**
+- `subagent_type`: `"general-purpose"`
+- `run_in_background`: `true`
+- `description`: `"Six-Sigma Gap Analyst"`
+
+**Prompt** (fill in $OUTPUT_DIR before passing):
+
+```
+You are the SIX-SIGMA GAP ANALYST. Your job is to independently discover gaps the design
+does not cover — escape paths, test type mismatches, sibling vulnerabilities, and
+version/config drift risks. You challenge the design to find what would be needed for
+six-sigma (99.9999%) quality.
+
+## Source Material
+
+Read the verbatim source capture at: $OUTPUT_DIR/source.md
+Read the verification table at: $OUTPUT_DIR/verification.md
+Read the codebase snapshot at: $OUTPUT_DIR/codebase-snapshot.md
+
+Read ALL files completely before beginning analysis.
+
+IMPORTANT: codebase-snapshot.md contains a **Decision History** section with ADRs, prior
+designs, and recent git changes. Check whether any gap you discover was already addressed
+by a prior design or ADR. If so, note it — the gap may be closed by existing architecture,
+not by this design.
+
+## Your Analysis Process
+
+### Step 1: Extract Quality Gaps from Source
+
+Read source.md. For every acceptance criterion and constraint, identify:
+- What could go wrong even if the AC is technically met?
+- What scenarios exist between the stated ACs that are not covered?
+- What failure modes are not addressed by any AC?
+
+### Step 2: Independent Gap Discovery
+
+Do NOT rely solely on what source.md states. Investigate independently.
+
+For code/system designs, ask:
+1. Escape paths: Can the failure still occur through a path the design does not cover?
+2. Test type mismatch: Would tests be structural when behavioral is needed?
+3. Sibling vulnerabilities: Does the same bug class exist in related code?
+4. Version/config drift: Are there hardcoded values that could silently drift?
+5. Scope gaps: Are any AC clauses not addressable by the proposed scope?
+
+For any domain, ask:
+1. Unstated assumptions: What does the design assume that could be wrong?
+2. Failure mode coverage: What failure modes exist beyond the ones addressed?
+3. Dependency fragility: Does the design depend on something that could change?
+4. Observability: If the solution silently fails, would anyone know?
+
+Read actual code where the source references existing systems.
+
+### Step 3: Feasibility Challenge
+
+For EACH gap identified, actively try to disprove it:
+
+Step 3.1: Describe the ideal fix concretely.
+Step 3.2: Walk through implementation step by step. For each step, ask:
+- Does this require something that does not exist yet?
+- Does this require the output of a later step?
+- Does this require the thing it is supposed to gate/prevent/validate?
+Step 3.3: Check architectural ceilings.
+Step 3.4: Check diminishing returns.
+Step 3.5: Classify each gap's feasibility:
+- Feasible: Implementable with reasonable effort
+- Partially feasible: Achievable with caveats or architectural changes
+- Infeasible: Logically impossible or fundamentally constrained
+
+### Step 4: Write Gap Analysis
+
+Write to: $OUTPUT_DIR/six_sigma_gaps.md
+
+# Six-Sigma Gap Analysis
+
+**Date**: [today]
+**Source**: $OUTPUT_DIR/source.md
+
+## Gap Discovery Method
+Independent analysis of escape paths, test type mismatches, sibling vulnerabilities,
+version/config drift risks, and unstated assumptions.
+
+## Gaps Identified
+
+### Gap 1: [Title]
+**Category**: [escape path | test type mismatch | sibling vulnerability | version drift |
+scope gap | unstated assumption | failure mode gap | dependency fragility | observability gap]
+**Current state**: [What the design as stated would produce]
+**Ideal state**: [What six-sigma quality would require]
+**Feasibility**: [Feasible | Partially feasible | Infeasible]
+**Feasibility rationale**: [specific rationale]
+
+## Summary Table
+| # | Gap | Category | Impact | Feasibility | Specific constraint (if infeasible) |
+
+## Practical Ceiling
+[The practical ceiling for this class of design problem and what residual risk must be accepted.]
+
+## Rules
+
+- Do NOT read any other analysis files in $OUTPUT_DIR/ besides source.md, verification.md, and codebase-snapshot.md.
+- Do NOT produce design-doc.md.
+- Every gap must have a feasibility classification with specific rationale.
+- Read actual code where the source references existing systems.
+
+## Codebase Fidelity Rule (MANDATORY)
+
+Same rules as other analysts: only cite what you verify via codebase-snapshot.md or
+Read. Mark unverified claims [UNVERIFIED]. Do not invent paths or counts.
+```
+
+---
+
+**After launching all three sub-agents**, wait for all to complete. Then verify
+their output files exist:
+
+```bash
+OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
+ls -la "$OUTPUT_DIR"/audit.md "$OUTPUT_DIR"/conflicts.md "$OUTPUT_DIR"/dependencies.md \
+  "$OUTPUT_DIR"/elevation_assessment.md "$OUTPUT_DIR"/six_sigma_gaps.md
+# Also check dimension files exist (per scope)
+ls "$OUTPUT_DIR"/api.md "$OUTPUT_DIR"/data.md "$OUTPUT_DIR"/integration.md
+```
+
+**If any sub-agent output file is missing:** Re-spawn ONLY the missing sub-agent
+(not all three). Do not proceed with partial analysis.
+
+**Context management:** Launching three sub-agents and waiting for them is
+context-heavy. If context is filling up after sub-agents complete:
+```bash
+af handoff -s "Phase 2 sub-agents complete" -m "Issue: {{issue}}
+Output dir: $OUTPUT_DIR
+Completed: 3 parallel sub-agents (dimensions, elevation, six-sigma)
+Ready for: phase-2-5-fidelity-verification step"
+```
+
+**Exit criteria:** All three sub-agent output files exist. Dimension files,
+audit.md, conflicts.md, dependencies.md, elevation_assessment.md, and
+six_sigma_gaps.md all present in `$OUTPUT_DIR/`."""
+
+[[steps]]
+id = "phase-2-5-fidelity-verification"
+title = "Phase 2.5: Fidelity Verification (Sequential Sub-Agent)"
+needs = ["phase-2-parallel-analysis"]
+description = """
+
+This sub-agent reads the outputs of all three Phase 2 sub-agents and verifies
+every codebase claim against the actual codebase. It MUST run AFTER Phase 2
+completes (not in parallel with it).
+
+**Entry:** All three Phase 2 sub-agent output files exist in `$OUTPUT_DIR/`.
+**Exit:** `$OUTPUT_DIR/verification-report.md` exists with every codebase claim classified.
+
+Spawn a SINGLE sub-agent (NOT in background — must complete before Phase 3):
+
+**Agent tool parameters:**
+- `subagent_type`: `"general-purpose"`
+- `run_in_background`: `false`
+- `description`: `"Fidelity Verifier"`
+
+**Prompt** (fill in $OUTPUT_DIR before passing):
+
+```
+You are the FIDELITY VERIFIER. Your job is to verify that every codebase claim made by
+three analytical sub-agents is factually accurate. You have full codebase access.
+
+## Source Material
+
+Read ALL of these files from $OUTPUT_DIR/:
+- codebase-snapshot.md (ground truth from Phase 1)
+- Every dimension file: api.md, data.md, ux.md, scale.md, security.md, integration.md
+- audit.md, conflicts.md, dependencies.md
+- elevation_assessment.md
+- six_sigma_gaps.md
+
+## Your Process
+
+### Step 1: Extract Codebase Claims
+
+From all sub-agent output files, extract every claim about the EXISTING codebase:
+- File paths
+- Line number references
+- Function/method names and signatures
+- Struct field names
+- CLI command names and flags
+- CLI command capabilities (verify with --help)
+- Formula step names AND COUNTS (run grep -c to get exact counts)
+- Package/module references
+- Timing/interval assertions (find the actual config value or code)
+- Behavioral assertions about existing code
+- ADR citations (verify the ADR exists and the quote is accurate)
+
+PAY SPECIAL ATTENTION to:
+- Step/item counts: run `grep -c` to get exact counts, don't trust prose
+- Timing claims: find the actual config value or code that sets the interval
+- Capability claims: verify via --help flags, not inference
+- ADR quotes: verify verbatim accuracy against the actual ADR file
+
+Ignore claims about PROPOSED new code — only verify claims about what EXISTS.
+
+### Step 2: Verify Each Claim
+
+For each claim:
+1. Check codebase-snapshot.md first
+2. If not in snapshot, Read/Grep/Bash the actual codebase to verify
+3. Classify as:
+   - VERIFIED: factually accurate
+   - INACCURATE: factually wrong — provide the CORRECT information
+   - UNVERIFIABLE: about proposed new code (exclude)
+
+### Step 3: Write verification-report.md
+
+Write to $OUTPUT_DIR/verification-report.md:
+
+# Fidelity Verification Report
+
+## Summary
+- Total claims checked: N
+- Verified: N
+- Inaccurate: N (with corrections)
+- Unverifiable: N (excluded)
+
+## Claim Details
+
+| # | Claim | Source File | Classification | Correction (if inaccurate) |
+
+For every INACCURATE claim, the Correction column MUST contain the factually correct
+information that should be used instead.
+
+## Rules
+
+- Verify by reading actual code, not by reasoning about what should exist
+- Be strict: close-but-wrong file paths are INACCURATE
+- Be fair: approximately correct line numbers (within ~20 lines) are VERIFIED
+- Every classification must include what you did to verify
+```
+
+After the fidelity verifier completes, verify the report exists:
+```bash
+OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
+ls -la "$OUTPUT_DIR/verification-report.md"
+```
+
+**Exit criteria:** `$OUTPUT_DIR/verification-report.md` exists with every codebase
+claim classified as VERIFIED, INACCURATE, or UNVERIFIABLE."""
+
+[[steps]]
+id = "gate-b-synthesis-regrounding"
+title = "GATE B: Pre-Synthesis Source Re-grounding + Fidelity Gate"
+needs = ["phase-2-5-fidelity-verification"]
+description = """
+
+**MANDATORY GATE CHECK** — Do NOT close this step until BOTH checks pass.
+
+Before writing a single line of `design-doc.md`, re-ground against source.md
+and incorporate fidelity corrections.
+
+**Entry criteria:** All sub-agent outputs and verification-report.md exist.
+
+---
+
+**Gate 3.0 — Source Re-grounding:**
+
+**1. Re-open `$OUTPUT_DIR/source.md`** and read it top to bottom. Do not rely on
+prior reads. Do not rely on sub-agent outputs as a proxy for source.
+
+**2. Re-paste each AC** from `source.md` into a scratch checklist at
+`$OUTPUT_DIR/synthesis-checklist.md`:
+
+| AC-id | Verbatim text (RE-COPY from source.md RIGHT NOW) | Clauses (enumerated) | Each clause satisfied by which component? |
+|-------|------------------------------------------------|----------------------|-------------------------------------------|
+| AC-a  | "..."                                          | (i) ... (ii) ...     | (i) [comp] (ii) [comp]                    |
+
+**Gate 3.0 check:**
+- Every AC in `source.md` is listed.
+- Every clause is individually enumerated.
+- Every clause maps to a specific component.
+- Any cell reading "covered generally" or "handled by design" FAILS — enumerate the clause and name the component.
+
+```bash
+OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
+SOURCE_ACS=$(grep -c "^### AC-" "$OUTPUT_DIR/source.md")
+CHECKLIST_ACS=$(grep -c "^| AC-" "$OUTPUT_DIR/synthesis-checklist.md")
+[ "$SOURCE_ACS" = "$CHECKLIST_ACS" ] || { echo "FAIL: AC count mismatch between source.md and synthesis-checklist.md"; exit 1; }
+echo "GATE B (source re-grounding AC count) passed."
+```
+
+If any clause has no owning component: STOP. The design does not address that
+requirement. Return to `phase-2-parallel-analysis` and add coverage.
+
+---
+
+**Gate 3.0b — Fidelity Gate:**
+
+**3. Read `$OUTPUT_DIR/verification-report.md`** completely.
+
+For every claim marked INACCURATE:
+1. Note the correction provided by the verifier.
+2. When writing design-doc.md, use the CORRECTED information, not the original claim.
+3. If a sub-agent's entire analysis depends on an inaccurate claim, note this in
+   the Decisions Made table as a reduced-confidence finding.
+
+**Gate 3.0b check:** design-doc.md (when written in Phase 3) must contain ZERO
+claims that verification-report.md flagged as INACCURATE. Every inaccurate claim
+must be replaced with its correction or removed entirely.
+
+Record any required corrections in `$OUTPUT_DIR/synthesis-checklist.md` as an
+addendum so they are available during synthesis.
+
+**If PASS for both 3.0 and 3.0b:** Close this step and continue.
+
+**Exit criteria:** `$OUTPUT_DIR/synthesis-checklist.md` exists. Every AC listed
+with enumerated clauses. Every clause has an owning component. All fidelity
+corrections noted for Phase 3 use."""
+
+[[steps]]
+id = "phase-3-synthesis"
+title = "Phase 3: Synthesis — Cross-Perspective Conflicts, Elevation, Gaps, Design Doc"
+needs = ["gate-b-synthesis-regrounding"]
+description = """
+
+Synthesize all prior artifacts into the implementation-ready design document.
+This is where the design actually happens — sub-agents provided evidence;
+synthesis resolves conflicts and makes decisions.
+
+**Entry criteria:** `synthesis-checklist.md` exists. All sub-agent outputs and
+fidelity corrections available.
+
+---
+
+**Step 3.1: Read All Sub-Agent Outputs**
+
+Read each file completely:
+1. `$OUTPUT_DIR/audit.md` — dimension analysis audit
+2. `$OUTPUT_DIR/conflicts.md` — cross-dimension conflict matrix
+3. `$OUTPUT_DIR/dependencies.md` — dependency graph
+4. `$OUTPUT_DIR/elevation_assessment.md` — architecture elevation verdict
+5. `$OUTPUT_DIR/six_sigma_gaps.md` — gap analysis
+6. Each dimension file (api.md, data.md, ux.md, scale.md, security.md, integration.md)
+7. `$OUTPUT_DIR/verification-report.md` — fidelity corrections
+
+**If any file is missing:** That sub-agent failed. Re-spawn it (single sub-agent,
+not all three). Do not proceed with partial analysis.
+
+---
+
+**Step 3.1b: Cross-Perspective Conflict Mining (REQUIRED)**
+
+The three sub-agents analyzed independently. Their recommendations may conflict
+in ways none could detect alone.
+
+1. **Dimension vs Elevation conflicts**: Does a dimension introduce an abstraction
+   the elevation flagged? Does a recommendation contradict an elevation candidate?
+   If elevation verdict was "Frame-lift offered," do dimensions depend on that frame?
+
+2. **Dimension vs Gap conflicts**: Does closing a feasible gap conflict with a
+   dimension recommendation? Does a gap mitigation require a rejected component?
+
+3. **Dimension vs Decision History conflicts**: For each dimension's recommended
+   option, check whether it contradicts any ADR or prior design from the Decision
+   History section of codebase-snapshot.md. This is the primary defense against
+   designs that violate existing architectural decisions.
+
+4. **Produce a supplementary conflict table:**
+
+| Finding Source | Finding | Conflicts With | Nature | Resolution |
+|---------------|---------|----------------|--------|------------|
+| Elevation | [finding] | [dimension] | [tension/conflict] | [resolution] |
+| Gap Analysis | [gap] | [dimension] | [tension/conflict] | [resolution] |
+| Decision History | [ADR/prior design] | [dimension] | [tension/conflict] | [resolution] |
+
+If no cross-perspective conflicts found, document explicitly with reasoning
+for each perspective pair checked (elevation-vs-dimensions, gaps-vs-dimensions,
+elevation-vs-gaps, decision-history-vs-dimensions).
+
+---
+
+**Step 3.2: Process Elevation Verdict**
+
+Read the verdict from `elevation_assessment.md`. Branch:
+
+| Verdict | Action |
+|---------|--------|
+| Frame correct | Proceed with synthesis using dimension analysis as-is |
+| Frame-lift offered | Record the alternative in "Alternatives Considered". Proceed with instance design but document the trade-off |
+| Frame-lift required | Dimension analysis was in the wrong frame. Re-read required revisions. Redesign affected dimensions. May require re-spawning Sub-agent 1 |
+| Frame artificial | The entire concern is a symptom of an abstraction. Reframe around removing the abstraction. Return to Phase 1 and rewrite source.md |
+
+---
+
+**Step 3.3: Process Six-Sigma Gaps**
+
+Read `six_sigma_gaps.md`. For each gap:
+
+| Feasibility | Action |
+|-------------|--------|
+| Feasible | Design MUST address this gap. Add a component/phase/mitigation |
+| Partially feasible | Document in Risk Registry with caveats. Address what is feasible |
+| Infeasible | Document in "Six-Sigma Caveats" with specific logical constraint |
+
+---
+
+**Step 3.4: Write `$OUTPUT_DIR/design-doc.md`**
+
+Use this template:
+
+```markdown
+# Design: [Problem Title]
+
+## Executive Summary
+[2-3 paragraph overview incorporating findings from all three perspectives]
+
+## Constraints Respected
+All proposals respect the constraints captured in source.md:
+- C-1: [short name] — [compliance note]
+
+## AC Traceability (REQUIRED)
+
+| AC id | Verbatim quote from source.md | Clause breakdown | Addressed by | Verified by |
+|-------|------------------------------|------------------|--------------|-------------|
+| AC-a  | "..."                        | (i)...(ii)...    | [component]  | [test name] |
+
+## Architecture Elevation Verdict
+
+**Verdict**: [from elevation_assessment.md]
+
+[Verdict-specific documentation as per Step 3.2]
+
+## Problem Statement
+[Must match source.md verbatim — do not paraphrase]
+
+## Proposed Design
+
+### Overview
+[High-level approach — 1 paragraph]
+
+### Key Components
+[Main pieces and how they fit together]
+
+### Component Dependency Graph
+[From dependencies.md]
+
+### Interface
+[CLI/API summary from api.md]
+
+### Data Model
+[Schema summary from data.md — MUST match storage constraints]
+
+## Cross-Dimension Trade-offs
+[From conflicts.md — ALL tensions, not just the obvious ones]
+
+| Conflict | Resolution | Rationale |
+
+Every conflict row MUST have a resolution. "Unresolved" is NOT acceptable.
+
+## Cross-Perspective Conflicts
+[From Step 3.1b]
+
+| Finding Source | Finding | Conflicts With | Nature | Resolution |
+
+## Decisions Made
+
+| Decision | Options Considered | Chosen | Rationale | Reversibility |
+
+## Risk Registry
+
+| Risk | Severity | Likelihood | Mitigation | Owner | Source |
+| [risk] | ... | ... | ... | ... | [dimension / elevation / gap analysis] |
+
+## Six-Sigma Caveats
+
+| Gap | Category | Impact | Feasibility | Constraint |
+
+[Closing paragraph: practical ceiling and accepted residual risk]
+
+## Implementation Plan
+
+### Phase 1: [Name] (Effort: [X])
+**Deliverables:**
+1. [deliverable]
+
+**Source ACs satisfied**: AC-[id], AC-[id]
+**Dependencies**: [what must exist first]
+**Risks addressed**: [from registry]
+**Six-Sigma gaps closed**: [which feasible gaps]
+
+**Phase acceptance criteria:**
+- [ ] [specific test or observable behavior]
+- [ ] [another concrete pass/fail check]
+
+[Repeat for each phase — every phase MUST have at least 2 checkbox acceptance criteria]
+
+## Appendix: Analysis Artifacts
+- [source.md](source.md)
+- [verification.md](verification.md)
+- [codebase-snapshot.md](codebase-snapshot.md)
+- Dimension analyses: api.md, data.md, ux.md, scale.md, security.md, integration.md
+- [audit.md](audit.md)
+- [conflicts.md](conflicts.md)
+- [dependencies.md](dependencies.md)
+- [elevation_assessment.md](elevation_assessment.md)
+- [six_sigma_gaps.md](six_sigma_gaps.md)
+- [verification-report.md](verification-report.md)
+```
+
+**Fidelity enforcement:** Before writing ANY codebase claim into design-doc.md,
+cross-check it against `verification-report.md`. If it was flagged INACCURATE,
+use the corrected version from the report.
+
+**Context management:** Synthesis is context-heavy. If context is filling up
+after reading all outputs but before writing design-doc.md:
+```bash
+af handoff -s "Phase 3 synthesis in progress — outputs read, ready to write design-doc" \
+  -m "Issue: {{issue}}
+Output dir: $OUTPUT_DIR
+Completed: read all sub-agent outputs, cross-perspective conflict mining, elevation/gap processing
+Ready for: write design-doc.md (continue in phase-3-synthesis step)"
+```
+
+**Exit criteria:** `$OUTPUT_DIR/design-doc.md` exists. AC Traceability table
+populated. Elevation verdict honored. Feasible gaps closed. No INACCURATE claims
+imported from sub-agents."""
+
+[[steps]]
+id = "phase-4-finalize"
+title = "Phase 4: Final Verification and Commit"
+needs = ["phase-3-synthesis"]
+description = """
+
+Final verification of the complete design. All cross-checks must pass before
+the invariant post-work sequence begins.
+
+**Entry criteria:** `design-doc.md` exists.
+
+---
+
+**Step 4.1: Artifact Completeness Check**
+
+Verify all required files exist:
+
+```bash
+OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
+for f in source.md verification.md codebase-snapshot.md audit.md conflicts.md \
+  dependencies.md elevation_assessment.md six_sigma_gaps.md verification-report.md \
+  design-doc.md; do
+  [ -f "$OUTPUT_DIR/$f" ] || { echo "MISSING: $OUTPUT_DIR/$f"; exit 1; }
+done
+echo "All required artifacts present."
+
+# Check dimension files (at minimum api.md, data.md, integration.md for small scope)
+for f in api.md data.md integration.md; do
+  [ -f "$OUTPUT_DIR/$f" ] || { echo "MISSING dimension file: $OUTPUT_DIR/$f"; exit 1; }
+done
+echo "Dimension files present."
+```
+
+---
+
+**Step 4.2: Six-Sigma Gaps Addressed**
+
+For EVERY gap in `six_sigma_gaps.md` classified as **Feasible**:
+- Does `design-doc.md` contain a component, phase, or mitigation that closes this gap?
+- If NO: the design is incomplete. Return to `phase-3-synthesis` and add coverage.
+
+For EVERY gap classified as **Partially feasible**:
+- Is the feasible portion addressed in the design?
+- Is the infeasible portion documented in the Risk Registry or Six-Sigma Caveats?
+
+---
+
+**Step 4.3: Elevation Verdict Honored**
+
+- If **Frame correct**: verify the design does not introduce frame-level issues the elevation cleared.
+- If **Frame-lift offered**: verify the trade-off is documented.
+- If **Frame-lift required**: verify the design was substantively revised (changed components/interfaces/data model, not just annotated).
+- If **Frame artificial**: verify the design is reframed around abstraction removal.
+
+---
+
+**Step 4.3b: Decision History Respected**
+
+- No recommended option in `design-doc.md` contradicts an ADR from the Decision
+  History section of `codebase-snapshot.md`.
+- No recommended option reverses a deliberate recent change without explicit
+  justification in the Decisions Made table.
+- If any contradiction exists without justification: STOP, return to
+  `phase-3-synthesis` and add justification or change the recommendation.
+
+---
+
+**Step 4.4: Final AC Verification**
+
+Re-read the AC Traceability table in `design-doc.md` against `source.md`:
+
+```bash
+OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
+SOURCE_ACS=$(grep -c "^### AC-" "$OUTPUT_DIR/source.md")
+DOC_ACS=$(grep -c "^| AC-" "$OUTPUT_DIR/design-doc.md")
+[ "$SOURCE_ACS" = "$DOC_ACS" ] || { echo "FAIL: design-doc.md AC Traceability row count ($DOC_ACS) does not match source.md AC count ($SOURCE_ACS)"; exit 1; }
+
+SOURCE_CS=$(grep -c "^### C-" "$OUTPUT_DIR/source.md")
+DOC_CS=$(grep -c "^- C-" "$OUTPUT_DIR/design-doc.md")
+[ "$DOC_CS" -ge "$SOURCE_CS" ] || { echo "FAIL: design-doc.md Constraints Respected count is less than source.md constraint count"; exit 1; }
+
+echo "Final AC/Constraint verification passed."
+```
+
+Every row must have a specific addressing component AND a specific verifying test.
+Any missing row or unmapped clause: STOP, return to `gate-b-synthesis-regrounding`.
+
+---
+
+**Step 4.5: Dependency Verification**
+
+- Dependency graph matches `design-doc.md`'s Component Dependency Graph.
+- Implementation phases respect dependencies (no component before its deps).
+- No circular dependencies.
+
+---
+
+**Step 4.6: Risk Verification**
+
+- Every risk in the Risk Registry has a mitigation.
+- Every risk is assigned to an implementation phase.
+- Risks from all three sources (dimensions, elevation, gap analysis) are represented.
+
+---
+
+**Step 4.7: Commit Design Artifacts**
+
+In the agent-driven formula context, the PR IS the review workflow (Supervisor
+reviews the PR). Commit now:
+
+```bash
+OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
+cd "${AF_WORKTREE:-.}"
+find .designs/ -maxdepth 1 -type l -delete
+git add "$OUTPUT_DIR"/
+git commit -m "design: design-v7 artifacts for {{issue}}
+
+- source.md (verbatim requirements)
+- codebase-snapshot.md (verified ground truth for sub-agents)
+- verification.md (Gate A: forced-enumeration AC/constraint table)
+- dimension files (api/data/ux/scale/security/integration)
+- audit.md, conflicts.md, dependencies.md (dimension analysis)
+- elevation_assessment.md (architecture elevation verdict)
+- six_sigma_gaps.md (six-sigma gap analysis)
+- verification-report.md (fidelity verification of all codebase claims)
+- synthesis-checklist.md (Gate B: pre-synthesis re-grounding)
+- design-doc.md (with AC Traceability, elevation verdict, six-sigma caveats)"
+```
+
+**If any verification fails:** STOP. Return to the indicated earlier step.
+Do NOT paper over a failing check.
+
+**Exit criteria:** All verifications pass. Design artifacts committed.
+Ready for invariant post-work steps."""
+
+# ============================================================================
+# POST-WORK INVARIANT STEPS
+# ============================================================================
+
+[[steps]]
+id = "self-review"
+title = "Self-review changes"
+needs = ["phase-4-finalize"]
+description = """
+Review your own changes before running tests.
+
+**1. Review the diff:**
+```bash
+git diff origin/{{default_branch}}...HEAD     # All changes vs main
+git log --oneline origin/{{default_branch}}..HEAD  # All commits
+```
+
+**2. Check for common issues:**
+
+| Category | Look For |
+|----------|----------|
+| Bugs | Off-by-one, null handling, edge cases |
+| Security | Injection, auth bypass, exposed secrets |
+| Style | Naming, formatting, code organization |
+| Completeness | Missing error handling, incomplete paths |
+| Cruft | Debug prints, commented code, TODOs |
+
+**3. Fix issues found:**
+Don't just note them — fix them now. Amend or add commits as needed.
+
+**4. Verify no unintended changes:**
+```bash
+git diff --stat origin/{{default_branch}}...HEAD
+# Only files relevant to {{issue}} should appear — specifically the design artifacts under .designs/{{issue}}/
+```
+
+If you accidentally modified unrelated files, remove those changes.
+
+**Exit criteria:** Changes are clean, reviewed, and ready for testing."""
+
+[[steps]]
+id = "run-tests"
+title = "Run tests and verify coverage"
+needs = ["self-review"]
+description = """
+Verify your changes don't break anything.
+
+For a pure-design formula like design-v7, your diff is design documentation
+under `.designs/{{issue}}/`. There is typically no production code change. The
+test run is a sanity check that the branch is still green.
+
+**1. Run the full test suite:**
+```bash
+# Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
+# Then run it. Examples: make test, npm test, cargo test, go test ./...
+```
+
+**ALL TESTS MUST PASS.** Do not proceed with failures.
+
+**2. If tests fail:**
+- Read the failure output carefully
+- Determine if your change caused it:
+  - If yes: Fix it. Since this is a design-only formula, any test breakage
+    likely means you accidentally committed non-design files — revert those.
+  - If no (pre-existing): File a bead, but still must pass for your PR
+
+```bash
+# Check if failure exists on main:
+git stash
+git checkout {{default_branch}}
+# Run the same test command you discovered above
+git checkout -
+git stash pop
+```
+
+**3. Validate terraform if .tf files were modified:**
+```bash
+TF_CHANGED=$(git diff --name-only origin/{{default_branch}}...HEAD -- '*.tf' | head -1)
+if [ -n "$TF_CHANGED" ]; then
+  echo "Terraform files modified — running validation..."
+  TF_DIR=$(dirname "$TF_CHANGED")
+  (cd "$TF_DIR" && terraform validate) || { echo "FAIL: terraform validate failed"; exit 1; }
+  terraform fmt -check -recursive "$TF_DIR" || { echo "FAIL: terraform fmt check failed — run 'terraform fmt'"; exit 1; }
+  echo "Terraform validation passed."
+fi
+```
+
+**Exit criteria:** All tests pass, terraform valid (if applicable)."""
+
+[[steps]]
+id = "self-verify"
+title = "Verify design-doc.md matches design contract"
+needs = ["run-tests"]
+description = """
+Gate: verify the produced `design-doc.md` matches the contract established by
+`source.md` (Jidoka).
+
+design-v7 PRODUCES the design contract — so this step is a final
+self-verification that the produced design doc is faithful to the source.
+
+**1. Re-open `$OUTPUT_DIR/source.md`** one last time.
+
+**2. For each AC in `source.md`:**
+- Find the corresponding row in `design-doc.md` AC Traceability table.
+- Confirm the "verbatim quote" column matches `source.md` (no paraphrase).
+- Confirm the "Addressed by" and "Verified by" columns are concrete.
+
+**3. For each constraint in `source.md`:**
+- Confirm it appears in `design-doc.md` "Constraints Respected" section.
+- Confirm no recommendation in the design violates it.
+
+**4. Verify elevation verdict is honored:**
+- If Frame-lift required/Frame artificial: verify substantive revision, not annotation.
+
+**5. Verify all feasible gaps are closed:**
+- Cross-check six_sigma_gaps.md feasible gaps against design-doc.md components.
+
+**6. Document any deviation with justification:**
+If any AC clause or constraint cannot be faithfully addressed, STOP and mail
+Supervisor for decision. Do NOT quietly drop it from the design-doc.
+
+**Exit criteria:** `design-doc.md` verified against `source.md`. No AC silently
+dropped. No constraint silently violated. Elevation verdict honored. Feasible
+gaps closed."""
+
+[[steps]]
+id = "cleanup-workspace"
+title = "Clean up workspace"
+needs = ["self-verify"]
+description = """
+Ensure workspace is pristine before handoff.
+
+**Note:** The design-v7 process creates design documents in `.designs/{{issue}}/`
+which ARE the actual deliverables — these should NOT be deleted. They are the
+work product, committed in `phase-4-finalize`.
+
+**No skill artifacts to remove.** All output files (source.md, verification.md,
+codebase-snapshot.md, dimension files, audit.md, conflicts.md, dependencies.md,
+elevation_assessment.md, six_sigma_gaps.md, verification-report.md,
+synthesis-checklist.md, design-doc.md) are committed deliverables.
+
+**1. Check for uncommitted changes:**
+```bash
+git status
+```
+Must show "working tree clean". If not:
+- Commit legitimate changes
+- Discard garbage: `git checkout -- .`
+
+**2. Check for untracked files:**
+```bash
+git status --porcelain
+```
+Should be empty. If not:
+- Add to .gitignore if appropriate
+- Remove if temporary: `rm <file>`
+- Commit if needed
+
+**3. Check stash:**
+```bash
+git stash list
+```
+Should be empty. If not:
+- Pop and commit: `git stash pop && git add -A && git commit`
+- Or drop if garbage: `git stash drop`
+
+**4. Push your branch:**
+```bash
+git push -u origin $(git branch --show-current)
+```
+
+**5. Verify nothing left behind:**
+```bash
+git status                  # Clean
+git stash list              # Empty
+git log origin/{{default_branch}}..HEAD   # Your commits
+git diff origin/{{default_branch}}...HEAD # Your changes (expected — design artifacts only)
+```
+
+**Exit criteria:** Branch pushed, workspace clean, no cruft."""
+
+[[steps]]
+id = "prepare-for-review"
+title = "Prepare work for review"
+needs = ["cleanup-workspace"]
+description = """
+Verify work is complete and ready for PR submission.
+
+**Note:** Do NOT close the issue. The Supervisor will close it after successful merge.
+This enables conflict-resolution retries without reopening closed issues.
+
+**1. Verify the issue shows your work:**
+```bash
+af bead show {{issue}}
+# Status should still be 'in_progress' (you're working on it)
+```
+
+**2. Add completion notes:**
+```bash
+af bead update {{issue}} --notes "Completed design-v7 exploration for {{issue}}.
+Design artifacts in .designs/{{issue}}/:
+- source.md (verbatim requirements)
+- codebase-snapshot.md (verified ground truth for sub-agents)
+- verification.md (Gate A: forced-enumeration)
+- dimension files (per scope calibration)
+- audit.md, conflicts.md, dependencies.md (dimension analysis)
+- elevation_assessment.md (architecture elevation — 4-phase frame interrogation)
+- six_sigma_gaps.md (independent gap discovery with feasibility classification)
+- verification-report.md (fidelity verification of all codebase claims)
+- synthesis-checklist.md (Gate B: pre-synthesis re-grounding)
+- design-doc.md (unified design with AC Traceability, elevation verdict, six-sigma caveats, cross-perspective conflicts)"
+```
+
+**Exit criteria:** Issue updated with completion notes."""
+
+[[steps]]
+id = "submit-and-exit"
+title = "Submit PR and exit"
+needs = ["prepare-for-review"]
+description = """
+Create a PR and signal completion.
+
+**Ephemeral Agent Model:**
+Once you submit, you're done. The Supervisor will:
+1. Review and merge your PR
+2. Handle rebasing (mechanical rebases done automatically)
+3. Close your issue after successful merge
+4. Create conflict-resolution tasks if needed (fresh agent handles those)
+
+**1. Create a pull request:**
+```bash
+gh pr create --title "design: {{issue}} (design-v7)" --body "Design artifacts for {{issue}} via design-v7 sub-agent orchestration.
+
+See .designs/{{issue}}/design-doc.md for the unified design.
+
+design-v7 forcing functions applied:
+- Verbatim source captured in source.md before any paraphrase
+- Codebase snapshot verified before sub-agent launch
+- Gate A: forced-enumeration verification.md (every AC + constraint has dimension owner)
+- 3 parallel independent sub-agents: Dimensions, Elevation, Six-Sigma Gap
+- Fidelity verifier checked all codebase claims against actual code
+- Gate B: synthesis-checklist.md re-grounded against source.md, mapped every AC clause
+- Cross-perspective conflict mining (dimension-vs-elevation, dimension-vs-gaps)
+- Elevation verdict: [insert verdict]
+- design-doc.md: AC Traceability, elevation verdict integration, six-sigma caveats, risk registry"
+```
+
+**2. Complete the formula:**
+```bash
+af done
+```
+
+`af done` closes the current formula step and — since this is the last step —
+mails WORK_DONE to the Supervisor and cleans up the checkpoint.
+
+**3. You're done:**
+Your PR is open and the Supervisor knows you're done.
+Your workspace can be cleaned up — all work is pushed to origin.
+
+If you have context remaining, you may:
+- Pick up new work from `af prime`
+- Or use `af handoff` to cycle to a fresh session
+
+If the Supervisor needs conflict resolution, it will dispatch a fresh agent.
+You do NOT need to wait around.
+
+**Exit criteria:** PR created, Supervisor notified via WORK_DONE, agent done."""
+
+[vars]
+[vars.issue]
+description = "The issue/design-request ID assigned to this agent"
+required = true
+source = "hook_bead"

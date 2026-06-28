@@ -53,6 +53,14 @@ type watchdogAgentState struct {
 
 var watchdogMaxConsecutiveFailures = 3
 
+// watchdogNudgeFn nudges a silent agent. It is copy-mode-resilient (Issue #412
+// Fix B, K-WATCH defense-in-depth) WITHOUT any change here: SendKeys ->
+// SendKeysDebounced calls (*Tmux).exitCopyMode, which drops a pane latched in
+// copy-mode back to live view before the "continue" reaches it. We intentionally
+// do NOT cancel copy-mode in pollAgents directly — exitCopyMode is unexported and
+// the watchdogTmux interface exposes no send/cancel method, so a literal cancel
+// here would require a new exported tmux API for no added protection (the
+// transitive coverage above already closes the C-CRIT-2 autonomy trap).
 var watchdogNudgeFn = func(sessionID string) error {
 	tx := tmux.NewTmux()
 	return tx.SendKeys(sessionID, "continue")

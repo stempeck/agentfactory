@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/claude"
@@ -31,6 +32,8 @@ var formulasFS embed.FS
 var skillsFS embed.FS
 
 var installInitFlag bool
+var installAgentsFlag bool
+var installNoBuildFlag bool
 
 var installCmd = &cobra.Command{
 	Use:   "install [role]",
@@ -41,16 +44,47 @@ Factory initialization creates the config directory, starter configs,
 issue store database, and hooks directory.
 
 Agent provisioning creates the agent directory, renders CLAUDE.md from
-the role template, and writes Claude Code settings.json with hooks.`,
+the role template, and writes Claude Code settings.json with hooks.
+
+Redeploy all formula-derived agents (--agents) regenerates every specialist
+template and reinstalls the factory in one command, resolving the AF source
+tree and project directory for you. It runs agent-gen-all.sh (regenerate
+templates + rebuild) first, then quickstart.sh (full bootstrap), the latter
+non-interactively so its terminal 'exec bash' exits on its own. Add --no-build
+to skip agent-gen-all.sh's duplicate rebuild (quickstart.sh always rebuilds the
+binary). It stops all agents (the wrapped 'af down --all' never restarts them),
+so run 'af up' afterward. It requires an already-initialized factory:
+agent-gen-all.sh runs first and aborts if .agentfactory/store/formulas/ is
+absent, before quickstart.sh could bootstrap a cold factory; for a first-time or
+cold-start setup run quickdocker.sh/quickstart.sh first. Residual risk: the
+command is not transactional, so a mid-run failure can leave agents down and the
+factory half-regenerated -- check the streamed exit code and end-state. A green
+unit test confirms dispatch, not factory health; behavioral success requires the
+e2e cold-start, 'af up', 'af sling', PR check.`,
 	RunE: runInstall,
 }
 
 func init() {
 	installCmd.Flags().BoolVar(&installInitFlag, "init", false, "Initialize a new factory workspace")
+	installCmd.Flags().BoolVar(&installAgentsFlag, "agents", false,
+		"Regenerate and reinstall all formula-derived agents (runs agent-gen-all.sh then quickstart.sh)")
+	installCmd.Flags().BoolVar(&installNoBuildFlag, "no-build", false,
+		"With --agents: skip ONLY agent-gen-all.sh's duplicate rebuild — quickstart.sh always rebuilds the binary, so the embedded identity is never left stale")
 	rootCmd.AddCommand(installCmd)
 }
 
 func runInstall(cmd *cobra.Command, args []string) error {
+	// --agents is checked before --init so its mutual-exclusion guard fires:
+	// af install --agents --init must be rejected, not silently run --init.
+	if installAgentsFlag {
+		if installInitFlag {
+			return fmt.Errorf("--agents and --init are mutually exclusive")
+		}
+		if len(args) > 0 {
+			return fmt.Errorf("--agents takes no role argument (usage: af install --agents)")
+		}
+		return runInstallAgents(cmd)
+	}
 	if installInitFlag {
 		return runInstallInit(cmd)
 	}
@@ -520,6 +554,216 @@ func runInstallRole(cmd *cobra.Command, role string) error {
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Agent %q provisioned successfully.\n", role)
 	return nil
+}
+
+// selfExecEnv guards the one-shot re-exec in relinkSelfForReinstall so the copy it
+// launches does not re-enter the re-exec and loop.
+const selfExecEnv = "AF_INSTALL_SELFEXEC"
+
+// relinkSelfForReinstall makes `af install --agents` survive reinstalling the very
+// `af` it runs as. The operation IS a reinstall of af: agent-gen-all.sh's `make
+// install` and quickstart.sh's install_af both `cp` a freshly built af over
+// ~/.local/bin/af. Linux refuses to open a file for writing while its inode has an
+// active text (exec) mapping — ETXTBSY, "Text file busy" — so a `cp` over the inode
+// THIS process is executing fails. The kernel guards the inode's mapping, not the
+// name, so we move this process's mapping off that inode: copy our own binary to a
+// throwaway file and re-exec from it. ~/.local/bin/af keeps its name (the scripts'
+// own `af down`/`af version` still resolve on PATH) but is no longer the busy inode,
+// so every downstream `cp` over it succeeds — without editing either script.
+//
+// On the re-exec'd copy this unlinks the throwaway file (Linux keeps the inode, and
+// thus this process, alive until exit) so nothing lingers on disk. Best-effort
+// throughout: any failure falls through to the original flow, which is no worse than
+// today. No-op under `go test` (would exec a copy of the test binary) and once the
+// re-exec has already happened (env guard).
+func relinkSelfForReinstall(cmd *cobra.Command) {
+	if os.Getenv(selfExecEnv) != "" {
+		if exe, err := os.Executable(); err == nil {
+			os.Remove(exe)
+		}
+		return
+	}
+	if isTestBinary() {
+		return
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return
+	}
+	if resolved, rerr := filepath.EvalSymlinks(self); rerr == nil {
+		self = resolved
+	}
+	data, err := os.ReadFile(self)
+	if err != nil {
+		return
+	}
+	// Same directory as the binary we replace: guaranteed to be on an exec-capable
+	// filesystem (af already runs from there) and on the same device for cleanup.
+	copyPath := filepath.Join(filepath.Dir(self), fmt.Sprintf(".af-selfexec-%d", os.Getpid()))
+	if err := os.WriteFile(copyPath, data, 0o755); err != nil {
+		return
+	}
+	env := append(os.Environ(), selfExecEnv+"=1")
+	if err := syscall.Exec(copyPath, os.Args, env); err != nil {
+		os.Remove(copyPath)
+		fmt.Fprintf(cmd.ErrOrStderr(), "note: could not re-exec from a self-copy (%v); the af binary may be busy during reinstall\n", err)
+	}
+}
+
+// runInstallAgents implements `af install --agents`: redeploy ALL formula-derived
+// agents by running the two repo-root scripts in order. It resolves the operator's
+// CWD (project dir) and the AF source tree, then runs agent-gen-all.sh FIRST and,
+// only on success, quickstart.sh SECOND. Aborting before quickstart on a non-zero
+// agent-gen exit avoids stacking a half-bootstrap on a failed regen (design G8:
+// no cross-script rollback). Both scripts are invoked through ADR-009 package-var
+// seams so unit tests can assert dispatch without executing the real scripts.
+func runInstallAgents(cmd *cobra.Command) error {
+	// Re-exec from a throwaway self-copy BEFORE any work, so the scripts below can
+	// reinstall the very af we run as (ETXTBSY otherwise — see relinkSelfForReinstall).
+	relinkSelfForReinstall(cmd)
+
+	cwd, err := getWd() // helpers.go
+	if err != nil {
+		return err
+	}
+
+	// Guard 1 (R2/G4) — REFUSE inside a worktree, BEFORE FindFactoryRoot. Mirrors
+	// runInstallInit's .factory-root idiom (install.go:93-95) but with an
+	// operator-facing message that points to the main checkout. This is a clearer,
+	// earlier error for the specific worktree case; the script's own CWD check
+	// (agent-gen-all.sh:39-42) still streams for other CWD problems.
+	if data, err := os.ReadFile(filepath.Join(config.ConfigDir(cwd), ".factory-root")); err == nil {
+		return fmt.Errorf("cannot run af install --agents inside a worktree (factory root: %s); run from the main project checkout, not a worktree", strings.TrimSpace(string(data)))
+	}
+
+	factoryRoot, err := config.FindFactoryRoot(cwd) // as runInstallRole
+	if err != nil {
+		return err
+	}
+
+	afSrc, fallback := resolveAFSource(factoryRoot) // formula.go
+
+	// Guard 2 (R3/G6) — REFUSE when the AF source tree is unresolvable or
+	// incomplete, BEFORE either seam. The fallback bool covers "nothing valid
+	// resolved"; the two os.Stat checks additionally catch a stale-but-valid moved
+	// checkout that still passes validateAFSource's go.mod substring test but no
+	// longer has the scripts. Both scripts must be present before either seam runs.
+	if fallback {
+		return fmt.Errorf("cannot run af install --agents: agentfactory source tree not found (resolved to %q); set AF_SOURCE_ROOT to your agentfactory checkout or run from a built install", afSrc)
+	}
+	for _, script := range []string{"agent-gen-all.sh", "quickstart.sh"} {
+		if _, err := os.Stat(filepath.Join(afSrc, script)); err != nil {
+			return fmt.Errorf("cannot run af install --agents: %s missing under source tree %q; set AF_SOURCE_ROOT to a complete agentfactory checkout or run from a built install", script, afSrc)
+		}
+	}
+
+	// Guard 3 (R8/G11) — WARN (do not block) when CWD is the AF source repo: the
+	// agent-gen orphan-removal pass (agent-gen-all.sh:82-106) is destructive there.
+	// sameDir returns a==b on stat error, so worst case is a missed warning, never
+	// a wrong block — do NOT promote to a refusal.
+	if sameDir(cwd, afSrc) {
+		fmt.Fprintln(cmd.ErrOrStderr(), "warning: running from the agentfactory source repo — agent-gen-all.sh will remove local formulas/templates that have no source counterpart (destructive orphan removal)")
+	}
+
+	// Guard 5 (R1/G3) — WARN when the caller is itself a live agent session: the
+	// impending `af down --all` (agent-gen-all.sh:57) SIGKILLs every agent,
+	// including this one. Transparent self-survival is infeasible (C-1) — surface
+	// it, then proceed.
+	if inAgentSession() {
+		fmt.Fprintln(cmd.ErrOrStderr(), "warning: running inside a live agent session — agent-gen-all.sh runs `af down --all`, which will SIGKILL all agents including this session")
+	}
+
+	// Guard 6 (R9/H1) — WARN when a locally-edited shipped formula would be
+	// clobbered by agent-gen-all.sh's unconditional, mtime-based -nt cp
+	// (agent-gen-all.sh:72-81). Compares each project formula by CONTENT against
+	// the ON-DISK source copy (never the embedded formulasFS, which can diverge in
+	// a stale binary). A net-new customer formula (no source counterpart) is
+	// preserved by the script and warns nothing.
+	warnShippedFormulaClobber(cmd, cwd, afSrc)
+
+	// Guard 4 (D6, REFRAMED) — informational note only; NO staleness warning.
+	// quickstart.sh runs second and always rebuilds/reinstalls the binary, so
+	// af prime's embedded template is always fresh after a successful run.
+	// --no-build skips only agent-gen-all.sh's duplicate build.
+	if installNoBuildFlag {
+		fmt.Fprintln(cmd.OutOrStdout(), "note: --no-build skips only agent-gen-all.sh's duplicate build; quickstart.sh always rebuilds the binary")
+	}
+
+	// Author PR #417: run BOTH scripts in order — agent-gen FIRST, then quickstart.
+	if err := runAgentGenScript(cmd, afSrc, cwd, installNoBuildFlag); err != nil {
+		return err // abort before quickstart on non-zero (no half-bootstrap)
+	}
+	return runQuickstartScript(cmd, afSrc, cwd) // stdin←/dev/null (exec-bash mitigation)
+}
+
+// inAgentSession reports whether this process is running inside a live agent
+// session, detected via the AF_ROLE env var the session manager sets
+// (session.go:288-294). There is no central helper today — the package reads
+// AF_ROLE directly in done.go/containment.go/helpers.go; this mirrors them.
+func inAgentSession() bool { return os.Getenv("AF_ROLE") != "" }
+
+// warnShippedFormulaClobber prints Guard 6's warning for each project formula
+// under config.FormulasDir(cwd) that also exists under the ON-DISK
+// $afSrc/internal/cmd/install_formulas/ AND differs by content — exactly the set
+// agent-gen-all.sh:72-81 will silently overwrite via its mtime-based -nt cp. The
+// comparison is on-disk-source vs on-disk-project (the formula_drift_test.go
+// idiom), never the embedded formulasFS (which can diverge from what the script
+// copies in a stale-binary case). Net-new customer formulas (no source
+// counterpart) and any unreadable dir/file are skipped silently — a read error is
+// not a clobber. Guard 2's os.Stat already proved afSrc is a real source tree.
+func warnShippedFormulaClobber(cmd *cobra.Command, cwd, afSrc string) {
+	formulasDir := config.FormulasDir(cwd)
+	entries, err := os.ReadDir(formulasDir)
+	if err != nil {
+		return // no project formulas dir (or unreadable) → nothing to clobber
+	}
+	srcDir := filepath.Join(afSrc, "internal", "cmd", "install_formulas")
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".formula.toml") {
+			continue
+		}
+		name := entry.Name()
+		srcBytes, err := os.ReadFile(filepath.Join(srcDir, name))
+		if err != nil {
+			continue // net-new customer formula (no shipped counterpart) — not a clobber
+		}
+		projBytes, err := os.ReadFile(filepath.Join(formulasDir, name))
+		if err != nil {
+			continue // unreadable project file — not a clobber
+		}
+		if !bytes.Equal(srcBytes, projBytes) {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: shipped formula %q has local edits that agent-gen-all.sh will overwrite; make durable edits in internal/cmd/install_formulas/ and re-sync (ADR-015)\n", name)
+		}
+	}
+}
+
+// runAgentGenScript is the ADR-009 seam tests override to avoid executing the
+// real agent-gen-all.sh (which needs af on PATH, runs af down --all, rebuilds).
+var runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error {
+	scriptPath := filepath.Join(afSrc, "agent-gen-all.sh")
+	args := []string{}
+	if noBuild {
+		args = append(args, "--no-build")
+	}
+	c := exec.Command(scriptPath, args...) // argv form, never a shell invocation (security.md SEC-1)
+	c.Dir = projectDir
+	c.Env = append(os.Environ(), "AF_SRC="+afSrc)
+	c.Stdout = cmd.OutOrStdout()
+	c.Stderr = cmd.ErrOrStderr()
+	return c.Run() // propagate exit code as error
+}
+
+// runQuickstartScript is the ADR-009 seam for quickstart.sh. Stdin is /dev/null
+// so the script's terminal `exec bash` (quickstart.sh:625) reads EOF and exits
+// instead of hanging or hijacking the session (ADR-014 mitigation).
+var runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string) error {
+	c := exec.Command(filepath.Join(afSrc, "quickstart.sh")) // argv form; no --no-build
+	c.Dir = projectDir
+	c.Env = append(os.Environ(), "AF_SRC="+afSrc)
+	c.Stdin = nil // nil ⇒ /dev/null in os/exec → exec bash gets EOF
+	c.Stdout = cmd.OutOrStdout()
+	c.Stderr = cmd.ErrOrStderr()
+	return c.Run()
 }
 
 const (

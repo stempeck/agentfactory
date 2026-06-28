@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Floor · AgentFactory</title>
+<link rel="stylesheet" href="styles/variables.css">
+<link rel="stylesheet" href="styles/main.css">
+</head>
+<body class="app boot">
+
+<!-- ============================ CHROME ============================ -->
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" id="brand-home" href="/" aria-label="AgentFactory home">
+      <img class="mark" src="assets/logo.svg" alt="" width="30" height="30" aria-hidden="true">
+      <span class="word">Agentfactory</span>
+    </a>
+    <nav class="nav" aria-label="Primary">
+      <a id="nav-floor" href="/" data-route="floor" aria-current="page">Floor</a>
+      <a id="nav-sling" href="#sling" data-route="sling">Sling</a>
+      <a id="nav-dispatch" href="#dispatch" data-route="dispatch">Dispatch</a>
+      <a id="nav-prototypes" href="#prototypes" data-route="prototypes">Prototypes</a>
+      <a id="nav-settings" href="#settings" data-route="settings">Settings</a>
+    </nav>
+    <div class="powerbar" aria-label="Factory power">
+      <button class="pwr start" id="pwr-start" type="button"><span aria-hidden="true">⏻</span> Start Factory</button>
+      <button class="pwr" id="pwr-shutdown" type="button"><span aria-hidden="true">◼</span> Shut Down</button>
+      <button class="pwr danger" id="pwr-shutdown-reset" type="button"><span aria-hidden="true">⟲</span> Shut Down &amp; Reset</button>
+    </div>
+  </div>
+  <div class="wrap strip">
+    <span><span class="dot" aria-hidden="true"></span> updated <span id="stale">just now</span></span>
+    <span>· <span id="lit-count">0</span> agents lit</span>
+    <button class="ghost" id="refresh" type="button" aria-label="Refresh"><span aria-hidden="true">⟳</span> Refresh</button>
+  </div>
+</header>
+
+<!-- ============================ MAIN ============================ -->
+<main class="wrap">
+<section id="view-floor">
+  <div class="view-head">
+    <h1 class="view-title">The Floor</h1>
+    <p class="view-sub">Every lit sign is an agent at work — its glow is its honest status. Scan the skyline, then steer.</p>
+  </div>
+
+  <!-- sticky filter row -->
+  <div class="filterbar" role="search">
+    <input class="field search" id="floor-search" type="search" placeholder="Search agents by name…" aria-label="Search running agents">
+    <div class="seg" role="group" aria-label="Filter by status">
+      <button id="filter-all" type="button" data-filter="all" aria-pressed="true">All</button>
+      <button id="filter-working" type="button" data-filter="working" aria-pressed="false">Working</button>
+      <button id="filter-gate" type="button" data-filter="gate" aria-pressed="false">Gate</button>
+      <button id="filter-waiting" type="button" data-filter="waiting" aria-pressed="false">Waiting</button>
+      <button id="filter-attention" type="button" data-filter="attention" aria-pressed="false">Attention</button>
+    </div>
+  </div>
+
+  <h2 class="group-label">Running · <span id="lit-label">0</span> lit</h2>
+
+  <!-- live agent grid (populated from /api/agents) -->
+  <ul class="grid" id="grid" aria-live="polite"></ul>
+
+  <!-- empty state (shown when nothing is running) -->
+  <section class="empty" id="empty" aria-label="No agents running" hidden>
+    <h3>No agents running — Start the Factory</h3>
+    <p style="max-width:42ch;margin:0 auto 16px;">The factory is dark. Start it to dispatch agents, or sling one a task to light the first sign.</p>
+    <button class="pwr start" id="empty-start" type="button"><span aria-hidden="true">⏻</span> Start the Factory</button>
+  </section>
+
+  <!-- error banner (shown when the read-model can't be assembled) -->
+  <section class="empty" id="errbox" aria-label="Read error" hidden style="border-color:var(--danger);color:var(--danger)">
+    <h3 style="color:var(--danger)">Couldn't read factory state</h3>
+    <p id="errmsg" style="max-width:52ch;margin:0 auto;"></p>
+  </section>
+</section>
+
+<!-- ============================ SLING VIEW ============================ -->
+<section id="view-sling" hidden>
+  <div class="view-head">
+    <h1 class="view-title">Sling a Task</h1>
+    <p class="view-sub">Pick an idle agent on the left, then tell it what to do. We auto-build its task form from the agent's variables.</p>
+  </div>
+
+  <div class="cols">
+    <!-- LEFT: idle-agent list (read-model Running == false) -->
+    <section class="panel" aria-label="Idle agents">
+      <h2>Idle agents · <span id="sling-idle-count">0</span></h2>
+      <div class="formrow">
+        <input class="field w" type="search" id="sling-search" placeholder="Filter agents…" aria-label="Filter idle agents">
+      </div>
+      <div class="agentlist" id="sling-agentlist" role="listbox" aria-label="Choose an agent to sling"></div>
+      <p class="keyhint" id="sling-empty" hidden>No idle agents — every agent is busy or the factory is dark.</p>
+    </section>
+
+    <!-- RIGHT: generated task form (built from GET /api/agents/{name}/form) -->
+    <section class="panel" aria-label="Task form">
+      <h2><span id="sling-form-agent">Select an agent</span> · task form</h2>
+      <div class="success" id="sling-success" hidden>
+        <span class="ic" aria-hidden="true">✦</span>
+        <div><strong id="sling-success-agent"></strong> is starting — it'll appear on the Floor in a moment.</div>
+      </div>
+      <!-- persistent inline error region (K7): sling failures land here, reusing the .validation danger style (no .error class exists). -->
+      <div class="validation" id="sling-error" role="alert" aria-live="polite" hidden></div>
+      <div id="sling-form-host">
+        <p class="keyhint" id="sling-form-placeholder">Choose an idle agent on the left to build its task form.</p>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================ DISPATCH VIEW ============================ -->
+<section id="view-dispatch" hidden>
+  <div class="view-head">
+    <h1 class="view-title">Dispatch</h1>
+    <p class="view-sub">The dispatcher watches your repos and routes newly-labeled issues to the right agent automatically.</p>
+  </div>
+
+  <div class="cols">
+    <!-- LEFT: dispatcher status -->
+    <section class="panel" aria-label="Dispatcher status">
+      <h2>Status</h2>
+      <p class="online off" id="dispatch-status"><span class="pip" aria-hidden="true"></span> <span id="dispatch-status-text">Checking…</span></p>
+      <div class="stat-grid" id="dispatch-stats" aria-live="polite"></div>
+      <button class="ghost inline" type="button" id="dispatch-refresh" style="margin-top:14px"><span aria-hidden="true">⟳</span> Refresh feed</button>
+    </section>
+
+    <!-- RIGHT: recent-dispatch feed (one <li> per `af dispatch status --json` entry) -->
+    <section class="panel" aria-label="Recent dispatches">
+      <h2>Recent dispatches</h2>
+      <ul class="feed" id="dispatch-feed" aria-live="polite"></ul>
+      <div class="empty" id="dispatch-empty" hidden style="padding:22px">
+        <p style="margin:0">No dispatches yet — the dispatcher will route newly-labeled issues here.</p>
+      </div>
+    </section>
+  </div>
+</section>
+
+<!-- ============================ SETTINGS VIEW ============================ -->
+<section id="view-settings" hidden>
+  <div class="view-head">
+    <h1 class="view-title">Settings</h1>
+    <p class="view-sub">Decide which agent handles each issue label, and tune how the factory boots. Changes are validated and saved atomically — a mapping to a non-existent agent is rejected without corrupting the file.</p>
+  </div>
+
+  <div class="cols even">
+    <!-- LEFT: dispatch routes (label → agent mapping editor) -->
+    <section class="panel" aria-label="Label to agent mapping">
+      <h2>Dispatch routes</h2>
+      <p class="muted" style="margin-bottom:14px">When an issue gets a label on the left, the dispatcher slings the agent on the right.</p>
+
+      <div class="formrow">
+        <label class="lbl" for="set-trigger">Trigger label</label>
+        <input class="field w" id="set-trigger" aria-describedby="set-dispatch-err" placeholder="e.g. agent:go">
+      </div>
+
+      <div id="mapRows"></div>
+      <button class="add-row" type="button" id="set-add-row">+ Add route</button>
+
+      <p class="validation" id="set-dispatch-err" hidden></p>
+      <div class="success" id="set-dispatch-ok" hidden style="margin-top:12px"><span class="ic" aria-hidden="true">✦</span><div>Dispatch routes saved.</div></div>
+    </section>
+
+    <!-- RIGHT: curated factory options + read-only factory.json + save -->
+    <section class="panel" aria-label="Factory options">
+      <h2>Factory options</h2>
+
+      <div class="toggle-row">
+        <span class="tlabel">Auto-dispatch on startup
+          <small>Start the dispatcher automatically when the factory boots.</small>
+        </span>
+        <label class="switch"><input type="checkbox" id="set-startdispatch" aria-label="Auto-dispatch on startup"><span class="track"></span></label>
+      </div>
+
+      <div class="formrow" style="margin-top:16px">
+        <label class="lbl" for="set-startup-agents">Startup agents</label>
+        <input class="field w" id="set-startup-agents" aria-describedby="set-startup-err" placeholder="comma-separated agent names — blank means ALL">
+        <p class="validation" id="set-startup-err" hidden></p>
+      </div>
+
+      <div class="success" id="set-startup-ok" hidden style="margin:8px 0 14px"><span class="ic" aria-hidden="true">✦</span><div>Startup settings saved.</div></div>
+
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
+        <button class="btn primary" type="button" id="set-save">Save changes</button>
+      </div>
+
+      <h3 style="margin-top:22px">factory.json <span class="muted" style="font-size:12px;font-weight:400">· read-only</span></h3>
+      <pre class="readonly-block mono" id="set-factory" aria-label="factory.json (read-only)"></pre>
+    </section>
+  </div>
+</section>
+
+<!-- ============================ PROTOTYPES VIEW ============================ -->
+<section id="view-prototypes" hidden>
+  <div class="view-head">
+    <h1 class="view-title">Prototypes</h1>
+    <p class="view-sub">Review what agents have built. Pick a prototype, look it over in the isolated viewer, then send feedback the agent will actually honor.</p>
+  </div>
+
+  <div class="proto-cols">
+    <!-- LEFT: list of agent-built prototypes (from GET /api/prototypes) -->
+    <section class="panel" aria-label="Prototype directories">
+      <h2>Built by agents · <span id="proto-count">0</span></h2>
+      <div class="proto-list" id="proto-list" role="listbox" aria-label="Choose a prototype"></div>
+      <p class="keyhint" id="proto-empty" hidden>No prototypes yet — dispatch a design agent to build one.</p>
+    </section>
+
+    <!-- CENTER: sandboxed viewer (iframe src = GET /proto/{id}/) -->
+    <section aria-label="Prototype viewer">
+      <div class="viewer">
+        <div class="vh">
+          <span class="dots" aria-hidden="true"><i style="background:#FF5630"></i><i style="background:#FFC24B"></i><i style="background:#20E5FF"></i></span>
+          <span id="proto-vpath">Select a prototype</span>
+          <span style="margin-inline-start:auto">sandboxed preview</span>
+        </div>
+        <!-- bare `sandbox` = maximally restrictive (ux.md Decision 5A / security.md Decision 4): no
+             allow-scripts, no allow-same-origin — prototype JS cannot reach the app shell. -->
+        <iframe id="proto-frame" title="Sandboxed prototype preview" sandbox src="about:blank"></iframe>
+      </div>
+    </section>
+
+    <!-- RIGHT: feedback side-panel (does not overlay the viewer) -->
+    <section class="panel" aria-label="Feedback">
+      <h2>Your feedback</h2>
+      <div class="success" id="proto-fb-ok" hidden>
+        <span class="ic" aria-hidden="true">✦</span>
+        <div id="proto-fb-ok-msg">Feedback saved.</div>
+      </div>
+      <p class="online off" id="proto-fb-closed" hidden><span class="pip" aria-hidden="true"></span> Feedback not currently open for this prototype.</p>
+      <form id="proto-fb-form">
+        <div class="radios" role="radiogroup" aria-label="Verdict">
+          <label><input type="radio" name="proto-verdict" value="approve"> Approve — carry this forward</label>
+          <label><input type="radio" name="proto-verdict" value="changes"> Request changes — iterate on the notes</label>
+        </div>
+        <div class="formrow">
+          <label class="lbl" for="proto-notes">Notes for the agent</label>
+          <textarea class="field w" id="proto-notes" placeholder="What works, what to change for the next iteration…"></textarea>
+        </div>
+        <button class="btn primary block" type="submit" id="proto-fb-send">Send feedback</button>
+        <p class="validation" id="proto-fb-err" hidden></p>
+        <p class="contract-note">Sending writes the iteration's <code>feedback-form.md</code> contract the design agent reads to drive the next round.</p>
+      </form>
+    </section>
+  </div>
+</section>
+</main>
+
+<!-- ============================ SHARED: RESET DIALOG ============================ -->
+<dialog class="confirm" id="resetDlg" aria-label="Confirm reset">
+  <form method="dialog">
+    <div class="dh">
+      <span class="warn" aria-hidden="true">!</span>
+      <h2 id="resetTitle">Reset agent?</h2>
+    </div>
+    <div class="db">
+      <p class="what" id="resetWhat">This removes the agent's work-in-progress branch and worktree.</p>
+      <p class="lose" id="resetLose">Unmerged work will be lost — this cannot be undone.</p>
+    </div>
+    <div class="df">
+      <button class="cancel" id="confirm-cancel" value="cancel" type="submit" autofocus>Cancel</button>
+      <button class="doit" id="confirm-go" value="confirm" type="submit">Yes, reset</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<noscript>
+  <p style="padding:24px;color:#EDEAFF">The AgentFactory Floor needs JavaScript to render the live agent skyline.</p>
+</noscript>
+
+<script src="app.js" defer></script>
+</body>
+</html>

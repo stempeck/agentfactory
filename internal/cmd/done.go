@@ -221,7 +221,7 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 	// other store/mail op here — the steps are already closed and the formula is
 	// genuinely done, so a close failure must not abort completion. M1: this is
 	// the formula-instance epic (af-<hex>), distinct from the GitHub work issue.
-	if err := store.Close(ctx, instanceID, "formula complete"); err != nil {
+	if err := store.Close(ctx, instanceID, config.CloseReasonFormulaComplete); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not close formula-instance epic %s: %v\n", instanceID, err)
 	}
 

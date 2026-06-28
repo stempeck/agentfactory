@@ -6,11 +6,23 @@
       "directive": "Run af prime to load formula context.",
       "formula": "design"
     },
+    "design-plan-impl": {
+      "type": "autonomous",
+      "description": "## Overview\nConvert design skill output into an executable implementation plan outline —\nMode A ONLY.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "design-plan-impl"
+    },
     "design-v3": {
       "type": "autonomous",
       "description": "## Overview\nStructured design exploration with constraint verification, dependency mapping,\nand cross-dimension conflict detection for agents.",
       "directive": "Run af prime to load formula context.",
       "formula": "design-v3"
+    },
+    "design-v7": {
+      "type": "autonomous",
+      "description": "## Overview\nSub-agent-based design orchestration that captures verbatim source in the main\ncontext, then spawns three parallel sub-agents (Design Dimensions Analyst,\nArchitecture Elevation Analyst, Six-Sigma Gap Analyst) using Claude Code's\nnative Agent tool.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "design-v7"
     },
     "factoryworker": {
       "type": "autonomous",
@@ -58,6 +70,18 @@
       "description": "## Overview\nLean, adaptive incremental workflow that addresses the UNRESOLVED review comments on a pull request, scaling process rigor to the size of the change.",
       "directive": "Run af prime to load formula context.",
       "formula": "rapid-increment"
+    },
+    "rapid-soldesign-plan": {
+      "type": "autonomous",
+      "description": "## Overview\nAutonomous multi-agent rapid design refinement from a GitHub issue URI.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "rapid-soldesign-plan"
+    },
+    "rootcause-all": {
+      "type": "autonomous",
+      "description": "## Overview\nSystematic root cause analysis on problems using 5-whys, fishbone diagrams,\nand hypothesis testing.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "rootcause-all"
     },
     "supervisor": {
       "type": "autonomous",

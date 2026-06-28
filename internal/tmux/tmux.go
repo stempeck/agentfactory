@@ -212,6 +212,15 @@ func (t *Tmux) NewSession(name, workDir string) error {
 	if t.guardOp("new-session", name) {
 		return nil
 	}
+	// Raise scrollback globally BEFORE new-session so the initial agent pane gets a
+	// deep buffer — history-limit only sizes windows created after it is set, and
+	// new-session creates the first window from the global value (Issue #412, Fix A).
+	// Best-effort: a failed apply must never abort session creation. PLACEMENT PIN:
+	// this target-less, guard-blind set-option -g is safe ONLY here, after the
+	// guardOp("new-session") early-return above and before the new-session exec
+	// below — so it inherits NewSession's guard and is never reached under the
+	// default-build test guard (F1 / AC #9).
+	_ = t.SetGlobalOption("history-limit", "50000")
 	args := []string{"new-session", "-d", "-s", name}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
@@ -298,11 +307,39 @@ func (t *Tmux) SendKeys(session, keys string) error {
 	return t.SendKeysDebounced(session, keys, debounceMs)
 }
 
+// Drop a latched pane out of any tmux mode (copy-mode, view-mode, search) before
+// a real injection, so a scrolled/searching pane never silently swallows the
+// keystrokes that follow (Issue #412 Fix B — the C-CRIT-2 autonomy trap that
+// Phase 2's `mouse on` makes trivial to trigger). It is a STRICT no-op when the
+// pane is not in a mode: it gates on #{pane_in_mode} because an unconditional
+// `send-keys -X cancel` errors ("not in a mode") on a live pane and could inject
+// spurious input. Best-effort — callers ignore the returned error so a failed
+// read or cancel never aborts the injection it precedes. It self-guards via
+// guardOp because it WRITES (`send-keys -X cancel`), unlike the read-only
+// GetPaneCommand which uses the lighter t.guard probe; this keeps it inside the
+// ADR-018 fail-closed contract even at the unguarded AcceptBypassPermissionsWarning
+// call site.
+func (t *Tmux) exitCopyMode(session string) error {
+	if t.guardOp("send-keys", session) {
+		return nil
+	}
+	out, err := t.run("list-panes", "-t", session, "-F", "#{pane_in_mode}")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) != "1" {
+		return nil // pane is not in a mode: send nothing (strict no-op)
+	}
+	_, err = t.run("send-keys", "-t", session, "-X", "cancel")
+	return err
+}
+
 // SendKeysDebounced sends keystrokes with a configurable delay before Enter.
 func (t *Tmux) SendKeysDebounced(session, keys string, debounceMillis int) error {
 	if t.guardOp("send-keys", session) {
 		return nil
 	}
+	_ = t.exitCopyMode(session) // best-effort: drop a latched pane out of copy-mode first
 	if _, err := t.run("send-keys", "-t", session, "-l", keys); err != nil {
 		return err
 	}
@@ -337,6 +374,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	if t.guardOp("send-keys", session) {
 		return nil
 	}
+	_ = t.exitCopyMode(session) // best-effort: drop a latched pane out of copy-mode first
 	if _, err := t.run("send-keys", "-t", session, "-l", message); err != nil {
 		return err
 	}
@@ -366,6 +404,10 @@ func (t *Tmux) SendNotificationBanner(session, from, subject string) error {
 	if t.guardOp("send-keys", session) {
 		return nil
 	}
+	// Best-effort copy-mode cancel. This is defense-in-depth: the banner path
+	// delegates to SendKeys -> SendKeysDebounced, which already cancels — but the
+	// explicit call keeps every injection chokepoint independently resilient.
+	_ = t.exitCopyMode(session)
 	from = strings.NewReplacer("\n", " ", "\r", " ").Replace(from)
 	subject = strings.NewReplacer("\n", " ", "\r", " ").Replace(subject)
 	content := fmt.Sprintf("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nNEW MAIL from %s\nSubject: %s\nRun: af mail inbox\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", from, subject)
@@ -466,6 +508,46 @@ func (t *Tmux) SetEnvironment(session, key, value string) error {
 	return err
 }
 
+// SetOption sets a session-scoped tmux option (set-option -t). It mirrors
+// SetEnvironment: the op carries a -t target, so the ADR-018 guard can protect it
+// (the op-string literal "set-option" names the real op in the guard panic).
+func (t *Tmux) SetOption(session, name, value string) error {
+	if t.guardOp("set-option", session) {
+		return nil
+	}
+	_, err := t.run("set-option", "-t", session, name, value)
+	return err
+}
+
+// ShowOption reads a session-scoped tmux option value (show-options -t <session>
+// -v <name>) and returns it trimmed. Like the other read-only probes
+// (GetPaneCommand, CapturePane) it uses the lighter `t.guard` gate rather than
+// guardOp: a read carries no destructive risk, so under the test guard it is a
+// benign no-op returning the zero value instead of shelling out to real tmux.
+// Best-effort by contract — callers treat a read error as "unknown" and must
+// never abort on it (used for the Issue #412 mouse read-back, Gap 7).
+func (t *Tmux) ShowOption(session, name string) (string, error) {
+	if t.guard {
+		return "", nil // read-only probe: benign zero-value, no real exec
+	}
+	out, err := t.run("show-options", "-t", session, "-v", name)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// SetGlobalOption sets a server-global tmux option (set-option -g). Unlike
+// SetOption it is TARGET-LESS and therefore GUARD-BLIND: it carries no -t, so
+// guardOp/targetFromArgs cannot protect it. Callers MUST invoke it ONLY from
+// within an already-guarded method (e.g. NewSession, after its guardOp
+// early-return) — never from an unguarded standalone path — or it would mutate
+// the operator's real tmux server under `make test`. (ADR-018 invariant; F1.)
+func (t *Tmux) SetGlobalOption(name, value string) error {
+	_, err := t.run("set-option", "-g", name, value)
+	return err
+}
+
 // WaitForShellReady polls until the pane is running a shell command.
 func (t *Tmux) WaitForShellReady(session string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
@@ -512,6 +594,11 @@ func (t *Tmux) WaitForCommand(session string, excludeCommands []string, timeout 
 // AcceptBypassPermissionsWarning dismisses the Claude Code bypass permissions warning.
 func (t *Tmux) AcceptBypassPermissionsWarning(session string) error {
 	time.Sleep(5 * time.Second)
+
+	// Best-effort: drop a latched pane out of copy-mode so the Down/Enter below
+	// reach the warning dialog. The helper self-guards, so it is safe even though
+	// this method has no top-level guardOp (it relies on CapturePane's guard).
+	_ = t.exitCopyMode(session)
 
 	content, err := t.CapturePane(session, 30)
 	if err != nil {

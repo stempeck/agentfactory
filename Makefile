@@ -1,4 +1,4 @@
-.PHONY: build install clean clean-venv test generate test-integration check-formulas sync-formulas install-hooks check-skills sync-skills check-formula-skills check-regen
+.PHONY: build build-webui install clean clean-venv test generate test-integration check-formulas sync-formulas install-hooks check-skills sync-skills check-formula-skills check-regen
 
 BINARY := af
 BUILD_DIR := .
@@ -28,9 +28,20 @@ generate:
 build: check-formulas check-skills check-formula-skills
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/af
 
+# Phase 5: build the optional web console from its OWN module (web/go.mod). The source package is
+# web/cmd/afweb (package main); the output/installed/launched binary is named `webui` — the
+# container entrypoint guard and the Phase-5 ACs all key on that name. af-core never references
+# this target or its output (cross-review H-3). Built standalone, NOT part of `build`, so af-core
+# build/test stay independent of the web module.
+build-webui:
+	cd web && CGO_ENABLED=0 go build -o ../webui ./cmd/afweb
+
 install: build install-hooks
 	mkdir -p ~/.local/bin
 	cp $(BUILD_DIR)/$(BINARY) ~/.local/bin/$(BINARY)
+	@# Phase 5: install the web console best-effort — a missing/unbuilt `webui` must never fail the
+	@# af install (run `make build-webui` first to produce it; the entrypoint guard launches it iff present).
+	@[ -f webui ] && cp webui ~/.local/bin/webui || true
 
 install-hooks:
 	cp hooks/protect-agent-scaffold.sh .git/hooks/pre-commit
@@ -61,6 +72,12 @@ $(VENV_MARKER): $(PY_REQS)
 test-integration: $(VENV_MARKER)
 	@mkdir -p $(AF_TEST_TMPDIR)
 	PATH="$(CURDIR)/$(VENV)/bin:$$PATH" TMPDIR=$(AF_TEST_TMPDIR) GOTMPDIR=$(AF_TEST_TMPDIR) CGO_ENABLED=0 go test -tags=integration -timeout=4m ./...
+	@# Issue #425 Phase 5A: the web console is a SEPARATE Go module (web/go.mod), so the root
+	@# `go test ./...` above never descends into it. Run its integration tier explicitly — the only
+	@# `cd web` precedent is build-webui above. The `//go:build integration` bridge test lives here
+	@# (web/internal/server/bridge_integration_test.go) and t.Skips when docker is absent, so CI
+	@# (which runs `make test-integration` without a guaranteed docker host) stays green.
+	cd web && TMPDIR=$(AF_TEST_TMPDIR) GOTMPDIR=$(AF_TEST_TMPDIR) CGO_ENABLED=0 go test -tags=integration -timeout=4m ./...
 
 check-formulas:
 	@fail=0; for f in internal/cmd/install_formulas/*.formula.toml; do \

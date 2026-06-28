@@ -16,23 +16,32 @@ import (
 // internal/session cannot import the cmd-side fake; this is the documented
 // duplicate the design permits (Round-2 LOW-1: "ONE fake; accept documented
 // duplication only if cross-package visibility makes a single shared type
-// impossible"). It implements the same 15-method union and configurable liveness
-// fields; here it is consumed as a tmuxClient. Like its twin, it records ops and
-// performs NO real I/O, never sleeps, and never shells out.
+// impossible"). It implements the cmd twin's union plus the session-only
+// ShowOption read-back (Issue #412 Phase 4) and configurable liveness fields; here
+// it is consumed as a tmuxClient. Like its twin, it records ops and performs NO
+// real I/O, never sleeps, and never shells out.
 type fakeTmux struct {
 	ops           []string
 	present       map[string]bool
 	paneCommand   map[string]string
 	running       map[string]bool
 	claudeRunning map[string]bool
+	// optionVals records the value of each set option (key: sess+"\x00"+name) so
+	// ShowOption can read it back, modelling a successful apply by default.
+	optionVals map[string]string
+	// suppressOption[name]=true makes SetOption record the op but NOT store the
+	// value, simulating a silent apply failure so the #412 read-back warning fires.
+	suppressOption map[string]bool
 }
 
 func newFakeTmux() *fakeTmux {
 	return &fakeTmux{
-		present:       map[string]bool{},
-		paneCommand:   map[string]string{},
-		running:       map[string]bool{},
-		claudeRunning: map[string]bool{},
+		present:        map[string]bool{},
+		paneCommand:    map[string]string{},
+		running:        map[string]bool{},
+		claudeRunning:  map[string]bool{},
+		optionVals:     map[string]string{},
+		suppressOption: map[string]bool{},
 	}
 }
 
@@ -66,6 +75,19 @@ func (f *fakeTmux) SetEnvironment(sess, key, value string) error {
 }
 
 // --- tmuxClient-only methods ---
+
+func (f *fakeTmux) SetOption(sess, name, value string) error {
+	f.record(fmt.Sprintf("SetOption %s %s=%s", sess, name, value))
+	if !f.suppressOption[name] {
+		f.optionVals[sess+"\x00"+name] = value
+	}
+	return nil
+}
+
+func (f *fakeTmux) ShowOption(sess, name string) (string, error) {
+	f.record(fmt.Sprintf("ShowOption %s %s", sess, name))
+	return f.optionVals[sess+"\x00"+name], nil
+}
 
 func (f *fakeTmux) IsClaudeRunning(sess string) bool {
 	f.record("IsClaudeRunning " + sess)

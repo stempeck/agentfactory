@@ -25,14 +25,29 @@ import (
 //
 // Skips if python3 is not on PATH.
 func TestMCPStoreContract(t *testing.T) {
+	// Gap-4 (issue #458): a t.Skip is reported GREEN, indistinguishable from a
+	// pass — so if CI drifts (the venv build path changes, a dep is dropped, the
+	// runner image loses python3, or someone runs `go test -tags=integration`
+	// without the Makefile) this real-store gate would silently degrade to a
+	// no-op while staying green: the exact "a green suite says nothing about the
+	// real store" failure mode #458 calls out, reintroduced one layer up at the
+	// skip. Under the CI signal AF_REQUIRE_REAL_STORE=1 a missing dependency must
+	// instead HARD-FAIL. Locally (var unset) the friendly skip remains so dev
+	// machines without the Python deps are unaffected. t.Skipf and t.Fatalf share
+	// func(string, ...any), so one selector covers BOTH dependency probes.
+	fail := t.Skipf
+	if os.Getenv("AF_REQUIRE_REAL_STORE") == "1" {
+		fail = t.Fatalf
+	}
 	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 not available")
+		fail("python3 not available")
 	}
 	// Phase 4's server imports aiohttp and sqlalchemy. If the active
-	// python3 cannot import them, there's no point spawning — skip and
-	// let CI (which installs py/requirements.txt) run the real check.
+	// python3 cannot import them, there's no point spawning — skip (or, under the
+	// CI signal, fatal) and let CI (which installs py/requirements.txt) run the
+	// real check.
 	if out, err := exec.Command("python3", "-c", "import aiohttp, sqlalchemy").CombinedOutput(); err != nil {
-		t.Skipf("python3 missing server deps (aiohttp/sqlalchemy): %s", out)
+		fail("python3 missing server deps (aiohttp/sqlalchemy): %s", out)
 	}
 
 	repoRoot := findRepoRoot(t)

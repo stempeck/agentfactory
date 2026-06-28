@@ -37,6 +37,7 @@ func TestGuard_PanicsOnProductionIdentity(t *testing.T) {
 		{"new-session", func() { _ = tx.NewSession(target, "/tmp") }},
 		{"send-keys", func() { _ = tx.SendKeys(target, "echo hi") }},
 		{"attach-session", func() { _ = tx.AttachSession(target) }},
+		{"set-option", func() { _ = tx.SetOption(target, "mouse", "on") }},
 	}
 
 	for _, tc := range cases {
