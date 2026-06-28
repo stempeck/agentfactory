@@ -22,11 +22,18 @@ only `manager`+`supervisor`, verified), and `ValidateDispatchConfig`
 (`internal/config/dispatch.go:93+`) **hard-fails the entire dispatch cycle** on the
 first unknown mapped agent — invoked unconditionally at `internal/cmd/dispatch.go:146`
 (verified firsthand). So the default alone would break dispatch on every fresh
-factory. The design therefore couples three moves into one systemic change: (1) the
-baked-in default builder, (2) non-interactive repo discovery feeding `repos`, and
-(3) provisioning the referenced specialists during bootstrap so the default is
-**valid-by-construction**, backed by a defense-in-depth dispatcher tolerance and a
-golden test that mechanically gates drift.
+factory. The design therefore couples four moves into one systemic change: (1) the
+baked-in default builder, (2) non-interactive repo discovery feeding `repos`,
+(3) **seeding the four specialists into the default `agents.json` within
+`runInstallInit` itself** (a `DefaultAgentsConfigJSON()` companion) so the default is
+**valid-by-construction on EVERY init path** — including the documented bare
+`af install --init` "hard way", not just quickstart — and (4) hoisting dispatcher
+auto-start so the documented `af up manager` path also starts the polling loop.
+Backed by a defense-in-depth dispatcher tolerance (with mandatory observability) and
+a golden cross-file test that mechanically gates drift. The two cross-review CRITICAL
+findings (bare-init inconsistency; positional-`af up` auto-start gating) are
+incorporated below — both small, localized, and reinforcing the valid-by-construction
+thesis rather than redirecting it.
 
 The Architecture Elevation verdict is **Frame correct** (the dispatch fields must
 exist; deleting `dispatch.json` only relocates them) with **one Frame-lift OFFERED**
@@ -47,7 +54,7 @@ All proposals respect the constraints captured verbatim in `source.md`:
 | AC ref | Verbatim quote from source.md | Clause breakdown | Addressed by | Verified by |
 |--------|-------------------------------|------------------|--------------|-------------|
 | AC-1 | "We need to update dispatch.json to include a baked-in default for dispatch with agentfactory" | (i) update dispatch.json (ii) baked-in default (iii) for dispatch | K1 `DefaultDispatchConfigJSON` + K4 wiring at install.go:145 | `TestDefaultDispatchConfigJSON_*` golden test that the shipped default parses + equals expected mappings/workflow (model: `internal/config/dispatch_workflow_test.go`) |
-| AC-2 | "they could opt to just start tagging their github issues with tags instead to kick off work without ever needing to visit the manager." | (i) tag issues with labels (ii) kick off work (iii) without visiting the manager | K1 mappings + `trigger_label`; EX dispatcher auto-start (`start_dispatch:true`, install.go:147) + K5 provisioned specialists | Integration test: fresh-init temp factory + provisioned specialists → `ValidateDispatchConfig` passes; `af dispatch --dry-run` matches a `agentic`+`rapid-plan` issue to `rapid-soldesign-plan` |
+| AC-2 | "they could opt to just start tagging their github issues with tags instead to kick off work without ever needing to visit the manager." | (i) tag issues with labels (ii) kick off work (iii) without visiting the manager | K1 mappings + `trigger_label`; **K5 seeds the 4 specialists into the default agents.json** (valid on every init path); **K9 hoists dispatcher auto-start** so the documented `af up manager` (positional) starts the polling loop, not only blanket `af up` | Integration test: bare `af install --init` temp factory → `ValidateDispatchConfig(default,default-agents)` passes; `af dispatch --dry-run` matches an `agentic`+`rapid-plan` issue to `rapid-soldesign-plan`; `af up manager` launches the dispatch session |
 | AC-3 | "The dispatch.json should be boostrapped when the dispatch.json is first created during initial setup of the repository so we know the repository-name and can include that appropriately in the dispatch.json" | (i) first created (ii) during initial setup (iii) know repo-name (iv) include appropriately | K2 discovery + K3 validation + K4 write-if-absent (install.go:152) | Unit test: temp repo with known `git remote origin` → `af install --init` writes `repos:["<org>/<repo>"]`; re-run does not clobber |
 | AC-4 | "when we get to the step where we ask the manager,`run af sling --agent <some-agent> \"task description\"`, we should have the work executed autonomously using the step-by-step formula that represents the IDENTITY of that agent and respects the formulas rigid step-by-step process up to the point where human interaction is necessary for next steps" | (i) `af sling --agent` (ii) autonomous via formula (iii) formula = identity (iv) rigid steps (v) up to human gate | EX `af sling --agent` specialist dispatch (sling.go, unchanged) + K5 (routed agents are formula-bearing) | Existing sling/formula behavior (unchanged); K5 ensures the 4 agents resolve as specialists with formulas |
 | AC-5 | "all the code branches created should have been pushed as PR's against the main branch without doctor fixes or human interaction (unless absolutely necessary, or in the case of doctor - a `doctor --fix` is acceptable only as a bandaid/fix for legacy broken behaviors, not as an ongoing operational dependency)." | (i) branches → PRs against main (ii) no doctor as ongoing dep (iii) no human (unless necessary) | (i) property of the routed FORMULAS (K5 routes; scoped to formula layer — see Six-Sigma Caveats) (ii) K1+K5 valid-by-construction → no doctor (iii) EX zero-touch happy path | Clause (i) owned by the formula layer (out of this change's scope, traceably noted); (ii)/(iii) by the valid-by-construction default + no-doctor-on-happy-path |
@@ -112,26 +119,32 @@ skip-and-warn tolerance and a golden cross-file test as backstops.
 | K2 | Repo-discovery helper: `gh repo view --json nameWithOwner` (primary) with `git remote get-url origin` normalization (no-auth fallback); warn-don't-abort | `internal/cmd/install.go` (`runInstallInit`) | NEW |
 | K3 | Strict `owner/name` validator (allowlist regex) applied at the write boundary — guards `gh --repo` flag-injection and terminal-escape in the install banner | `internal/cmd` or `internal/config` | NEW |
 | K4 | Wire `runInstallInit` starter-config map (install.go:139-148) to call K2→K3→K1; reuse write-if-absent (install.go:150-157) | `internal/cmd/install.go:145` | MODIFIED |
-| K5 | Provision the referenced specialists during bootstrap so `agents.json` contains them before the dispatcher runs — invoke `agent-gen-all.sh` directly (or targeted `af formula agent-gen` for the 4), NOT `af install --agents` | `quickstart.sh` `configure_factory` (~:414-471) | MODIFIED |
-| K6 | Dispatch-loop unknown-agent tolerance: skip-and-warn instead of hard-fail, scoped to the dispatch-loop caller ONLY (`af config dispatch set` stays strict) | `internal/cmd/dispatch.go` (caller of `ValidateDispatchConfig`, :146) | MODIFIED (defense-in-depth) |
-| K7 | Golden + cross-file tests: the shipped default parses (`validateDispatchConfig`) AND cross-validates (`ValidateDispatchConfig`) against the default+provisioned `agents.json` | `internal/config/*_test.go`, `internal/cmd/*_test.go` | NEW |
+| K5 | **`DefaultAgentsConfigJSON()`** seeds the 4 specialist entries (`{"type":"autonomous","formula":"<name>"}`) into the default `agents.json` WITHIN `runInstallInit` (same write as K4). The 4 role templates are already embedded (`internal/templates/roles/{rapid-soldesign-plan,rapid-implement,ultra-review,rapid-increment}.md.tmpl`, verified), so a seeded agents.json entry is sufficient for `af prime`/sling to resolve each specialist — **no `agent-gen` run, no `quickstart` step, no rebuild**. Makes the default valid-by-construction on EVERY init path (bare `af install --init` AND quickstart). Mirrors `DefaultFactoryConfigJSON` single-source idiom | `internal/config` (new fn) + `internal/cmd/install.go:143` | NEW + MODIFIED |
+| K6 | Dispatch-loop unknown-agent tolerance: skip-and-warn instead of hard-fail, scoped to the dispatch-loop caller ONLY (`af config dispatch set` stays strict). Defense-in-depth for partial/edited factories; K8 is MANDATORY wherever K6 is enabled (else it hides the failure) | `internal/cmd/dispatch.go` (caller of `ValidateDispatchConfig`, :146) | MODIFIED (defense-in-depth) |
+| K7 | Golden + cross-file tests: the shipped default parses (`validateDispatchConfig`) AND cross-validates (`ValidateDispatchConfig`) against the default-seeded `agents.json` (K5) — asserting validity on the **bare-init** path, not just quickstart | `internal/config/*_test.go`, `internal/cmd/*_test.go` | NEW |
+| K8 | Pre-flight `ValidateDispatchConfig` surfaced at `af up` / `af dispatch status` — distinguishes "empty by design" vs "discovery failed" vs "references unprovisioned agents"; warn, never abort `af up`. **MANDATORY wherever K6 is enabled** (K6 without K8 turns a clean friendly-skip into a silently-warning loop) | `internal/cmd/up.go` / `af dispatch status` | NEW (mandatory) |
+| K9 | Hoist the `if startupCfg.StartDispatch { startDispatch(...) }` block out of the `blanket`-only gate so positional `af up <name>` (the documented `af up manager`) ALSO auto-starts the dispatcher. `startDispatch` is idempotent — already-running is a benign no-op (dispatch.go:1322-1325, verified) | `internal/cmd/up.go:306,330` | MODIFIED |
 
 ### Component Dependency Graph
 
 (from `dependencies.md`; DAG verified acyclic, topo order K3 → K1 → K2 → K4 → K5 → K6 → K7)
 
 ```
-K4 (install wiring) → K1 (default builder) → EX1 validateDispatchConfig (output must pass struct validation)
+K4 (install wiring) → K1 (dispatch default builder) → EX1 validateDispatchConfig (output must pass struct validation)
 K4 → K2 (repo discovery) → K3 (repo validator)
+K4 → K5 (DefaultAgentsConfigJSON — seed 4 specialists into default agents.json, SAME write)
 K4 → EX4 write-if-absent guard (reused, unchanged)
-K5 (provisioning) → EX3 agent-gen-all.sh / af formula agent-gen
+K9 (hoist auto-start) → up.go blanket-gate refactor (independent of install)
 K6 (dispatch tolerance) → EX2 ValidateDispatchConfig (relaxes ONLY the dispatch-loop caller)
-K7 (tests) → K1, K4, K5, K6, EX1, EX2
+K8 (observability) pairs with K6 (mandatory) → EX2 (read-only pre-flight at af up / dispatch status)
+K7 (tests) → K1, K4, K5, K6, K9, EX1, EX2
 
-Runtime sequencing: K2→K3→K1→K4 at install; K5 must complete before the dispatcher
-runs EX2; EX2 consumes K4's written default + K5's provisioned agents.json.
+Runtime sequencing: K2→K3→K1 and K5 all feed the SINGLE runInstallInit write (K4) →
+EX2 (cross-file) then consumes K4's dispatch default AND K5's seeded agents.json — both
+present after one `af install --init`, so there is NO cross-entry-point sequencing (the
+cross-review C1 fix; the prior quickstart→dispatch ordering risk is eliminated).
 ```
-No cycles. **Constraint:** any new validation in `internal/config` MUST NOT import
+No cycles. **Constraint:** any new code in `internal/config` (K1, K5) MUST NOT import
 `internal/formula` (it imports `internal/config` → cycle; dispatch.go:130-136).
 
 ### Interface (from api.md)
@@ -177,13 +190,41 @@ single-label mapping (`phaseResolvesAlone`, dispatch.go:256), both phases share
 source `"issue"`, and `feature-workflow` collides with neither `trigger_label` nor a
 mapping label.
 
+**Default `agents.json` (K5 — the cross-review C1 fix).** The same `runInstallInit`
+write seeds the four referenced specialists into the default `agents.json` so the
+dispatch default is valid-by-construction on EVERY init path. The current inline
+literal (install.go:143) ships only `manager`+`supervisor`; it is replaced by a
+`DefaultAgentsConfigJSON()` (mirroring `DefaultFactoryConfigJSON`) that adds:
+
+```json
+{
+  "agents": {
+    "manager":    { "type": "interactive", "description": "...", "directive": "..." },
+    "supervisor": { "type": "autonomous",  "description": "...", "directive": "..." },
+    "rapid-soldesign-plan": { "type": "autonomous", "formula": "rapid-soldesign-plan" },
+    "rapid-implement":      { "type": "autonomous", "formula": "rapid-implement" },
+    "ultra-review":         { "type": "autonomous", "formula": "ultra-review" },
+    "rapid-increment":      { "type": "autonomous", "formula": "rapid-increment" }
+  }
+}
+```
+
+The four role templates are already embedded
+(`internal/templates/roles/{rapid-soldesign-plan,rapid-implement,ultra-review,rapid-increment}.md.tmpl`,
+verified), so a seeded registry entry (with `formula`) is sufficient for `af prime`
+and `af sling --agent` to resolve each specialist — no `agent-gen` run, no rebuild,
+no `quickstart`-only dependency. This is a registry/default-content change only: no
+schema change, and write-if-absent (install.go:152) still preserves a customer-edited
+agents.json (ADR-017). `ValidateDispatchConfig` (dispatch.go:101) then passes because
+every `mappings[].agent` resolves in the seeded registry.
+
 ## Cross-Dimension Trade-offs
 
 (from `conflicts.md`; every conflict has a resolution — none unresolved)
 
 | Conflict | Resolution | Rationale |
 |----------|-----------|-----------|
-| D2×D6 (X) — default references 4 unprovisioned specialists → cross-file validation hard-fails (THE crux) | K5 provision specialists in bootstrap (primary) + K6 dispatcher skip-and-warn (defense-in-depth); Data ships the faithful default unchanged | Provisioning makes the default valid-by-construction (C-5/C-6); tolerance backstops a partial provision |
+| D2×D6 (X) — default references 4 unprovisioned specialists → cross-file validation hard-fails (THE crux) | K5 seed the 4 specialists into the default `agents.json` within `runInstallInit` (valid-by-construction on every init path) + K6 dispatcher skip-and-warn (defense-in-depth); Data ships the faithful dispatch default unchanged | Seeding (one `--init` write, templates embedded) makes the default valid on bare init and quickstart alike (C-5/C-6); tolerance backstops a partial/edited factory |
 | D5×D6 (X) — how to resolve C-6 vs write-path strictness | Provision + scope the K6 tolerance to the dispatch-LOOP caller ONLY; `af config dispatch set` keeps strict `ValidateDispatchConfig` | The default is valid-by-construction; the dispatch loop degrades gracefully; human edits still catch typos |
 | D1×D5 / D3×D5 (T) — untrusted repo string from a crafted remote | K3 validate `owner/name` at the WRITE boundary before storing/echoing | A bad value never reaches disk, `gh --repo`, or the banner; dispatcher's `strings.Cut` becomes a 2nd line of defense |
 | D1×D2 (T) — function output must satisfy `validateDispatchConfig` | Build K1 from the `DispatchConfig` struct (compile-time field safety) + K7 golden test pins content | Struct guarantees well-formedness; golden test guarantees the specific mappings |
@@ -197,7 +238,10 @@ mapping label.
 | Finding Source | Finding | Conflicts With | Nature | Resolution |
 |----------------|---------|----------------|--------|------------|
 | Elevation | Repo self-derivation is a Frame-lift OFFERED (not required) | Dimensions/Integration treat repo discovery (K2) as a core recommended component | tension (status vs adoption) | Adopt K2 as a design component AND document its "offered" elevation status; keep `Repos` editable (multi-repo edge) — both views reconciled |
-| Six-Sigma Gap-1 + Integration I3.1 | Provision specialists via `af install --agents` in quickstart | Integration's own quickstart call site | **DIRECT (synthesis-discovered)** — `af install --agents` re-invokes `quickstart.sh` (USING_AGENTFACTORY.md:634), so calling it FROM quickstart RECURSES | **Correction:** K5 invokes `agent-gen-all.sh` directly (or targeted `af formula agent-gen` for the 4), NOT `af install --agents`. Same provisioning effect, no recursion |
+| Six-Sigma Gap-1 + Integration I3.1 | Provision specialists via `af install --agents` in quickstart | Integration's own quickstart call site | **DIRECT (synthesis-discovered)** — `af install --agents` re-invokes `quickstart.sh` (USING_AGENTFACTORY.md:634), so calling it FROM quickstart RECURSES | **Superseded by C1 (below):** seed the 4 specialists into the default `agents.json` within `runInstallInit` — no quickstart step, no `agent-gen-all.sh`, no recursion, and valid on bare init too |
+| Analyst cross-review **C1** (CRITICAL) | "Valid-by-construction" held only on the quickstart path; bare `af install --init` (USING_AGENTFACTORY.md:40-52) writes the populated default but registers only manager+supervisor → `ValidateDispatchConfig` hard-fails | original K5 (quickstart-only provisioning) | **DIRECT** — defeats the design's own valid-by-construction thesis on the documented "hard way" | **Incorporated:** K5 now seeds the 4 specialists into the default `agents.json` inside `runInstallInit` (templates already embedded — verified); K7 asserts validity on the bare-init path. Adopted verbatim |
+| Analyst cross-review **C2** (CRITICAL) | Dispatcher auto-start fires only on blanket `af up` (inside `if blanket{` up.go:306,330); the documented `af up manager` is gated out → polling loop never starts | AC-2 "without visiting the manager" + the D3×D6 "EX auto-start" claim | **DIRECT** — breaks the zero-touch promise on the documented setup path | **Incorporated:** new K9 hoists the `StartDispatch` block out of the blanket gate so positional `af up <name>` auto-starts too (idempotent, dispatch.go:1322-1325 — verified). Adopted verbatim |
+| Analyst cross-review **H1/H2** (HIGH) | Commit to the minimal K5 mechanism; make K8 mandatory wherever K6 is enabled | K5 ambiguity; K8 "optional" | tension | **Incorporated:** K5 committed to agents.json seeding (no `agent-gen-all.sh`); K8 is now MANDATORY whenever K6 ships |
 | Six-Sigma Gap-5 | AC-5 (PRs without doctor/human) is a property of the 4 FORMULAS, not dispatch.json | AC-5's apparent ownership by this change | scoping | Scope AC-5 clause (i) to the formula layer (necessary-but-not-sufficient); this change routes to those formulas and removes the doctor dependency, but does not (and cannot) verify formula-internal PR-push |
 | Six-Sigma Gap-2 | `trigger_label` is a hard query pre-filter (dispatch.go:301) — tagging ONLY a mapping label dispatches nothing | AC-2's natural reading ("just tag rapid-plan") | escape path | Document the two-label requirement (`agentic` + mapping label) in the default and setup docs; widening the query is out of scope (expands blast radius) |
 | Decision History (ADR-017) | Write-if-absent never upgrades existing empty-default installs | C-2 "first created" for the installed base | scope boundary | Scope to NET-NEW installs (ADR-017-honest); existing factories opt in via `af config dispatch set` — named, not silently accepted |
@@ -215,16 +259,18 @@ decision-history-vs-dimensions (ADR-014/017 shape K2/K4/K5, no contradiction).
 | Default content | 4 mappings + `feature-workflow` (D2.2-A) / mappings-only (D2.2-C) / manager-supervisor-only (D2.2-B, rejected: fails AC-2) | 4 mappings + `feature-workflow`, intent-corrected from the struct | Maximally faithful to source intent; D2.2-C is the conservative fallback if the workflow surface is deemed risky | Easy |
 | Repo name | hand-authored placeholder (status quo) / `--init --repo` flag (I2.2) / self-derive in Go (I2.1) | Self-derive via `gh`/`git remote` in `runInstallInit`, validated | Adopts the elevation Frame-lift; ADR-014 prefers the Go path self-sufficient over a script-fed flag | Easy |
 | `notify_on_complete` | explicit `"manager"` (source) / omit | Omit (defaults to manager) | Strictly smaller validation surface; identical runtime behavior (Gap-7) | Easy |
-| C-6 provisioning mechanism | `af install --agents` in quickstart (I3.1 as written) / `agent-gen-all.sh` direct / targeted `af formula agent-gen` | `agent-gen-all.sh` direct (or targeted agent-gen) | `af install --agents` re-invokes quickstart → RECURSION (USING:634); direct invocation provisions specialists without recursion | Moderate |
-| Dispatcher tolerance | none (hard-fail) / skip-and-warn everywhere / skip-and-warn dispatch-loop only | Skip-and-warn scoped to the dispatch loop; write path strict | Graceful degradation on partial provision without weakening the human write-path typo check | Moderate |
+| C-6 provisioning mechanism | `af install --agents` in quickstart (recurses) / `agent-gen-all.sh` direct (heavy: `af down --all`+rebuild) / targeted `af formula agent-gen` / **seed default agents.json in `runInstallInit`** | **Seed the 4 specialists into the default `agents.json` (`DefaultAgentsConfigJSON`) in `runInstallInit`** | Cross-review C1/H1: templates already embedded (verified), so a registry seed needs no `agent-gen`/rebuild; valid-by-construction on EVERY init path (incl. bare `af install --init`), not just quickstart; no recursion, no `af down --all` mid-bootstrap | Easy |
+| Dispatcher tolerance | none (hard-fail) / skip-and-warn everywhere / skip-and-warn dispatch-loop only | Skip-and-warn scoped to the dispatch loop; write path strict; **K8 observability mandatory alongside** | Graceful degradation on partial/edited factory without weakening the human write-path typo check; K8 prevents K6 from hiding a "configured-but-broken" loop (cross-review H2) | Moderate |
+| Dispatcher auto-start on positional `af up` | leave blanket-only (status quo) / hoist `StartDispatch` out of the blanket gate (K9) / change docs to bare `af up` | Hoist `StartDispatch` to run on any `af up` (K9) | Cross-review C2: the documented `af up manager` is positional and gated out of auto-start (up.go:306,330); hoisting is the robust interlock and is idempotent (dispatch.go:1322-1325, verified) — docs-only would leave the trap | Moderate |
 | Installed base | blind overwrite (rejected, ADR-017) / scope to net-new | Net-new installs; existing factories opt in | ADR-017 forbids clobbering customer-edited config | n/a (policy) |
 
 ## Risk Registry
 
 | Risk | Severity | Likelihood | Mitigation | Owner | Source |
 |------|----------|-----------|------------|-------|--------|
-| Default references 4 specialists absent from fresh agents.json → `ValidateDispatchConfig` hard-fails dispatch cycle | HIGH | Certain (without K5) | K5 provision specialists in bootstrap + K6 dispatch-loop skip-and-warn | Integration | dimensions / elevation / gap |
-| `af install --agents` from quickstart recurses | HIGH | Certain (if K5 used `--agents`) | K5 invokes `agent-gen-all.sh` directly / targeted `agent-gen`, never `af install --agents` | Integration | synthesis cross-perspective |
+| Default references 4 specialists absent from fresh agents.json → `ValidateDispatchConfig` hard-fails dispatch cycle | HIGH | Certain (without K5) | K5 seeds the 4 specialists into the default agents.json in `runInstallInit` (valid on every init path) + K6 dispatch-loop skip-and-warn | Integration | dimensions / elevation / gap |
+| Bare `af install --init` (documented "hard way") writes the populated default but registers only manager+supervisor → default invalid-by-construction off the quickstart path | HIGH | Certain (without C1 fix) | K5 `DefaultAgentsConfigJSON` seeds specialists in the SAME `runInstallInit` write, so validity holds on bare init; K7 asserts it | Integration | cross-review C1 |
+| Documented `af up manager` (positional) is gated out of dispatcher auto-start (up.go:306,330) → polling loop never starts; "without visiting the manager" breaks | HIGH | Certain (without K9) | K9 hoists `StartDispatch` out of the blanket gate; idempotent no-op if already running (dispatch.go:1322-1325) | Integration/UX | cross-review C2 |
 | Repo discovery fails (no/non-GitHub/non-`origin` remote) → empty `repos`, dispatcher silently skips (looks like benign "not configured", dispatch.go:1330) | HIGH | Possible | K2 warn-don't-abort writes loadable default; surface a distinct fail-loud message (ADR-014); `af up` pre-flight warns (K8 observability, below) | Security/UX | gap-3 / gap-8 |
 | Crafted remote URL injects bad `repos` (gh flag-injection / terminal escape in banner) | MED | Low | K3 strict `owner/name` allowlist at the write boundary | Security | security |
 | K1 output fails `validateDispatchConfig` (drift) | MED | Low | Build from struct + K7 golden test | API/Data | conflicts |
@@ -264,32 +310,32 @@ explicit repo; (b) AC-5 is a downstream-formula guarantee verified separately;
 2. K2 repo-discovery helper in `runInstallInit` (`gh repo view --json nameWithOwner` → fallback `git remote get-url origin`), warn-don't-abort.
 3. K3 strict `owner/name` validator applied before write/echo.
 4. K4 replace install.go:145 literal with `config.DefaultDispatchConfigJSON(discoveredRepo)`; reuse write-if-absent.
+5. K5 `DefaultAgentsConfigJSON()` in `internal/config` seeds the 4 specialists into the default `agents.json` (replace install.go:143 literal); SAME `runInstallInit` write, so the default is valid-by-construction on bare `af install --init` (cross-review C1). No `agent-gen`/rebuild (templates embedded).
 
-**Source ACs satisfied**: AC-1, AC-3 (and the substrate of AC-2).
-**Dependencies**: none new (uses existing struct, write path).
-**Risks addressed**: drift (single-source), injection (K3), discovery failure (warn-don't-abort).
-**Six-Sigma gaps closed**: Gap-7 (omit notify), partial Gap-3 (discovery exists).
+**Source ACs satisfied**: AC-1, AC-3, AC-2 substrate (mappings + their agents now both present at init).
+**Dependencies**: none new (uses existing struct, write path, embedded templates).
+**Risks addressed**: drift (single-source), injection (K3), discovery failure (warn-don't-abort), bare-init invalidity (K5 seed — cross-review C1).
+**Six-Sigma gaps closed**: Gap-1 (via seeding), Gap-7 (omit notify), partial Gap-3 (discovery exists).
 
 **Phase acceptance criteria:**
 - [ ] `DefaultDispatchConfigJSON("org/repo")` output passes `validateDispatchConfig` (unit test).
-- [ ] In a temp repo with a known `git remote origin`, `af install --init` writes `dispatch.json` with `repos:["org/repo"]` and the 4 mappings + `feature-workflow`; a re-run does not clobber it.
+- [ ] After bare `af install --init` in a temp repo with a known `git remote origin`, `dispatch.json` has `repos:["org/repo"]` + the 4 mappings + `feature-workflow`, `agents.json` contains the 4 specialists, and `ValidateDispatchConfig(default, default-agents)` returns nil; a re-run clobbers neither file.
 - [ ] A crafted/garbage remote URL is rejected by K3 and yields `repos:[]` + a loud warning, not a malformed write.
 
-### Phase 2: C-6 resolution — provision specialists + dispatcher tolerance (Effort: M)
+### Phase 2: Dispatcher auto-start + graceful degradation + observability (Effort: M)
 **Deliverables:**
-1. K5 bootstrap provisioning in `quickstart.sh` `configure_factory` via `agent-gen-all.sh` (or targeted `af formula agent-gen` for the 4 referenced agents) — explicitly NOT `af install --agents` (recursion).
+1. K9 hoist the `if startupCfg.StartDispatch { startDispatch(...) }` block out of the `blanket`-only gate (`internal/cmd/up.go:306,330`) so positional `af up <name>` (the documented `af up manager`) also auto-starts the dispatcher (cross-review C2).
 2. K6 dispatch-loop skip-and-warn on unknown-agent mappings, scoped to the dispatcher caller of `ValidateDispatchConfig` (`internal/cmd/dispatch.go:146`); `af config dispatch set` unchanged (strict).
-3. K8 observability: pre-flight validation surfaced at `af up` / `af dispatch status` (warn, never abort).
+3. K8 (MANDATORY with K6) observability: pre-flight `ValidateDispatchConfig` surfaced at `af up` / `af dispatch status`, distinguishing "empty by design" vs "discovery failed" vs "references unprovisioned agents"; warn, never abort `af up`.
 
-**Source ACs satisfied**: AC-2, AC-4, AC-6 (and the no-doctor clause of AC-5).
-**Dependencies**: Phase 1's default (the mappings that name the specialists).
-**Risks addressed**: hard-fail-on-fresh-factory (HIGH), recursion (HIGH), low-visibility failure (MED).
-**Six-Sigma gaps closed**: Gap-1, Gap-8; Gap-2 documented.
+**Source ACs satisfied**: AC-2 (auto-start on the documented path), AC-4, AC-6.
+**Dependencies**: Phase 1's seeded default (so the common path needs no degradation).
+**Risks addressed**: positional-`af up` auto-start gating (HIGH, cross-review C2), partial/edited-factory hard-fail (MED), low-visibility failure (MED, cross-review H2).
+**Six-Sigma gaps closed**: Gap-8 (mandatory K8); Gap-2 documented.
 
 **Phase acceptance criteria:**
-- [ ] After a fresh bootstrap (init + K5 provisioning), `agents.json` contains the 4 specialists and `ValidateDispatchConfig(default, agents)` returns nil.
-- [ ] With one mapped agent absent, the dispatch LOOP skips that mapping with a warning and still dispatches the others; `af config dispatch set` with the same config still exits non-zero (strict).
-- [ ] `af up`/`af dispatch status` reports a distinct, actionable state for "references unprovisioned agents" vs "empty by design" vs "discovery failed".
+- [ ] `af up manager` (positional) launches the dispatch tmux session when `start_dispatch:true` and the default is valid; a second `af up manager` is a benign no-op ("Dispatcher already running").
+- [ ] With one mapped agent absent, the dispatch LOOP skips that mapping with a warning and still dispatches the others; `af config dispatch set` with the same config still exits non-zero (strict); `af dispatch status` reports the distinct "references unprovisioned agents" state.
 
 ### Phase 3: Drift/golden test gate + docs (Effort: S)
 **Deliverables:**
