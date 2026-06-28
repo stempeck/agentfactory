@@ -123,6 +123,32 @@ func DefaultFactoryConfigJSON() string {
 	return string(b)
 }
 
+// DefaultAgentsConfigJSON returns the fresh-install agents.json content built from the
+// AgentConfig struct (single-source, compiler-checked — mirroring DefaultFactoryConfigJSON).
+// Beyond manager+supervisor it SEEDS the four dispatch specialists referenced by the
+// baked-in default dispatch.json (issue #73 K5), so a fresh `af install --init` factory is
+// valid-by-construction on EVERY init path (cross-review C1): ValidateDispatchConfig then
+// finds every mapping agent present. The role templates are already embedded
+// (internal/templates/roles/*.tmpl), so a seeded registry entry is sufficient for af prime
+// and `af sling --agent` to resolve each specialist — no agent-gen run or rebuild. Each
+// specialist carries a non-empty description (validateAgentConfig requires it) and the
+// matching formula (so the feature-workflow phases resolve to formula-bearing agents).
+func DefaultAgentsConfigJSON() string {
+	cfg := AgentConfig{Agents: map[string]AgentEntry{
+		"manager":              {Type: "interactive", Description: "Interactive agent for human-supervised work", Directive: "Read your memory and docs, and prove it."},
+		"supervisor":           {Type: "autonomous", Description: "Autonomous agent for independent task execution", Directive: "Read your memory and docs, and prove it."},
+		"rapid-soldesign-plan": {Type: "autonomous", Description: "Autonomous design + implementation-planning specialist", Formula: "rapid-soldesign-plan"},
+		"rapid-implement":      {Type: "autonomous", Description: "Autonomous test-first implementation specialist", Formula: "rapid-implement"},
+		"ultra-review":         {Type: "autonomous", Description: "Autonomous multi-agent PR review specialist", Formula: "ultra-review"},
+		"rapid-increment":      {Type: "autonomous", Description: "Autonomous PR-iteration specialist", Formula: "rapid-increment"},
+	}}
+	b, err := json.Marshal(cfg)
+	if err != nil { // unreachable for these field types
+		return `{"agents":{"manager":{"type":"interactive","description":"Interactive agent for human-supervised work","directive":"Read your memory and docs, and prove it."},"supervisor":{"type":"autonomous","description":"Autonomous agent for independent task execution","directive":"Read your memory and docs, and prove it."}}}`
+	}
+	return string(b)
+}
+
 // BuildHostConfig holds the contents of build-host.json
 type BuildHostConfig struct {
 	Mode      string `json:"mode"`

@@ -142,7 +142,20 @@ af dispatch status                   # Show dispatch state and agent availabilit
 af dispatch --dry-run                # Show what would be dispatched without acting
 ```
 
-Configuration lives in `.agentfactory/dispatch.json` (created by `af install --init`). Edit it to add repos, trigger label, and label-to-agent mappings before starting the dispatcher.
+Configuration lives in `.agentfactory/dispatch.json`. On a **net-new** `af install --init`,
+agentfactory bakes in a ready-to-use default: it auto-discovers the repo's `owner/name`
+(via `gh` / `git remote origin`) into `repos`, ships the four label→agent mappings and the
+`feature-workflow` shown below, and seeds the referenced specialist agents into `agents.json`
+— so a freshly bootstrapped factory can drive label-triggered work with no hand-editing.
+(If the repo can't be discovered, `repos` ships empty and the dispatcher friendly-skips until
+you set it.) **Existing factories are not auto-migrated** — a customer-edited `dispatch.json`
+is never clobbered; opt in by replacing it via `af config dispatch set` (pipe a JSON document
+on stdin). Edit `dispatch.json` any time to change repos, labels, or mappings.
+
+> **Two-label requirement.** `trigger_label` (default `agentic`) is a hard query pre-filter:
+> the dispatcher only fetches items that carry it. Tagging an issue with *only* a mapping or
+> workflow label dispatches nothing — an item must have **both** `agentic` **and** the
+> mapping/workflow label (e.g. `agentic` + `rapid-plan`) to be picked up.
 
 ```json
 {

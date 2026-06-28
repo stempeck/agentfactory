@@ -135,14 +135,29 @@ func runInstallInit(cmd *cobra.Command) error {
 		return fmt.Errorf("creating agents directory: %w", err)
 	}
 
+	// 2c. Discover the home repo (issue #73 K2) non-interactively so the baked-in dispatch
+	//     default ships with the ACTUAL owner/name in `repos` (C-3). Best-effort and validated
+	//     (K3): an undiscoverable/unsafe remote degrades to an empty `repos` default (the
+	//     dispatcher then friendly-skips) — install never aborts (A3.1 warn-don't-abort).
+	repo := discoverRepo(cwd)
+	if repo == "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "warning: could not discover an owner/name repo from `gh` / `git remote origin`; dispatch.json ships with empty repos — set it with `af config dispatch set` to enable label-triggered dispatch")
+	} else {
+		fmt.Fprintf(cmd.OutOrStdout(), "Discovered repository: %s\n", repo)
+	}
+
 	// 3. Write starter configs (only if they don't exist — idempotent)
 	starterConfigs := map[string]string{
 		// Built from the in-code defaults (incl. the C-3 git_identity) so the on-disk
 		// literal cannot drift from internal/config's constants (issue #371 Gap-6).
-		"factory.json":   config.DefaultFactoryConfigJSON(),
-		"agents.json":    `{"agents":{"manager":{"type":"interactive","description":"Interactive agent for human-supervised work","directive":"Read your memory and docs, and prove it."},"supervisor":{"type":"autonomous","description":"Autonomous agent for independent task execution","directive":"Read your memory and docs, and prove it."}}}`,
+		"factory.json": config.DefaultFactoryConfigJSON(),
+		// agents.json + dispatch.json are built from the in-code defaults (single-source,
+		// issue #73 K5/K1) so the fresh factory is valid-by-construction: the seeded
+		// specialists satisfy the dispatch default's mappings (cross-review C1), and the
+		// discovered repo lands in dispatch.json's `repos` (C-3).
+		"agents.json":    config.DefaultAgentsConfigJSON(),
 		"messaging.json": `{"groups":{"all":["manager","supervisor"]}}`,
-		"dispatch.json":  `{"repos":[],"trigger_label":"agentic","notify_on_complete":"manager","mappings":[],"interval_seconds":300,"retry_after_seconds":1800}`,
+		"dispatch.json":  config.DefaultDispatchConfigJSON(repo),
 		// Opinionated defaults for fresh installs (see TestLoadStartupConfig_ScaffoldLoads).
 		"startup.json": `{"agents":["manager"],"quality":"default","fidelity":"default","start_dispatch":true,"watchdog_agents":["manager","supervisor"]}`,
 	}

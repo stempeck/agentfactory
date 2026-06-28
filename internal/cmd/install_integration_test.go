@@ -39,6 +39,13 @@ func TestInstallInit_CreatesDispatchJson(t *testing.T) {
 		}
 	}
 
+	// Deterministic discovery (issue #73 K2): this temp repo has no remote, so the
+	// dispatch default degrades to the empty shape. Stub the seam so the assertion never
+	// depends on the CI host's gh auth / ambient remote.
+	origDetect := runGitDetect
+	runGitDetect = func(workDir, name string, args ...string) string { return "" }
+	t.Cleanup(func() { runGitDetect = origDetect })
+
 	output, err := runInstallInDir(t, dir, "--init")
 	// Reset flag to avoid affecting subsequent tests (cobra doesn't reset bool flags)
 	installInitFlag = false
@@ -64,11 +71,11 @@ func TestInstallInit_CreatesDispatchJson(t *testing.T) {
 	}
 	repos, ok := cfg["repos"].([]interface{})
 	if !ok || len(repos) != 0 {
-		t.Errorf("repos should be empty array, got: %v", cfg["repos"])
+		t.Errorf("repos should be empty array (no remote discovered), got: %v", cfg["repos"])
 	}
 	mappings, ok := cfg["mappings"].([]interface{})
 	if !ok || len(mappings) != 0 {
-		t.Errorf("mappings should be empty array, got: %v", cfg["mappings"])
+		t.Errorf("mappings should be empty array (degraded default), got: %v", cfg["mappings"])
 	}
 	if interval, ok := cfg["interval_seconds"].(float64); !ok || int(interval) != 300 {
 		t.Errorf("interval_seconds should be 300, got: %v", cfg["interval_seconds"])
@@ -76,8 +83,104 @@ func TestInstallInit_CreatesDispatchJson(t *testing.T) {
 	if retry, ok := cfg["retry_after_seconds"].(float64); !ok || int(retry) != 1800 {
 		t.Errorf("retry_after_seconds should be 1800, got: %v", cfg["retry_after_seconds"])
 	}
-	if notify, ok := cfg["notify_on_complete"].(string); !ok || notify != "manager" {
-		t.Errorf("notify_on_complete should be 'manager', got: %v", cfg["notify_on_complete"])
+	// notify_on_complete is now OMITTED from the default (issue #73 Gap-7): it defaults to
+	// "manager" at runtime, so an explicit value would add a brittle cross-file check.
+	if _, present := cfg["notify_on_complete"]; present {
+		t.Errorf("notify_on_complete should be omitted from the default, got: %v", cfg["notify_on_complete"])
+	}
+}
+
+// TestInstallInit_PopulatedDispatchAndAgents_WithDiscoveredRepo exercises issue #73's
+// happy path end-to-end: with a discoverable repo, `af install --init` bakes the
+// owner/name into dispatch.json's repos AND ships the four label->agent mappings +
+// feature-workflow, seeds the four specialists into agents.json, and the result is
+// valid-by-construction (the default cross-validates against the seeded agents — C1/C-6).
+// A re-run does not clobber. Discovery is stubbed (in-process install shares the package
+// seam) so the assertion is deterministic regardless of the CI host's auth/remote.
+func TestInstallInit_PopulatedDispatchAndAgents_WithDiscoveredRepo(t *testing.T) {
+	requirePython3WithServerDeps(t)
+
+	dir := t.TempDir()
+	ensurePySymlink(t, dir)
+	t.Cleanup(func() { terminateMCPServer(dir) })
+
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "test@test.test"},
+		{"config", "user.name", "Test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %s\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	origDetect := runGitDetect
+	runGitDetect = func(workDir, name string, args ...string) string {
+		if name == "gh" {
+			return "acme/widget"
+		}
+		return ""
+	}
+	t.Cleanup(func() { runGitDetect = origDetect })
+
+	output, err := runInstallInDir(t, dir, "--init")
+	installInitFlag = false
+	if err != nil {
+		t.Fatalf("install --init failed: %v\nOutput: %s", err, output)
+	}
+
+	dispatchPath := filepath.Join(dir, ".agentfactory", "dispatch.json")
+	dispData, err := os.ReadFile(dispatchPath)
+	if err != nil {
+		t.Fatalf("read dispatch.json: %v", err)
+	}
+	var disp config.DispatchConfig
+	if err := json.Unmarshal(dispData, &disp); err != nil {
+		t.Fatalf("dispatch.json invalid: %v", err)
+	}
+	if len(disp.Repos) != 1 || disp.Repos[0] != "acme/widget" {
+		t.Errorf("repos = %v, want [acme/widget]", disp.Repos)
+	}
+	if len(disp.Mappings) != 4 {
+		t.Errorf("mappings = %d, want 4", len(disp.Mappings))
+	}
+	if len(disp.Workflows) != 1 || disp.Workflows[0].Label != "feature-workflow" {
+		t.Errorf("workflows = %v, want one feature-workflow", disp.Workflows)
+	}
+	if strings.Contains(string(dispData), "notify_on_complete") {
+		t.Errorf("notify_on_complete should be omitted; got: %s", dispData)
+	}
+
+	agentsData, err := os.ReadFile(filepath.Join(dir, ".agentfactory", "agents.json"))
+	if err != nil {
+		t.Fatalf("read agents.json: %v", err)
+	}
+	var agents config.AgentConfig
+	if err := json.Unmarshal(agentsData, &agents); err != nil {
+		t.Fatalf("agents.json invalid: %v", err)
+	}
+	for _, name := range []string{"manager", "supervisor", "rapid-soldesign-plan", "rapid-implement", "ultra-review", "rapid-increment"} {
+		if _, ok := agents.Agents[name]; !ok {
+			t.Errorf("agents.json missing seeded agent %q", name)
+		}
+	}
+	// C1/C-6: the shipped default is valid-by-construction against the seeded agents.
+	if err := config.ValidateDispatchConfig(&disp, &agents); err != nil {
+		t.Errorf("default dispatch must cross-validate against seeded agents.json: %v", err)
+	}
+
+	// Idempotent (ADR-017 write-if-absent): a re-run must not clobber the populated files.
+	before, _ := os.ReadFile(dispatchPath)
+	if _, err := runInstallInDir(t, dir, "--init"); err != nil {
+		installInitFlag = false
+		t.Fatalf("second install --init failed: %v", err)
+	}
+	installInitFlag = false
+	after, _ := os.ReadFile(dispatchPath)
+	if string(before) != string(after) {
+		t.Errorf("re-run clobbered dispatch.json:\nbefore: %s\nafter:  %s", before, after)
 	}
 }
 
