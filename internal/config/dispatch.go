@@ -18,7 +18,7 @@ const defaultNotifyAgent = "manager"
 type DispatchConfig struct {
 	Repos                      []string          `json:"repos"`
 	TriggerLabel               string            `json:"trigger_label"`
-	NotifyOnComplete           string            `json:"notify_on_complete"`
+	NotifyOnComplete           string            `json:"notify_on_complete,omitempty"`
 	Mappings                   []DispatchMapping `json:"mappings"`
 	IntervalSecs               int               `json:"interval_seconds"`
 	RetryAfterSecs             int               `json:"retry_after_seconds"`
@@ -42,6 +42,48 @@ type DispatchMapping struct {
 type Workflow struct {
 	Label  string   `json:"label"`  // operator-applied GitHub label that triggers the workflow
 	Phases []string `json:"phases"` // ordered existing mapping labels
+}
+
+// DefaultDispatchConfigJSON returns the fresh-install dispatch.json content built
+// from the DispatchConfig struct — so the field set is compiler-checked and cannot
+// drift from the schema, mirroring DefaultFactoryConfigJSON (issue #371 Gap-6). repo
+// is the validated owner/name discovered at install time (the cmd-layer caller owns
+// discovery/validation; this package has no git dependency).
+//
+// A non-empty repo yields the full label->agent default (the four specialists + the
+// feature-workflow) the bootstrapped factory needs to drive autonomous work from
+// GitHub labels (issue #73). An EMPTY repo degrades to the loadable empty default
+// (repos:[], mappings:[]) — the status-quo "not configured" shape — because a
+// repos:[]-with-mappings config fails validateDispatchConfig's repo>0 rule and would
+// break the dispatcher. notify_on_complete is OMITTED (it defaults to "manager" at
+// runtime via validateDispatchConfig; an explicit value would add a brittle cross-file
+// existence check — Gap-7).
+func DefaultDispatchConfigJSON(repo string) string {
+	cfg := DispatchConfig{
+		Repos:          []string{},
+		TriggerLabel:   "agentic",
+		Mappings:       []DispatchMapping{},
+		IntervalSecs:   300,
+		RetryAfterSecs: 1800,
+	}
+	if repo != "" {
+		cfg.Repos = []string{repo}
+		cfg.RemoveTriggerAfterDispatch = true
+		cfg.Mappings = []DispatchMapping{
+			{Labels: []string{"rapid-plan"}, Source: "issue", Agent: "rapid-soldesign-plan"},
+			{Labels: []string{"rapid-engineer"}, Source: "issue", Agent: "rapid-implement"},
+			{Labels: []string{"pr-review"}, Source: "pr", Agent: "ultra-review"},
+			{Labels: []string{"pr-iterate"}, Source: "pr", Agent: "rapid-increment"},
+		}
+		cfg.Workflows = []Workflow{
+			{Label: "feature-workflow", Phases: []string{"rapid-plan", "rapid-engineer"}},
+		}
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil { // unreachable for these scalar/slice field types
+		return `{"repos":[],"trigger_label":"agentic","mappings":[],"interval_seconds":300,"retry_after_seconds":1800}`
+	}
+	return string(b)
 }
 
 // LoadDispatchConfig loads and validates .agentfactory/dispatch.json.

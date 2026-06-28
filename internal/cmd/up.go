@@ -301,8 +301,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	// Defined action order (Gap-9): agents → gates → dispatch → watchdog, each
-	// best-effort (warn+continue, never abort). Gates/dispatch are startup.json-driven
-	// and blanket-only so `af up <names>` stays byte-identical (C-4).
+	// best-effort (warn+continue, never abort). Gates stay blanket-only so `af up <names>`
+	// stays byte-identical (C-4); dispatch (K9) and the watchdog (N5) are startup.json-driven
+	// and run on BOTH paths so the documented `af up manager` also auto-starts the dispatcher.
 	if blanket {
 		// AC-3/AC-4: apply gates with the af-up-resolved root (R-7) — for the gate
 		// files AND as the fidelity active-formula formulaDir, so the guard checks
@@ -322,16 +323,25 @@ func runUp(cmd *cobra.Command, args []string) error {
 		} else if startupCfg.Fidelity != "" && startupCfg.Fidelity != "default" {
 			fmt.Fprintf(cmd.OutOrStdout(), "fidelity gate: %s\n", startupCfg.Fidelity)
 		}
+	}
 
-		// AC-5: start the dispatcher when configured (friendly-skips internally when
-		// dispatch.json is absent/unconfigured, warns on real config errors; an
-		// already-running dispatcher is a benign no-op). A real launch failure is
-		// best-effort like every other af-up sub-action: warn + allOK=false.
-		if startupCfg.StartDispatch {
-			if dErr := startDispatch(cmd, root, t); dErr != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: dispatcher launch failed: %v\n", dErr)
-				allOK = false
-			}
+	// AC-5 + K9 (issue #73 / cross-review C2): auto-start the dispatcher on BOTH the blanket
+	// and positional `af up` paths, following the watchdog precedent (N5). The documented
+	// `af up manager` is positional, so gating the dispatcher to blanket `af up` only broke
+	// the "tag an issue, never visit the manager" promise on the documented setup path.
+	// startDispatch friendly-skips an absent/unconfigured dispatch.json, warns on real config
+	// errors, and is idempotent (already-running is a benign no-op), so running it on every
+	// path is safe. A real launch failure is best-effort: warn + allOK=false.
+	if startupCfg.StartDispatch {
+		// K8 (mandatory with K6): pre-flight the dispatch config against agents.json and warn
+		// (never abort) when it references unprovisioned agents — else a fresh/partial factory
+		// launches a dispatcher the K6 loop silently skip-and-warns on every cycle.
+		if loadDispatchConfigState(root) == dispatchStateUnprovisioned {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: dispatch.json references agents not in agents.json; the dispatcher will skip those mappings — run `af install --agents` or fix the mappings\n")
+		}
+		if dErr := startDispatch(cmd, root, t); dErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: dispatcher launch failed: %v\n", dErr)
+			allOK = false
 		}
 	}
 

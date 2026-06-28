@@ -632,7 +632,9 @@ func TestDispatchStatus_JSON_SchemaSnapshot(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &top); err != nil {
 		t.Fatalf("unmarshal %q: %v", out, err)
 	}
-	wantTop := map[string]bool{"dispatcher_running": true, "entries": true}
+	// config_state is the additive K8 observability field (issue #73): the dispatch
+	// config-validity state ("not_configured" here — only factory.json was written).
+	wantTop := map[string]bool{"dispatcher_running": true, "config_state": true, "entries": true}
 	if len(top) != len(wantTop) {
 		t.Errorf("top-level key count = %d, want %d (%q)", len(top), len(wantTop), out)
 	}

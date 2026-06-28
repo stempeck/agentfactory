@@ -120,6 +120,72 @@ type dispatchEntry struct {
 	Attempts          int       `json:"attempts,omitempty"`
 }
 
+// partitionDispatchMappings splits a dispatch config's mappings into those whose agent
+// is provisioned in agents.json (known, kept in order) and the distinct agent names
+// referenced by mappings that are NOT (unknownAgents, in first-seen order). It backs the
+// K6 dispatch-loop tolerance (skip-and-warn) WITHOUT relaxing the shared write-path
+// validator (config.ValidateDispatchConfig), which the CLI/web config-set paths still use.
+func partitionDispatchMappings(disp *config.DispatchConfig, agents *config.AgentConfig) (known []config.DispatchMapping, unknownAgents []string) {
+	seen := make(map[string]bool)
+	for _, m := range disp.Mappings {
+		if _, ok := agents.Agents[m.Agent]; ok {
+			known = append(known, m)
+			continue
+		}
+		if !seen[m.Agent] {
+			seen[m.Agent] = true
+			unknownAgents = append(unknownAgents, m.Agent)
+		}
+	}
+	return known, unknownAgents
+}
+
+// Dispatch config-validity states surfaced by `af dispatch status --json` and the `af up`
+// pre-flight (issue #73 K8). They make a fresh/partial factory's dispatch readiness
+// observable so a degraded loop (K6) is never silent (cross-review H2).
+const (
+	dispatchStateOK            = "ok"
+	dispatchStateNotConfigured = "not_configured"
+	dispatchStateUnprovisioned = "references_unprovisioned_agents"
+	dispatchStateInvalid       = "invalid"
+)
+
+// dispatchConfigState classifies a dispatch config's readiness from its load result and a
+// cross-file check against agents.json. "not_configured" covers the empty install default
+// and an absent file (the dispatcher friendly-skips both); "references_unprovisioned_agents"
+// is the K6 degraded path the loop tolerates; "invalid" is any other load/validation error.
+func dispatchConfigState(disp *config.DispatchConfig, agents *config.AgentConfig, loadErr error) string {
+	if loadErr != nil {
+		if errors.Is(loadErr, config.ErrNotFound) || errors.Is(loadErr, config.ErrMissingField) {
+			return dispatchStateNotConfigured
+		}
+		return dispatchStateInvalid
+	}
+	if _, unknown := partitionDispatchMappings(disp, agents); len(unknown) > 0 {
+		return dispatchStateUnprovisioned
+	}
+	if err := config.ValidateDispatchConfig(disp, agents); err != nil {
+		return dispatchStateInvalid
+	}
+	return dispatchStateOK
+}
+
+// loadDispatchConfigState loads the dispatch + agents configs at root and classifies the
+// dispatch config-validity state for observability (K8). A missing/invalid agents.json is
+// "invalid" — the dispatcher cannot cross-validate without it. Read-only and advisory; it
+// never mutates state and never aborts.
+func loadDispatchConfigState(root string) string {
+	disp, loadErr := config.LoadDispatchConfig(root)
+	if loadErr != nil {
+		return dispatchConfigState(nil, nil, loadErr)
+	}
+	agents, err := config.LoadAgentConfig(config.AgentsConfigPath(root))
+	if err != nil {
+		return dispatchStateInvalid
+	}
+	return dispatchConfigState(disp, agents, nil)
+}
+
 func runDispatch(cmd *cobra.Command, args []string) error {
 	wd, err := getWd()
 	if err != nil {
@@ -140,11 +206,27 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading agent config: %w", err)
 	}
 
-	// Cross-validate via the shared single source of truth: every mapping agent and an
-	// explicitly set notify_on_complete must exist in agents.json. config.ValidateDispatchConfig
-	// is the same validator the CLI/web config-write paths use, so the rule cannot drift.
+	// K6 (issue #73): the dispatch LOOP tolerates a partial/edited factory — drop
+	// mappings whose agent is not provisioned (skip-and-warn) and dispatch the rest,
+	// instead of hard-failing the whole cycle. The write path (af config dispatch set)
+	// stays strict. K8 surfaces the degraded state at `af up` / `af dispatch status` so a
+	// "running-but-dispatching-nothing" loop is never silent (cross-review H2).
+	knownMappings, unknownAgents := partitionDispatchMappings(dispatchCfg, agentsCfg)
+	for _, agent := range unknownAgents {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: skipping dispatch mappings for unprovisioned agent %q (not in agents.json)\n", agent)
+	}
+	dispatchCfg.Mappings = knownMappings
+	if len(dispatchCfg.Mappings) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "skipping dispatch: no mapping references a provisioned agent")
+		return nil
+	}
+	// The remaining cross-file rules (an explicitly set notify_on_complete, workflow phase
+	// formulas) stay authoritative; config.ValidateDispatchConfig is still the shared single
+	// source of truth. Only this loop caller relaxes hard-fail to skip-and-warn, so a
+	// residual error degrades the cycle rather than aborting the polling loop.
 	if err := config.ValidateDispatchConfig(dispatchCfg, agentsCfg); err != nil {
-		return err
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: skipping dispatch: %v\n", err)
+		return nil
 	}
 
 	// Check gh auth
@@ -1396,7 +1478,11 @@ func runDispatchStatus(cmd *cobra.Command, args []string) error {
 	phaseComplete := computePhaseCompletion(cmd.Context(), root, state.Dispatched)
 
 	if jsonOut {
-		return emitDispatchStatusJSON(cmd, running, state.Dispatched, agentState, phaseComplete)
+		// K8: surface the dispatch config-validity state so a fresh/partial factory's
+		// readiness ("not configured" vs "references unprovisioned agents" vs "ok") is
+		// observable to the web reader and operators (read-only, never aborts).
+		configState := loadDispatchConfigState(root)
+		return emitDispatchStatusJSON(cmd, running, configState, state.Dispatched, agentState, phaseComplete)
 	}
 
 	out := formatDispatchStatus(running, state.Dispatched, agentState, phaseComplete)
@@ -1457,6 +1543,7 @@ type dispatchStatusEntry struct {
 // `af dispatch status --json`.
 type dispatchStatusJSON struct {
 	DispatcherRunning bool                  `json:"dispatcher_running"`
+	ConfigState       string                `json:"config_state"`
 	Entries           []dispatchStatusEntry `json:"entries"`
 }
 
@@ -1476,7 +1563,7 @@ func emitDispatchStatusError(cmd *cobra.Command, e error) error {
 
 // emitDispatchStatusJSON marshals the dispatcher state as JSON to stdout. Entries
 // are sorted by issue key for deterministic, snapshot-stable output.
-func emitDispatchStatusJSON(cmd *cobra.Command, running bool, entries map[string]dispatchEntry, agentState map[string]bool, phaseComplete map[string]bool) error {
+func emitDispatchStatusJSON(cmd *cobra.Command, running bool, configState string, entries map[string]dispatchEntry, agentState map[string]bool, phaseComplete map[string]bool) error {
 	keys := make([]string, 0, len(entries))
 	for k := range entries {
 		keys = append(keys, k)
@@ -1485,6 +1572,7 @@ func emitDispatchStatusJSON(cmd *cobra.Command, running bool, entries map[string
 
 	out := dispatchStatusJSON{
 		DispatcherRunning: running,
+		ConfigState:       configState,
 		Entries:           make([]dispatchStatusEntry, 0, len(entries)),
 	}
 	for _, k := range keys {

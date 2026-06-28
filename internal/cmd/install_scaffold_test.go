@@ -54,12 +54,14 @@ func TestInstallScaffold_WatchdogAgentsAreSeededAgents(t *testing.T) {
 	}
 	src := string(data)
 
-	agentsLiteral := extractScaffoldLiteral(t, src, `"agents.json":`)
+	// agents.json is now built by config.DefaultAgentsConfigJSON() (single-source, issue
+	// #73 K5) rather than an inline literal, so read the REAL default — still drift-proof,
+	// now also covering the seeded specialists. startup.json stays an inline literal.
 	startupLiteral := extractScaffoldLiteral(t, src, `"startup.json":`)
 
 	var agents config.AgentConfig
-	if err := json.Unmarshal([]byte(agentsLiteral), &agents); err != nil {
-		t.Fatalf("unmarshal scaffold agents.json literal: %v\nliteral: %s", err, agentsLiteral)
+	if err := json.Unmarshal([]byte(config.DefaultAgentsConfigJSON()), &agents); err != nil {
+		t.Fatalf("unmarshal DefaultAgentsConfigJSON: %v", err)
 	}
 	var startup config.StartupConfig
 	if err := json.Unmarshal([]byte(startupLiteral), &startup); err != nil {
