@@ -225,8 +225,25 @@ func (t *Tmux) NewSession(name, workDir string) error {
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
-	_, err := t.run(args...)
-	return err
+	if _, err := t.run(args...); err != nil {
+		return err
+	}
+	// Apply the Issue #412 attach-time copy/scroll UX server-wide so every pane in
+	// this (one-per-container) tmux gets it: mouse capture, system clipboard (OSC 52),
+	// and the K-WHEEL rebind that forwards the wheel to the alt-screen app while it
+	// runs (#{mouse_any_flag}) and otherwise scrolls scrollback in copy-mode. set -s
+	// and bind-key have no session scope by nature; mouse is set -g here to match.
+	// Applied AFTER new-session so the warm server accepts them on the first session
+	// too (the pre-create global apply above races a cold server, per the history-limit
+	// caveat). Best-effort: a failed apply must never abort session creation. PLACEMENT
+	// PIN: still after the guardOp("new-session") early-return, so these guard-blind ops
+	// never reach real tmux under the default-build test guard. (Manager.Start keeps its
+	// session-scoped mouse + read-back as the Gap-7 apply-confirmation diagnostic.)
+	_ = t.SetGlobalOption("mouse", "on")
+	_ = t.SetServerOption("set-clipboard", "on")
+	_ = t.BindKey("-n", "WheelUpPane", `if-shell -F -t = "#{mouse_any_flag}" "send-keys -M" "if -Ft= '#{pane_in_mode}' 'send-keys -M' 'select-pane -t=; copy-mode -e; send-keys -M'"`)
+	_ = t.BindKey("-n", "WheelDownPane", "select-pane -t=; send-keys -M")
+	return nil
 }
 
 // HasSession checks if a session exists (exact match).
@@ -545,6 +562,30 @@ func (t *Tmux) ShowOption(session, name string) (string, error) {
 // the operator's real tmux server under `make test`. (ADR-018 invariant; F1.)
 func (t *Tmux) SetGlobalOption(name, value string) error {
 	_, err := t.run("set-option", "-g", name, value)
+	return err
+}
+
+// SetServerOption sets a server-scoped tmux option (set-option -s). Like
+// SetGlobalOption it is TARGET-LESS and GUARD-BLIND: a server option has no
+// session to target, so guardOp/targetFromArgs cannot protect it. Callers MUST
+// invoke it ONLY from within an already-guarded method (e.g. NewSession, after
+// its guardOp early-return) — never from an unguarded standalone path. (ADR-018
+// invariant; F1.)
+func (t *Tmux) SetServerOption(name, value string) error {
+	_, err := t.run("set-option", "-s", name, value)
+	return err
+}
+
+// BindKey installs a tmux key binding (bind-key). The key tables are server-wide,
+// so like SetGlobalOption it is TARGET-LESS and GUARD-BLIND: callers MUST invoke
+// it ONLY from within an already-guarded method (e.g. NewSession, after its
+// guardOp early-return). args are passed straight to the bind-key argv (no shell).
+// A multi-command binding must be passed as a SINGLE argument (e.g.
+// "select-pane -t=; send-keys -M"): a bare ";" token is otherwise consumed by
+// tmux's outer command parser, which would bind only the first command and run the
+// rest immediately. (ADR-018 invariant; F1.)
+func (t *Tmux) BindKey(args ...string) error {
+	_, err := t.run(append([]string{"bind-key"}, args...)...)
 	return err
 }
 
