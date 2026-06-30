@@ -168,7 +168,7 @@ Repeat until all steps are complete.
 
 | Variable | Required | Source | Description |
 |----------|----------|--------|-------------|
-| pr_uri | yes | cli | Pull request to review: full GitHub URL (https://github.com/owner/repo/pull/N), owner/repo#N, or bare PR number (current repo) |
+| pr_uri | yes | cli | Pull request to review: full GitHub URL (https://github.com/owner/repo/pull/N), owner/repo#N, or bare PR number (current repo) — OR a GitHub issue URL (.../issues/N), which the formula resolves to its single linked PR via the closing-keyword relationship, or fails fast |
 | min_confidence | no | cli | Minimum 0-100 confidence score a finding needs to be included in the posted review |
 
 ### Available Commands
