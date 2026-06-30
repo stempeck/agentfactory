@@ -1112,6 +1112,143 @@ func TestSendWorkDoneAndCleanup_WarningIncludesContext(t *testing.T) {
 	}
 }
 
+// TestDone_WorkDone_ManagerFallback_Terminates is the done-path end-state proof for #321
+// Phase 1. When a dispatched session's .runtime/formula_caller holds the synthesized
+// `manager` fallback, af done routes WORK_DONE to `manager`, mail succeeds (mailErr == nil),
+// shouldAutoTerminate(dispatched=true, nil) is true, and NO "skipping auto-terminate"
+// warning is emitted — i.e. the session reaches normal auto-terminate.
+func TestDone_WorkDone_ManagerFallback_Terminates(t *testing.T) {
+	t.Setenv("AF_ROLE", "test-agent")
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".runtime"), 0o755)
+	writeRuntimeFile(t, dir, "formula_caller", "manager")
+	writeRuntimeFile(t, dir, "dispatched", "true")
+	// No worktree_id → worktree cleanup block is skipped; selfTerminate is a no-op under test.
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:  "Formula: manager-fallback-terminate",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	s, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step 1",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+	if err := mem.Close(t.Context(), s.ID, ""); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+
+	var captured string
+	origSendWorkDoneMail := sendWorkDoneMail
+	sendWorkDoneMail = func(caller, instanceID, formulaName string, stepCount int) error {
+		captured = caller
+		return nil
+	}
+	defer func() { sendWorkDoneMail = origSendWorkDoneMail }()
+
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID)
+
+	w.Close()
+	os.Stderr = origStderr
+	out, _ := io.ReadAll(r)
+	stderr := string(out)
+
+	if captured != "manager" {
+		t.Errorf("WORK_DONE recipient = %q, want \"manager\"", captured)
+	}
+	if !shouldAutoTerminate(true, nil) {
+		t.Error("shouldAutoTerminate(dispatched=true, mailErr=nil) should be true")
+	}
+	if strings.Contains(stderr, "skipping auto-terminate") {
+		t.Errorf("should NOT emit 'skipping auto-terminate' when WORK_DONE mail succeeds, got: %q", stderr)
+	}
+}
+
+// T4 (issue #321, Phase 2 / K6): a legacy in-flight instance that persisted the
+// unroutable "@cli" sentinel before the Phase-1 fix merged must be healed at
+// af done. With the velocity guard NOT triggered (no done_velocity priming),
+// the read-time normalization rewrites caller "@cli" -> fallbackCaller ("manager")
+// strictly after the guard and before the WORK_DONE send. Proves: the captured
+// recipient is "manager", a loud "legacy @cli" warning is emitted, mailErr is nil,
+// and (with dispatched=true) the "skipping auto-terminate" warning is NOT emitted.
+// Modeled on TestDone_WorkDone_ManagerFallback_Terminates; the only differences are
+// the seeded caller value ("@cli" vs "manager") and the added warning assertion.
+func TestDone_LegacyCliCaller_RoutesToManager(t *testing.T) {
+	t.Setenv("AF_ROLE", "test-agent")
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".runtime"), 0o755)
+	writeRuntimeFile(t, dir, "formula_caller", "@cli")
+	writeRuntimeFile(t, dir, "dispatched", "true")
+	// No done_velocity → velocity guard does not trigger, so control reaches K6.
+	// No worktree_id → worktree cleanup block is skipped; selfTerminate is a no-op under test.
+
+	mem := memstore.New()
+	instance, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:  "Formula: legacy-cli-caller-heal",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+	s, err := mem.Create(t.Context(), issuestore.CreateParams{
+		Title:    "Step 1",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "AF_ACTOR",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+	if err := mem.Close(t.Context(), s.ID, ""); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+
+	var captured string
+	origSendWorkDoneMail := sendWorkDoneMail
+	sendWorkDoneMail = func(caller, instanceID, formulaName string, stepCount int) error {
+		captured = caller
+		return nil
+	}
+	defer func() { sendWorkDoneMail = origSendWorkDoneMail }()
+
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID)
+
+	w.Close()
+	os.Stderr = origStderr
+	out, _ := io.ReadAll(r)
+	stderr := string(out)
+
+	if captured != "manager" {
+		t.Errorf("WORK_DONE recipient = %q, want \"manager\" (legacy @cli should be normalized to fallbackCaller)", captured)
+	}
+	if !strings.Contains(stderr, "legacy @cli") {
+		t.Errorf("expected a loud 'legacy @cli' warning on stderr, got: %q", stderr)
+	}
+	if strings.Contains(stderr, "skipping auto-terminate") {
+		t.Errorf("should NOT emit 'skipping auto-terminate' after legacy @cli is healed and WORK_DONE succeeds, got: %q", stderr)
+	}
+}
+
 // TestSendWorkDoneMail_SeamReturnsNilUnderTest verifies that the default
 // sendWorkDoneMail seam returns nil under go test (isTestBinary guard).
 // Derived from Gherkin: "sendWorkDoneMail returns nil on subprocess success"

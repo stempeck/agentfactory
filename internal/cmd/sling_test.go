@@ -519,20 +519,20 @@ func TestEnsureCallerIdentity_FromFactoryRoot(t *testing.T) {
 	// callerWd == root → detectRole returns empty
 	role := ensureCallerIdentity(dir, dir, agentDir, &buf)
 
-	if role != "@cli" {
-		t.Errorf("ensureCallerIdentity() = %q, want '@cli'", role)
+	if role != "manager" {
+		t.Errorf("ensureCallerIdentity() = %q, want 'manager'", role)
 	}
 	if !strings.Contains(buf.String(), "warning") {
 		t.Errorf("should emit warning when dispatching from factory root, got: %q", buf.String())
 	}
 
-	// Verify @cli was persisted
+	// Verify manager was persisted
 	data, err := os.ReadFile(filepath.Join(agentDir, ".runtime", "formula_caller"))
 	if err != nil {
 		t.Fatalf("formula_caller not created: %v", err)
 	}
-	if string(data) != "@cli" {
-		t.Errorf("formula_caller = %q, want '@cli'", string(data))
+	if string(data) != "manager" {
+		t.Errorf("formula_caller = %q, want 'manager'", string(data))
 	}
 }
 
@@ -1043,6 +1043,101 @@ description = "Orchestrator is {{orchestrator}}"
 	}
 	if !strings.Contains(step.Description, "manager-agent") {
 		t.Errorf("step description should contain 'manager-agent', got: %q", step.Description)
+	}
+}
+
+// TestInstantiateFormulaWorkflow_NonDispatch_OrchestratorIsManager is the SITE-2 proof gate
+// for #321 Phase 1. On the non-dispatch path (empty params.CallerIdentity) with a caller
+// working directory that cannot resolve to an agent, instantiateFormulaWorkflow must
+// synthesize the routable `manager` fallback (sling.go SITE 2) and render it into
+// {{orchestrator}}. WorkDir MUST be the factory root (NOT the agent dir): if it were the
+// agent dir, detectRole would succeed, return "test-agent", and SITE 2's fallback branch
+// would never fire — making the test a silent false-positive (the exact prior-fix regression).
+func TestInstantiateFormulaWorkflow_NonDispatch_OrchestratorIsManager(t *testing.T) {
+	t.Setenv("AF_ROLE", "") // neutralize any ambient AF_ROLE so detectRole stays empty
+	store := installMemStore(t)
+	toml := `
+formula = "test-orchestrator-fallback"
+type = "workflow"
+version = 1
+
+[[steps]]
+id = "step1"
+title = "Dispatched by {{orchestrator}}"
+description = "Orchestrator is {{orchestrator}}"
+`
+	root, _ := createTestFormulaFactoryWithTOML(t, "test-orchestrator-fallback", "test-agent", toml)
+
+	params := InstantiateParams{
+		Ctx:         t.Context(),
+		FormulaName: "test-orchestrator-fallback",
+		AgentName:   "test-agent",
+		Root:        root,
+		WorkDir:     root, // factory root → detectRole empty → SITE 2 synthesizes the fallback
+		// CallerIdentity intentionally left empty to exercise the non-dispatch SITE-2 path.
+	}
+
+	var buf bytes.Buffer
+	_, stepIDs, _, err := instantiateFormulaWorkflow(params, &buf)
+	if err != nil {
+		t.Fatalf("instantiateFormulaWorkflow: %v", err)
+	}
+
+	stepBeadID, ok := stepIDs["step1"]
+	if !ok {
+		t.Fatal("stepIDs missing step1")
+	}
+	step, err := store.Get(t.Context(), stepBeadID)
+	if err != nil {
+		t.Fatalf("store.Get(step1): %v", err)
+	}
+	if !strings.Contains(step.Title, "manager") {
+		t.Errorf("step title should render {{orchestrator}} as 'manager', got: %q", step.Title)
+	}
+	if !strings.Contains(step.Description, "manager") {
+		t.Errorf("step description should render {{orchestrator}} as 'manager', got: %q", step.Description)
+	}
+}
+
+// TestSynthesis_FallbackAgentAbsent_Warns covers K11 (#321 Phase 3b): when the
+// non-dispatch path synthesizes the `fallbackCaller` ("manager") but that agent is
+// absent from agents.json, instantiateFormulaWorkflow must warn via `w` at the
+// synthesis chokepoint. createTestFormulaFactoryWithTOML seeds agents.json with ONLY
+// "test-agent", so "manager" is absent — the true config defect K11 flags. WorkDir is
+// the factory root so detectRole stays empty and SITE 2's fallback branch fires. The
+// K8 warning also writes to the same buffer, so the assertion uses the substring unique
+// to the K11 message ("not present in agents.json").
+func TestSynthesis_FallbackAgentAbsent_Warns(t *testing.T) {
+	t.Setenv("AF_ROLE", "") // neutralize any ambient AF_ROLE so detectRole stays empty
+	installMemStore(t)
+	toml := `
+formula = "test-fallback-absent"
+type = "workflow"
+version = 1
+
+[[steps]]
+id = "step1"
+title = "A step"
+description = "Body"
+`
+	root, _ := createTestFormulaFactoryWithTOML(t, "test-fallback-absent", "test-agent", toml)
+
+	params := InstantiateParams{
+		Ctx:         t.Context(),
+		FormulaName: "test-fallback-absent",
+		AgentName:   "test-agent",
+		Root:        root,
+		WorkDir:     root, // factory root → detectRole empty → SITE 2 synthesizes the fallback
+		// CallerIdentity intentionally left empty to exercise the non-dispatch SITE-2 path.
+	}
+
+	var buf bytes.Buffer
+	if _, _, _, err := instantiateFormulaWorkflow(params, &buf); err != nil {
+		t.Fatalf("instantiateFormulaWorkflow: %v", err)
+	}
+
+	if !strings.Contains(buf.String(), "not present in agents.json") {
+		t.Errorf("expected fallback-absent warning mentioning agents.json, got: %q", buf.String())
 	}
 }
 

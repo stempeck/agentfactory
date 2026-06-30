@@ -51,6 +51,11 @@ var executableBranchLiteralPatterns = []*regexp.Regexp{
 	// glued refspecs only — anchored to a ref token so prose colons don't match
 	regexp.MustCompile(`[\w./~^-]+:main\b`),
 	regexp.MustCompile(`\bmain:[\w./~^-]+`),
+	// literal @cli recipient — the unroutable mail-synthesis sentinel #321 removed;
+	// it must never be reintroduced at the formula layer (constraint C-4). `\b` so it
+	// does not over-match tokens like @client (mirrors the @main allowlist care —
+	// see the "   @main" mustNotFlag fixture).
+	regexp.MustCompile(`@cli\b`),
 }
 
 // branchLiteralAllowlist suppresses lines that match an executable pattern above but
@@ -128,6 +133,9 @@ func TestBranchLiteralLintSelfNegative(t *testing.T) {
 		"git push origin main:feature",
 		"git branch --contains $sha | grep main",
 		"gh pr create --base develop --head main",
+		// #321 Phase 4 (C-4): a literal @cli mail recipient must never be
+		// reintroduced at the formula layer — the lint must bite on it too.
+		"af mail send @cli -s WORK_DONE",
 	}
 	for _, s := range mustFlag {
 		if v := checkExecutableBranchLiterals(s); len(v) == 0 {

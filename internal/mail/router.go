@@ -3,6 +3,7 @@ package mail
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/stempeck/agentfactory/internal/config"
@@ -112,7 +113,13 @@ func (r *Router) ResolveGroupAddress(addr string) ([]string, error) {
 
 	members, ok := r.msgCfg.Groups[groupName]
 	if !ok {
-		return nil, fmt.Errorf("unknown group: @%s", groupName)
+		known := make([]string, 0, len(r.msgCfg.Groups)+1)
+		known = append(known, "all")
+		for g := range r.msgCfg.Groups {
+			known = append(known, g)
+		}
+		sort.Strings(known)
+		return nil, fmt.Errorf("unknown group: @%s (known groups: %s; agents are addressed by bare name, e.g. \"manager\")", groupName, strings.Join(known, ", "))
 	}
 	return members, nil
 }

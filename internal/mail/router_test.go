@@ -64,6 +64,18 @@ func TestResolveGroupAddress_Unknown(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown group")
 	}
+
+	msg := err.Error()
+	for _, want := range []string{
+		"unknown group: @",                 // leading clause preserved (prefix callers unaffected)
+		"agents are addressed by bare name", // bare-name hint
+		"supervisors",                       // a known group is listed
+		"all",                               // the implicit "all" group is listed
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q missing expected substring %q", msg, want)
+		}
+	}
 }
 
 func TestSendDispatchesGroup(t *testing.T) {

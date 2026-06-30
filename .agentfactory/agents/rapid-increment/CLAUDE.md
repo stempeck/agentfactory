@@ -146,7 +146,7 @@ that cannot be closed until an external condition is met. When you reach a gate 
 
 | Variable | Required | Source | Description |
 |----------|----------|--------|-------------|
-| pr_uri | yes | cli | Pull request whose unresolved review comments to address: full GitHub URL (https://github.com/owner/repo/pull/N), owner/repo#N, or bare PR number (current repo) |
+| pr_uri | yes | cli | Pull request whose unresolved review comments to address: full GitHub URL (https://github.com/owner/repo/pull/N), owner/repo#N, or bare PR number (current repo) — OR a GitHub issue URL (.../issues/N), which the formula resolves to its single linked PR via the closing-keyword relationship, or fails fast |
 
 ### Available Commands
 - `af prime` — Re-inject identity and formula step context
