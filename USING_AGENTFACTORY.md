@@ -51,14 +51,17 @@ af install manager
 af install supervisor
 ```
 
-### 3. Add factory dirs to .gitignore
+### 3. Factory dirs are already excluded from git
 
-```bash
-cat >> .gitignore << 'EOF'
-.agentfactory/
-.agentfactory/hooks/
-.agentfactory/store/
-EOF
+No manual `.gitignore` editing is needed. `af install --init` (step 1) automatically
+adds the factory-managed paths to `.git/info/exclude` under a
+`# agentfactory managed paths` sentinel:
+
+```
+.agentfactory/*
+.runtime/
+AGENTS.md
+.claude/
 ```
 
 ### 4. Start and attach to the manager
@@ -280,10 +283,10 @@ Then: `af install researcher && af up researcher`
 | Hook | Trigger | Action |
 |------|---------|--------|
 | `SessionStart` | Session opens | `af prime --hook` — inject identity. Autonomous agents also run `af mail check --inject` to pick up queued work. |
-| `PreCompact` | Context compaction | `af prime` — re-inject identity and formula step context (automatic when formula active). |
+| `PreCompact` | Context compaction | `af compact-handoff` (interactive agents: `af compact-handoff --interactive`) — checkpoint and recycle the session so the fresh session re-injects identity and formula step context. |
 | `UserPromptSubmit` | Each prompt | `af mail check --inject` — deliver new mail |
-| `Stop` | Each response | `quality-gate.sh` — haiku grades against 7 generic principles, mails verdict on failure. **Off by default** — `af quality on` (or `echo on > "$(af root)/.quality-gate"`) to enable. |
-| `Stop` | Each response | `fidelity-gate.sh` — haiku grades against the *current formula step's* title + description (ground truth from the step bead, not `af prime` output). Mails `STEP_FIDELITY` verdict on failure. Self-gates on `.runtime/hooked_formula` — generic supervisors with no active formula are unaffected. **On by default** (`af install --init` creates `.fidelity-gate` with "on") — `af fidelity off` to disable. |
+| `Stop` | Each response | `quality-gate.sh` — haiku grades against 7 generic principles, mails verdict on failure. **Off by default** — `af quality on` (or `echo on > "$(af root)/.agentfactory/.quality-gate"`) to enable. |
+| `Stop` | Each response | `fidelity-gate.sh` — haiku grades against the *current formula step's* title + description (ground truth from the step bead, not `af prime` output). Mails `STEP_FIDELITY` verdict on failure. Self-gates on `.runtime/hooked_formula` — generic supervisors with no active formula are unaffected. **On by default** (`af install --init` creates `.agentfactory/.fidelity-gate` with "on") — `af fidelity off` to disable. |
 
 ### Directory layout (after setup)
 
@@ -318,7 +321,7 @@ Then: `af install researcher && af up researcher`
     fidelity-gate-prompt.txt
   .agentfactory/store/
     ...                          # Issue store (SQLite)
-    formulas/                    # Formula TOML files (17 shipped by default)
+    formulas/                    # Formula TOML files
       investigate.formula.toml
       factoryworker.formula.toml
       ...
@@ -406,7 +409,7 @@ Summarize results and mail the dispatcher.
 """
 ```
 
-Steps execute in dependency order (`needs`). Variables (`{{environment}}`) are substituted at instantiation time from `--var` flags. The `source` field controls where variable values come from: `cli` (from `--var`), `env` (environment variable), `literal` (hardcoded in TOML), or `hook_bead` (from the hooked bead).
+Steps execute in dependency order (`needs`). Variables (`{{environment}}`) are substituted at instantiation time from `--var` flags. The `source` field controls where variable values come from: `cli` (from `--var`), `env` (environment variable), `literal` (hardcoded in TOML), `hook_bead` (the hooked bead's ID), `bead_title` (the hooked bead's title), `bead_description` (the hooked bead's description), or `deferred` (resolved later — excluded from the initial resolved map).
 
 ### Gate Steps
 
@@ -462,10 +465,8 @@ af sling --formula my-workflow --var issue=bd-42 --agent supervisor --reset
 ```
 
 `--reset` removes:
-- `.runtime/hooked_formula` (prior formula instance ID)
-- `.runtime/formula_caller` (prior dispatcher address)
-- `.runtime/dispatched` (prior dispatch marker)
-- `.agent-checkpoint.json` FormulaID field (crash-recovery formula reference)
+- The entire `.runtime/` directory (including `hooked_formula`, `formula_caller`, `dispatched`, `session_id`, and any other runtime state)
+- The entire `.agent-checkpoint.json` file (all crash-recovery state, not just the formula reference)
 
 In the dispatch path (`af sling --agent`), `--reset` additionally removes:
 - The agent's tmux session (if running)
@@ -562,7 +563,7 @@ The specialist template gives the agent **procedural identity** — what it is a
 - Behavioral discipline (the formula's `description` field, verbatim)
 - Standard agent capabilities (mail protocol, startup protocol, constraints)
 
-The template does NOT contain **operational state** — which step the agent is on right now. That comes from `af prime`, which injects both identity and current formula context automatically. After context compression, the PreCompact hook runs `af prime`, restoring both the specialist identity and the current step instructions. No manual command is needed.
+The template does NOT contain **operational state** — which step the agent is on right now. That comes from `af prime`, which injects both identity and current formula context automatically. After context compression, the PreCompact hook runs `af compact-handoff`, which checkpoints and recycles the session; the fresh session's SessionStart then runs `af prime`, restoring both the specialist identity and the current step instructions. No manual command is needed.
 
 ### Dry run
 
@@ -661,11 +662,11 @@ Another session is running as this agent. Lock is PID-based and stale-safe — d
 
 ### Quality gate not running
 
-The quality gate is OFF by default. Create `<factory-root>/.quality-gate` containing `on` (or run `af quality on`) to enable it. Also requires `claude`, `jq`, and `af` on PATH — exits silently if missing (non-fatal). Check: `which claude && which jq && which af`. WARNING: Quality gate can be very noisy because it catches every mis-step claude takes, which happens surprisingly often.
+The quality gate is OFF by default. Create `<factory-root>/.agentfactory/.quality-gate` containing `on` (or run `af quality on`) to enable it. Also requires `claude`, `jq`, and `af` on PATH — exits silently if missing (non-fatal). Check: `which claude && which jq && which af`. WARNING: Quality gate can be very noisy because it catches every mis-step claude takes, which happens surprisingly often.
 
 ### Fidelity gate not running
 
-The fidelity gate is ON by default — `af install --init` creates `.fidelity-gate` containing "on". To disable: `af fidelity off` or `echo off > "$(af root)/.fidelity-gate"`. Also requires `claude`, `jq`, and `af` on PATH. Additionally, the fidelity gate self-gates on `.runtime/hooked_formula` — if no formula is active in the agent's working directory, the hook exits silently regardless of toggle state. Confirm with `af step current --json` (output should have `state == "ready"` for the gate to fire). The two gates use distinct PID-file locks (`.runtime/fidelity-gate.lock` vs `.runtime/quality-gate.lock`) and run independently — stale locks from dead processes are automatically recovered via PID-based detection. NOTICE: The Fidelity gate is MUCH less noisy because it only fires when claude doesn't properly follow a formula step, which doesn't happen very often.
+The fidelity gate is ON by default — `af install --init` creates `.agentfactory/.fidelity-gate` containing "on". To disable: `af fidelity off` or `echo off > "$(af root)/.agentfactory/.fidelity-gate"`. Also requires `claude`, `jq`, and `af` on PATH. Additionally, the fidelity gate self-gates on `.runtime/hooked_formula` — if no formula is active in the agent's working directory, the hook exits silently regardless of toggle state. Confirm with `af step current --json` (output should have `state == "ready"` for the gate to fire). The two gates use distinct PID-file locks (`.runtime/fidelity-gate.lock` vs `.runtime/quality-gate.lock`) and run independently — stale locks from dead processes are automatically recovered via PID-based detection. NOTICE: The Fidelity gate is MUCH less noisy because it only fires when claude doesn't properly follow a formula step, which doesn't happen very often.
 
 ### Agent can't see project files
 

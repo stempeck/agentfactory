@@ -225,6 +225,19 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 		fmt.Fprintf(os.Stderr, "warning: could not close formula-instance epic %s: %v\n", instanceID, err)
 	}
 
+	// K6 (issue #321): legacy in-flight rescue. A formula instance dispatched
+	// before the Phase-1 fix persisted the unroutable "@cli" sentinel to
+	// .runtime/formula_caller, and persistFormulaCaller's no-overwrite semantics
+	// forbid re-synthesizing it. Heal it here at read time so the final WORK_DONE
+	// delivers and the dispatched session auto-terminates. Placed strictly AFTER
+	// the velocity guard so the C-2 escalation degrade (done.go:198-206) still
+	// observes raw @cli -> supervisor; does NOT touch the empty-caller skip below
+	// (empty != @cli — empty is the D1 "no dispatcher waiting" rule).
+	if caller == "@cli" {
+		fmt.Fprintln(os.Stderr, "warning: legacy @cli caller; routing WORK_DONE to manager")
+		caller = fallbackCaller
+	}
+
 	// D1: no fallback. Per H-4/D15, a missing caller file means there is no
 	// dispatcher waiting on WORK_DONE mail. Skip the send entirely. Pinned
 	// by TestDone_NoCallerFile_NoMail.

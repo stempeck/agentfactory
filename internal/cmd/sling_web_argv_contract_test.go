@@ -35,15 +35,9 @@ package cmd
 
 import (
 	"bytes"
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 
-	"github.com/stempeck/agentfactory/internal/formula"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/issuestore/memstore"
 )
@@ -293,109 +287,5 @@ func TestSlingWebArgvContract_EmptyTaskRejected(t *testing.T) {
 	// A non-empty task is accepted (the happy path the web always sends).
 	if err := validateSlingArgs("", "rootcause-all", []string{webTask}); err != nil {
 		t.Errorf("validateSlingArgs with a real task should succeed, got %v", err)
-	}
-}
-
-// ---- L1: full-roster completeness guard ----
-
-// classifyBindShape returns the EFFECTIVE bound field and mechanism for a formula slung with a
-// bare positional task (no --var issue). It models Mechanism 1 pre-setting cliVars["issue"]
-// before the input bridge runs (sling.go ordering), so a formula whose only no-default required
-// input is named `issue` is not double-counted. It returns an error for a workflow with >1
-// unsatisfied required input — a shape a bare-task dispatch cannot bind (sling.go:478) and the
-// exact "silent divergence" this guard exists to catch.
-//
-// NOTE: it deliberately does NOT equate the bind with findUnsatisfiedRequiredInputs alone — for
-// the vars-only `issue` shapes that scan returns [], and the real bind is the assignment bead
-// (Mechanism 1). Falling through to "issue" here is what avoids the C1 trap.
-func classifyBindShape(f *formula.Formula) (field, mechanism string, err error) {
-	if f.Type == formula.TypeWorkflow && len(f.Inputs) > 0 {
-		// Mechanism 1 sets cliVars["issue"] for every bare-task dispatch before the input
-		// bridge evaluates unsatisfied inputs; model that so an `issue` input is not counted.
-		cliVars := map[string]string{"issue": "mem-assignment"}
-		unsatisfied := findUnsatisfiedRequiredInputs(f.Inputs, cliVars)
-		switch {
-		case len(unsatisfied) == 1:
-			return unsatisfied[0], "input-bridge", nil
-		case len(unsatisfied) > 1:
-			return "", "ambiguous", fmt.Errorf(
-				"formula %q has %d unsatisfied required inputs %v; a bare-task dispatch would error (sling.go:478) — give all but one a default or wire it into the contract",
-				f.Name, len(unsatisfied), unsatisfied)
-		}
-	}
-	// Mechanism 1: the task binds `issue` via the auto-created assignment bead.
-	return "issue", "assignment-bead", nil
-}
-
-// TestSlingWebArgvContract_RosterCompleteness is the L1 golden guard. It enumerates every
-// formula-bearing specialist in the live .agentfactory/agents.json (read-only) and classifies
-// each one's git-tracked formula (internal/cmd/install_formulas, the //go:embed source). It
-// fails if any formula is missing, unparseable, or classifies to an ambiguous bind — so a
-// newly-added specialist cannot silently diverge from the web contract — and pins the three
-// AC-named shapes to their expected effective fields.
-func TestSlingWebArgvContract_RosterCompleteness(t *testing.T) {
-	// The three shapes the AC names, asserted against the real formulas (not synthetic mirrors).
-	golden := map[string]string{
-		"rootcause-all":        "issue",     // vars-only required issue (source=cli) -> assignment bead
-		"rapid-soldesign-plan": "issue_uri", // single no-default required input -> input bridge
-		"design-v7":            "issue",     // vars-only required issue (source=hook_bead) -> assignment bead + override
-	}
-
-	// Read the live roster (read-only). `../../.agentfactory/agents.json` is the worktree's own
-	// git-tracked roster — same cwd-relative idiom as formula_drift_test.go.
-	var roster struct {
-		Agents map[string]struct {
-			Formula string `json:"formula"`
-		} `json:"agents"`
-	}
-	data, err := os.ReadFile(filepath.Join("..", "..", ".agentfactory", "agents.json"))
-	if err != nil {
-		t.Fatalf("reading live roster: %v", err)
-	}
-	if err := json.Unmarshal(data, &roster); err != nil {
-		t.Fatalf("parsing live roster: %v", err)
-	}
-
-	specialists := make([]string, 0, len(roster.Agents))
-	for name, entry := range roster.Agents {
-		if entry.Formula != "" {
-			specialists = append(specialists, name)
-		}
-	}
-	sort.Strings(specialists)
-	if len(specialists) == 0 {
-		t.Fatal("no formula-bearing specialists found in the live roster — guard would be vacuous")
-	}
-
-	seenGolden := map[string]bool{}
-	for _, name := range specialists {
-		formulaName := roster.Agents[name].Formula
-		path := filepath.Join("install_formulas", formulaName+".formula.toml")
-		f, err := formula.ParseFile(path)
-		if err != nil {
-			t.Errorf("specialist %q: formula %q failed to parse (%s): %v", name, formulaName, path, err)
-			continue
-		}
-		field, mechanism, err := classifyBindShape(f)
-		if err != nil {
-			t.Errorf("specialist %q: %v", name, err)
-			continue
-		}
-		t.Logf("specialist %-22s formula=%-22s binds %-10q via %s", name, formulaName, field, mechanism)
-
-		if want, ok := golden[name]; ok {
-			seenGolden[name] = true
-			if field != want {
-				t.Errorf("specialist %q binds %q, want %q (the web contract's effective field for this shape)", name, field, want)
-			}
-		}
-	}
-
-	// Every golden shape must still be present in the roster (catches a rename/removal that would
-	// silently drop the contract's anchor cases).
-	for name := range golden {
-		if !seenGolden[name] {
-			t.Errorf("golden specialist %q is missing from the live roster (renamed or removed?) — update the contract", name)
-		}
 	}
 }

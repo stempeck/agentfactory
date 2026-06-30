@@ -178,14 +178,27 @@ func TestGroupMappingsBySource_Empty(t *testing.T) {
 // seedClosedEpic creates a formula-instance epic (mirroring instantiateFormula's
 // shape) and closes it with the given reason, returning the re-fetched issue so
 // the test sees the terminal Status + CloseReason exactly as the dispatcher will.
+// It defaults the Assignee to "mgr"; seedClosedEpicFor overrides it for the
+// completion-latch correlation tests, which require the PRODUCTION assignee (the
+// phase's agent) the latch filters on (#461 RC#1).
 func seedClosedEpic(t *testing.T, store *memstore.Store, reason string) issuestore.Issue {
+	return seedClosedEpicFor(t, store, reason, "mgr")
+}
+
+// seedClosedEpicFor is seedClosedEpic with an explicit Assignee. The latch
+// (completionLatch) correlates on Assignee == the phase's slung agent (the same
+// value sling stamps as the epic's Assignee, sling.go:652), so a latch test MUST
+// seed the phase-agent assignee here — NOT the "mgr" default, which would pass a
+// hermetic test while the latch never fired in production (#461 P-4). Type and
+// Labels are already the production values, so only Assignee varies.
+func seedClosedEpicFor(t *testing.T, store *memstore.Store, reason, assignee string) issuestore.Issue {
 	t.Helper()
 	ctx := context.Background()
 	iss, err := store.Create(ctx, issuestore.CreateParams{
 		Title:    "Formula: demo",
 		Type:     issuestore.TypeEpic,
 		Labels:   []string{"formula-instance"},
-		Assignee: "mgr",
+		Assignee: assignee,
 	})
 	if err != nil {
 		t.Fatalf("Create epic: %v", err)

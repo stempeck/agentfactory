@@ -218,15 +218,14 @@ func TestEvaluatePhase_StaleRecordedPhaseDoesNotAdvance(t *testing.T) {
 		Agent: "impl", Workflow: "feature-workflow", Phase: "enhancement",
 		PhaseInstanceID: complete.ID, PhaseDispatchedAt: time.Now().Add(-time.Hour),
 	}
-	m, ok := phaseMapping(cfg.Mappings, "pr-review")
-	if !ok {
+	if _, ok := phaseMapping(cfg.Mappings, "pr-review"); !ok {
 		t.Fatal("pr-review mapping missing from crossSourceCfg")
 	}
 	item := ghItem{Number: 42, URL: "https://github.com/owner/repo/pull/42",
 		Labels: labels("agentic", "feature-workflow", "pr-review")}
 
 	outcome, _ := evaluatePhase(context.Background(), store, "owner/repo", item, "pr",
-		entry, cfg.Mappings, wf, "pr-review", m)
+		entry, cfg.Mappings, wf, "pr-review")
 
 	if outcome != phaseIncomplete {
 		t.Errorf("evaluatePhase with stale entry.Phase=%q vs live phase=%q = %v, want phaseIncomplete (the next phase must be re-slung, never silently skipped)",

@@ -485,15 +485,32 @@ func captureInstanceID(ctx context.Context, store issuestore.Store, agentDir, sl
 	if id == "" {
 		return ""
 	}
-	iss, err := store.Get(ctx, id)
+	// We HAVE a candidate id (hooked_formula / stdout marker), so the epic exists —
+	// a store.Get error here is TRANSIENT (a backend blip), NOT a genuine "no id".
+	// Collapsing both to "" (the pre-#461 behavior) bakes a recoverable blip into a
+	// permanently-lost PhaseInstanceID that then drives the RC#1 re-sling loop. Retry
+	// a bounded number of times so a transient blip does not lose the just-created
+	// instance. Best-effort hardening: the completion latch recovers any residual
+	// miss next cycle and the empty-ID backoff floor bounds its cost.
+	var iss issuestore.Issue
+	var err error
+	for attempt := 0; attempt < captureGetAttempts; attempt++ {
+		if iss, err = store.Get(ctx, id); err == nil {
+			break
+		}
+	}
 	if err != nil {
-		return ""
+		return "" // a persistent (not transient) failure ⇒ no capture; the latch recovers it
 	}
 	if iss.CreatedAt.Before(phaseDispatchedAt) {
 		return "" // stale: this epic predates the dispatch — not the instance we just created
 	}
 	return id
 }
+
+// captureGetAttempts bounds captureInstanceID's retry of a transient store.Get
+// blip when a candidate instance id is already in hand (issue #461).
+const captureGetAttempts = 3
 
 // instanceComplete reports whether a recorded formula-instance epic has GENUINELY
 // completed (issue #378 K6): it is in a terminal lifecycle state AND was closed
@@ -503,6 +520,53 @@ func captureInstanceID(ctx context.Context, store issuestore.Store, agentDir, sl
 // actor-independent, so no IncludeAllAgents overlay is needed.
 func instanceComplete(iss issuestore.Issue) bool {
 	return iss.Status.IsTerminal() && iss.CloseReason == config.CloseReasonFormulaComplete
+}
+
+// completionLatch reports whether a genuinely-complete formula instance — assigned to
+// this phase's agent and created at/after this phase's dispatch — exists when the
+// capture-time pointer was lost (PhaseInstanceID == ""). It is the load-bearing RC#1
+// fix (#461): without it, an empty pointer to an already-complete instance re-slings
+// forever. It correlates on the PRODUCTION formula-instance epic shape
+// (instantiateFormula, sling.go:645-653): Assignee == the phase's agent, label
+// "formula-instance", Type Epic, and CreatedAt at/after this phase's dispatch. Among
+// matches it picks the most-recent and requires instanceComplete — the SAME terminal +
+// CloseReasonFormulaComplete evidence, so a --reset-closed instance (a different
+// CloseReason) can NEVER satisfy it (C-3 preserved; instanceComplete is reused, not
+// re-derived). IncludeClosed is required because a complete instance is terminal and
+// the default List filter omits terminal issues. Sound because a completed epic is
+// excluded from --reset's open-only close-list (down.go:210-225) and so retains
+// "formula complete".
+//
+// LIMITATION (#473 T1): the (agent, dispatch-time, complete) triple is a PROXY for
+// "this phase's dispatch", NOT an item-specific identity — the formula-instance epic
+// carries no issue/PR id. If this phase's capture missed AND a DIFFERENT item's formula
+// completes on the SAME agent after this dispatch, that sibling's completion can be
+// latched here. Closing that gap requires the dispatched item stamped onto the epic at
+// creation (a producer-side change through the generic sling path); deferred.
+func completionLatch(ctx context.Context, store issuestore.Store, agent string, phaseDispatchedAt time.Time) bool {
+	issues, err := store.List(ctx, issuestore.Filter{
+		Assignee:      agent,
+		Labels:        []string{"formula-instance"},
+		Type:          issuestore.TypeEpic,
+		IncludeClosed: true,
+	})
+	if err != nil {
+		return false
+	}
+	latched := false
+	var newest time.Time
+	for _, iss := range issues {
+		if iss.CreatedAt.Before(phaseDispatchedAt) { // pre-dispatch ⇒ a prior run, reject
+			continue
+		}
+		if !instanceComplete(iss) { // terminal + formula-complete ONLY (C-3)
+			continue
+		}
+		if !latched || iss.CreatedAt.After(newest) { // prefer the most-recent post-dispatch match
+			latched, newest = true, iss.CreatedAt
+		}
+	}
+	return latched
 }
 
 // linkedPRsGraphQL is the W-6 issue→PR linkage query, pinned by the Phase-3
@@ -758,6 +822,20 @@ func phaseMapping(mappings []config.DispatchMapping, phaseLabel string) (config.
 	return config.DispatchMapping{}, false
 }
 
+// phaseConsumesPR reports whether ANY mapping for phaseLabel declares Source=="pr".
+// Source-aware (unlike phaseMapping which returns the first label match and ignores
+// Source), so a dual-source phase (source:issue + source:pr, as pr-review/pr-iterate
+// are in the real dispatch.json) is correctly recognized as PR-consuming regardless
+// of mapping order. Closes Gap 1 / neutralizes Gap 10.
+func phaseConsumesPR(mappings []config.DispatchMapping, phaseLabel string) bool {
+	for _, m := range mappings {
+		if len(m.Labels) == 1 && m.Labels[0] == phaseLabel && m.Source == "pr" {
+			return true
+		}
+	}
+	return false
+}
+
 // phaseIndex returns phase's position in phases, or -1.
 func phaseIndex(phases []string, phase string) int {
 	for i, p := range phases {
@@ -809,9 +887,10 @@ const (
 // evaluatePhase gates an advance on the Phase-2 predicates (K6: IsTerminal +
 // CloseReasonFormulaComplete on the SPECIFIC recorded instance; K6b: the
 // agent-independent artifact predicate where one is definable). An empty/missing
-// recorded instance ⇒ phaseIncomplete (re-sling the current phase — the
-// lost-record self-heal — never advance).
-func evaluatePhase(ctx context.Context, store issuestore.Store, repo string, item ghItem, itemSource string, entry dispatchEntry, mappings []config.DispatchMapping, wf *config.Workflow, phase string, m config.DispatchMapping) (phaseOutcome, string) {
+// recorded instance for the current phase consults the completion latch: it advances
+// only when THIS dispatch produced a genuinely-complete instance (the RC#1 fix),
+// otherwise ⇒ phaseIncomplete (re-sling the current phase — the lost-record self-heal).
+func evaluatePhase(ctx context.Context, store issuestore.Store, repo string, item ghItem, itemSource string, entry dispatchEntry, mappings []config.DispatchMapping, wf *config.Workflow, phase string) (phaseOutcome, string) {
 	if entry.Phase != phase {
 		// Staleness guard (#413 CRIT-1): the recorded entry must belong to the phase the
 		// live GitHub cursor names. After a crash between advance()'s label swap and the
@@ -823,7 +902,15 @@ func evaluatePhase(ctx context.Context, store issuestore.Store, repo string, ite
 		return phaseIncomplete, ""
 	}
 	if entry.PhaseInstanceID == "" {
-		return phaseIncomplete, "" // no recorded instance ⇒ re-sling, never advance
+		// Capture missed (the phase WAS dispatched — entry.Phase == phase — but the
+		// pointer to its instance was lost). Consult the completion latch before
+		// re-slinging: if THIS dispatch produced a genuinely-complete instance, advance
+		// instead of looping forever (RC#1). Placed ONLY here, never at the phase-mismatch
+		// branch above, where the record belongs to a different (or zero) phase.
+		if completionLatch(ctx, store, entry.Agent, entry.PhaseDispatchedAt) {
+			return phaseAdvance, ""
+		}
+		return phaseIncomplete, "" // no recorded instance and no latched completion ⇒ re-sling
 	}
 	iss, err := store.Get(ctx, entry.PhaseInstanceID)
 	if err != nil {
@@ -836,10 +923,12 @@ func evaluatePhase(ctx context.Context, store issuestore.Store, repo string, ite
 	idx := phaseIndex(wf.Phases, phase)
 	isLast := idx == len(wf.Phases)-1
 	if isLast {
-		// Terminal source:pr gates on mergeable+approved+green (HIGH-A), NOT merged.
-		// A terminal issue-source phase has no downstream artifact: IsTerminal +
-		// provenance IS the definition of completion for it (named residual, W-9).
-		if m.Source == "pr" {
+		// A terminal PR-consuming phase gates on the PR being mergeable+approved+green
+		// (HIGH-A), NOT merged — dual-source-aware via phaseConsumesPR, so a dual-source
+		// terminal (e.g. pr-iterate, whose source:issue mapping is listed first) gates
+		// even when the tracking item is an issue. A terminal phase that consumes no PR
+		// has no downstream artifact: IsTerminal + provenance IS its completion (W-9).
+		if phaseConsumesPR(mappings, phase) {
 			prNum, count, err := resolveLinkedPR(repo, item, itemSource)
 			if err != nil {
 				return phaseWait, "" // transient gh error ⇒ retry next cycle
@@ -857,7 +946,7 @@ func evaluatePhase(ctx context.Context, store issuestore.Store, repo string, ite
 	// (W-6 / K6b). A completed issue-source formula that produced 0 or >1 linked
 	// PRs is a documented detectable stall (e.g. a producer that emits only a
 	// title cross-reference, not a closing keyword), never a silent advance.
-	if next, ok := phaseMapping(mappings, wf.Phases[idx+1]); ok && m.Source == "issue" && next.Source == "pr" {
+	if itemSource == "issue" && phaseConsumesPR(mappings, wf.Phases[idx+1]) {
 		prs, err := ghLinkedPRs(repo, item.Number)
 		if err != nil {
 			return phaseWait, "" // transient gh error ⇒ retry next cycle
@@ -977,7 +1066,7 @@ func (w *workflowCtx) run() {
 	}
 
 	entry := w.state.Dispatched[w.itemKey] // zero value if absent ⇒ lost-record self-heal
-	outcome, reason := evaluatePhase(w.ctx, w.store, w.repo, w.item, w.source, entry, w.dispatchCfg.Mappings, w.wf, phase, m)
+	outcome, reason := evaluatePhase(w.ctx, w.store, w.repo, w.item, w.source, entry, w.dispatchCfg.Mappings, w.wf, phase)
 	switch outcome {
 	case phaseStall:
 		w.stall("workflow %q %s", w.wf.Label, reason)
@@ -1066,6 +1155,13 @@ func (w *workflowCtx) advance(phase string) {
 		return
 	}
 	if err := w.slingPhase(next, m.Agent, 0); err != nil {
+		if errors.Is(err, errResolvePhaseInput) {
+			// Gate↔sling race: the linked-PR count changed between the handoff gate
+			// and the sling. Stall immediately (W-7) rather than the bare return that
+			// would defer to the resling self-heal and burn attempts (ROUND-2 P-3).
+			w.stall("workflow %q %q→%q %v", w.wf.Label, phase, next, err)
+			return
+		}
 		fmt.Fprintf(w.cmd.ErrOrStderr(), "dispatch %s failed: %v\n", w.itemKey, err)
 		w.stats.errors++
 		return
@@ -1105,24 +1201,46 @@ func (w *workflowCtx) terminal(phase string) {
 	w.stats.dispatched++
 }
 
+// emptyIDReslingFloor is the minimum interval before an empty-PhaseInstanceID
+// (capture-miss) record may re-sling (issue #461). It bounds the RC#1 burst — a
+// capture miss must not burn maxWorkflowAttempts in seconds — while staying well
+// under the full RetryAfterSecs window so a genuinely-lost record still self-heals
+// promptly. A tenth of RetryAfterSecs, floored at a small absolute minimum so an
+// unset/zero RetryAfterSecs still gates.
+func emptyIDReslingFloor(retryAfterSecs int) time.Duration {
+	const minFloor = 30 * time.Second
+	if floor := time.Duration(retryAfterSecs) * time.Second / 10; floor > minFloor {
+		return floor
+	}
+	return minFloor
+}
+
 // resling: current phase NOT complete and agent idle ⇒ clear the record and
 // re-sling the SAME phase with Attempts++ (#413 CRIT-2: completion keys to the NEW
-// instance, never the previous one). Bounded by the retry window AND the attempt
-// ceiling (W-7); on exceed, a distinctly-named detectable stall.
+// instance, never the previous one). Bounded by two retry gates — the full
+// RetryAfterSecs window for a captured (non-empty PhaseInstanceID) record, and the
+// shorter emptyIDReslingFloor for the empty-PhaseInstanceID capture-miss case — plus
+// the attempt ceiling (W-7); on exceed, a distinctly-named detectable stall. A
+// gate↔sling resolve race (errResolvePhaseInput) stalls immediately, like advance().
 func (w *workflowCtx) resling(phase, agent string, entry dispatchEntry) {
 	if w.agentBusy(agent) {
 		w.skipBusy(agent) // non-blocking (C-13/AC-5)
 		return
 	}
 	// Time-gate like the non-workflow retry window, measured from this phase's
-	// dispatch. A lost record (empty PhaseInstanceID) skips the gate and re-slings
-	// immediately (self-heal).
+	// dispatch.
 	if entry.PhaseInstanceID != "" {
 		retryAfter := time.Duration(w.dispatchCfg.RetryAfterSecs) * time.Second
 		if time.Since(entry.PhaseDispatchedAt) < retryAfter {
 			w.stats.skipped++
 			return
 		}
+	} else if time.Since(entry.PhaseDispatchedAt) < emptyIDReslingFloor(w.dispatchCfg.RetryAfterSecs) {
+		// Empty PhaseInstanceID (capture miss): gate on emptyIDReslingFloor. A zero/lost
+		// record (PhaseDispatchedAt is the zero time) has effectively-infinite elapsed
+		// time, so it still re-slings immediately.
+		w.stats.skipped++
+		return
 	}
 	if entry.Attempts >= maxWorkflowAttempts {
 		w.stall("workflow %q phase %q exceeded the re-sling ceiling (%d attempts)", w.wf.Label, phase, entry.Attempts)
@@ -1135,6 +1253,14 @@ func (w *workflowCtx) resling(phase, agent string, entry dispatchEntry) {
 	}
 	delete(w.state.Dispatched, w.itemKey)
 	if err := w.slingPhase(phase, agent, entry.Attempts+1); err != nil {
+		if errors.Is(err, errResolvePhaseInput) {
+			// Gate↔sling race: the linked-PR count changed between the handoff gate and
+			// the sling. Stall immediately (W-7), exactly as advance() does — a resolve
+			// race is not a real attempt, so it must NOT be restored and counted toward
+			// the ceiling (ROUND-2 P-3). The record stays deleted, mirroring advance().
+			w.stall("workflow %q phase %q %v", w.wf.Label, phase, err)
+			return
+		}
 		// Restore the correlation record with this attempt COUNTED. slingPhase only writes
 		// a record on success, so without this the failed sling leaves no entry and next
 		// cycle reads Attempts == 0 — the 0→delete→fail→0 loop that never lets the
@@ -1151,6 +1277,33 @@ func (w *workflowCtx) resling(phase, agent string, entry dispatchEntry) {
 	w.stats.dispatched++
 }
 
+// errResolvePhaseInput tags a slingPhase failure that originated in
+// resolvePhaseInputURL — the narrow gate↔sling race where the linked-PR count
+// changed from 1 to 0/>1 between the handoff gate and the sling. Both slingPhase
+// callers that can hit it — advance() and resling() — detect it (errors.Is) and route
+// it to an immediate w.stall (a clean, detectable stall) instead of burning attempts
+// to the ceiling (ROUND-2 P-3).
+var errResolvePhaseInput = errors.New("resolve phase input URL")
+
+// resolvePhaseInputURL returns the URL to hand the phase agent as its input.
+// For a PR-consuming phase of an ISSUE-started workflow it resolves the linked PR
+// and returns https://github.com/<repo>/pull/<N>. Otherwise it returns w.item.URL
+// unchanged (issue-source phases, and the whole w.source=="pr" path — AC-5).
+// 0 or >1 linked PRs (or a gh error) => error => caller stalls/logs (never a silent advance).
+func (w *workflowCtx) resolvePhaseInputURL(phase string) (string, error) {
+	if w.source != "issue" || !phaseConsumesPR(w.dispatchCfg.Mappings, phase) {
+		return w.item.URL, nil
+	}
+	pr, count, err := resolveLinkedPR(w.repo, w.item, w.source)
+	if err != nil {
+		return "", fmt.Errorf("resolve linked PR for issue %d (phase %q): %w", w.item.Number, phase, err)
+	}
+	if count != 1 {
+		return "", fmt.Errorf("issue→pr handoff at phase %q resolved %d linked PRs (want exactly 1)", phase, count)
+	}
+	return fmt.Sprintf("https://github.com/%s/pull/%d", w.repo, pr), nil
+}
+
 // slingPhase slings phase's agent, captures the FRESH instance ID (stdout fallback
 // — the dispatcher cannot compute the worktree dir sling reassigns to, so
 // captureInstanceID's stdout parse is the real path), and writes the correlation
@@ -1158,7 +1311,11 @@ func (w *workflowCtx) resling(phase, agent string, entry dispatchEntry) {
 // captureInstanceID's freshness gate (HIGH-3).
 func (w *workflowCtx) slingPhase(phase, agent string, attempts int) error {
 	dispatchedAt := time.Now().UTC()
-	stdout, err := dispatchItem(w.root, agent, w.item.URL, w.dispatchCfg.NotifyOnComplete)
+	inputURL, err := w.resolvePhaseInputURL(phase)
+	if err != nil {
+		return fmt.Errorf("%w for %q: %w", errResolvePhaseInput, phase, err)
+	}
+	stdout, err := dispatchItem(w.root, agent, inputURL, w.dispatchCfg.NotifyOnComplete)
 	if err != nil {
 		return err
 	}

@@ -22,6 +22,12 @@ import (
 	"github.com/stempeck/agentfactory/internal/worktree"
 )
 
+// fallbackCaller is the routable default recipient synthesized when no
+// dispatching agent can be resolved. Must be a real, seeded mailbox so that
+// {{orchestrator}} step signals and WORK_DONE mail are deliverable (unlike the
+// former "@cli" sentinel, which the mail router rejects as an unknown @group).
+const fallbackCaller = "manager"
+
 var (
 	slingFormulaName string
 	slingVars        []string
@@ -402,7 +408,10 @@ func instantiateFormulaWorkflow(params InstantiateParams, w io.Writer) (string, 
 	if callerIdentity == "" {
 		callerIdentity, _, _ = detectRole(params.WorkDir, params.Root)
 		if callerIdentity == "" {
-			callerIdentity = "@cli"
+			callerIdentity = fallbackCaller
+			if _, ok := agentsCfg.Agents[fallbackCaller]; !ok {
+				fmt.Fprintf(w, "warning: fallback caller %q is not present in agents.json; WORK_DONE/orchestrator mail may be undeliverable (run `af install --init` to re-seed it)\n", fallbackCaller)
+			}
 		}
 	}
 
@@ -752,13 +761,14 @@ func assignmentTitle(task string) string {
 }
 
 // ensureCallerIdentity resolves the caller role and persists it. If the caller
-// cannot be detected (e.g., dispatching from the factory root), it writes a
-// synthetic "@cli" value and emits a warning so WORK_DONE mail is not silently lost.
+// cannot be detected (e.g., dispatching from the factory root), it falls back to
+// the routable fallbackCaller mailbox and emits a warning so WORK_DONE mail is
+// delivered to a real recipient rather than silently lost.
 func ensureCallerIdentity(callerWd, root, agentDir string, w io.Writer) string {
 	callerRole, _, _ := detectRole(callerWd, root)
 	if callerRole == "" {
-		callerRole = "@cli"
-		fmt.Fprintf(w, "warning: dispatching from outside an agent directory; WORK_DONE mail will be sent to @cli (use --caller to set an explicit recipient)\n")
+		callerRole = fallbackCaller
+		fmt.Fprintf(w, "warning: no resolvable dispatching agent; defaulting WORK_DONE/orchestrator recipient to %s (use --caller to set an explicit recipient)\n", fallbackCaller)
 	}
 	persistFormulaCaller(agentDir, callerRole)
 	return callerRole
@@ -895,7 +905,7 @@ func findUnsatisfiedRequiredInputs(inputs map[string]formula.Input, cliVars map[
 }
 
 // writeDispatchedMarker writes the dispatch marker to <agentDir>/.runtime/dispatched.
-// The content is the caller identity (dispatcher's agent name or "@cli") for debugging.
+// The content is the caller identity (dispatcher's agent name or the fallbackCaller default) for debugging.
 // Only the file's existence matters functionally — Phase 2 reads it via isDispatchedSession().
 // Each dispatch writes a fresh marker unconditionally (no no-overwrite semantics).
 func writeDispatchedMarker(agentDir, callerIdentity string) {

@@ -300,8 +300,8 @@ description = """
 
 5. **Dispatch both agents with their bead instructions:**
    ```bash
-   af sling --agent {{analyst_name}} --persistent --var issue={{issue_id}} "$(af bead show "$ANALYST_BEAD" --json | jq -r '.[0].description')"
-   af sling --agent {{designer_name}} --persistent --var issue={{issue_id}} "$(af bead show "$DESIGNER_BEAD" --json | jq -r '.[0].description')"
+   af sling --agent {{analyst_name}} --persistent --var issue={{issue_id}} --reset "$(af bead show "$ANALYST_BEAD" --json | jq -r '.description')"
+   af sling --agent {{designer_name}} --persistent --var issue={{issue_id}} --reset "$(af bead show "$DESIGNER_BEAD" --json | jq -r '.description')"
    ```
 
 5a. **Verify both agent sessions started (one-time check, not a poll):**

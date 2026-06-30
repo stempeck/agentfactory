@@ -94,7 +94,46 @@ af mail inbox
 ```
 
 **3. Resolve the PR reference from {{pr_uri}}:**
-The input may arrive in one of three forms:
+
+First, if {{pr_uri}} is a GitHub *issue* URL (`.../issues/N`), resolve it to its single linked
+PR via the closing-keyword relationship, then continue against that PR. Query the issue's
+closing-keyword reverse edge so the issue URL resolves to exactly the one PR that closes it:
+
+```bash
+if echo "{{pr_uri}}" | grep -q '/issues/'; then
+  ISSUE_NUM=$(echo "{{pr_uri}}" | grep -oE '[0-9]+$')          # digits-only (injection-safe, security.md)
+  OWNER=$(echo "{{pr_uri}}" | sed -E 's|https://github.com/([^/]+)/[^/]+/issues/.*|\\1|')
+  REPO=$(echo "{{pr_uri}}"  | sed -E 's|https://github.com/[^/]+/([^/]+)/issues/.*|\\1|')
+  # Resolve via the closedByPullRequestsReferences reverse edge with includeClosedPrs:true,
+  # selecting nodes { number }. Apply NO isDraft filter so draft PRs are included; do NOT add
+  # a one-sided draft filter.
+  PRS=$(gh api graphql \
+          -f query='query($owner:String!,$repo:String!,$number:Int!){
+            repository(owner:$owner,name:$repo){
+              issue(number:$number){
+                closedByPullRequestsReferences(first:50, includeClosedPrs:true){
+                  nodes { number }
+                }
+              }
+            }
+          }' \
+          -F owner="$OWNER" -F repo="$REPO" -F number="$ISSUE_NUM" \
+          --jq '[.data.repository.issue.closedByPullRequestsReferences.nodes[].number]')
+  COUNT=$(echo "$PRS" | jq 'length')
+  if [ "$COUNT" -ne 1 ]; then
+    af mail send supervisor -s "HELP: cannot resolve issue to a single linked PR" \
+      -m "pr_uri={{pr_uri}} is a GitHub issue; closing-keyword lookup found $COUNT linked PRs (want exactly 1). Dispatch with the PR URL directly."
+    # terminate honestly — do NOT close formula complete (H-4). Surface the error and stop.
+    exit 1
+  fi
+  PR_NUM=$(echo "$PRS" | jq '.[0]')
+  PR_URI="https://github.com/$OWNER/$REPO/pull/$PR_NUM"
+else
+  PR_URI="{{pr_uri}}"
+fi
+```
+
+Then resolve `$PR_URI` (now a PR reference). It may arrive in one of three forms:
 
 - **Full URL**: `https://github.com/owner/repo/pull/42` — extract owner/repo and number
 - **Short form**: `owner/repo#42` — extract owner/repo and number
@@ -994,6 +1033,6 @@ If you have context remaining, you may:
 
 [inputs]
 [inputs.pr_uri]
-description = "Pull request whose unresolved review comments to address: full GitHub URL (https://github.com/owner/repo/pull/N), owner/repo#N, or bare PR number (current repo)"
+description = "Pull request whose unresolved review comments to address: full GitHub URL (https://github.com/owner/repo/pull/N), owner/repo#N, or bare PR number (current repo) — OR a GitHub issue URL (.../issues/N), which the formula resolves to its single linked PR via the closing-keyword relationship, or fails fast"
 type = "string"
 required = true
