@@ -39,7 +39,7 @@ This formula has 2 gate checkpoints. Some steps have gates — structural interl
 that cannot be closed until an external condition is met. When you reach a gate step:
 1. Complete the work described in the step
 2. Run `af done --phase-complete --gate <gate-id>`
-3. Then run `af prime` to load your next step and continue.
+3. Your session ends. A fresh agent resumes when the gate resolves.
 
 ### Formula Structure
 - **Name**: design-v7
@@ -77,7 +77,7 @@ that cannot be closed until an external condition is met. When you reach a gate 
 ### Available Commands
 - `af prime` — Re-inject identity and formula step context
 - `af done` — Close current step and advance
-- `af done --phase-complete --gate <id>` — Complete a gate step (continue via `af prime`)
+- `af done --phase-complete --gate <id>` — Complete a gate step (session ends)
 - `af mail send <to> -s <subject> -m <message>` — Send a message to an agent or group
 - `af mail inbox` — List unread messages
 - `af mail read <id>` — Read a specific message
