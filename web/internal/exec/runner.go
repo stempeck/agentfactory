@@ -1,14 +1,14 @@
-// Package exec is the C2 command-injection-safe af exec wrapper for the web module.
+// Package exec is the command-injection-safe af exec wrapper for the web module.
 //
 // Every af invocation is built as an argv array (program "af" + literal arguments) and run
 // via os/exec — NEVER through a shell. This mirrors the canonical af-core idiom at
 // internal/tmux/tmux.go:163-177 (exec.Command with a fixed program name + an argv slice, no
 // shell interpolation). A field value such as "; rm -rf" is carried as ONE literal argv
-// element and can never be interpreted as a command (Security Decision 2).
+// element and can never be interpreted as a command.
 //
 // All execution goes through the Runner interface so the server, read-model, and handlers
 // depend on the seam — never on os/exec directly. Tests inject a hermetic fake so the suite
-// can assert argv/serialization without ever spawning a real af (FR-3 / ADR-018). No unit or
+// can assert argv/serialization without ever spawning a real af (ADR-018). No unit or
 // acceptance test issues a real down/sling/--reset against the live tree.
 package exec
 
@@ -70,8 +70,8 @@ type ExecRunner struct {
 }
 
 // NewExecRunner returns a Runner that invokes the `af` binary on PATH, pinning the spawned af
-// child's working directory to root. root is required — this is the SOLE constructor form
-// (HIGH-1 compile-time interlock): a root-less production caller will not compile, so the #432
+// child's working directory to root. root is required — this is the SOLE constructor form,
+// a compile-time interlock: a root-less production caller will not compile, so the #432
 // bug cannot silently return via a forgotten root. Pass "" to opt into the prior cwd-inheriting
 // behaviour (used by unit tests that reject the verb before any exec).
 func NewExecRunner(root string) *ExecRunner {
@@ -106,7 +106,8 @@ func (e *ExecRunner) run(ctx context.Context, stdin []byte, verb string, args ..
 	}
 	argv := afArgv(verb, args...)
 	cmd := e.execCommand(ctx, argv[0], argv[1:]...)
-	if e.root != "" { // K3: pin the af child to the resolved factory root (channel is cmd.Dir, NOT AF_ROOT — Gap 3)
+	if e.root != "" { // pin the af child's working directory to the resolved factory root, never via an
+		// inherited AF_ROOT env var, which could be silently wrong or misattribute the sender
 		cmd.Dir = e.root
 	}
 	var stdout, stderr bytes.Buffer
@@ -132,15 +133,14 @@ func (e *ExecRunner) run(ctx context.Context, stdin []byte, verb string, args ..
 // factoryLockKey is the per-"agent" serialization key for factory-wide up/down.
 const factoryLockKey = "@factory"
 
-// Wrapper is the high-level C2 surface the server depends on. It validates every input
+// Wrapper is the high-level surface the server depends on. It validates every input
 // against the allowlists, serializes mutations per agent (UI-vs-itself), and performs a
 // best-effort cross-actor pre-flight before any mutating exec.
 //
-// Concurrency note (H-P3): the per-agent mutex closes only UI-vs-itself races. Cross-actor
+// Concurrency note: the per-agent mutex closes only UI-vs-itself races. Cross-actor
 // races (UI vs CLI operator vs the autonomous orchestrator) are NOT eliminable here — af's
 // underlying locks are advisory/PID-TOCTOU (internal/lock/lock.go:52). The dispatched-marker
-// pre-flight is a bounded-TOCTOU mitigation, not a guarantee; the residual is an Accepted
-// Residual Risk.
+// pre-flight is a bounded-TOCTOU mitigation, not a guarantee; the residual is an accepted risk.
 type Wrapper struct {
 	runner Runner
 	root   string // factory root; "" disables the on-disk dispatched-marker pre-flight
@@ -191,7 +191,7 @@ func (w *Wrapper) mutate(ctx context.Context, lockKey, preflightAgent, verb stri
 	defer l.Unlock()
 
 	// Best-effort cross-actor pre-flight, performed immediately before the exec to minimize
-	// the TOCTOU window. Refuse to collide with an orchestrated/dispatched run (protects AC-8).
+	// the TOCTOU window. Refuse to collide with an orchestrated/dispatched run.
 	if preflightAgent != "" && w.isDispatched(preflightAgent) {
 		return Result{}, ErrAgentOrchestrated
 	}
@@ -234,12 +234,12 @@ func (w *Wrapper) DownAgent(ctx context.Context, name string, reset bool) (Resul
 // idle) agent otherwise errors on Formula Succession — af refuses with "prior formula still
 // active; use --reset" (internal/cmd/sling.go) — so the UI path force-resets runtime state to
 // keep a UI-slung run byte-identical to the hand-slung `af sling --agent <name> --reset …`
-// argv the operator would type (AC-7/AC-8). --var travels as ONE literal argv element per field
+// argv the operator would type. --var travels as ONE literal argv element per field
 // (varArgs), never a comma-joined StringSliceVar value.
 //
 // task is the operator's primary text. af-core's `af sling [task]` takes it as the POSITIONAL
 // argument (Use: "sling [task]"; Args: cobra.MaximumNArgs(1)), so it is emitted AFTER a `--`
-// terminator: `[--agent <name> --reset --var k=v … -- <task>]`. The `--` is mandatory (#440 H1) —
+// terminator: `[--agent <name> --reset --var k=v … -- <task>]`. The `--` is mandatory (#440) —
 // with default pflag a task beginning with `-`/`--` would otherwise be misparsed as a flag and
 // re-trigger af's `task description required` error. The task is value-validated (validateTask:
 // reject control chars; allow commas and a leading dash) but never key-checked — it is the
@@ -257,13 +257,13 @@ func (w *Wrapper) Sling(ctx context.Context, name, task string, vars map[string]
 		return Result{}, err
 	}
 	args := append([]string{"--agent", name, "--reset"}, vargs...)
-	args = append(args, "--", task) // `--` terminator (H1) then the positional task
+	args = append(args, "--", task) // `--` terminator then the positional task
 	return w.mutate(ctx, name, name, "sling", args...)
 }
 
 // AgentsListJSON returns the raw stdout of `af agents list --json` (a read; no lock, no
 // pre-flight). The command always exits 0 and encodes failure as {"state":"error",...}; the
-// read-model (File 3) branches on that .state shape, not on the process exit code.
+// read-model branches on that .state shape, not on the process exit code.
 func (w *Wrapper) AgentsListJSON(ctx context.Context) (string, error) {
 	res, err := w.runner.Run(ctx, "agents", "list", "--json")
 	if err != nil {
@@ -274,7 +274,7 @@ func (w *Wrapper) AgentsListJSON(ctx context.Context) (string, error) {
 
 // FormulaShowJSON returns the raw stdout of `af formula show <formula> --json` (a read; no lock,
 // no pre-flight). Like AgentsListJSON the command always exits 0 and encodes failure as
-// {"state":"error",...}; the form-schema reader (C4) branches on that .state shape, not on the
+// {"state":"error",...}; the form-schema reader branches on that .state shape, not on the
 // process exit code. The "formula" verb is already on the allowlist (validate.go).
 func (w *Wrapper) FormulaShowJSON(ctx context.Context, formula string) (string, error) {
 	res, err := w.runner.Run(ctx, "formula", "show", formula, "--json")
@@ -304,7 +304,7 @@ func (w *Wrapper) DispatchStatusJSON(ctx context.Context) (string, error) {
 // canonical validator/writer: it validates (struct + cross-file ValidateDispatchConfig for dispatch)
 // and writes atomically (temp+rename), exiting non-zero with a friendly stderr message on any
 // validation failure — which RunStdin surfaces in the returned error. The web module never
-// re-declares the config schema nor re-implements validation on the write side (H-P1).
+// re-declares the config schema nor re-implements validation on the write side.
 //
 // file is checked against the {dispatch,startup} allowlist BEFORE exec (factory.json is read-only —
 // there is no `af config factory set`), so a caller can never smuggle an arbitrary subcommand as the
@@ -315,4 +315,35 @@ func (w *Wrapper) ConfigSet(ctx context.Context, file string, payload []byte) (R
 		return Result{}, fmt.Errorf("config file %q is not writable", file)
 	}
 	return w.runner.RunStdin(ctx, payload, "config", file, "set")
+}
+
+// mailFooter is appended to every web-sent body so recipients don't wait on a reply-blackhole:
+// the wrapper-pinned sender below is not a monitored mailbox.
+const mailFooter = "\n\n(sent from the web console; replies to 'operator' are not monitored)"
+
+// MailSend sends operator mail to an agent's mailbox: `af mail send <name> --subject=<s>
+// --message=<body+footer>` with the constant sender `operator`. Recipient name (trim, then the
+// copied af-core shape rule — the wrapper convention), subject, and body are all validated
+// BEFORE any exec; the sender is a wrapper constant, never caller input (root af enforces
+// members ∪ operator on it — internal/cmd/mail.go). Single-token `=` flag forms so a
+// dash-leading value can never re-parse as a flag, and the subcommand is fixed to
+// `send` — a caller can never smuggle a different mail subcommand.
+//
+// MailSend deliberately calls runner.Run DIRECTLY — no mutate(), no per-agent lock, no
+// .runtime/dispatched pre-flight, the same direct-Run exception ConfigSet above makes. Mail's
+// primary recipients ARE dispatched agents: the pre-flight would refuse exactly the mail this
+// feature exists to send. Mail targets the agent's MAILBOX, not its running session, so there
+// is no session mutation to serialize or protect.
+func (w *Wrapper) MailSend(ctx context.Context, name, subject, body string) (Result, error) {
+	name = trimAgent(name)
+	if err := ValidateAgentName(name); err != nil {
+		return Result{}, err
+	}
+	if err := validateMailSubject(subject); err != nil {
+		return Result{}, err
+	}
+	if err := validateMailBody(body); err != nil {
+		return Result{}, err
+	}
+	return w.runner.Run(ctx, "mail", "send", name, "--subject="+subject, "--message="+body+mailFooter, "--from=operator")
 }

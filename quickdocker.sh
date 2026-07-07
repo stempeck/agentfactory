@@ -168,7 +168,10 @@ _web_bridge() {
         if [[ -n "$_mpid" ]] && kill -0 "$_mpid" 2>/dev/null && [[ -n "$_mport" ]] && _port_in_use "$_mport"; then
             local _rurl="http://127.0.0.1:${_mport}/"
             echo "🔗 Open your factory:  ${_rurl}"
-            command -v open >/dev/null 2>&1 && open "$_rurl" 2>/dev/null || true
+            command -v open >/dev/null 2>&1 && open "$_rurl" 2>/dev/null \
+                || { command -v xdg-open >/dev/null 2>&1 && xdg-open "$_rurl" 2>/dev/null; } \
+                || { command -v wslview >/dev/null 2>&1 && wslview "$_rurl" 2>/dev/null; } \
+                || true
             return 0
         fi
         rm -f "$_marker" 2>/dev/null || true   # stale marker (listener never bound / died) -> re-setup
@@ -316,7 +319,10 @@ rm -f "$marker" "$handler"'
 
     # (7) Reveal the URL and return immediately.
     echo "🔗 Open your factory:  ${_url}"
-    command -v open >/dev/null 2>&1 && open "$_url" 2>/dev/null || true
+    command -v open >/dev/null 2>&1 && open "$_url" 2>/dev/null \
+        || { command -v xdg-open >/dev/null 2>&1 && xdg-open "$_url" 2>/dev/null; } \
+        || { command -v wslview >/dev/null 2>&1 && wslview "$_url" 2>/dev/null; } \
+        || true
 }
 
 # Parse arguments
@@ -638,7 +644,7 @@ step_done
 
 step 8 "Running quickstart.sh (this may take a few minutes)..."
 
-docker exec -it -u dev -w "${PROJECTS_DIR}/${AF_DIR}" "$CONTAINER_NAME" \
+docker exec -it -u dev -w "${PROJECTS_DIR}/${AF_DIR}" -e AF_QUICKDOCKER_DRIVEN=1 "$CONTAINER_NAME" \
     ./quickstart.sh
 
 step_done
@@ -680,6 +686,8 @@ fi
 echo ""
 echo "  Connect:"
 echo "    docker exec -it -u dev $CONTAINER_NAME bash"
+echo "  Web console:"
+echo "    printed above (re-open later with ./quickdocker.sh $REPO_PATH --web)"
 echo ""
 echo "  Start agents:"
 echo "    af up"
@@ -690,4 +698,14 @@ echo "=========================================="
 echo ""
 
 # Connect to the container
+# Open the web console for this freshly-installed container, THEN drop the user into the
+# shell (Issue #479). MUST be a subshell: _web_bridge has five `exit 1` paths and the
+# script runs `set -euo pipefail`, so a non-subshell `exit` would abort setup before reaching
+# the shell — and `_web_bridge … || true` would NOT save it (the shell exits before `||`).
+# The subshell inherits `set -e`, so any non-zero command inside also trips the `if !`
+# branch — which is fine: still non-fatal, the shell below always lands. Do not "tidy" the
+# subshell away.
+if ! ( _web_bridge "$CONTAINER_NAME" "${WORKSPACE_DIR}/${REPO_NAME}" ); then
+    echo "  Web console not started — continuing to shell. Re-run './quickdocker.sh ${REPO_PATH} --web' once the cause is fixed." >&2
+fi
 docker exec -it -u dev "$CONTAINER_NAME" bash

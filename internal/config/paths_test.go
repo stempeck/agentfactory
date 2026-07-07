@@ -209,3 +209,19 @@ func TestBuildHostConfigPath(t *testing.T) {
 		t.Errorf("BuildHostConfigPath: got %q, want %q", got, want)
 	}
 }
+
+func TestStartupConfigPath(t *testing.T) {
+	got := StartupConfigPath("/tmp/myproject")
+	want := filepath.Join("/tmp/myproject", ".agentfactory", "startup.json")
+	if got != want {
+		t.Errorf("StartupConfigPath: got %q, want %q", got, want)
+	}
+}
+
+func TestModelsConfigPath(t *testing.T) {
+	got := ModelsConfigPath("/tmp/myproject")
+	want := filepath.Join("/tmp/myproject", ".agentfactory", "models.json")
+	if got != want {
+		t.Errorf("ModelsConfigPath: got %q, want %q", got, want)
+	}
+}

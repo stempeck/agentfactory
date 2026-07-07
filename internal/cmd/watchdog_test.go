@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -65,12 +66,74 @@ func TestWatchdog_NoFalsePositive(t *testing.T) {
 		"Reading files...\nRunning tests...\nAll 42 tests passed",
 		"Analyzing code in internal/cmd/watchdog.go",
 		"HTTP 200 OK",
+		// Bare transport errors from local tooling (go test / curl / ssh against a
+		// closed port) carry no model-gateway context and must not be mistaken for an
+		// endpoint outage, or a working agent gets respawned on a false positive.
+		"dial tcp 127.0.0.1:4000: connect: connection refused",
+		"read tcp 127.0.0.1:54233->127.0.0.1:6379: connection timed out",
 	}
 	for _, output := range outputs {
 		detected, pattern := detectErrorPattern(output)
 		if detected {
 			t.Errorf("false positive on %q: detected pattern %q", output, pattern)
 		}
+	}
+}
+
+// TestWatchdog_DetectsEndpointSignatures is the positive half of the endpoint-failure
+// detection (issue #508): detectErrorPattern recognizes the enumerated signatures a down
+// or misbehaving gateway surfaces into the pane (connection refused/timeout, gateway 5xx,
+// the codex 400 unsupported_api_for_model code, LiteLLM proxy error classes) and returns
+// a human-readable cause naming the endpoint failure. The connection cases carry the
+// model API request context (/v1/messages) that scopes them to a real gateway failure.
+func TestWatchdog_DetectsEndpointSignatures(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+	}{
+		{"http_502", "upstream error: 502 Bad Gateway"},
+		{"http_503", "the gateway returned 503 Service Unavailable"},
+		{"http_504", "504 Gateway Timeout from the proxy"},
+		{"conn_refused", `Post "http://127.0.0.1:4000/v1/messages": dial tcp 127.0.0.1:4000: connect: connection refused`},
+		{"conn_timeout", `Post "https://gw.local/v1/messages": connection timed out`},
+		{"unsupported_api", `{"error":{"code":"unsupported_api_for_model"}}`},
+		{"litellm_500", "litellm.InternalServerError: llm provider raised an error"},
+		{"litellm_503", "litellm.ServiceUnavailableError: upstream is down"},
+		{"litellm_conn", "litellm.APIConnectionError: could not reach the endpoint"},
+		{"litellm_timeout", "litellm.Timeout: request exceeded the deadline"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			detected, cause := detectErrorPattern(tc.output)
+			if !detected {
+				t.Fatalf("expected an endpoint signature to be detected in %q", tc.output)
+			}
+			if !strings.Contains(cause, "endpoint failure") {
+				t.Errorf("cause should name an endpoint failure, got %q", cause)
+			}
+		})
+	}
+}
+
+// TestWatchdog_EndpointCauseNamedInEscalationMail pins the escalation-mail half of
+// W11: the cause detectErrorPattern returns is threaded verbatim into the operator
+// escalation mail, so the operator sees "endpoint failure: …" rather than a generic
+// respawn. sendHandoffMail is a no-op under `go test`, so the mail text is proven
+// through the pure watchdogFailureMail formatter that recoverAgent feeds.
+func TestWatchdog_EndpointCauseNamedInEscalationMail(t *testing.T) {
+	detected, cause := detectErrorPattern("the gateway returned 503 Service Unavailable")
+	if !detected {
+		t.Fatal("expected 503 to be detected")
+	}
+	subject, body := watchdogFailureMail("worker_a", cause)
+	if !strings.Contains(subject, "worker_a") {
+		t.Errorf("escalation subject should name the agent, got %q", subject)
+	}
+	if !strings.Contains(body, cause) {
+		t.Errorf("escalation body should thread the detected cause %q verbatim, got %q", cause, body)
+	}
+	if !strings.Contains(body, "endpoint failure") {
+		t.Errorf("escalation body should name the endpoint failure, got %q", body)
 	}
 }
 

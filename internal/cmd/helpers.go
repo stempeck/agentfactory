@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -15,6 +16,22 @@ import (
 	"github.com/stempeck/agentfactory/internal/session"
 	"github.com/stempeck/agentfactory/internal/tmux"
 )
+
+// loadModelsConfigForCrossCheck loads models.json for a NON-selecting cross-check
+// caller (`af dispatch`, `af config dispatch set`). Neither path launches from a
+// profile, so a models.json validation error must NOT be fatal — mirroring the launch
+// path's non-selecting tolerance (resolveLaunchModelEnv's fall-through): it warns and
+// returns nil, which ValidateDispatchConfig treats as "skip the per-mapping model
+// cross-check". The profile-WRITING path (`af config models set` / SaveModelsConfig)
+// stays strict — this tolerance is only for the read/cross-check callers.
+func loadModelsConfigForCrossCheck(root string, warn io.Writer) *config.ModelsConfig {
+	cfg, err := config.LoadModelsConfig(root)
+	if err != nil {
+		fmt.Fprintf(warn, "warning: ignoring models.json for the dispatch model cross-check (%v); proceeding without it\n", err)
+		return nil
+	}
+	return cfg
+}
 
 type respawnTmux interface {
 	ClearHistory(pane string) error
@@ -55,6 +72,12 @@ type RespawnOptions struct {
 	CmdPrefix    string
 	WorktreePath string
 	WorktreeID   string
+	// AgentWorkDir is the agent's actual working dir — where the
+	// .runtime/model_override marker lives (issue #480). The three respawn call
+	// sites disagree on WorktreePath (handoff/compact pass none but run from the
+	// worktree agent dir; watchdog sets WorktreePath), so each passes its known
+	// agent dir here to make the respawn marker-read match the launch marker-write.
+	AgentWorkDir string
 	Tx           respawnTmux
 }
 
@@ -68,6 +91,19 @@ func respawnSession(opts RespawnOptions) error {
 	// (handoff/compact-handoff/watchdog) — without this, respawned agents would
 	// commit without them (issue #371 G-B sibling-entrypoint).
 	wireGitIdentity(mgr, opts.FactoryRoot, opts.WorktreePath)
+
+	// Re-resolve the FULL model precedence chain on every respawn (issue #480):
+	// BOTH a --model override (captured by the .runtime/model_override marker) AND a
+	// durable models.json.agents default must survive handoff/compact/watchdog —
+	// reading only the marker would silently revert a durable-default agent to the
+	// global model on the first handoff. A respawn carries no explicit flag (cliModel
+	// ""), so a broken models.json warns + falls through to the global default
+	// rather than failing. Emission is structural: BuildStartupCommand() re-emits the
+	// set, so no second emission path is added here (handoff_test transitivity guard).
+	if _, env, _ := resolveLaunchModelEnv(opts.FactoryRoot, opts.AgentName, respawnAgentDir(opts), "", opts.AgentEntry.Model, false, os.Stderr); len(env) > 0 {
+		mgr.SetModelEnv(env)
+	}
+
 	respawnCmd := opts.CmdPrefix + mgr.BuildStartupCommand()
 	tx := opts.Tx
 	if tx == nil {
@@ -75,6 +111,20 @@ func respawnSession(opts RespawnOptions) error {
 	}
 	_ = tx.ClearHistory(opts.PaneID)
 	return tx.RespawnPane(opts.PaneID, respawnCmd)
+}
+
+// respawnAgentDir derives the agent working dir holding the .runtime/model_override
+// marker so the respawn read matches the launch write (issue #480). It
+// prefers the explicit AgentWorkDir (handoff/compact pass their cwd; watchdog passes
+// resolveAgentDir), then the worktree-derived dir, then the factory-root dir.
+func respawnAgentDir(opts RespawnOptions) string {
+	if opts.AgentWorkDir != "" {
+		return opts.AgentWorkDir
+	}
+	if opts.WorktreePath != "" {
+		return config.AgentDir(opts.WorktreePath, opts.AgentName)
+	}
+	return config.AgentDir(opts.FactoryRoot, opts.AgentName)
 }
 
 // detectGitIdentity reads the ambient git identity (user.name/user.email) as

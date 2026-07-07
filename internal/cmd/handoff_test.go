@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stempeck/agentfactory/internal/config"
 )
 
 func TestHandoff_NotInsideTmux(t *testing.T) {
@@ -201,6 +203,105 @@ func TestHandoff_TransitiveEndpointDependency(t *testing.T) {
 	}
 	if !strings.Contains(helperCode, "BuildStartupCommand()") {
 		t.Error("helpers.go respawnSession must call BuildStartupCommand() for endpoint transitivity")
+	}
+}
+
+// TestHandoff_OverrideSurvives — a --model override persisted to
+// .runtime/model_override is re-resolved on respawn and the rebuilt startup
+// command carries the override's model. models.json has NO agents-map default,
+// so the ONLY source of the model is the marker.
+func TestHandoff_OverrideSurvives(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	writeValidModels(t, dir, &config.ModelsConfig{
+		Models: map[string]map[string]string{"sonnet": {"ANTHROPIC_MODEL": "claude-sonnet-4-6"}},
+	})
+
+	t.Run("non_worktree", func(t *testing.T) {
+		agentDir := config.AgentDir(dir, "manager")
+		writeRuntimeFile(t, agentDir, "model_override", "sonnet")
+
+		mock := &mockTmux{}
+		err := respawnSession(RespawnOptions{
+			FactoryRoot:  dir,
+			AgentName:    "manager",
+			AgentEntry:   config.AgentEntry{Type: "interactive"}, // Model empty → no legacy mask
+			AgentWorkDir: agentDir,
+			PaneID:       "%0",
+			Tx:           mock,
+		})
+		if err != nil {
+			t.Fatalf("respawnSession: %v", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(agentDir, ".runtime", "model_override")); statErr != nil {
+			t.Error("model_override marker must persist across respawn")
+		}
+		if len(mock.respawnPaneCalls) != 1 {
+			t.Fatalf("RespawnPane should be called once, got %d", len(mock.respawnPaneCalls))
+		}
+		if cmd := mock.respawnPaneCalls[0].cmd; !strings.Contains(cmd, "claude-sonnet-4-6") {
+			t.Errorf("respawn command must carry the override model claude-sonnet-4-6, got: %s", cmd)
+		}
+	})
+
+	// Worktree case: handoff/compact pass NO WorktreePath but the agent
+	// dir lives under a worktree. The marker is written there; the respawn marker-read
+	// must match the write via AgentWorkDir. A read/write path mismatch fails here.
+	t.Run("worktree_via_agentworkdir", func(t *testing.T) {
+		wtAgentDir := filepath.Join(dir, ".agentfactory", "worktrees", "wt-xyz", ".agentfactory", "agents", "manager")
+		if err := os.MkdirAll(wtAgentDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeRuntimeFile(t, wtAgentDir, "model_override", "sonnet")
+
+		mock := &mockTmux{}
+		err := respawnSession(RespawnOptions{
+			FactoryRoot:  dir,
+			AgentName:    "manager",
+			AgentEntry:   config.AgentEntry{Type: "interactive"},
+			AgentWorkDir: wtAgentDir, // handoff/compact pass cwd (the worktree agent dir)
+			PaneID:       "%0",
+			Tx:           mock,
+		})
+		if err != nil {
+			t.Fatalf("respawnSession: %v", err)
+		}
+		if cmd := mock.respawnPaneCalls[0].cmd; !strings.Contains(cmd, "claude-sonnet-4-6") {
+			t.Errorf("respawn must read the worktree marker via AgentWorkDir and carry claude-sonnet-4-6, got: %s", cmd)
+		}
+	})
+}
+
+// TestHandoff_AgentsMapDefaultSurvives — a durable
+// models.json.agents default with NO --model flag and NO marker must re-apply on
+// every respawn. AgentEntry.Model is kept EMPTY so the legacy emit cannot mask the
+// bug. This FAILS if respawn reads only the marker (the marker path test would
+// still pass), proving respawn re-resolves the FULL precedence chain.
+func TestHandoff_AgentsMapDefaultSurvives(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	writeValidModels(t, dir, &config.ModelsConfig{
+		Models: map[string]map[string]string{"sonnet": {"ANTHROPIC_MODEL": "claude-sonnet-4-6"}},
+		Agents: map[string]string{"manager": "sonnet"},
+	})
+	// Deliberately: NO marker written, NO --model, AgentEntry.Model empty.
+
+	mock := &mockTmux{}
+	err := respawnSession(RespawnOptions{
+		FactoryRoot:  dir,
+		AgentName:    "manager",
+		AgentEntry:   config.AgentEntry{Type: "interactive"},
+		AgentWorkDir: config.AgentDir(dir, "manager"),
+		PaneID:       "%0",
+		Tx:           mock,
+	})
+	if err != nil {
+		t.Fatalf("respawnSession: %v", err)
+	}
+	if len(mock.respawnPaneCalls) != 1 {
+		t.Fatalf("RespawnPane should be called once, got %d", len(mock.respawnPaneCalls))
+	}
+	if cmd := mock.respawnPaneCalls[0].cmd; !strings.Contains(cmd, "claude-sonnet-4-6") {
+		t.Errorf("a durable agents-map default must survive respawn; respawn must re-resolve "+
+			"the full chain, not just the marker. got: %s", cmd)
 	}
 }
 

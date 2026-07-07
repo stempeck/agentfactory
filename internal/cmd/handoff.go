@@ -126,11 +126,12 @@ func runHandoffCore(ctx context.Context, cwd, subject, message string, collect, 
 
 	fmt.Printf("Handing off %s...\n", agentName)
 	return respawnSession(RespawnOptions{
-		FactoryRoot: factoryRoot,
-		AgentName:   agentName,
-		AgentEntry:  *agentEntry,
-		PaneID:      pane,
-		CmdPrefix:   sleepPrefix,
+		FactoryRoot:  factoryRoot,
+		AgentName:    agentName,
+		AgentEntry:   *agentEntry,
+		PaneID:       pane,
+		CmdPrefix:    sleepPrefix,
+		AgentWorkDir: cwd,
 	})
 }
 

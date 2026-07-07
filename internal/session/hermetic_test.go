@@ -74,6 +74,11 @@ func (f *fakeTmux) SetEnvironment(sess, key, value string) error {
 	return nil
 }
 
+func (f *fakeTmux) UnsetEnvironment(sess, key string) error {
+	f.record(fmt.Sprintf("UnsetEnvironment %s %s", sess, key))
+	return nil
+}
+
 // --- tmuxClient-only methods ---
 
 func (f *fakeTmux) SetOption(sess, name, value string) error {

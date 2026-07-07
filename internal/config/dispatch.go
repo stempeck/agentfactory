@@ -32,6 +32,11 @@ type DispatchMapping struct {
 	Labels []string `json:"labels,omitempty"`
 	Source string   `json:"source,omitempty"`
 	Agent  string   `json:"agent"`
+
+	// Model (issue #480) optionally pins the per-mapping model profile threaded to
+	// `af sling --model` at dispatch time; empty leaves the agent on its durable
+	// default. ValidateDispatchConfig cross-checks it against models.json.
+	Model string `json:"model,omitempty"`
 }
 
 // Workflow defines an ordered multi-phase pipeline keyed by a single
@@ -90,7 +95,15 @@ func SaveDispatchConfig(path string, cfg *DispatchConfig) error {
 // factory that has no "manager" agent and leaves notify_on_complete unset still has an
 // otherwise-valid dispatch.json and must not be blocked from saving it. Only an
 // explicitly named, non-existent notify agent is an error.
-func ValidateDispatchConfig(disp *DispatchConfig, agents *AgentConfig) error {
+//
+// models (issue #480) is nil-tolerant: when non-nil AND at least one profile is
+// defined, every mapping's Model must name a profile defined in models.json —
+// mirroring the unknown-agent check — so a dispatch.json that routes to a typo'd
+// profile is rejected at the write/start boundary rather than failing loud only when
+// the item is finally slung. With NO registry (nil models, absent models.json, or
+// zero profiles) a mapping's model is a raw id passed straight to `claude --model`,
+// exactly as the launch path treats it, so the cross-check is skipped.
+func ValidateDispatchConfig(disp *DispatchConfig, agents *AgentConfig, models *ModelsConfig) error {
 	if disp == nil {
 		return fmt.Errorf("dispatch config is nil")
 	}
@@ -100,6 +113,11 @@ func ValidateDispatchConfig(disp *DispatchConfig, agents *AgentConfig) error {
 	for _, m := range disp.Mappings {
 		if _, ok := agents.Agents[m.Agent]; !ok {
 			return fmt.Errorf("dispatch mapping references unknown agent %q", m.Agent)
+		}
+		if models != nil && len(models.Models) > 0 && m.Model != "" {
+			if _, ok := models.Models[m.Model]; !ok {
+				return fmt.Errorf("dispatch mapping references undefined model %q", m.Model)
+			}
 		}
 	}
 	if disp.NotifyOnComplete != "" {

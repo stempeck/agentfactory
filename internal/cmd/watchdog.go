@@ -96,11 +96,58 @@ func checkpointBeforeKill(agentDir, reason string) {
 	}
 }
 
+// apiRequestMarker anchors the two generic connection-error needles below to a model
+// API call. "connection refused" / "connection timed out" are Go's bare transport-error
+// text — an agent running go test, curl, or ssh against a closed port prints them for
+// reasons unrelated to its model gateway, so matching the bare substring would respawn a
+// working agent on a false positive. Requiring the Anthropic messages path to co-occur
+// scopes the match to a genuine gateway failure (Claude Code posts every model request to
+// <base_url>/v1/messages), the same way the LiteLLM needles are scoped by the litellm.
+// error-class prefix.
+const apiRequestMarker = "/v1/messages"
+
+// endpointFailureSignatures enumerates the substrings a down or misbehaving per-agent
+// endpoint (issue #508) surfaces into the pane. Matching is by explicit substring; when
+// context is non-empty it must ALSO be present, which scopes an otherwise-generic needle
+// to model-gateway output. The 5xx entries carry the full HTTP reason phrase — never a
+// bare digit or a loose "HTTP" — so a 4xx/200 line cannot trip them (the watchdog
+// negatives pin 400/200). The LiteLLM entries use specific error-class prefixes so a
+// benign secrets path like "file:.agentfactory/secrets/litellm.key" cannot false-positive.
+// The returned cause is human-readable and flows verbatim into the operator escalation
+// mail so a gateway outage reads as "endpoint failure" rather than a generic respawn.
+var endpointFailureSignatures = []struct{ needle, context, cause string }{
+	{"502 Bad Gateway", "", "endpoint failure: HTTP 502 Bad Gateway"},
+	{"503 Service Unavailable", "", "endpoint failure: HTTP 503 Service Unavailable"},
+	{"504 Gateway Timeout", "", "endpoint failure: HTTP 504 Gateway Timeout"},
+	{"connection refused", apiRequestMarker, "endpoint failure: connection refused (endpoint unreachable)"},
+	{"connection timed out", apiRequestMarker, "endpoint failure: connection timed out (endpoint unreachable)"},
+	{"unsupported_api_for_model", "", "endpoint failure: unsupported_api_for_model (model not served on this endpoint)"},
+	{"litellm.InternalServerError", "", "endpoint failure: LiteLLM proxy internal server error"},
+	{"litellm.ServiceUnavailableError", "", "endpoint failure: LiteLLM proxy service unavailable"},
+	{"litellm.APIConnectionError", "", "endpoint failure: LiteLLM proxy connection error"},
+	{"litellm.Timeout", "", "endpoint failure: LiteLLM proxy timeout"},
+}
+
 func detectErrorPattern(output string) (bool, string) {
 	if strings.Contains(output, "Invalid signature in thinking block") {
 		return true, "Invalid signature in thinking block"
 	}
+	for _, sig := range endpointFailureSignatures {
+		if strings.Contains(output, sig.needle) && (sig.context == "" || strings.Contains(output, sig.context)) {
+			return true, sig.cause
+		}
+	}
 	return false, ""
+}
+
+// watchdogFailureMail formats the operator escalation mail for a detected session
+// failure. It is a pure formatter (no send) so the cause threading — including the
+// endpoint-failure signatures — is directly unit-testable; recoverAgent feeds its
+// output to sendHandoffMail (a no-op under `go test`).
+func watchdogFailureMail(agentName, pattern string) (subject, body string) {
+	subject = fmt.Sprintf("WATCHDOG: %s session failure detected: %s", agentName, pattern)
+	body = fmt.Sprintf("Watchdog detected failure in agent %s: %s. Session will be respawned.", agentName, pattern)
+	return subject, body
 }
 
 func checkSilence(agentName, output string, state map[string]*watchdogAgentState, threshold int) bool {
@@ -204,9 +251,8 @@ func recoverAgent(root, agentName string, entry config.AgentEntry, pattern strin
 		fmt.Fprintf(os.Stderr, "watchdog: %s: failed to write last_error: %v\n", agentName, err)
 	}
 
-	_ = sendHandoffMail(escalationTarget,
-		fmt.Sprintf("WATCHDOG: %s session failure detected: %s", agentName, pattern),
-		fmt.Sprintf("Watchdog detected failure in agent %s: %s. Session will be respawned.", agentName, pattern))
+	subject, body := watchdogFailureMail(agentName, pattern)
+	_ = sendHandoffMail(escalationTarget, subject, body)
 
 	if !shouldAutoRecover(entry.Type) {
 		fmt.Fprintf(os.Stderr, "watchdog: %s: interactive agent, alert-only (no respawn)\n", agentName)
@@ -215,10 +261,11 @@ func recoverAgent(root, agentName string, entry config.AgentEntry, pattern strin
 
 	meta, absWtPath := resolveWorktreeMeta(root, agentName)
 	opts := RespawnOptions{
-		FactoryRoot: root,
-		AgentName:   agentName,
-		AgentEntry:  entry,
-		PaneID:      session.SessionName(agentName),
+		FactoryRoot:  root,
+		AgentName:    agentName,
+		AgentEntry:   entry,
+		PaneID:       session.SessionName(agentName),
+		AgentWorkDir: agentDir,
 	}
 	if meta != nil {
 		opts.WorktreePath = absWtPath

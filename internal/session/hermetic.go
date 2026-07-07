@@ -3,7 +3,7 @@ package session
 // TmuxForTest exposes the unexported tmuxClient interface to external test
 // helpers (notably internal/cmd) that must inject a recording fake via
 // InstallHermeticForTest. Because it is a type alias, any value implementing the
-// 11-method tmuxClient union is assignable to it from another package without
+// 14-method tmuxClient union is assignable to it from another package without
 // that package having to name the unexported interface.
 type TmuxForTest = tmuxClient
 

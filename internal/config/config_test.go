@@ -324,14 +324,14 @@ func TestValidateAgentName_ExactlyMaxLength(t *testing.T) {
 
 func TestValidateAgentName_InvalidChars(t *testing.T) {
 	invalid := []string{
-		"../../etc",    // path traversal
-		"agent;rm",     // shell injection
-		"agent name",   // spaces
-		"123start",     // starts with digit
-		".hidden",      // starts with dot
-		"agent\ttab",   // tab
-		"agent/slash",  // slash
-		"",             // empty (covered separately but included for completeness)
+		"../../etc",   // path traversal
+		"agent;rm",    // shell injection
+		"agent name",  // spaces
+		"123start",    // starts with digit
+		".hidden",     // starts with dot
+		"agent\ttab",  // tab
+		"agent/slash", // slash
+		"",            // empty (covered separately but included for completeness)
 	}
 	for _, name := range invalid {
 		if name == "" {
@@ -727,6 +727,16 @@ func TestValidateAgentName_ReservedDispatch(t *testing.T) {
 	err := ValidateAgentName("dispatch")
 	if err == nil {
 		t.Fatal("expected error for reserved name \"dispatch\"")
+	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Errorf("error = %q, want it to contain 'reserved'", err.Error())
+	}
+}
+
+func TestValidateAgentName_ReservedOperator(t *testing.T) {
+	err := ValidateAgentName("operator")
+	if err == nil {
+		t.Fatal("expected error for reserved name \"operator\"")
 	}
 	if !strings.Contains(err.Error(), "reserved") {
 		t.Errorf("error = %q, want it to contain 'reserved'", err.Error())

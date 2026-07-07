@@ -525,6 +525,17 @@ func (t *Tmux) SetEnvironment(session, key, value string) error {
 	return err
 }
 
+// UnsetEnvironment removes an environment variable from the session (the -u form of
+// set-environment). Guarded identically to SetEnvironment: -u is still a set-environment
+// op, so the ADR-018 guard classification stays correct.
+func (t *Tmux) UnsetEnvironment(session, key string) error {
+	if t.guardOp("set-environment", session) {
+		return nil
+	}
+	_, err := t.run("set-environment", "-t", session, "-u", key)
+	return err
+}
+
 // SetOption sets a session-scoped tmux option (set-option -t). It mirrors
 // SetEnvironment: the op carries a -t target, so the ADR-018 guard can protect it
 // (the op-string literal "set-option" names the real op in the guard panic).

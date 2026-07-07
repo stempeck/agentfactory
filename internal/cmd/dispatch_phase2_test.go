@@ -24,7 +24,7 @@ func TestMatchItemToAgent_ANDSemantics_AllLabelsMatch(t *testing.T) {
 		{Labels: []string{"bug", "backend"}, Agent: "debugger"},
 	}
 
-	got := matchItemToAgent(item, mappings)
+	got, _ := matchItemToAgent(item, mappings)
 	if got != "debugger" {
 		t.Errorf("matchItemToAgent() = %q, want %q", got, "debugger")
 	}
@@ -41,7 +41,7 @@ func TestMatchItemToAgent_ANDSemantics_PartialMatchFails(t *testing.T) {
 		{Labels: []string{"bug", "backend"}, Agent: "debugger"},
 	}
 
-	got := matchItemToAgent(item, mappings)
+	got, _ := matchItemToAgent(item, mappings)
 	if got != "" {
 		t.Errorf("matchItemToAgent() = %q, want empty string (partial match should fail)", got)
 	}
@@ -58,7 +58,7 @@ func TestMatchItemToAgent_ANDSemantics_SingleLabelBackwardCompat(t *testing.T) {
 		{Labels: []string{"bug-triage"}, Agent: "debugger"},
 	}
 
-	got := matchItemToAgent(item, mappings)
+	got, _ := matchItemToAgent(item, mappings)
 	if got != "debugger" {
 		t.Errorf("matchItemToAgent() = %q, want %q", got, "debugger")
 	}
@@ -76,7 +76,7 @@ func TestMatchItemToAgent_ANDSemantics_FirstMatchWins(t *testing.T) {
 		{Labels: []string{"docs"}, Agent: "writer"},
 	}
 
-	got := matchItemToAgent(item, mappings)
+	got, _ := matchItemToAgent(item, mappings)
 	if got != "debugger" {
 		t.Errorf("matchItemToAgent() = %q, want %q (first match wins)", got, "debugger")
 	}
@@ -94,7 +94,7 @@ func TestMatchItemToAgent_ANDSemantics_NoMatch(t *testing.T) {
 		{Labels: []string{"docs"}, Agent: "writer"},
 	}
 
-	got := matchItemToAgent(item, mappings)
+	got, _ := matchItemToAgent(item, mappings)
 	if got != "" {
 		t.Errorf("matchItemToAgent() = %q, want empty string", got)
 	}

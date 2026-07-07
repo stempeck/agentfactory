@@ -36,6 +36,8 @@ var (
 	slingReset       bool
 	slingCaller      string
 	slingPersistent  bool
+	slingModel       string
+	slingSkipFitness bool
 )
 
 // InstantiateParams contains parameters for formula instantiation.
@@ -85,6 +87,8 @@ func init() {
 	slingCmd.Flags().StringVar(&slingCaller, "caller", "", "Explicit caller identity for WORK_DONE mail (used by dispatch)")
 	slingCmd.Flags().MarkHidden("caller")
 	slingCmd.Flags().BoolVar(&slingPersistent, "persistent", false, "Keep session alive after formula completion (do not auto-terminate). !IMPORTANT! ONLY used in formulas instructions, not ad-hoc specialist dispatch. Use with caution: the session will not auto-terminate on formula completion.")
+	slingCmd.Flags().StringVar(&slingModel, "model", "", "Per-agent model profile (or raw model id) from models.json — overrides the per-agent default for this launch")
+	slingCmd.Flags().BoolVar(&slingSkipFitness, "skip-fitness", false, "Launch a non-loopback model profile without a fitness attestation (loud override; see `af config models attest`)")
 	rootCmd.AddCommand(slingCmd)
 }
 
@@ -250,7 +254,7 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 		return nil
 	}
 
-	return launchAgentSession(cmd, root, agentName, worktreePath, worktreeID)
+	return launchAgentSession(cmd, root, agentName, worktreePath, worktreeID, slingModel, slingSkipFitness)
 }
 
 // resolveSpecialistAgent loads agents.json and validates that the named agent
@@ -353,7 +357,7 @@ func runFormulaInstantiation(cmd *cobra.Command, root, wd string, args []string)
 		}
 	}
 
-	if err := launchAgentSession(cmd, root, agentName, worktreePath, worktreeID); err != nil {
+	if err := launchAgentSession(cmd, root, agentName, worktreePath, worktreeID, slingModel, slingSkipFitness); err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: session launch failed: %v\n", err)
 		// Non-fatal — beads were created successfully
 	}
@@ -817,7 +821,7 @@ func detectAgentName(wd, root string) (string, error) {
 // test suite hits its global timeout. The seam mirrors newIssueStore in
 // helpers.go and lets dispatch-path tests exercise the full pipeline
 // without depending on tmux + claude being present on PATH.
-var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath, worktreeID string) error {
+var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath, worktreeID, cliModel string, skipFitness bool) error {
 	t := tmux.NewTmux()
 	if !t.IsAvailable() {
 		return fmt.Errorf("tmux is not installed or not available")
@@ -842,6 +846,28 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 		}
 	}
 	wireGitIdentity(mgr, root, worktreePath)
+
+	// Resolve the per-agent model export set (issue #480) and fail fast BEFORE
+	// mgr.Start() — an unknown profile or incomplete endpoint must never launch a
+	// half-configured tmux session. The marker dir matches where a respawn
+	// will read it (worktree agent dir when a worktree exists).
+	agentDir := config.AgentDir(root, agentName)
+	if worktreePath != "" {
+		agentDir = config.AgentDir(worktreePath, agentName)
+	}
+	modelName, modelEnv, modelErr := resolveLaunchModelEnv(root, agentName, agentDir, cliModel, entry.Model, skipFitness, cmd.ErrOrStderr())
+	if modelErr != nil {
+		return modelErr
+	}
+	if len(modelEnv) > 0 {
+		mgr.SetModelEnv(modelEnv)
+	}
+	// Persist ONLY an explicit per-launch --model override (precedence step 2); a
+	// durable agents-map/agents.json default writes no marker (it resolves durably).
+	if cliModel != "" && modelName != "" {
+		writeModelOverride(agentDir, modelName)
+	}
+
 	if err := mgr.Start(); err != nil {
 		if err == session.ErrAlreadyRunning {
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: already running\n", session.SessionName(agentName))
@@ -851,11 +877,21 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 	}
 
 	var parts []string
-	if entry.Model != "" {
-		parts = append(parts, "model: "+entry.Model)
+	displayModel := entry.Model
+	if modelName != "" {
+		displayModel = modelName
 	}
-	if entry.BaseURL != "" {
-		parts = append(parts, "endpoint: "+entry.BaseURL)
+	if displayModel != "" {
+		parts = append(parts, "model: "+displayModel)
+	}
+	// Endpoint echo from the resolved set (names only, never auth_token), falling
+	// back to the legacy field; empty when neither applies.
+	endpoint := entry.BaseURL
+	if u := modelEnvValue(modelEnv, "ANTHROPIC_BASE_URL"); u != "" {
+		endpoint = u
+	}
+	if endpoint != "" {
+		parts = append(parts, "endpoint: "+endpoint)
 	}
 	if len(parts) > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Launched %s (%s)\n", session.SessionName(agentName), strings.Join(parts, ", "))
@@ -863,6 +899,145 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 		fmt.Fprintf(cmd.OutOrStdout(), "Launched %s\n", session.SessionName(agentName))
 	}
 	return nil
+}
+
+// resolveLaunchModelEnv resolves the per-agent model-env export set for a launch
+// (issue #480). It loads models.json, reads the .runtime/model_override marker
+// (precedence step 2), applies the unknown-profile / incomplete-endpoint fail-fast,
+// and runs the pure config.ResolveModelEnv. It is the single shared resolver for
+// every launch path (sling launch and respawn; af up in Phase 4) so fail-fast and
+// precedence stay uniform.
+//
+// A non-empty cliModel makes the launch "profile-selecting": a broken models.json or
+// a bad selection fails loud (a structured error the caller must return BEFORE
+// mgr.Start()). A launch that selects no profile (cliModel == "", e.g. every respawn)
+// treats a load/resolve error as non-fatal — it warns and falls through to the global
+// default (empty set) so one bad models.json cannot brick default-model agents.
+//
+// The marker is read here in the cmd layer and passed INTO the pure resolver; the
+// resolver never reads a file or the environment (ADR-004).
+func resolveLaunchModelEnv(root, agentName, agentDir, cliModel, legacyModel string, skipFitness bool, warn io.Writer) (string, []config.EnvVar, error) {
+	profileSelecting := cliModel != ""
+
+	cfg, err := config.LoadModelsConfig(root)
+	if err != nil {
+		if profileSelecting {
+			return "", nil, fmt.Errorf("cannot select model %q: %w", cliModel, err)
+		}
+		fmt.Fprintf(warn, "warning: ignoring models.json (%v); using the global default model\n", err)
+		return "", nil, nil
+	}
+
+	// Unknown-profile fail-fast: an explicit --model naming something not in a populated
+	// registry is a typo, not a raw-id passthrough — the pure resolver would silently
+	// pass it through (models.go raw-id branch). A raw model id with NO registry stays a
+	// passthrough (`--model claude-opus-4-8` works with no models.json).
+	if profileSelecting && len(cfg.Models) > 0 {
+		if _, ok := cfg.Models[cliModel]; !ok {
+			return "", nil, fmt.Errorf("unknown model profile %q: not defined in models.json (defined: %s)", cliModel, knownProfiles(cfg))
+		}
+	}
+
+	marker := readModelOverride(agentDir)
+	name, env, ok, err := config.ResolveModelEnv(cfg, agentName, cliModel, marker, legacyModel)
+	if err != nil {
+		if profileSelecting {
+			return "", nil, fmt.Errorf("model %q: %w", name, err)
+		}
+		fmt.Fprintf(warn, "warning: ignoring models.json model %q (%v); using the global default model\n", name, err)
+		return "", nil, nil
+	}
+	if !ok {
+		return "", nil, nil
+	}
+
+	// Launch preflight (issue #508): a resolved ANTHROPIC_AUTH_TOKEN carrying a
+	// file: secret reference must point at a real, non-empty file BEFORE mgr.Start(). The
+	// cmd layer may do this I/O (ADR-004 confines only the library). A selecting launch
+	// fails fast naming profile + path; a respawn (cliModel "") warns naming the abandoned
+	// model and falls through to the global default so one missing secret can never brick a
+	// default-model agent (the 43052536 posture). The path resolves like Phase-2's emission
+	// deref: relative to the factory root, absolute as-is.
+	if tok := modelEnvValue(env, "ANTHROPIC_AUTH_TOKEN"); strings.HasPrefix(tok, "file:") {
+		path := secretRefPath(root, tok)
+		if info, statErr := os.Stat(path); statErr != nil || info.IsDir() || info.Size() == 0 {
+			if profileSelecting {
+				return "", nil, fmt.Errorf("model %q: secret reference ANTHROPIC_AUTH_TOKEN → %s: file not found", name, path)
+			}
+			fmt.Fprintf(warn, "warning: agent %s: model %q secret %s missing; falling back to %s\n", agentName, name, path, globalDefaultDesc(legacyModel))
+			return "", nil, nil
+		}
+	}
+
+	// Fitness attestation interlock (issue #508): a selecting launch of a profile
+	// with a NON-loopback endpoint requires a recorded fitness attestation (af config models
+	// attest) unless --skip-fitness is passed. Loopback profiles are exempt, a profile with
+	// no endpoint (a plain model-id passthrough) is not gated at all, and a respawn
+	// (non-selecting) never reaches the refuse branch — so a routine handoff can never brick.
+	if endpoint := modelEnvValue(env, "ANTHROPIC_BASE_URL"); profileSelecting && endpoint != "" && !config.IsLoopbackEndpoint(endpoint) {
+		if skipFitness {
+			fmt.Fprintf(warn, "warning: --skip-fitness: launching model %q on non-loopback endpoint %s without a fitness attestation (operator override)\n", name, endpoint)
+		} else if !hasFitnessAttestation(root, name) {
+			return "", nil, fmt.Errorf("model %q targets a non-loopback endpoint with no fitness attestation; run `af config models attest %s` after verifying it, or pass --skip-fitness to override", name, name)
+		}
+	}
+
+	return name, env, nil
+}
+
+// globalDefaultDesc names the fallback target for a non-selecting launch whose selected
+// profile's secret is missing: the agent's legacy default model when it has one, else the
+// implicit global default. Used to name both the abandoned and the fallback model in the
+// respawn secret-missing warning.
+func globalDefaultDesc(legacyModel string) string {
+	if legacyModel != "" {
+		return fmt.Sprintf("global default model %s", legacyModel)
+	}
+	return "global default model"
+}
+
+// knownProfiles returns the sorted, comma-joined profile names defined in cfg, so a
+// fail-fast error can point the operator at the valid choices.
+func knownProfiles(cfg *config.ModelsConfig) string {
+	names := make([]string, 0, len(cfg.Models))
+	for n := range cfg.Models {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+// modelEnvValue returns the value of the first export with the given key, or "".
+func modelEnvValue(env []config.EnvVar, key string) string {
+	for _, e := range env {
+		if e.Key == key {
+			return e.Value
+		}
+	}
+	return ""
+}
+
+// writeModelOverride persists the resolved per-launch model override to
+// <agentDir>/.runtime/model_override (issue #480). Written unconditionally
+// (mirrors writeDispatchedMarker) so a fresh --model overwrites a stale marker; the
+// existing --reset .runtime wipe cleans it. Only the per-launch --model override is
+// persisted here — never an agents.json/models.json.agents default (those resolve
+// durably without a marker, so a one-off override never becomes sticky).
+func writeModelOverride(agentDir, name string) {
+	runtimeDir := filepath.Join(agentDir, ".runtime")
+	os.MkdirAll(runtimeDir, 0o755)
+	os.WriteFile(filepath.Join(runtimeDir, "model_override"), []byte(name), 0o644)
+}
+
+// readModelOverride reads the per-launch model override marker from
+// <workDir>/.runtime/model_override (mirrors readHookedFormulaID). Returns "" when
+// absent; the value is passed into the pure resolver as the precedence-step-2 marker.
+func readModelOverride(workDir string) string {
+	data, err := os.ReadFile(filepath.Join(workDir, ".runtime", "model_override"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // formulaUsesBeadSources returns true if any variable in the formula uses a bead-based source.

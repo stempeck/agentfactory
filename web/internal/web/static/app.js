@@ -1,6 +1,6 @@
 /* ============================================================================
    app.js — Direction A · "Neon Bazaar" Floor view (Phase 1, vanilla JS).
-   Implements the four Phase-1 view-models from design-contract.yaml:
+   Implements the four Phase-1 view-models:
      AppViewModel · PowerBarViewModel · ConfirmViewModel · FloorViewModel
    No framework. Reads /api/agents (honest read-model) and drives the
    allowlisted control verbs (af up / af down / af down --reset) through the
@@ -171,7 +171,7 @@
     },
     search: function (q) { this.query = (q || '').toLowerCase(); render(); },
     filterByStatus: function (f) { this.statusFilter = f || 'all'; syncFilterButtons(); render(); },
-    viewAgent: function (name) { toast('Agent detail for ' + name + ' arrives in a later phase'); },
+    viewAgent: function (name) { AppViewModel.navigate('agent/' + name); },
     downAgent: function (name) {
       return API.post('/api/agents/' + encodeURIComponent(name) + '/down', { reset: false, confirm: false })
         .then(report(name + ' is stopping')).then(function () { FloorViewModel.refresh(); });
@@ -189,7 +189,7 @@
   // SlingViewModel — pick an idle agent, build its form, sling a task.
   // Issues the identical `af sling --agent <name> --reset --var k=v …` argv
   // the operator would run by hand; the server hides identity-bearing vars
-  // (INV-2) and rejects unknown keys. Sling is fire-and-forget: success copy
+  // and rejects unknown keys. Sling is fire-and-forget: success copy
   // says "starting", never "working".
   // =========================================================================
   var SlingViewModel = {
@@ -247,7 +247,7 @@
       var vars = collectFormValues(this.schema);
       if (primary) delete vars[primary]; // the task is the positional; it must not double-bind as a --var.
 
-      // Validate EVERY required field (not just the task) before dispatch (K7). required_unless
+      // Validate EVERY required field (not just the task) before dispatch. required_unless
       // fields are a hint only — the CLI is the arbiter — so they are intentionally not blocked here.
       var fields = (this.schema.fields || []);
       for (var i = 0; i < fields.length; i++) {
@@ -262,7 +262,7 @@
       var self = this;
       var dispatch = function () { return self._postSling(name, task, vars); };
 
-      // --reset blast-radius guard (K6): always-`--reset` would discard a live formula step. If the
+      // --reset blast-radius guard: always-`--reset` would discard a live formula step. If the
       // chosen idle agent still holds a live (non-terminal) step, require a browser confirm first.
       // This is a UI affordance, NOT an af-core runtime prompt (ADR-014 unaffected).
       var sel = this._agentByName(name);
@@ -300,7 +300,7 @@
   };
 
   // ---- view toggles (exactly one #view-* section visible at a time) ----
-  var VIEW_IDS = ['view-floor', 'view-sling', 'view-dispatch', 'view-settings', 'view-prototypes'];
+  var VIEW_IDS = ['view-floor', 'view-sling', 'view-dispatch', 'view-settings', 'view-prototypes', 'view-agent'];
   function showView(id) {
     VIEW_IDS.forEach(function (v) { var s = byId(v); if (s) s.hidden = (v !== id); });
   }
@@ -343,7 +343,7 @@
     var host = byId('sling-form-host'); if (!host) return;
     host.innerHTML = '';
     var fields = (schema && schema.fields) || [];
-    // Server-authoritative: which field the positional task effectively binds to (K3). Blank == the
+    // Server-authoritative: which field the positional task effectively binds to. Blank == the
     // synthetic-task-box signal (e.g. design-v7, whose issue is hook-sourced) — never re-derived client-side.
     var primary = (schema && schema.primary) || '';
     var primaryField = null;
@@ -388,7 +388,8 @@
     var wrap = el('div', 'formrow taskbox');
     var lbl = el('label', 'lbl');
     lbl.setAttribute('for', 'sling-field-' + key);
-    // L2 — drive the label from the primary field so distinct agents visibly differ.
+    // Drive the label from the primary field so distinct agents visibly differ, rather than
+    // the same hardcoded placeholder/label for every agent.
     lbl.appendChild(document.createTextNode(synthetic ? 'Task / issue reference' : (f.description || f.name)));
     lbl.appendChild(document.createTextNode(' '));
     lbl.appendChild(el('span', 'req', 'required'));
@@ -397,7 +398,8 @@
     ta.id = 'sling-field-' + key;
     ta.setAttribute('data-key', key);
     ta.setAttribute('aria-describedby', 'sling-field-err-' + key);
-    // L2 — name the bound field in the placeholder so the box is distinct per agent.
+    // Name the bound field in the placeholder so the box is distinct per agent, same reasoning
+    // as the label above.
     ta.placeholder = synthetic
       ? 'Paste a GitHub issue/PR URL, a path to a problem description, or describe the task…'
       : 'Paste a GitHub issue/PR URL, a path, or a description — this becomes “' + (f.name || f.description) + '”.';
@@ -430,7 +432,7 @@
     row.appendChild(lbl);
     var ctl = controlFor(f);
     row.appendChild(ctl);
-    // Required (non-primary) fields get the same per-field error machinery as the task box (K7) —
+    // Required (non-primary) fields get the same per-field error machinery as the task box —
     // generalized, not a parallel system: same sling-field-err-<name> id + clear-on-input.
     if (required) {
       ctl.addEventListener('input', onFieldInput);
@@ -472,8 +474,8 @@
     var err = byId('sling-field-err-' + key); if (err) err.hidden = false;
     var ta = byId('sling-field-' + key); if (ta) ta.focus();
   }
-  // Persistent inline failure surface (K7): a sling failure renders env.message here, not as an
-  // ephemeral toast. Reuses the .validation danger class (#sling-error in index.html).
+  // Persistent inline failure surface: a sling failure renders env.message here, not as an
+  // ephemeral toast. Reuses the .validation danger class (the sling-error region in index.html).
   function showSlingError(msg) {
     var box = byId('sling-error'); if (!box) return;
     box.textContent = msg || 'sling failed';
@@ -483,7 +485,7 @@
   function clearSlingError() {
     var box = byId('sling-error'); if (box) { box.hidden = true; box.textContent = ''; }
   }
-  // A live (non-terminal) formula step means re-slinging (always `--reset`) would discard work (K6).
+  // A live (non-terminal) formula step means re-slinging (always `--reset`) would discard work.
   // step_state strings come from the /api/agents read-model (af-core agents.go): ready/blocked are
   // live; all_complete/no_formula/error/empty (and the empty string) are terminal.
   function isTerminalStep(state) {
@@ -846,12 +848,221 @@
   function showValidation(id, msg) { var e = byId(id); if (e) { e.textContent = msg; e.hidden = false; } }
 
   // =========================================================================
+  // AgentDetailViewModel — the sixth view (route "agent/<name>", #500). Renders
+  // the honest per-agent detail from GET /api/agents/{name}/detail: a status
+  // header + receipt-anchored freshness, a conditional gate banner, the
+  // facts grid (RUNNING vs DECLARED formula kept DISTINCT — #455), a read-only
+  // session snapshot filled via textContent ONLY, and a mail composer.
+  // Ages anchor to Date.now() at RESPONSE RECEIPT — the
+  // clock-skew-vulnerable server-stamp math in tickStale is deliberately NOT reused.
+  // =========================================================================
+  var AgentDetailViewModel = {
+    name: '',
+    data: null,        // last successful detail payload {agent, declared_formula, tail}
+    receivedAt: 0,     // Date.now() at receipt of `data` — the anchor for every age
+    stale: false,      // true after a failed refresh: keep the last snapshot, warn honestly, keep polling
+
+    activate: function (name) {
+      this.name = name;
+      this.data = null;
+      this.receivedAt = 0;
+      this.stale = false;
+      byId('agent-name').textContent = name;
+      byId('agent-mail-ok').hidden = true;
+      hide('agent-mail-err');
+      showView('view-agent');
+      renderAgentDetail(); // paint the loading shell immediately
+      return this.refresh();
+    },
+    refresh: function () {
+      var self = this;
+      var name = this.name;
+      if (!name) return;
+      return API.get('/api/agents/' + encodeURIComponent(name) + '/detail').then(function (env) {
+        if (self.name !== name) return; // a newer navigation won
+        if (!env || !env.ok) {
+          self.stale = true;   // keep the last snapshot; the freshness line flips to the explicit warning
+          renderAgentDetail();
+          return;
+        }
+        self.data = env.data || {};
+        self.receivedAt = Date.now();
+        self.stale = false;
+        renderAgentDetail();
+      }).catch(function () {
+        if (self.name !== name) return;
+        self.stale = true;
+        renderAgentDetail();
+      });
+    },
+    send: function () {
+      var self = this;
+      var name = this.name;
+      if (!name) return;
+      var subject = String((byId('agent-mail-subject') || {}).value || '').trim();
+      var body = String((byId('agent-mail-body') || {}).value || '').trim();
+      hide('agent-mail-err');
+      byId('agent-mail-ok').hidden = true;
+      if (!subject) { showAgentMailError('Add a subject before sending.'); return; }
+      if (!body) { showAgentMailError('Write a message before sending.'); return; }
+      var btn = byId('agent-mail-send');
+      if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+      return API.post('/api/agents/' + encodeURIComponent(name) + '/mail', { subject: subject, body: body }).then(function (env) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Send mail'; }
+        if (env && env.ok) {
+          var msg = 'Mail queued for ' + name + ' — the agent reads it when it next checks its inbox.';
+          if (self.data && self.data.tail && self.data.tail.live) {
+            msg += ' It will see a notification banner in its session.';
+          }
+          byId('agent-mail-ok-msg').textContent = msg;
+          byId('agent-mail-ok').hidden = false;
+          byId('agent-mail-ok').scrollIntoView({ block: 'nearest' });
+          byId('agent-mail-subject').value = '';
+          byId('agent-mail-body').value = '';
+        } else {
+          showAgentMailError((env && env.message) || 'mail failed');
+        }
+        return env;
+      }).catch(function (e) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Send mail'; }
+        showAgentMailError(String(e));
+      });
+    }
+  };
+
+  // Receipt-anchored age formatter: the argument is a millisecond delta measured from
+  // Date.now() at RESPONSE RECEIPT — never new Date(serverStamp), which tickStale uses and which is
+  // clock-skew-vulnerable. Returns a trailing-"ago" phrase (or "just now").
+  function agoText(ms) {
+    var s = Math.max(0, Math.round((ms || 0) / 1000));
+    if (s < 2) return 'just now';
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.round(s / 60) + 'm ago';
+    if (s < 86400) return Math.round(s / 3600) + 'h ago';
+    return Math.round(s / 86400) + 'd ago';
+  }
+
+  function renderAgentDetail() {
+    var vm = AgentDetailViewModel;
+    var d = vm.data;
+    var agent = (d && d.agent) || null;
+
+    var badgeHost = byId('agent-badge');
+    if (badgeHost) {
+      badgeHost.innerHTML = '';
+      var st = STATUS[(agent && agent.status)] || STATUS.idle;
+      var badge = el('span', st.neutral ? 'badge neutral' : 'badge');
+      if (!st.neutral) badge.appendChild(el('span', 'pip'));
+      badge.appendChild(document.createTextNode(st.label));
+      badgeHost.appendChild(badge);
+    }
+
+    // Freshness strip — receipt-anchored. Stale ⇒ explicit warning; else "Ns ago".
+    var fresh = byId('agent-fresh');
+    if (fresh) {
+      if (vm.stale && vm.receivedAt) { fresh.textContent = 'snapshot may be stale — last captured ' + agoText(Date.now() - vm.receivedAt) + '; retrying'; }
+      else if (vm.receivedAt) { fresh.textContent = 'updated ' + agoText(Date.now() - vm.receivedAt); }
+      else if (vm.stale) { fresh.textContent = 'could not load — retrying'; }
+      else { fresh.textContent = 'loading…'; }
+    }
+
+    // Gate banner (conditional): only when the agent is parked at a gate; the composer sits below it.
+    var gate = byId('agent-gate');
+    if (gate) {
+      var isGate = !!(agent && agent.is_gate);
+      gate.hidden = !isGate;
+      if (isGate) { byId('agent-gate-text').textContent = 'Parked at gate ' + (agent.gate_id || '—') + ' — your input is needed'; }
+    }
+
+    renderAgentFacts(agent, d);
+    renderAgentSnapshot(d);
+  }
+
+  // Facts grid. RUNNING (agent.formula) vs CONFIGURED (declared_formula) are DISTINCT labels —
+  // never merged (#455). A reset agent with no recorded run state renders an honest empty state,
+  // never blank cells that imply retained-but-hidden data.
+  function renderAgentFacts(agent, d) {
+    var host = byId('agent-facts'); if (!host) return;
+    host.innerHTML = '';
+    if (!agent) { host.appendChild(factRow('status', 'loading…')); return; }
+    var noRun = !agent.step_id && !agent.step_state && !agent.formula;
+    host.appendChild(factRow('status', (STATUS[agent.status] || STATUS.idle).label));
+    host.appendChild(factRow('running formula', agent.formula || '—'));
+    host.appendChild(factRow('configured formula', (d && d.declared_formula) || '—'));
+    if (noRun) {
+      host.appendChild(factRow('step', 'no recorded run state'));
+    } else {
+      host.appendChild(factRow('step', (agent.step_title || agent.step_id || '—') + (agent.step_state ? ' · ' + agent.step_state : '')));
+    }
+    host.appendChild(factRow('gate', agent.is_gate ? ('parked · ' + (agent.gate_id || '—')) : 'none'));
+    if (agent.inputs && Object.keys(agent.inputs).length) {
+      Object.keys(agent.inputs).forEach(function (k) { host.appendChild(factRow(k, String(agent.inputs[k]))); });
+    }
+  }
+  function factRow(k, v) {
+    var row = el('div', 'fact');
+    row.appendChild(el('span', 'fk', k));
+    row.appendChild(el('span', 'fv', v));
+    return row;
+  }
+
+  // Read-only session snapshot. The pane is filled via textContent ONLY — NEVER
+  // innerHTML — so terminal bytes can never inject markup. live=false renders the last-known state
+  // plus a hint that mail still queues normally (the bead persists; only the delivery banner is
+  // skipped); a per-pane "captured Ns ago" is receipt-anchored.
+  function renderAgentSnapshot(d) {
+    var pre = byId('agent-snapshot'); if (!pre) return;
+    var note = byId('agent-snapshot-note');
+    var captured = byId('agent-snapshot-captured');
+    var tail = (d && d.tail) || null;
+    // Follow the newest output ONLY when the operator is already pinned to the bottom, so a manual
+    // scroll-back to read older output is never yanked away by the 5s refresh.
+    var pinned = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 4;
+    if (!tail) {
+      pre.textContent = '';
+      if (note) note.hidden = true;
+      if (captured) captured.hidden = true;
+    } else if (tail.live === false) {
+      pre.textContent = tail.output || '';
+      if (note) {
+        note.textContent = 'No live session — showing last-known agent state. This agent is stopped — your mail will wait in its inbox.';
+        note.hidden = false;
+      }
+      if (captured) captured.hidden = true;
+    } else {
+      pre.textContent = tail.output || '';
+      if (note) note.hidden = true;
+      if (captured) {
+        if (tail.captured_at) { captured.textContent = 'captured ' + agoText(Date.now() - AgentDetailViewModel.receivedAt); captured.hidden = false; }
+        else { captured.hidden = true; }
+      }
+    }
+    if (pinned) pre.scrollTop = pre.scrollHeight;
+  }
+
+  function showAgentMailError(msg) {
+    var box = byId('agent-mail-err'); if (!box) return;
+    box.textContent = msg || 'mail failed';
+    box.hidden = false;
+    box.scrollIntoView({ block: 'nearest' });
+  }
+
+  // =========================================================================
   // AppViewModel — shell / nav / staleness.
   // =========================================================================
   var AppViewModel = {
     currentRoute: 'floor',
     lastUpdated: '',
     navigate: function (route) {
+      // Parameterized detail route ("agent/<name>") is parsed FIRST — BEFORE the syncNav(route)
+      // below — because a bare syncNav('agent/x') matches no nav anchor and would clear every
+      // highlight. The Floor tab stays lit while a detail view is open.
+      if (route.indexOf('agent/') === 0) {
+        this.currentRoute = route;
+        syncNav('floor');
+        AgentDetailViewModel.activate(route.slice(6));
+        return;
+      }
       this.currentRoute = route;
       syncNav(route);                                               // move the highlight first, for every route
       if (route === 'sling') { SlingViewModel.activate(); return; }
@@ -859,7 +1070,7 @@
       if (route === 'settings') { SettingsViewModel.activate(); return; }
       if (route === 'prototypes') { PrototypesViewModel.activate(); return; }
       if (route === 'floor') { showFloor(); return; }
-      toast(cap(route) + ' view arrives in a later phase');
+      this.goHome();                                                // unknown route → home, silently
     },
     goHome: function () { this.currentRoute = 'floor'; syncNav('floor'); showFloor(); },
     refresh: function () { return FloorViewModel.refresh(); }
@@ -892,7 +1103,10 @@
     var lit = FloorViewModel.agents.filter(function (a) { return a.running; });
     var allowed = FILTERS[FloorViewModel.statusFilter];
     var q = FloorViewModel.query;
-    var shown = lit.filter(function (a) {
+    // The "Stopped" segment shows ONLY dark cards: the lit grid is emptied for it (no FILTERS['stopped']
+    // entry — that would wrongly run against the running grid).
+    var stoppedOnly = FloorViewModel.statusFilter === 'stopped';
+    var shown = stoppedOnly ? [] : lit.filter(function (a) {
       if (allowed && allowed.indexOf(a.status) === -1) return false;
       if (q && a.name.toLowerCase().indexOf(q) === -1) return false;
       return true;
@@ -903,7 +1117,60 @@
 
     byId('lit-count').textContent = String(lit.length);
     byId('lit-label').textContent = String(lit.length);
+    // #empty stays keyed on lit.length: "No agents running" remains
+    // literally true even when dark cards are visible — stopped agents are, by definition, not running.
     byId('empty').hidden = lit.length !== 0;
+
+    renderDarkGroup(q); // additive pass, AFTER the untouched lit pipeline above
+  }
+
+  // The dimmed "Dark" group (#500): stopped agents rendered as View-only cards, appended AFTER the
+  // lit pipeline. Keyed on !a.running — NEVER status === "stopped", which diverges on the
+  // liveness-probe-failure path. It honors the "Stopped" segment itself: visible only under the All
+  // or Stopped filters.
+  function renderDarkGroup(q) {
+    var darkGrid = byId('dark-grid'); if (!darkGrid) return;
+    var f = FloorViewModel.statusFilter;
+    var show = (f === 'all' || f === 'stopped');
+    var dark = show ? FloorViewModel.agents.filter(function (a) { return !a.running; }) : [];
+    if (q) { dark = dark.filter(function (a) { return a.name.toLowerCase().indexOf(q) > -1; }); }
+
+    darkGrid.innerHTML = '';
+    dark.forEach(function (a) { darkGrid.appendChild(darkCard(a)); });
+
+    var label = byId('dark-label');
+    if (label) label.hidden = dark.length === 0;
+    var dc = byId('dark-count'); if (dc) dc.textContent = String(dark.length);
+    darkGrid.hidden = dark.length === 0;
+  }
+
+  // darkCard is the stopped-agent card variant: dimmed, name + "Stopped" badge + last-known formula,
+  // and a View button ONLY — no Down/Reset menu, since a stopped agent has nothing to stop.
+  // The card() builder is left byte-untouched.
+  function darkCard(a) {
+    var li = el('li', 'sign s-idle dark');
+    li.setAttribute('data-name', a.name);
+    li.setAttribute('data-status', 'stopped');
+
+    var badges = el('div', 'badges');
+    var badge = el('span', 'badge neutral');
+    badge.appendChild(document.createTextNode('Stopped'));
+    badges.appendChild(badge);
+    li.appendChild(badges);
+
+    li.appendChild(el('div', 'name', a.name));
+
+    var step = el('div', 'step');
+    step.appendChild(el('span', 'tt', a.formula ? ('last: ' + a.formula) : 'no recorded formula'));
+    li.appendChild(step);
+
+    var acts = el('div', 'acts');
+    var view = el('button', 'btn primary', 'View');
+    view.type = 'button';
+    view.addEventListener('click', function () { FloorViewModel.viewAgent(a.name); });
+    acts.appendChild(view);
+    li.appendChild(acts);
+    return li;
   }
 
   function el(tag, cls, text) {
@@ -1023,6 +1290,8 @@
     var sar = byId('set-add-row'); if (sar) sar.addEventListener('click', function () { SettingsViewModel.addRow(); });
     var ssave = byId('set-save'); if (ssave) ssave.addEventListener('click', function () { SettingsViewModel.save(); });
     var pf = byId('proto-fb-form'); if (pf) pf.addEventListener('submit', function (e) { e.preventDefault(); PrototypesViewModel.send(); });
+    var amf = byId('agent-mail-form'); if (amf) amf.addEventListener('submit', function (e) { e.preventDefault(); AgentDetailViewModel.send(); });
+    var aback = byId('agent-back'); if (aback) aback.addEventListener('click', function () { AppViewModel.goHome(); });
     document.querySelectorAll('.seg button').forEach(function (b) {
       b.addEventListener('click', function () { FloorViewModel.filterByStatus(b.getAttribute('data-filter')); });
     });
@@ -1039,8 +1308,11 @@
     FloorViewModel.refresh();
     setInterval(function () {
       FloorViewModel.refresh();
-      // Poll the dispatch feed too while its view is active (same 5s cadence; scale.md Decision 1).
+      // Poll the dispatch feed too while its view is active (same 5s cadence).
       if (AppViewModel.currentRoute === 'dispatch') { DispatchViewModel.refresh(); }
+      // Poll the open agent-detail view too (poll-ONLY-while-open) — keyed on the
+      // parameterized "agent/" route so the snapshot refreshes every 5s exactly while it is visible.
+      if (AppViewModel.currentRoute.indexOf('agent/') === 0) { AgentDetailViewModel.refresh(); }
     }, 5000);
     setInterval(tickStale, 1000);                                  // honest staleness clock
     window.setTimeout(function () { document.body.classList.remove('boot'); }, 1400);
@@ -1058,4 +1330,5 @@
   window.DispatchViewModel = DispatchViewModel;
   window.SettingsViewModel = SettingsViewModel;
   window.PrototypesViewModel = PrototypesViewModel;
+  window.AgentDetailViewModel = AgentDetailViewModel;
 })();

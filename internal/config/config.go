@@ -59,8 +59,12 @@ var validAgentName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
 // reservedNames are agent names that conflict with agentfactory internals.
 // "dispatch" is reserved because session.SessionName("dispatch") produces the
 // af-dispatch session name, which collides with the dispatcher's tmux session.
+// "operator" is reserved because the web console's mail sender uses it as a
+// synthetic identity (--from operator); a real agent with that name would be
+// indistinguishable from the console's mail, defeating the sender boundary.
 var reservedNames = map[string]bool{
 	"dispatch": true,
+	"operator": true,
 }
 
 // MessagingConfig holds the contents of messaging.json

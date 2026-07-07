@@ -47,7 +47,7 @@ func TestResling_PreservesAttemptsWhenSlingFails(t *testing.T) {
 
 	var slingCount int
 	orig := dispatchItem
-	dispatchItem = func(root, agent, itemURL, caller string) (string, error) {
+	dispatchItem = func(root, agent, itemURL, caller, model string) (string, error) {
 		slingCount++
 		return "", fmt.Errorf("sling boom (af unreachable)")
 	}
@@ -87,7 +87,7 @@ func TestResling_CeilingFiresOnPersistentSlingFailure(t *testing.T) {
 
 	var slingCount int
 	orig := dispatchItem
-	dispatchItem = func(root, agent, itemURL, caller string) (string, error) {
+	dispatchItem = func(root, agent, itemURL, caller, model string) (string, error) {
 		slingCount++
 		return "", fmt.Errorf("sling boom (af unreachable)")
 	}

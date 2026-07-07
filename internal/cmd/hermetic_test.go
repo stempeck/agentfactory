@@ -13,10 +13,10 @@ import (
 )
 
 // fakeTmux is the single hermetic tmux double for issue #309 Phase 2. It
-// satisfies BOTH the internal/session tmuxClient (13 methods, incl. the #412
-// Phase-4 ShowOption read-back) and the internal/cmd cmdTmux (9 methods) seam
-// interfaces — the 17-method distinct union — recording every would-be op in
-// order and returning benign values. It
+// satisfies BOTH the internal/session tmuxClient (14 methods, incl. the #412
+// Phase-4 ShowOption read-back and the #508 UnsetEnvironment) and the internal/cmd
+// cmdTmux (9 methods) seam interfaces — the 18-method distinct union — recording
+// every would-be op in order and returning benign values. It
 // performs NO real I/O, never sleeps, and never shells out; a default-suite test
 // that installs it via setupHermeticSessions cannot reach the real tmux server.
 //
@@ -69,6 +69,11 @@ func (f *fakeTmux) SendKeysDelayed(sess, keys string, delayMs int) error {
 
 func (f *fakeTmux) SetEnvironment(sess, key, value string) error {
 	f.record(fmt.Sprintf("SetEnvironment %s %s=%s", sess, key, value))
+	return nil
+}
+
+func (f *fakeTmux) UnsetEnvironment(sess, key string) error {
+	f.record(fmt.Sprintf("UnsetEnvironment %s %s", sess, key))
 	return nil
 }
 

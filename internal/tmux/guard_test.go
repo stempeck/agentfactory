@@ -130,6 +130,7 @@ func TestGuard_ZeroProductionRealOps(t *testing.T) {
 	_ = tx.KillSession("af-test-ab12cd34-x")
 	_ = tx.NewSession("af-test-ab12cd34-y", "/tmp")
 	_ = tx.SetEnvironment("af-test-ab12cd34-z", "K", "V")
+	_ = tx.UnsetEnvironment("af-test-ab12cd34-z", "K")
 
 	if _, err := tx.HasSession("af-manager"); err != nil {
 		t.Errorf("HasSession read-only probe returned err: %v", err)

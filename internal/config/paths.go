@@ -18,6 +18,7 @@ func AgentsConfigPath(root string) string    { return filepath.Join(root, dotDir
 func MessagingConfigPath(root string) string { return filepath.Join(root, dotDir, "messaging.json") }
 func DispatchConfigPath(root string) string  { return filepath.Join(root, dotDir, "dispatch.json") }
 func StartupConfigPath(root string) string   { return filepath.Join(root, dotDir, "startup.json") }
+func ModelsConfigPath(root string) string    { return filepath.Join(root, dotDir, "models.json") }
 func HooksDir(root string) string            { return filepath.Join(root, dotDir, "hooks") }
 
 // GitHooksDir is the af-managed git hooks directory (issue #371). It is

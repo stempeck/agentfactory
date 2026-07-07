@@ -31,37 +31,39 @@ import (
 )
 
 func main() {
-	// K4 (#432): resolve the VALIDATED factory root — AF_ROOT-first-then-cwd, walked up to a real
+	// Resolve the VALIDATED factory root (#432) — AF_ROOT-first-then-cwd, walked up to a real
 	// .agentfactory/factory.json — instead of the raw os.Getwd()/AF_ROOT value that could silently
-	// serve a wrong-but-valid (or non-existent) factory (R2). Validating here also fixes the ADR-010
+	// serve a wrong-but-valid (or non-existent) factory. Validating here also fixes the ADR-010
 	// rendezvous-file placement for free (the same validated string feeds rendezvous.Ensure below).
 	// Fail loud when no factory resolves (mirrors the log.Fatalf precedents below): a bounded,
-	// clearly-logged exit that the detached/bounded relaunch guard tolerates without busy-looping
-	// (LOW-e).
+	// clearly-logged exit that the detached/bounded relaunch guard tolerates without busy-looping.
 	root, err := config.ResolveFactoryRoot()
 	if err != nil {
 		log.Fatalf("afweb: cannot resolve factory root: %v", err)
 	}
 
-	// LOW-b: Wrapper.root (pre-flight) and ExecRunner.root (the af child's cwd) are sourced from the
+	// Wrapper.root (pre-flight) and ExecRunner.root (the af child's cwd) are sourced from the
 	// SAME validated root above, so they can never diverge.
 	runner := exec.NewExecRunner(root)
 	wrapper := exec.NewWrapper(runner, root)
 	rm := readmodel.New(wrapper, readmodel.NewTmuxLiveness())
+	capture := readmodel.NewTmuxCapture() // #500: per-agent read-only session-snapshot reader (probe-first)
 	forms := formschema.New(wrapper)
 	disp := dispatch.New(wrapper)
 	settings := config.New(root, wrapper)
-	protos := proto.New(root)                // C7: serve on-disk prototypes under <root>/.designs/
-	feedbackWriter := feedback.New(root, rm) // C6: gate-verify via the read-model (Option a; no new exec)
+	protos := proto.New(root)                // serve on-disk prototypes under <root>/.designs/
+	feedbackWriter := feedback.New(root, rm) // gate-verify via the read-model (no new exec)
 
 	opts := []server.Option{
-		server.WithRoot(root), // K5: surface the served factory root via /healthz (Gap 7)
+		server.WithRoot(root), // surfaced via /healthz so a wrong-but-valid root is visible, not silent
 		server.WithFormReader(forms),
 		server.WithDispatchReader(disp),
 		server.WithSettings(settings),
 		server.WithFormulaResolver(settings), // #455: Sling form resolves the DECLARED formula from agents.json (same *config.Service)
 		server.WithPrototypes(protos),
 		server.WithFeedback(feedbackWriter),
+		server.WithTailer(capture), // #500: GET /api/agents/{name}/detail session snapshot
+		server.WithMailer(wrapper), // #500: POST /api/agents/{name}/mail (Wrapper.MailSend, sender=operator)
 	}
 	if bind := os.Getenv("AF_BIND"); bind != "" {
 		opts = append(opts, server.WithBind(bind))
@@ -89,8 +91,8 @@ func main() {
 		log.Printf("afweb: web UI already running at %s; nothing to do", url)
 		return
 	}
-	_ = ln // the listener stays open; srv.Listen() serves on it in its own goroutine
-	log.Printf("afweb: factory root: %s", root) // K5: surface the resolved root (Gap 7; ux.md log-variant)
+	_ = ln                                      // the listener stays open; srv.Listen() serves on it in its own goroutine
+	log.Printf("afweb: factory root: %s", root) // so an operator can see which factory this process resolved to
 	log.Printf("afweb: serving the Floor at %s/", url)
 	log.Printf("afweb: session token: %s  (required only when the bind is not loopback)", srv.Token())
 

@@ -60,7 +60,7 @@ func recordLabelEdits(t *testing.T, edits *[]labelEdit) {
 func recordSlings(t *testing.T, store *memstore.Store, slung *[]string, ids *[]string) {
 	t.Helper()
 	orig := dispatchItem
-	dispatchItem = func(root, agent, itemURL, caller string) (string, error) {
+	dispatchItem = func(root, agent, itemURL, caller, model string) (string, error) {
 		*slung = append(*slung, agent)
 		iss, err := store.Create(context.Background(), issuestore.CreateParams{
 			Title: "Formula: " + agent, Type: issuestore.TypeEpic,
@@ -437,7 +437,7 @@ func TestWorkflow_NotComplete_IdleAgent_ReslingsSamePhase_ClearsRecord(t *testin
 	state := dispatchState{Dispatched: map[string]dispatchEntry{
 		"owner/repo#7": {
 			Agent: "impl", Workflow: "feature-workflow", Phase: "enhancement",
-			PhaseInstanceID: notComplete.ID,
+			PhaseInstanceID:   notComplete.ID,
 			PhaseDispatchedAt: time.Now().Add(-time.Hour), // beyond the retry window
 			Attempts:          1,
 		},
@@ -533,8 +533,8 @@ func TestWorkflow_Item_NeverTouchesNonWorkflowRetryWindow(t *testing.T) {
 	state := dispatchState{Dispatched: map[string]dispatchEntry{
 		"owner/repo#7": {
 			Agent: "impl", Workflow: "feature-workflow", Phase: "enhancement",
-			PhaseInstanceID: complete.ID,
-			DispatchedAt:    time.Now(), // within the non-workflow retry window
+			PhaseInstanceID:   complete.ID,
+			DispatchedAt:      time.Now(), // within the non-workflow retry window
 			PhaseDispatchedAt: time.Now(),
 		},
 	}}
@@ -616,7 +616,7 @@ func TestWorkflow_PhaseAgent_DirectLabelLookup_NotShadowedByWorkflowLabelMapping
 
 	// Sanity: the shadowing first-match path WOULD mis-route.
 	shadowItem := ghItem{Labels: labels("agentic", "feature-workflow", "enhancement")}
-	if got := matchItemToAgent(shadowItem, cfg.Mappings); got != "WRONG" {
+	if got, _ := matchItemToAgent(shadowItem, cfg.Mappings); got != "WRONG" {
 		t.Fatalf("precondition: matchItemToAgent first-match = %q, want WRONG (shadow setup)", got)
 	}
 

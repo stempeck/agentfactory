@@ -50,14 +50,14 @@ execution formula regardless of the skill being converted.
 | N+2 | `run-tests` | Full test suite, terraform validation if applicable |
 | N+3 | `self-verify` | Gate: verify implementation matches design contract (Jidoka) |
 | N+4 | `cleanup-workspace` | Skill artifact removal, workspace hygiene, push branch |
-| N+5 | `prepare-for-review` | `bd update` with completion notes |
+| N+5 | `prepare-for-review` | `af bead update` with completion notes |
 | N+6 | `submit-and-exit` | `af done`, become recyclable |
 
 **The `needs` chain must be unbroken.** The first domain step needs `["preflight-tests"]`.
 The `self-review` step needs `["<last-domain-step-or-gate>"]`. Every step between has a
 `needs` pointing to the previous step.
 
-**The `load-context` step MUST include requirement source detection.** Polecats receive
+**The `load-context` step MUST include requirement source detection.** Agents receive
 requirements through their assigned bead, which may provide them in different forms.
 Include this three-branch pattern in every `load-context` step:
 
@@ -141,12 +141,12 @@ Run this command:
 ## 10.5 Work Step Content Strategy
 
 Step descriptions are **self-contained**:
-- Embed the relevant phase content directly (the polecat can execute without reading external files)
+- Embed the relevant phase content directly (the agent can execute without reading external files)
 - Preserve all bash code blocks from the skill phase
 - Preserve all enforcement language
 - Include relevant anti-patterns from the skill's Anti-Patterns section
 - Use source-agnostic language for requirements. Skills often say "proposal" or "spec document",
-  but polecats receive work through beads. Replace "read the proposal" with "read the requirements
+  but agents receive work through beads. Replace "read the proposal" with "read the requirements
   (from bead description, proposal file, or GitHub issue)". Never assume a specific file exists —
   the bead is always the starting point.
 
@@ -254,7 +254,7 @@ rm -f test_results.txt
 Derive the artifact list from the skill's `## Outputs` section. Only remove files that
 the skill creates as working artifacts — not production code or test files.
 
-**Adaptation 3 — `prepare-for-review`:** Replace the generic `bd update` notes with a
+**Adaptation 3 — `prepare-for-review`:** Replace the generic `af bead update` notes with a
 skill-specific completion summary describing the artifacts produced. For example, a
 design formula should mention the design-doc.md and dimension analyses; a TDD formula
 should mention the fix and test files.

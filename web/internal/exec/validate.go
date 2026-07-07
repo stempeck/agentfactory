@@ -4,25 +4,28 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // This file re-implements the small af-core slices the web module needs. It deliberately
 // does NOT import internal/… — Go's internal seal plus the separate go.mod make that
-// compiler-impossible, and the duplication is the point (compiler-enforced C-2 decoupling).
+// compiler-impossible, and the duplication is the point (a compile error, not a lint,
+// catches this module drifting from the root module's validation rules).
 //
 // Sources (copied, not imported):
-//   - validAgentName / reservedNames / ValidateAgentName: internal/config/config.go:57,62-64,294-309
-//   - verb set: the Phase-1 allowlist from the design (IMPLREADME File 1)
-//   - --var key rule: design-doc C2
+//   - validAgentName / reservedNames / ValidateAgentName: internal/config/config.go:57,65-68,299-313
+//   - verb set: the CLI verb allowlist
+//   - --var key rule: identifier-shape validation
 
 // validAgentName mirrors internal/config/config.go:57.
 var validAgentName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
 
-// reservedNames mirrors internal/config/config.go:62-64 ("dispatch" collides with the
-// af-dispatch infra session).
-var reservedNames = map[string]bool{"dispatch": true}
+// reservedNames mirrors internal/config/config.go's map: "dispatch" collides with the
+// af-dispatch infra session; "operator" collides with the web console's synthetic mail
+// sender identity, which would otherwise be indistinguishable from a real agent of that name.
+var reservedNames = map[string]bool{"dispatch": true, "operator": true}
 
-// ValidateAgentName mirrors internal/config/config.go:294-309 in full — the regex ALONE is
+// ValidateAgentName mirrors internal/config/config.go:299-313 in full — the regex ALONE is
 // insufficient; the empty / length / reserved checks are load-bearing.
 func ValidateAgentName(name string) error {
 	if name == "" {
@@ -40,8 +43,8 @@ func ValidateAgentName(name string) error {
 	return nil
 }
 
-// allowedVerbs is the Phase-1 verb allowlist (IMPLREADME File 1). Any verb outside this set
-// is refused before reaching exec — there is no generic command passthrough (C-6).
+// allowedVerbs is the verb allowlist. Any verb outside this set is refused before reaching
+// exec — there is no generic command passthrough.
 var allowedVerbs = map[string]bool{
 	"up":       true,
 	"down":     true,
@@ -51,6 +54,7 @@ var allowedVerbs = map[string]bool{
 	"dispatch": true,
 	"step":     true,
 	"config":   true, // Phase 3: `af config <dispatch|startup> set` — the curated settings write path.
+	"mail":     true, // Phase 1 (#500): the wrapper fixes the subcommand to `send` — the web mail composer's write path.
 }
 
 // ValidateVerb refuses any verb outside the allowlist.
@@ -61,7 +65,7 @@ func ValidateVerb(verb string) error {
 	return nil
 }
 
-// validVarKey constrains --var keys to a safe identifier shape (design-doc C2).
+// validVarKey constrains --var keys to a safe identifier shape.
 var validVarKey = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
 // validateVar checks a single --var key/value pair. The key must be an identifier; the value
@@ -75,6 +79,44 @@ func validateVar(key, value string) error {
 	for _, r := range value {
 		if r == '\n' || r == '\r' || (r < 0x20 && r != '\t') || r == 0x7f {
 			return fmt.Errorf("invalid --var value for %q: control characters are not allowed", key)
+		}
+	}
+	return nil
+}
+
+// validateMailSubject checks the web composer's subject line: non-empty, at most 200 runes,
+// and validateVar's value predicate copied verbatim (so a literal tab IS allowed, exactly as
+// in --var values). The cap counts RUNES, not bytes: byte len() would unfairly reject short
+// multibyte-unicode subjects.
+func validateMailSubject(s string) error {
+	if s == "" {
+		return fmt.Errorf("mail subject cannot be empty")
+	}
+	if utf8.RuneCountInString(s) > 200 {
+		return fmt.Errorf("mail subject too long (max 200 characters)")
+	}
+	for _, r := range s {
+		if r == '\n' || r == '\r' || (r < 0x20 && r != '\t') || r == 0x7f {
+			return fmt.Errorf("invalid mail subject: control characters are not allowed")
+		}
+	}
+	return nil
+}
+
+// validateMailBody checks the web composer's body: non-empty, at most 10000 runes, multi-line
+// allowed. This is a deliberately NEW rule, NOT a validateVar reuse: mail bodies are
+// legitimately multi-line, so \n joins \t as permitted while \r, the other C0 controls, and
+// 0x7f stay rejected.
+func validateMailBody(b string) error {
+	if b == "" {
+		return fmt.Errorf("mail body cannot be empty")
+	}
+	if utf8.RuneCountInString(b) > 10000 {
+		return fmt.Errorf("mail body too long (max 10000 characters)")
+	}
+	for _, r := range b {
+		if r == '\r' || (r < 0x20 && r != '\t' && r != '\n') || r == 0x7f {
+			return fmt.Errorf("invalid mail body: control characters other than newline and tab are not allowed")
 		}
 	}
 	return nil

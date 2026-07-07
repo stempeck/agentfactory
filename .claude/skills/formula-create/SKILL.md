@@ -247,7 +247,7 @@ After creating the formula, inform the user:
 Formula created: .agentfactory/store/formulas/<name>.formula.toml
 
 To inspect:
-  bd formula show <name>           # View formula details
+  af formula show <name> --json    # View formula inputs and vars
 
 To use immediately (current workspace):
   af sling --formula <name> --var x=y   # Execute the formula

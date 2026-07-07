@@ -46,6 +46,8 @@ quickdocker.sh user/myrepo --web
 # -> 🔗 Open your factory:  http://127.0.0.1:<HOSTPORT>/
 ```
 
+> **Clean installs auto-reveal the console first.** A clean `quickdocker.sh <repo>` install now reveals the console **before the shell** — it prints `🔗 Open your factory:  http://127.0.0.1:<HOSTPORT>/` (and opens your browser on macOS) immediately before dropping you into the interactive shell. So `--web` is the way to **re-open** the console later, not the way to see it the first time.
+
 `--web` means **"reveal my URL"**, not "start a session":
 
 - It prints the clickable link exactly as `🔗 Open your factory:  http://127.0.0.1:<HOSTPORT>/`

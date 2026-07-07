@@ -44,7 +44,7 @@ func installMemStore(t *testing.T) *memstore.Store {
 func installNoopLaunchSession(t *testing.T) {
 	t.Helper()
 	orig := launchAgentSession
-	launchAgentSession = func(*cobra.Command, string, string, string, string) error {
+	launchAgentSession = func(*cobra.Command, string, string, string, string, string, bool) error {
 		return nil
 	}
 	t.Cleanup(func() { launchAgentSession = orig })
@@ -1966,7 +1966,7 @@ func TestRunFormulaInstantiation_PassesWorktreeToLaunch(t *testing.T) {
 
 	var capturedWTPath, capturedWTID string
 	orig := launchAgentSession
-	launchAgentSession = func(_ *cobra.Command, _, _, wtPath, wtID string) error {
+	launchAgentSession = func(_ *cobra.Command, _, _, wtPath, wtID, _ string, _ bool) error {
 		capturedWTPath = wtPath
 		capturedWTID = wtID
 		return nil
@@ -3157,7 +3157,7 @@ func installCapturingLaunchSession(t *testing.T) *launchCapture {
 	t.Helper()
 	cap := &launchCapture{}
 	orig := launchAgentSession
-	launchAgentSession = func(_ *cobra.Command, _, agentName, worktreePath, worktreeID string) error {
+	launchAgentSession = func(_ *cobra.Command, _, agentName, worktreePath, worktreeID, _ string, _ bool) error {
 		cap.agentName = agentName
 		cap.worktreePath = worktreePath
 		cap.worktreeID = worktreeID
@@ -3734,14 +3734,16 @@ func TestLaunchAgentSession_ModelInOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(src)
-	if !strings.Contains(content, `entry.Model != ""`) {
-		t.Error("sling.go: launchAgentSession must check entry.Model before printing launch message")
+	// Issue #480: the echo now prints the RESOLVED model name (--model / profile /
+	// agents-map / legacy), preferring it over the legacy entry.Model fallback.
+	if !strings.Contains(content, `displayModel`) {
+		t.Error("sling.go: launchAgentSession must print the resolved model name (displayModel)")
 	}
 	if !strings.Contains(content, `"model: "`) {
-		t.Error("sling.go: launchAgentSession must include model label in launch message when model is set")
+		t.Error("sling.go: launchAgentSession must include model label in launch message when a model is set")
 	}
 	if !strings.Contains(content, `"Launched %s\n"`) {
-		t.Error("sling.go: launchAgentSession must preserve backward-compatible Launched format when model is empty")
+		t.Error("sling.go: launchAgentSession must preserve backward-compatible Launched format when no model is set")
 	}
 }
 
@@ -3751,11 +3753,25 @@ func TestLaunchMessage_WithEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(src)
-	if !strings.Contains(content, `entry.BaseURL != ""`) {
-		t.Error("sling.go: launchAgentSession must check entry.BaseURL before printing launch message")
+	// Issue #480: the endpoint echo prefers the resolved set's ANTHROPIC_BASE_URL
+	// (falling back to the legacy entry.BaseURL) and must NEVER print the auth token.
+	if !strings.Contains(content, `entry.BaseURL`) {
+		t.Error("sling.go: launchAgentSession must consult entry.BaseURL as the endpoint fallback")
+	}
+	if !strings.Contains(content, `"ANTHROPIC_BASE_URL"`) {
+		t.Error("sling.go: launchAgentSession must source the endpoint echo from the resolved set's ANTHROPIC_BASE_URL")
+	}
+	// The echo must never APPEND the auth token to the printed parts. The #508 W3
+	// preflight legitimately references ANTHROPIC_AUTH_TOKEN elsewhere in the file (it
+	// stats the secret file and names it in a fail-fast error, api.md:125), so assert
+	// the token never appears in an echo `append(parts, …)` — not merely anywhere.
+	for _, line := range strings.Split(content, "\n") {
+		if strings.Contains(line, "append(parts,") && strings.Contains(line, "ANTHROPIC_AUTH_TOKEN") {
+			t.Error("sling.go: launchAgentSession echo must never print ANTHROPIC_AUTH_TOKEN")
+		}
 	}
 	if !strings.Contains(content, `"endpoint: "`) {
-		t.Error("sling.go: launchAgentSession must include endpoint label in launch message when base_url is set")
+		t.Error("sling.go: launchAgentSession must include endpoint label in launch message when an endpoint is set")
 	}
 	if !strings.Contains(content, `"Launched %s\n"`) {
 		t.Error("sling.go: launchAgentSession must preserve backward-compatible Launched format when no fields set")

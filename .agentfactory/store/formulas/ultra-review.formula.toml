@@ -32,6 +32,7 @@ false positives. Only findings scoring at or above {{min_confidence}} survive.
 |----------|--------|-------------|
 | pr_uri | input (cli) | Pull request to review: full GitHub URL, owner/repo#number, or bare number |
 | min_confidence | input (cli, default 70) | Minimum 0-100 confidence score a finding needs to be reported |
+| force_review | input (cli, default "false") | Set "true" to force a re-review of a PR this reviewer already reviewed. Waives ONLY the already-reviewed criterion — every other eligibility check still applies |
 
 ## Orchestrator Communication Contract
 
@@ -120,6 +121,12 @@ description = "Minimum 0-100 confidence score a finding needs to be included in 
 type = "number"
 required = false
 default = "70"
+
+[inputs.force_review]
+description = "Force a full re-review even if this reviewer has already reviewed the PR. Waives ONLY eligibility criterion (d) (already-reviewed) at both the phase-1 and phase-6 checkpoints — criteria (a) closed/merged, (b) draft, and (c) doesn't-need-review still apply. Default 'false' preserves standard behavior: already-reviewed PRs stay ineligible."
+type = "string"
+required = false
+default = "false"
 
 # ============================================================================
 # PRE-WORK INVARIANT STEPS
@@ -269,12 +276,16 @@ ls "$REVIEW_DIR" 2>/dev/null
 ```
 
 **If a prior review of this PR exists in `$REVIEW_DIR`** (findings.md, verdict.md):
-- Read it. Decide: has the PR gained new commits since (compare head sha in target.md
-  against current `gh pr view --json headRefOid`)?
-- If unchanged AND a comment was already posted: this PR is already reviewed —
-  note it in `$REVIEW_DIR/eligibility.md` ahead of time; phase-1-eligibility will confirm.
-- If changed: archive the prior artifacts (`mv "$REVIEW_DIR" "$REVIEW_DIR.old"`) and
-  re-create the directory fresh.
+- If {{force_review}} is "true": do NOT treat prior review state as a short-circuit —
+  archive the prior artifacts (`mv "$REVIEW_DIR" "$REVIEW_DIR.old"`), re-create the
+  directory fresh, and let phase-1-eligibility apply its own force_review-aware check.
+  This is the operator's forced-re-review path; it must not be pre-empted here.
+- Otherwise, read it. Decide: has the PR gained new commits since (compare head sha in
+  target.md against current `gh pr view --json headRefOid`)?
+  - If unchanged AND a comment was already posted: this PR is already reviewed —
+    note it in `$REVIEW_DIR/eligibility.md` ahead of time; phase-1-eligibility will confirm.
+  - If changed: archive the prior artifacts (`mv "$REVIEW_DIR" "$REVIEW_DIR.old"`) and
+    re-create the directory fresh.
 
 **2. Check the dispatch mail / bead for special constraints:**
 e.g., a different confidence threshold, a request to always post even with
@@ -325,8 +336,14 @@ this is a quick classification, not analysis.
 
 **Entry criteria:** `$REVIEW_DIR/target.md` exists.
 
+**force_review override:** When {{force_review}} is "true", criterion (d) below is
+waived — criteria (a), (b), and (c) still apply regardless. If {{force_review}} is
+"true", omit criterion (d) from the sub-agent prompt entirely (do not ask it to check
+prior reviews at all); otherwise include it verbatim as written.
+
 **Spawn ONE sub-agent** (Agent tool, `subagent_type: "general-purpose"`,
-`model: "haiku"` if available) with this prompt (fill in repo/number):
+`model: "haiku"` if available) with this prompt (fill in repo/number; drop criterion
+(d) when {{force_review}} is "true", per the override note above):
 
 ```
 Check pull request <owner/repo>#<number> using the gh CLI and report whether it
@@ -345,7 +362,9 @@ And: gh api repos/<owner>/<repo>/pulls/<number>/reviews --jq '.[].body'
 Return exactly: ELIGIBLE or INELIGIBLE, followed by one sentence of reasoning.
 ```
 
-**Write `$REVIEW_DIR/eligibility.md`** with the verdict, the reasoning, and a timestamp.
+**Write `$REVIEW_DIR/eligibility.md`** with the verdict, the reasoning, a timestamp, and
+whether {{force_review}} was applied (so phase-6's re-check and self-review can see it
+was an intentional override, not a protocol lapse).
 
 **Decision logic:**
 - IF ELIGIBLE → proceed to phase-2-context-gathering.
@@ -620,9 +639,11 @@ individually), then dispatches ultra-implement for the comments left standing.
 requested) or eligibility.md says INELIGIBLE, close this step with that reason.
 
 **1. Repeat the eligibility check** (same cheap sub-agent prompt as
-phase-1-eligibility). The PR may have closed, merged, or been reviewed while
-you worked. If now INELIGIBLE: update eligibility.md, mail the dispatcher,
-do NOT post, and close this step.
+phase-1-eligibility, including the SAME {{force_review}} override — if {{force_review}}
+is "true", criterion (d) is omitted here too, exactly as at phase-1; criteria (a), (b),
+and (c) still apply at this checkpoint regardless). The PR may have closed, merged, or
+gained ANOTHER reviewer's review while you worked. If now INELIGIBLE: update
+eligibility.md, mail the dispatcher, do NOT post, and close this step.
 
 **2. Capture the head sha** (used as the review's commit_id and for permalinks):
 ```bash

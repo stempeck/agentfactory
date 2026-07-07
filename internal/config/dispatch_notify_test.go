@@ -18,7 +18,7 @@ func TestValidateDispatchConfig_EmptyNotify_NoManagerAgent_Accepted(t *testing.T
 		// NotifyOnComplete intentionally left empty: it defaults to "manager" at
 		// runtime, but an absent manager must not fail validation.
 	}
-	if err := ValidateDispatchConfig(disp, agents); err != nil {
+	if err := ValidateDispatchConfig(disp, agents, nil); err != nil {
 		t.Fatalf("empty notify_on_complete with no manager agent must be accepted, got: %v", err)
 	}
 
@@ -29,7 +29,7 @@ func TestValidateDispatchConfig_EmptyNotify_NoManagerAgent_Accepted(t *testing.T
 		Mappings:         []DispatchMapping{{Labels: []string{"bug"}, Agent: "debugger"}},
 		NotifyOnComplete: "ghost",
 	}
-	if err := ValidateDispatchConfig(dispExplicit, agents); err == nil {
+	if err := ValidateDispatchConfig(dispExplicit, agents, nil); err == nil {
 		t.Fatal("explicitly set notify_on_complete=ghost (absent) must still be rejected")
 	}
 }

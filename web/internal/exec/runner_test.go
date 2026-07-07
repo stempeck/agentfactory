@@ -5,6 +5,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -422,7 +423,7 @@ func TestValidateAgentName(t *testing.T) {
 			t.Errorf("ValidateAgentName(%q) = %v, want nil", v, err)
 		}
 	}
-	invalid := []string{"", "agent;rm", "../../etc", "agent name", "123start", "dispatch"}
+	invalid := []string{"", "agent;rm", "../../etc", "agent name", "123start", "dispatch", "operator"}
 	for _, v := range invalid {
 		if err := ValidateAgentName(v); err == nil {
 			t.Errorf("ValidateAgentName(%q) = nil, want error", v)
@@ -596,7 +597,7 @@ func TestRun_AllVerbs_CarryCmdDir(t *testing.T) {
 	factoryRoot := t.TempDir()
 	// The exact allowlist from validate.go (allowedVerbs). A new verb added there without being added
 	// here is itself a prompt to re-confirm this invariant.
-	verbs := []string{"up", "down", "sling", "agents", "formula", "dispatch", "step", "config"}
+	verbs := []string{"up", "down", "sling", "agents", "formula", "dispatch", "step", "config", "mail"}
 	for _, verb := range verbs {
 		t.Run(verb, func(t *testing.T) {
 			er := NewExecRunner(factoryRoot)
@@ -615,5 +616,221 @@ func TestRun_AllVerbs_CarryCmdDir(t *testing.T) {
 				t.Fatalf("verb %q: cmd.Dir = %q, want %q", verb, captured.Dir, factoryRoot)
 			}
 		})
+	}
+}
+
+// ---- #500 Phase 1: MailSend (the web mail composer's write path) ----
+
+// mail is now on the allowlist (#500 Phase 1) so the real runner permits the verb (the wrapper
+// fixes the subcommand to `send`).
+func TestValidateVerb_AllowsMail(t *testing.T) {
+	if err := ValidateVerb("mail"); err != nil {
+		t.Fatalf("mail must be allowlisted: %v", err)
+	}
+}
+
+// MailSend's argv is byte-pinned: single-token `=` flag forms (a dash-leading value can never
+// re-parse as a flag — design-doc "Mail argv form"), the wrapper-pinned constant sender, and
+// the fixed reply-blackhole footer inside the --message element. A shell-hostile body travels
+// as ONE literal argv element (C2 argv-array exec — no shell, no splitting).
+func TestWrapper_MailSend_ArgvExact(t *testing.T) {
+	const footer = "\n\n(sent from the web console; replies to 'operator' are not monitored)"
+
+	fr := newFakeRunner()
+	w := NewWrapper(fr, "")
+	body := "status: green\nnext: verify" // multi-line is legal mail (validateMailBody allows \n)
+	if _, err := w.MailSend(context.Background(), "designer", "Build status", body); err != nil {
+		t.Fatalf("MailSend: %v", err)
+	}
+	c := fr.lastCall()
+	if c.Verb != "mail" {
+		t.Fatalf("verb = %q, want mail", c.Verb)
+	}
+	want := []string{"send", "designer", "--subject=Build status", "--message=" + body + footer, "--from=operator"}
+	if len(c.Args) != len(want) {
+		t.Fatalf("mail argv = %v, want %v", c.Args, want)
+	}
+	for i := range want {
+		if c.Args[i] != want[i] {
+			t.Fatalf("mail argv[%d] = %q, want %q (full: %v)", i, c.Args[i], want[i], c.Args)
+		}
+	}
+	if c.Stdin != nil {
+		t.Fatalf("MailSend is a plain Run — it must not pipe stdin, got %q", c.Stdin)
+	}
+
+	// A shell-looking body stays ONE literal --message element (plus the footer).
+	fr2 := newFakeRunner()
+	w2 := NewWrapper(fr2, "")
+	if _, err := w2.MailSend(context.Background(), "designer", "s", "; rm -rf /"); err != nil {
+		t.Fatalf("a shell-looking body should be accepted as one literal element, got %v", err)
+	}
+	got := fr2.lastArgs()
+	if len(got) != 5 || got[3] != "--message=; rm -rf /"+footer {
+		t.Fatalf("shell-looking body must be one literal --message element, got %v", got)
+	}
+}
+
+// MailSend is DIRECT exec (design-doc "Mail concurrency class"): no per-agent lock and no
+// .runtime/dispatched pre-flight, because mail's primary recipients ARE dispatched agents —
+// mail targets the mailbox, not the running session. Proven both ways: (a) while the SAME
+// agent's mutate-lock is held by a parked Sling, MailSend must not see ErrAgentBusy; (b) while
+// the dispatched marker exists, MailSend must not see ErrAgentOrchestrated — while DownAgent
+// on the same wrapper still must, proving the marker is real and only MailSend bypasses it.
+func TestWrapper_MailSend_NoLock(t *testing.T) {
+	// (a) same-agent mutate-lock held by a parked Sling.
+	fr := newFakeRunner()
+	fr.entered = make(chan string, 1)
+	fr.block = make(chan struct{})
+	w := NewWrapper(fr, "")
+
+	var wg sync.WaitGroup
+	var slingErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, slingErr = w.Sling(context.Background(), "alpha", "t", nil)
+	}()
+	<-fr.entered // the Sling is now parked INSIDE Run, holding alpha's mutate-lock
+
+	// Unhook the park for subsequent calls so MailSend itself is not blocked by the fake.
+	fr.mu.Lock()
+	blockCh := fr.block
+	fr.entered, fr.block = nil, nil
+	fr.mu.Unlock()
+
+	if _, err := w.MailSend(context.Background(), "alpha", "subject", "body"); err != nil {
+		t.Fatalf("MailSend while alpha's mutate-lock is held = %v, want nil (must not be ErrAgentBusy)", err)
+	}
+	if c := fr.lastCall(); c.Verb != "mail" {
+		t.Fatalf("MailSend must exec while the lock is held; last verb = %q", c.Verb)
+	}
+	close(blockCh)
+	wg.Wait()
+	if slingErr != nil {
+		t.Fatalf("parked Sling err = %v, want nil", slingErr)
+	}
+
+	// (b) dispatched marker present.
+	root := t.TempDir()
+	runtimeDir := filepath.Join(root, ".agentfactory", "agents", "alpha", ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "dispatched"), []byte("@dispatch"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fr2 := newFakeRunner()
+	w2 := NewWrapper(fr2, root)
+	if _, err := w2.DownAgent(context.Background(), "alpha", false); err != ErrAgentOrchestrated {
+		t.Fatalf("DownAgent(dispatched) err = %v, want ErrAgentOrchestrated (the marker must be effective)", err)
+	}
+	if _, err := w2.MailSend(context.Background(), "alpha", "subject", "body"); err != nil {
+		t.Fatalf("MailSend(dispatched agent) err = %v, want nil (mail must reach dispatched agents)", err)
+	}
+	if c := fr2.lastCall(); c.Verb != "mail" {
+		t.Fatalf("MailSend(dispatched) must exec; last verb = %q", c.Verb)
+	}
+}
+
+// Invalid recipient/subject/body is rejected BEFORE any exec (the ConfigSet precedent):
+// the fake records zero calls. A multi-line body is ACCEPTED — mail is legitimately
+// multi-line, which is exactly why validateMailBody is a NEW rule and not validateVar reuse.
+func TestWrapper_MailSend_ValidationRejectsBeforeExec(t *testing.T) {
+	cases := []struct {
+		label, name, subject, body string
+	}{
+		{"empty subject", "alpha", "", "body"},
+		{"empty body", "alpha", "subject", ""},
+		{"oversize subject >200", "alpha", strings.Repeat("a", 201), "body"},
+		{"oversize body >10000", "alpha", "subject", strings.Repeat("b", 10001)},
+		{"ESC in subject", "alpha", "esc\x1bhere", "body"},
+		{"ESC in body", "alpha", "subject", "esc\x1bhere"},
+		{"carriage return in body", "alpha", "subject", "line1\r\nline2"},
+		{"newline in subject", "alpha", "two\nlines", "body"},
+		{"bad agent name", "a;rm", "subject", "body"},
+		{"reserved agent name", "dispatch", "subject", "body"},
+	}
+	for _, tc := range cases {
+		fr := newFakeRunner()
+		w := NewWrapper(fr, "")
+		if _, err := w.MailSend(context.Background(), tc.name, tc.subject, tc.body); err == nil {
+			t.Errorf("%s: MailSend returned nil error, want rejection", tc.label)
+		}
+		if fr.callCount() != 0 {
+			t.Errorf("%s: rejected mail must never exec (recorded %d calls)", tc.label, fr.callCount())
+		}
+	}
+
+	fr := newFakeRunner()
+	w := NewWrapper(fr, "")
+	if _, err := w.MailSend(context.Background(), "alpha", "subject", "line1\nline2\n\ttabbed"); err != nil {
+		t.Fatalf("a multi-line body must be accepted, got %v", err)
+	}
+	if fr.callCount() != 1 {
+		t.Fatalf("accepted mail must exec exactly once, got %d", fr.callCount())
+	}
+}
+
+// validateMailSubject — non-empty, ≤200 RUNES, and the validateVar value predicate. Tab is
+// allowed (the predicate is copied verbatim — IMPLREADME Gotcha 9) and the cap counts runes,
+// not bytes (Gotcha 10), so a 200-rune multibyte subject is legal.
+func TestValidateMailSubject(t *testing.T) {
+	good := []string{
+		"Build status",
+		"unicode café ☃ 日本語",
+		"tab\there", // predicate copied verbatim from validateVar: tab allowed (Gotcha 9)
+		strings.Repeat("a", 200),
+		strings.Repeat("é", 200), // 200 runes / 400 bytes — the cap is runes (Gotcha 10)
+	}
+	for _, s := range good {
+		if err := validateMailSubject(s); err != nil {
+			t.Errorf("validateMailSubject(%q) = %v, want nil", s, err)
+		}
+	}
+	bad := []string{
+		"",
+		strings.Repeat("a", 201),
+		"two\nlines",
+		"carriage\rreturn",
+		"esc\x1bseq",
+		"null\x00byte",
+		"del\x7fhere",
+	}
+	for _, s := range bad {
+		if err := validateMailSubject(s); err == nil {
+			t.Errorf("validateMailSubject(%q) = nil, want error", s)
+		}
+	}
+}
+
+// validateMailBody — non-empty, ≤10000 RUNES; \n and \t allowed (mail is multi-line), \r,
+// the other C0 controls, and 0x7f rejected. A deliberately NEW rule: validateVar rejects \n.
+func TestValidateMailBody(t *testing.T) {
+	good := []string{
+		"one line",
+		"line1\nline2\nline3",
+		"tab\there",
+		"unicode café ☃ 日本語",
+		strings.Repeat("b", 10000),
+	}
+	for _, b := range good {
+		if err := validateMailBody(b); err != nil {
+			t.Errorf("validateMailBody(%q) = %v, want nil", b, err)
+		}
+	}
+	bad := []string{
+		"",
+		strings.Repeat("b", 10001),
+		"carriage\rreturn",
+		"esc\x1bseq",
+		"null\x00byte",
+		"bell\x07now",
+		"del\x7fhere",
+	}
+	for _, b := range bad {
+		if err := validateMailBody(b); err == nil {
+			t.Errorf("validateMailBody(%q) = nil, want error", b)
+		}
 	}
 }
