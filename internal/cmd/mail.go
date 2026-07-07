@@ -37,6 +37,7 @@ func init() {
 	sendCmd.Flags().StringP("message", "m", "", "Message body (required)")
 	sendCmd.Flags().String("priority", "normal", "Priority: urgent, high, normal, low")
 	sendCmd.Flags().String("reply-to", "", "ID of message being replied to")
+	sendCmd.Flags().String("from", "", "Send as this identity (agents.json member or 'operator'); skips sender auto-detection")
 	_ = sendCmd.MarkFlagRequired("subject")
 	_ = sendCmd.MarkFlagRequired("message")
 	mailCmd.AddCommand(sendCmd)
@@ -98,15 +99,41 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 	body, _ := cmd.Flags().GetString("message")
 	priorityStr, _ := cmd.Flags().GetString("priority")
 	replyToID, _ := cmd.Flags().GetString("reply-to")
+	from, _ := cmd.Flags().GetString("from")
 
 	wd, err := getWd()
 	if err != nil {
 		return err
 	}
 
-	sender, err := detectSender(wd)
-	if err != nil {
-		return err
+	// The cmd layer is the only From enforcement point — Router and the
+	// Message constructors accept any sender verbatim. "operator" is the
+	// single identity accepted without agents.json membership (the
+	// web console's mail sentinel, #500).
+	var sender string
+	if from != "" {
+		if from != "operator" {
+			if err := config.ValidateAgentName(from); err != nil {
+				return fmt.Errorf("invalid --from %q: %w", from, err)
+			}
+			root, err := config.FindFactoryRoot(wd)
+			if err != nil {
+				return fmt.Errorf("validating --from: %w", err)
+			}
+			agentsCfg, err := config.LoadAgentConfig(config.AgentsConfigPath(root))
+			if err != nil {
+				return fmt.Errorf("validating --from: %w", err)
+			}
+			if _, ok := agentsCfg.Agents[from]; !ok {
+				return fmt.Errorf("--from %q is not an agents.json member (or the literal \"operator\")", from)
+			}
+		}
+		sender = from
+	} else {
+		sender, err = detectSender(wd)
+		if err != nil {
+			return err
+		}
 	}
 
 	var msg *mail.Message
@@ -420,4 +447,3 @@ func newMailboxForSender(sender, wd string) (*mail.Mailbox, error) {
 	}
 	return mail.NewMailbox(sender, store), nil
 }
-

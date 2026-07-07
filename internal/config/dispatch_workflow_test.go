@@ -225,7 +225,7 @@ func TestValidateDispatchConfig_WorkflowPhaseAgentHasNoFormula_Rejected(t *testi
 		Mappings:     []DispatchMapping{{Labels: []string{"build"}, Agent: "builder"}},
 		Workflows:    []Workflow{{Label: "ship", Phases: []string{"build"}}},
 	}
-	err := ValidateDispatchConfig(disp, agents)
+	err := ValidateDispatchConfig(disp, agents, nil)
 	if err == nil {
 		t.Fatal("expected error: phase agent has no formula")
 	}
@@ -251,7 +251,7 @@ func TestValidateDispatchConfig_WorkflowPhaseAgentWithFormula_OK(t *testing.T) {
 		},
 		Workflows: []Workflow{{Label: "ship", Phases: []string{"build", "test"}}},
 	}
-	if err := ValidateDispatchConfig(disp, agents); err != nil {
+	if err := ValidateDispatchConfig(disp, agents, nil); err != nil {
 		t.Fatalf("valid formula-bearing workflow rejected: %v", err)
 	}
 }

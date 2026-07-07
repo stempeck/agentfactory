@@ -25,7 +25,7 @@ import (
 func recordSlingsWithURL(t *testing.T, store *memstore.Store, slung, urls, ids *[]string) {
 	t.Helper()
 	orig := dispatchItem
-	dispatchItem = func(root, agent, itemURL, caller string) (string, error) {
+	dispatchItem = func(root, agent, itemURL, caller, model string) (string, error) {
 		*slung = append(*slung, agent)
 		*urls = append(*urls, itemURL)
 		iss, err := store.Create(context.Background(), issuestore.CreateParams{

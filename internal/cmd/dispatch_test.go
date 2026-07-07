@@ -55,7 +55,7 @@ func TestMatchItemToAgent(t *testing.T) {
 				item.Labels = append(item.Labels, ghLabel{Name: l})
 			}
 
-			got := matchItemToAgent(item, mappings)
+			got, _ := matchItemToAgent(item, mappings)
 			if got != tc.want {
 				t.Errorf("matchItemToAgent() = %q, want %q", got, tc.want)
 			}
@@ -758,7 +758,7 @@ func TestMatchItemToAgent_MultiLabel_AND(t *testing.T) {
 				item.Labels = append(item.Labels, ghLabel{Name: l})
 			}
 
-			got := matchItemToAgent(item, mappings)
+			got, _ := matchItemToAgent(item, mappings)
 			if got != tc.want {
 				t.Errorf("matchItemToAgent() = %q, want %q", got, tc.want)
 			}
@@ -776,7 +776,7 @@ func TestMatchItemToAgent_MultiLabel_AND(t *testing.T) {
 			URL:    "https://github.com/owner/repo/issues/2",
 			Labels: []ghLabel{{Name: "a"}, {Name: "b"}, {Name: "c"}},
 		}
-		got := matchItemToAgent(item, m)
+		got, _ := matchItemToAgent(item, m)
 		if got != "agent2" {
 			t.Errorf("matchItemToAgent() = %q, want %q", got, "agent2")
 		}

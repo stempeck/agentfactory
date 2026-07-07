@@ -723,7 +723,7 @@ func TestLaunchAgentSession_EmptyWorktreePath(t *testing.T) {
 	cobraCmd.SetOut(&stdout)
 	cobraCmd.SetErr(&stderr)
 
-	err := launchAgentSession(cobraCmd, workspace, "manager", "", "")
+	err := launchAgentSession(cobraCmd, workspace, "manager", "", "", "", false)
 	if err == nil {
 		t.Fatal("expected error from launchAgentSession with empty worktree path, got nil")
 	}

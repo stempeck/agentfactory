@@ -472,7 +472,7 @@ func generateAgentTemplate(f *formula.Formula, agentName string, agentType strin
 	b.WriteString("- `af prime` — Re-inject identity and formula step context\n")
 	b.WriteString("- `af done` — Close current step and advance\n")
 	if hasGates {
-		b.WriteString("- `af done --phase-complete --gate <id>` — Complete a gate step (session ends)\n")
+		b.WriteString("- `af done --phase-complete --gate <id>` — Complete a gate step (continue via `af prime`)\n")
 	}
 	b.WriteString("- `af mail send <to> -s <subject> -m <message>` — Send a message to an agent or group\n")
 	b.WriteString("- `af mail inbox` — List unread messages\n")
@@ -638,7 +638,7 @@ func generateGateProtocol(f *formula.Formula) string {
 	b.WriteString("that cannot be closed until an external condition is met. When you reach a gate step:\n")
 	b.WriteString("1. Complete the work described in the step\n")
 	b.WriteString("2. Run `af done --phase-complete --gate <gate-id>`\n")
-	b.WriteString("3. Your session ends. A fresh agent resumes when the gate resolves.\n\n")
+	b.WriteString("3. Then run `af prime` to load your next step and continue.\n\n")
 
 	return b.String()
 }

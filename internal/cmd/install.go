@@ -145,6 +145,9 @@ func runInstallInit(cmd *cobra.Command) error {
 		"dispatch.json":  `{"repos":[],"trigger_label":"agentic","notify_on_complete":"manager","mappings":[],"interval_seconds":300,"retry_after_seconds":1800}`,
 		// Opinionated defaults for fresh installs (see TestLoadStartupConfig_ScaffoldLoads).
 		"startup.json": `{"agents":["manager"],"quality":"default","fidelity":"default","start_dispatch":true,"watchdog_agents":["manager","supervisor"]}`,
+		// Per-agent model registry (issue #480); the default model tracks quickstart.sh
+		// (see TestInstallScaffold_DefaultModel_MatchesQuickstart).
+		"models.json": `{"default":"default","models":{"default":{"ANTHROPIC_MODEL":"claude-fable-5","ANTHROPIC_DEFAULT_OPUS_MODEL":"claude-opus-4-8","ANTHROPIC_DEFAULT_SONNET_MODEL":"claude-sonnet-5"},"lmstudio":{"ANTHROPIC_BASE_URL":"http://localhost:1234","ANTHROPIC_AUTH_TOKEN":"lm-studio","ANTHROPIC_MODEL":"qwen2.5-coder-32b","ANTHROPIC_API_KEY":""},"sonnet-5":{"ANTHROPIC_MODEL":"claude-sonnet-5"}},"agents":{"factoryworker":"sonnet-5"}}`,
 	}
 
 	for name, content := range starterConfigs {

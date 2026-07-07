@@ -1,18 +1,20 @@
-// Package server is the C1 loopback HTTP server for the web module.
+// Package server is the loopback HTTP server for the web module.
 //
 // It binds 127.0.0.1:0 (ephemeral, stdlib net/http + Go 1.22 ServeMux), answers a uniform
-// {ok, message, data} JSON envelope on every response, and exposes ONLY the Phase-1
-// allowlisted verbs through the exec wrapper — there is no generic command passthrough (C-6).
+// {ok, message, data} JSON envelope on every response, and exposes ONLY the allowlisted verbs
+// through the exec wrapper — there is no generic command passthrough.
 //
 // Two security gates on every state-changing request:
 //   - CSRF: an Origin/Host allowlist (loopback only) is enforced on every POST/PUT.
 //   - Auth: a session token (crypto/rand mint, crypto/subtle constant-time verify) is
-//     MANDATORY whenever the effective bind is not pure loopback (design-doc CR-1, which
-//     overrides security.md Decision 1's loopback-no-auth recommendation). On pure loopback
-//     the token is optional but the Origin check still applies on POST.
+//     MANDATORY whenever the effective bind is not pure loopback — pure loopback matches the
+//     established same-machine trust model (any local process running as the same user can
+//     connect), but the moment an operator widens the bind beyond loopback that trust model no
+//     longer holds, so a token is required. On pure loopback the token is optional but the
+//     Origin check still applies on POST.
 //
 // Destructive ops (--reset) require confirm:true in the request body, refused otherwise — a
-// server-side guard, not merely a client affordance (Security Decision 5).
+// server-side guard, not merely a client affordance.
 package server
 
 import (
@@ -26,7 +28,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/stempeck/agentfactory-web/internal/config"
 	"github.com/stempeck/agentfactory-web/internal/dispatch"
@@ -43,7 +47,7 @@ type Mutator interface {
 	DownFactory(ctx context.Context, reset bool) (exec.Result, error)
 	DownAgent(ctx context.Context, name string, reset bool) (exec.Result, error)
 	// Sling carries the operator's task as the af-sling positional argument (after a `--`
-	// terminator) plus the remaining user-providable fields as vars (#440 K1).
+	// terminator) plus the remaining user-providable fields as vars (#440).
 	Sling(ctx context.Context, name, task string, vars map[string]string) (exec.Result, error)
 }
 
@@ -52,18 +56,18 @@ type Assembler interface {
 	Assemble(ctx context.Context) ([]readmodel.AgentView, error)
 }
 
-// FormReader yields the user-providable form schema for a formula by name (C4).
+// FormReader yields the user-providable form schema for a formula by name.
 // formschema.Reader satisfies it.
 type FormReader interface {
 	Read(ctx context.Context, formula string) (formschema.Schema, error)
 }
 
-// DispatchReader yields the read-only dispatch status view (C3). dispatch.Reader satisfies it.
+// DispatchReader yields the read-only dispatch status view. dispatch.Reader satisfies it.
 type DispatchReader interface {
 	Status(ctx context.Context) (dispatch.View, error)
 }
 
-// SettingsService is the curated config read + the af-routed write (C5). config.Service satisfies
+// SettingsService is the curated config read + the af-routed write. config.Service satisfies
 // it: Read returns the secret-stripped settings, Write routes the edited config through
 // `af config <file> set` (atomic + cross-file validated inside af-core).
 type SettingsService interface {
@@ -79,20 +83,35 @@ type FormulaResolver interface {
 	AgentFormula(ctx context.Context, name string) (formula string, found bool, err error)
 }
 
-// Prototypes is the C7 static/prototype server: it enumerates the servable prototype dirs and
+// Prototypes is the static/prototype server: it enumerates the servable prototype dirs and
 // serves their on-disk assets, traversal-contained. proto.Server satisfies it.
 type Prototypes interface {
 	List() []proto.Prototype
 	http.Handler // ServeHTTP serves GET /proto/{id}/{asset...}
 }
 
-// Feedback is the C6 gate-aware feedback writer (H-5). It writes feedback-form.md ONLY when the
+// Feedback is the gate-aware feedback writer. It writes feedback-form.md ONLY when the
 // owning agent is verified parked at the matching design-feedback-{N} gate. feedback.Writer
 // satisfies it. OpenFrom is the pure (no-exec) predicate used to annotate GET /api/prototypes from a
 // single already-fetched view set.
 type Feedback interface {
 	Submit(ctx context.Context, id string, in feedback.Input) (feedback.Result, error)
 	OpenFrom(views []readmodel.AgentView, id string) bool
+}
+
+// Tailer is the honest per-agent session-snapshot reader (#500). readmodel.TmuxCapture
+// satisfies it via Tail. It is probe-first and never reports a false live; an absent session is
+// an honest zero TailView, not an error. The detail handler passes tail output through WITHOUT
+// logging it (sessions print secrets).
+type Tailer interface {
+	Tail(ctx context.Context, name string, lines int) (readmodel.TailView, error)
+}
+
+// MailSender is the operator-mail write surface (#500). exec.Wrapper satisfies it via MailSend,
+// which pins the sender to `operator`, fixes the subcommand to `send`, and bypasses the
+// dispatched-marker pre-flight (mail's primary recipients ARE dispatched agents).
+type MailSender interface {
+	MailSend(ctx context.Context, name, subject, body string) (exec.Result, error)
 }
 
 // Envelope is the uniform response shape on every endpoint.
@@ -106,15 +125,18 @@ type Envelope struct {
 type Server struct {
 	mut      Mutator
 	reader   Assembler
-	form     FormReader      // C4 form-schema reader (nil ⇒ the /form and /sling routes 500)
+	form     FormReader      // form-schema reader (nil ⇒ the /form and /sling routes 500)
 	formula  FormulaResolver // #455 static-config (agents.json) formula resolver (nil ⇒ /form and /sling routes 500)
-	dispatch DispatchReader  // C3 dispatch reader (nil ⇒ GET /api/dispatch 500)
-	settings SettingsService // C5 settings read/write (nil ⇒ /api/settings routes 500)
-	proto    Prototypes      // C7 prototype server (nil ⇒ the /api/prototypes and /proto routes are unregistered)
-	feedback Feedback        // C6 feedback writer (nil ⇒ the feedback route is unregistered)
+	dispatch DispatchReader  // dispatch reader (nil ⇒ GET /api/dispatch 500)
+	settings SettingsService // settings read/write (nil ⇒ /api/settings routes 500)
+	proto    Prototypes      // prototype server (nil ⇒ the /api/prototypes and /proto routes are unregistered)
+	feedback Feedback        // feedback writer (nil ⇒ the feedback route is unregistered)
+	tailer   Tailer          // #500 session-snapshot reader (nil ⇒ the agent-detail route 500s)
+	mailer   MailSender      // #500 operator-mail sender (nil ⇒ the agent-mail route 500s)
 	static   http.Handler
 
-	root string // K5: the resolved factory root this console serves; surfaced via GET /healthz (Gap 7)
+	root string // the resolved factory root this console serves; surfaced via GET /healthz so a
+	// wrong-but-valid root is visible, not silent
 
 	bindAddr string
 	loopback bool   // true ⇒ token optional (Origin still enforced on POST)
@@ -139,17 +161,17 @@ func WithToken(tok string) Option {
 	return func(s *Server) { s.token = tok }
 }
 
-// WithFormReader wires the C4 form-schema reader used by the /form and /sling routes.
+// WithFormReader wires the form-schema reader used by the /form and /sling routes.
 func WithFormReader(fr FormReader) Option {
 	return func(s *Server) { s.form = fr }
 }
 
-// WithDispatchReader wires the C3 dispatch reader used by GET /api/dispatch.
+// WithDispatchReader wires the dispatch reader used by GET /api/dispatch.
 func WithDispatchReader(dr DispatchReader) Option {
 	return func(s *Server) { s.dispatch = dr }
 }
 
-// WithSettings wires the C5 settings service used by GET /api/settings and PUT /api/settings/{file}.
+// WithSettings wires the settings service used by GET /api/settings and PUT /api/settings/{file}.
 func WithSettings(ss SettingsService) Option {
 	return func(s *Server) { s.settings = ss }
 }
@@ -160,19 +182,29 @@ func WithFormulaResolver(fr FormulaResolver) Option {
 	return func(s *Server) { s.formula = fr }
 }
 
-// WithPrototypes wires the C7 prototype server used by GET /api/prototypes and GET /proto/{id}/...
+// WithPrototypes wires the prototype server used by GET /api/prototypes and GET /proto/{id}/...
 func WithPrototypes(p Prototypes) Option {
 	return func(s *Server) { s.proto = p }
 }
 
-// WithFeedback wires the C6 gate-aware feedback writer used by POST /api/prototypes/{id}/feedback.
+// WithFeedback wires the gate-aware feedback writer used by POST /api/prototypes/{id}/feedback.
 func WithFeedback(f Feedback) Option {
 	return func(s *Server) { s.feedback = f }
 }
 
+// WithTailer wires the #500 session-snapshot reader used by the agent-detail route.
+func WithTailer(t Tailer) Option {
+	return func(s *Server) { s.tailer = t }
+}
+
+// WithMailer wires the #500 operator-mail sender used by the agent-mail route.
+func WithMailer(m MailSender) Option {
+	return func(s *Server) { s.mailer = m }
+}
+
 // WithRoot records the resolved factory root this console serves. It is surfaced via GET /healthz
-// (K5 / Gap 7) so an operator — or an automated probe — can see WHICH factory the console resolved
-// to, making a wrong-but-valid root visible rather than silent.
+// so an operator — or an automated probe — can see WHICH factory the console resolved to, making
+// a wrong-but-valid root visible rather than silent.
 func WithRoot(root string) Option {
 	return func(s *Server) { s.root = root }
 }
@@ -211,22 +243,43 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/factory/down", s.handleFactoryDown)
 	s.mux.HandleFunc("POST /api/agents/{name}/down", s.handleAgentDown)
 	s.mux.HandleFunc("POST /api/agents/{name}/sling", s.handleAgentSling)
+	s.mux.HandleFunc("GET /api/agents/{name}/detail", s.handleAgentDetail)
+	s.mux.HandleFunc("POST /api/agents/{name}/mail", s.handleAgentMail)
 	s.mux.HandleFunc("GET /api/dispatch", s.handleDispatch)
 	s.mux.HandleFunc("GET /api/settings", s.handleSettings)
 	s.mux.HandleFunc("PUT /api/settings/{file}", s.handleSettingsWrite)
 	if s.proto != nil {
-		// C7: enumeration (read) + traversal-contained on-disk static serving. The static subtree
+		// Enumeration (read) + traversal-contained on-disk static serving. The static subtree
 		// is mounted under StripPrefix so the proto handler receives "{id}/{asset}".
 		s.mux.HandleFunc("GET /api/prototypes", s.handlePrototypes)
 		s.mux.Handle("GET /proto/", http.StripPrefix("/proto/", s.proto))
 	}
 	if s.feedback != nil {
-		// C6: state-changing, gate-verified feedback write (H-5).
+		// state-changing, gate-verified feedback write.
 		s.mux.HandleFunc("POST /api/prototypes/{id}/feedback", s.handleFeedback)
 	}
 	if s.static != nil {
-		s.mux.Handle("/", s.static)
+		// The CSP lands on the served HTML document ONLY — never on the API JSON responses
+		// (write() stays header-clean). The /proto/ mount is deliberately NOT wrapped: prototype
+		// HTML is operator-authored local content already neutralised by the iframe `sandbox`
+		// attribute — a recorded exclusion, not an oversight.
+		s.mux.Handle("/", withDocumentCSP(s.static))
 	}
+}
+
+// cspPolicy is the restrictive document Content-Security-Policy. The 'unsafe-inline' in
+// style-src is LOAD-BEARING: index.html carries inline style="" attributes. The Google-Fonts
+// @import in variables.css is intentionally left to fall back to the declared offline stacks
+// rather than allowlisting a font CDN, matching variables.css's own offline-fallback comment.
+const cspPolicy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+
+// withDocumentCSP wraps the HTML document handler so the CSP header is set on document responses
+// (set before the wrapped handler writes its status, so it sticks).
+func withDocumentCSP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", cspPolicy)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Listen binds the configured loopback address (127.0.0.1:0 by default), starts serving in a
@@ -318,7 +371,7 @@ func hostnameIsLoopback(host string) bool {
 // answer even when the bind is non-loopback so the loopback probe never blocks on auth — mirroring
 // mcpstore's unauthenticated /health (lifecycle.go:268-277).
 //
-// K5/Gap 7: it also carries the resolved factory root under data so an operator (or an automated
+// It also carries the resolved factory root under data so an operator (or an automated
 // check) can see WHICH factory the console resolved to. The root sits under Data (json:"data,omitempty")
 // so the bare {ok:true} liveness contract is preserved — rendezvous.healthCheck checks ONLY the 200
 // status, never the body, so surfacing the root cannot break the liveness probe.
@@ -339,7 +392,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDispatch (read) returns the dispatcher's running state and the dispatched issues/PRs from
-// `af dispatch status --json` (AC-4). af-core already computes dispatcher + per-agent liveness, so
+// `af dispatch status --json`. af-core already computes dispatcher + per-agent liveness, so
 // the view surfaces those directly. A read failure (e.g. the {"state":"error"} envelope) is a 502.
 func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r, false) {
@@ -358,7 +411,7 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSettings (read) returns the curated settings: editable dispatch.json/startup.json, the
-// read-only factory.json, and the secret-free agent roster (AC-6). Per-agent secrets
+// read-only factory.json, and the secret-free agent roster. Per-agent secrets
 // (Model/BaseURL/AuthToken) are stripped by construction in the config package, never here.
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r, false) {
@@ -378,8 +431,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 // handleSettingsWrite (state-changing) persists an edited config file. {file} ∈ {dispatch,startup}
 // (factory.json is read-only). The raw request body IS the complete edited config document — it is
-// fed straight to `af config <file> set` on stdin (H-P1: the web module never decodes it into a
-// typed struct nor re-implements validation). af-core validates (struct + cross-file) and writes
+// fed straight to `af config <file> set` on stdin: the web module never decodes it into a
+// typed struct nor re-implements validation. af-core validates (struct + cross-file) and writes
 // atomically; on a non-zero exit its friendly per-field message is surfaced as the validation error.
 func (s *Server) handleSettingsWrite(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r, true) {
@@ -467,7 +520,7 @@ func decodeDownBody(r *http.Request) downBody {
 
 // handleAgentForm (read) returns the user-providable form schema for an idle agent's configured
 // formula. It resolves {name} → formula via the agent's DECLARED agents.json config (#455), then
-// the C4 reader filters out the auto-sourced (identity-bearing) vars (INV-2) and orders required-first.
+// the form reader filters out the auto-sourced (identity-bearing) vars and orders required-first.
 func (s *Server) handleAgentForm(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r, false) {
 		return
@@ -487,10 +540,10 @@ func (s *Server) handleAgentForm(w http.ResponseWriter, r *http.Request) {
 
 // handleAgentSling (state-changing) dispatches a task to an agent, emitting the byte-identical
 // `af sling --agent <name> --reset --var k=v … -- <task>` argv (one --var per field, the task as
-// the positional after a `--` terminator) through C2. The body is the structured {task, vars}
-// shape: `task` is the operator's primary text (value-validated in the wrapper, never key-checked),
-// and every `vars` key is validated against the formula's user-providable field set first — an
-// unknown vars key (e.g. an auto-sourced var) is refused with 400 and Sling is never invoked (INV-2).
+// the positional after a `--` terminator) through the exec wrapper. The body is the structured
+// {task, vars} shape: `task` is the operator's primary text (value-validated in the wrapper, never
+// key-checked), and every `vars` key is validated against the formula's user-providable field set
+// first — an unknown vars key (e.g. an auto-sourced var) is refused with 400 and Sling is never invoked.
 func (s *Server) handleAgentSling(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r, true) {
 		return
@@ -510,7 +563,7 @@ func (s *Server) handleAgentSling(w http.ResponseWriter, r *http.Request) {
 		s.write(w, http.StatusBadGateway, Envelope{OK: false, Message: err.Error()})
 		return
 	}
-	// INV-2: reject any VARS key that is not a user-providable field of this formula. Written as a
+	// Reject any VARS key that is not a user-providable field of this formula. Written as a
 	// direct 400 (writeMutation's isValidationErr would not recognise this message and would
 	// mis-map it to 502). The task is the positional argument — value-validated by validateTask in
 	// the wrapper, NEVER key-checked here (it does not appear in schema.FieldNames()).
@@ -533,7 +586,7 @@ func (s *Server) handleAgentSling(w http.ResponseWriter, r *http.Request) {
 // envelope (500 if no form reader / no resolver is configured, 502 on a read failure, 404 if the
 // agent is unknown, 422 if it has no configured formula) and returns ok=false in those cases.
 func (s *Server) resolveFormula(ctx context.Context, w http.ResponseWriter, name string) (string, bool) {
-	if s.form == nil { // keep — unchanged
+	if s.form == nil {
 		s.write(w, http.StatusInternalServerError, Envelope{OK: false, Message: "form reader not configured"})
 		return "", false
 	}
@@ -557,9 +610,195 @@ func (s *Server) resolveFormula(ctx context.Context, w http.ResponseWriter, name
 	return formula, true
 }
 
+// DetailView is the per-agent detail payload (#500). Agent embeds readmodel.AgentView VERBATIM
+// (twelve snake_case keys) — never a fork (#455). DeclaredFormula is the agents.json formula,
+// carried as a SEPARATE, distinctly-labelled field from Agent.Formula (the RUNNING formula). Tail
+// is the honest session snapshot.
+type DetailView struct {
+	Agent           readmodel.AgentView `json:"agent"`
+	DeclaredFormula string              `json:"declared_formula"`
+	Tail            readmodel.TailView  `json:"tail"`
+}
+
+// handleAgentDetail (read) returns the honest per-agent detail projection: the read-model
+// AgentView, the DECLARED (agents.json) formula, and a read-only tmux session snapshot. Membership
+// is the read-model's decision (unknown ⇒ 404); the FormulaResolver only ANNOTATES declared_formula
+// and never 404s (a race-window unresolved formula is carried honestly as ""). The tail output is
+// passed through WITHOUT being logged anywhere (sessions print secrets), and the
+// response is Cache-Control: no-store, since the snapshot is secret-bearing.
+func (s *Server) handleAgentDetail(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r, false) {
+		return
+	}
+	if s.tailer == nil {
+		s.write(w, http.StatusInternalServerError, Envelope{OK: false, Message: "tailer not configured"})
+		return
+	}
+	name := r.PathValue("name")
+	views, err := s.reader.Assemble(r.Context())
+	if err != nil {
+		s.write(w, http.StatusBadGateway, Envelope{OK: false, Message: err.Error()})
+		return
+	}
+	agent, found := findAgentView(views, name)
+	if !found {
+		s.write(w, http.StatusNotFound, Envelope{OK: false, Message: "agent " + name + " not found"})
+		return
+	}
+
+	// declared_formula annotates from static config; a nil resolver, an unknown agent, or an empty
+	// formula all carry "" honestly (the 404 decision already belongs to read-model membership above).
+	declared := ""
+	if s.formula != nil {
+		if f, ok, ferr := s.formula.AgentFormula(r.Context(), name); ferr == nil && ok {
+			declared = f
+		}
+	}
+
+	lines := clampLines(r.URL.Query().Get("lines"))
+	tail, err := s.tailer.Tail(r.Context(), name, lines)
+	if err != nil {
+		s.write(w, http.StatusBadGateway, Envelope{OK: false, Message: err.Error()})
+		return
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+	s.write(w, http.StatusOK, Envelope{OK: true, Data: DetailView{Agent: agent, DeclaredFormula: declared, Tail: tail}})
+}
+
+// handleAgentMail (state-changing) queues operator mail to an agent's mailbox. Flow:
+// guard → nil-seam 500 → decode → name shape/membership 404 → content validation (direct 400 with
+// the friendly copy) → MailSend (502 on failure) → 200 with the honest async copy. Content
+// validation lives HERE (not only in the wrapper) because a fake MailSender never rejects, and
+// writeMutation/isValidationErr would mis-map these messages to 502.
+func (s *Server) handleAgentMail(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r, true) {
+		return
+	}
+	if s.mailer == nil {
+		s.write(w, http.StatusInternalServerError, Envelope{OK: false, Message: "mail sender not configured"})
+		return
+	}
+	name := r.PathValue("name")
+	subject, body, ok := decodeMailBody(r)
+	if !ok {
+		s.write(w, http.StatusBadRequest, Envelope{OK: false, Message: `invalid mail body: expected {"subject":"…","body":"…"}`})
+		return
+	}
+
+	// Name shape + read-model membership both resolve to the same honest 404 (an invalid name can
+	// never be a member). Trimming mirrors Wrapper.MailSend's trimAgent so the check agrees with exec.
+	trimmed := strings.TrimRight(strings.TrimSpace(name), "/")
+	if verr := exec.ValidateAgentName(trimmed); verr != nil {
+		s.write(w, http.StatusNotFound, Envelope{OK: false, Message: "agent " + name + " not found"})
+		return
+	}
+	views, err := s.reader.Assemble(r.Context())
+	if err != nil {
+		s.write(w, http.StatusBadGateway, Envelope{OK: false, Message: err.Error()})
+		return
+	}
+	if _, member := findAgentView(views, trimmed); !member {
+		s.write(w, http.StatusNotFound, Envelope{OK: false, Message: "agent " + name + " not found"})
+		return
+	}
+
+	if msg, valid := validateMailContent(subject, body); !valid {
+		s.write(w, http.StatusBadRequest, Envelope{OK: false, Message: msg})
+		return
+	}
+
+	res, err := s.mailer.MailSend(r.Context(), trimmed, subject, body)
+	if err != nil {
+		s.write(w, http.StatusBadGateway, Envelope{OK: false, Message: err.Error()})
+		return
+	}
+	s.write(w, http.StatusOK, Envelope{OK: true, Message: "Mail queued for " + trimmed + " — delivery is asynchronous", Data: map[string]int{"exit_code": res.ExitCode}})
+}
+
+// findAgentView returns the AgentView whose Name matches name (exact), and whether it was found.
+// It is the read-model membership oracle shared by the detail and mail handlers.
+func findAgentView(views []readmodel.AgentView, name string) (readmodel.AgentView, bool) {
+	for _, v := range views {
+		if v.Name == name {
+			return v, true
+		}
+	}
+	return readmodel.AgentView{}, false
+}
+
+// clampLines maps the ?lines= query to a snapshot line count. It NEVER errors:
+// absent/non-numeric ⇒ the default 120; out-of-range ⇒ clamped to [1,500]. The clamped value is
+// what the handler passes to Tail and what the response's tail.lines reports.
+func clampLines(raw string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 120
+	}
+	if n < 1 {
+		return 1
+	}
+	if n > 500 {
+		return 500
+	}
+	return n
+}
+
+// mailBody is the composer POST shape.
+type mailBody struct {
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
+}
+
+// decodeMailBody decodes {subject, body}. A missing/empty body decodes to empty strings (the
+// content validation then rejects them as required); a malformed body ⇒ ok=false for a 400.
+func decodeMailBody(r *http.Request) (subject, body string, ok bool) {
+	if r.Body == nil {
+		return "", "", true
+	}
+	var b mailBody
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+		if errors.Is(err, io.EOF) {
+			return "", "", true
+		}
+		return "", "", false
+	}
+	return b.Subject, b.Body, true
+}
+
+// validateMailContent applies friendly error copy and the ≤200/≤10000 rune caps at the handler
+// level. It is at least as strict as Wrapper.MailSend's
+// pre-exec validation, so anything it accepts the wrapper also accepts (no content path can slip to
+// a 502). Subject: single-line, no C0 controls except tab. Body: multi-line (newline + tab allowed).
+func validateMailContent(subject, body string) (msg string, valid bool) {
+	if strings.TrimSpace(subject) == "" {
+		return "subject is required", false
+	}
+	if utf8.RuneCountInString(subject) > 200 {
+		return "subject too long (max 200 characters)", false
+	}
+	for _, r := range subject {
+		if r == '\n' || r == '\r' || (r < 0x20 && r != '\t') || r == 0x7f {
+			return "subject cannot contain control characters", false
+		}
+	}
+	if strings.TrimSpace(body) == "" {
+		return "message body is required", false
+	}
+	if utf8.RuneCountInString(body) > 10000 {
+		return "message body too long (max 10000 characters)", false
+	}
+	for _, r := range body {
+		if r == '\r' || (r < 0x20 && r != '\t' && r != '\n') || r == 0x7f {
+			return "message body cannot contain control characters other than newline and tab", false
+		}
+	}
+	return "", true
+}
+
 // slingBody is the structured POST body of a sling request: the operator's positional task plus the
 // remaining user-providable fields as vars. `task` binds to the formula's effective field
-// (Schema.Primary) as the af-sling positional; each `vars` entry travels as one --var (#440 K1).
+// (Schema.Primary) as the af-sling positional; each `vars` entry travels as one --var (#440).
 type slingBody struct {
 	Task string            `json:"task"`
 	Vars map[string]string `json:"vars"`
@@ -585,7 +824,7 @@ func decodeSlingBody(r *http.Request) (task string, vars map[string]string, ok b
 	return body.Task, body.Vars, true
 }
 
-// handlePrototypes (read) returns the enumerated, servable prototype dirs (AC-5). Each entry is
+// handlePrototypes (read) returns the enumerated, servable prototype dirs. Each entry is
 // annotated with feedback_open — whether the owning agent is verified parked at the matching gate —
 // so the UI can disable the feedback panel honestly when feedback is not currently open. Enumeration
 // is graceful: no .designs/ yet ⇒ an empty list, never a 502.
@@ -610,10 +849,10 @@ func (s *Server) handlePrototypes(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleFeedback (state-changing) writes the prototype's feedback-form.md — but ONLY when the owning
-// agent is verified parked at the matching design-feedback-{N} gate (C6 / H-5). An off-gate (or
+// agent is verified parked at the matching design-feedback-{N} gate. An off-gate (or
 // no-such-agent) submission returns ok:false with the honest "feedback not currently open" message
 // and writes nothing; a transport failure reading gate state is a 502. The form is the SOLE
-// AUTHORITY that releases the gate (data.md Decision 3) — there is no alternate feedback channel.
+// AUTHORITY that releases the gate — there is no alternate feedback channel.
 func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r, true) {
 		return

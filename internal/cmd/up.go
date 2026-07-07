@@ -41,7 +41,19 @@ Positional 'af up <names>' ignores startup.json and starts exactly those agents.
 	RunE: runUp,
 }
 
+// upModel is the optional per-launch model profile (or raw model id) applied to
+// EVERY agent started by an `af up` invocation (issue #480). It resolves through
+// the same shared resolveLaunchModelEnv helper sling/respawn use, so fail-fast and
+// precedence stay uniform across entrypoints.
+var upModel string
+
+// upSkipFitness applies the fitness-attestation-skip override (issue #508) to EVERY agent started by an
+// `af up` invocation: launch a non-loopback model profile without a fitness attestation.
+var upSkipFitness bool
+
 func init() {
+	upCmd.Flags().StringVar(&upModel, "model", "", "Per-agent model profile (or raw model id) from models.json — applied to every agent started by this `af up`")
+	upCmd.Flags().BoolVar(&upSkipFitness, "skip-fitness", false, "Launch non-loopback model profiles without a fitness attestation (loud override; see `af config models attest`)")
 	rootCmd.AddCommand(upCmd)
 }
 
@@ -236,6 +248,21 @@ func runUp(cmd *cobra.Command, args []string) error {
 			Ambiguous: rr.Ambiguous,
 			OpenCount: rr.OpenCount,
 		})
+		// Per-agent model selection (issue #480): resolve the model-env export set
+		// through the SHARED resolver (same one sling/respawn use) BEFORE Start, so
+		// fail-fast and precedence stay uniform. A profile-selecting `--model` that
+		// cannot resolve is surfaced per-agent (warn + allOK=false + continue), mirroring
+		// every other best-effort sub-failure in this loop — one bad agent must not abort
+		// the rest. agentDir (worktree-aware) was derived just above.
+		modelName, modelEnv, modelErr := resolveLaunchModelEnv(root, name, agentDir, upModel, entry.Model, upSkipFitness, cmd.ErrOrStderr())
+		if modelErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "%s: %v\n", name, modelErr)
+			allOK = false
+			continue
+		}
+		if len(modelEnv) > 0 {
+			mgr.SetModelEnv(modelEnv)
+		}
 		if err := mgr.Start(); err != nil {
 			if errors.Is(err, session.ErrAlreadyRunning) {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s: already running\n", session.SessionName(name))
@@ -250,11 +277,25 @@ func runUp(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		var parts []string
-		if entry.Model != "" {
-			parts = append(parts, "model: "+entry.Model)
+		// Echo the RESOLVED model (issue #480 discoverability, design-doc.md:109),
+		// falling back to the legacy entry.Model — mirrors the sling.go launch echo
+		// (PR #482). Without this, --model on an empty-entry.Model agent prints no
+		// model, and an overridden agent prints the stale original.
+		displayModel := entry.Model
+		if modelName != "" {
+			displayModel = modelName
 		}
-		if entry.BaseURL != "" {
-			parts = append(parts, "endpoint: "+entry.BaseURL)
+		if displayModel != "" {
+			parts = append(parts, "model: "+displayModel)
+		}
+		// Endpoint echo from the resolved set (names only, never auth_token), falling
+		// back to the legacy field; empty when neither applies.
+		endpoint := entry.BaseURL
+		if u := modelEnvValue(modelEnv, "ANTHROPIC_BASE_URL"); u != "" {
+			endpoint = u
+		}
+		if endpoint != "" {
+			parts = append(parts, "endpoint: "+endpoint)
 		}
 		if len(parts) > 0 {
 			fmt.Fprintf(cmd.OutOrStdout(), "Started %s (%s)\n", session.SessionName(name), strings.Join(parts, ", "))

@@ -226,6 +226,7 @@ body.app{
 .app .sign.s-wait{    --lit:var(--neon-violet); }
 .app .sign.s-error{   --lit:var(--danger); }
 .app .sign.s-idle{    --lit:var(--line); }
+.app .sign.dark{      opacity:.55; }      /* dims stopped-agent cards to set them apart from running ones (#500) */
 
 .app .sign .name{
   font-family:var(--font-display); font-weight:700; letter-spacing:.02em;
@@ -419,7 +420,7 @@ body.app{
 .app .toast[hidden]{ display:none; }
 
 /* ============================ SLING — 2-COL LAYOUT + FORM ============================ */
-/* Ported from the operator-APPROVED prototype (prototype/styles/main.css:381-450). */
+/* Ported from the operator-APPROVED prototype (Direction A · Neon Bazaar). */
 .app .cols{ display:grid; gap:var(--space-7); grid-template-columns:minmax(0,360px) minmax(0,1fr); align-items:start; }
 .app .cols.even{ grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
 .app .panel{ background:var(--panel); border:1px solid var(--line); border-radius:var(--r); padding:var(--space-6); }
@@ -510,8 +511,8 @@ body.app{
 .app .pill-new{ font-family:var(--font-display); font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--neon-magenta); border:1px solid var(--neon-magenta); border-radius:999px; padding:2px 8px; margin-inline-start:auto; }   /* the "new" pill */
 
 /* ============================ PROTOTYPES ============================ */
-/* Ported from the operator-APPROVED prototype (Direction A · Neon Bazaar):
-   .designs/407/prototype/styles/main.css L476-508 — the binding visual reference for this view. */
+/* Ported from the operator-APPROVED prototype (Direction A · Neon Bazaar) —
+   the binding visual reference for this view. */
 .app .proto-cols{ display:grid; gap:var(--space-7); grid-template-columns:minmax(0,300px) minmax(0,1fr) minmax(0,300px); align-items:start; }
 .app .proto-list{ display:flex; flex-direction:column; gap:var(--space-3); }
 .app .proto-list button{
@@ -563,7 +564,22 @@ body.app{
 .app .switch input:checked + .track{ background:rgba(32,229,255,.18); border-color:var(--neon-cyan); }
 .app .switch input:checked + .track::after{ left:23px; background:var(--neon-cyan); box-shadow:0 0 8px var(--neon-cyan); }
 .app .switch input:focus-visible + .track{ outline:2px solid var(--focus); outline-offset:2px; }
+/* Settings-only read-only viewer (Settings' #set-factory). Deliberately small — do NOT reuse it for
+   the agent Session snapshot (issue af-f4f082bc): the snapshot is the View page's PRIMARY element and
+   has its own .snapshot-block rule below. Sizing them together is the sizing-leak this fix retires. */
 .app .readonly-block{ background:var(--panel-2); border:1px solid var(--line); border-radius:var(--r-sm); padding:12px 14px; font-size:12px; color:var(--muted); white-space:pre-wrap; word-break:break-word; max-height:240px; overflow:auto; margin:0; }
+
+/* Agent facts grid — legible label/value pairs (renderAgentFacts emits div.fact > span.fk + span.fv);
+   without this the pairs render run-together ("statusIdle"). */
+.app .facts{ display:flex; flex-direction:column; gap:var(--space-2); }
+.app .fact{ display:flex; align-items:baseline; justify-content:space-between; gap:var(--space-5); padding:6px 0; border-top:1px solid var(--line-soft); }
+.app .fact:first-child{ border-top:0; }
+.app .fk{ font-family:var(--font-mono); font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); flex:none; }
+.app .fv{ font-family:var(--font-mono); font-size:13px; color:var(--text); text-align:right; word-break:break-word; }
+
+/* Session snapshot — the View page's PRIMARY element: full-width, tall, and readable. Scoped to the
+   snapshot alone so Settings' .readonly-block stays small. Replaces the old cramped 240px/12px sizing. */
+.app .snapshot-block{ background:var(--panel-2); border:1px solid var(--line); border-radius:var(--r-sm); padding:var(--space-5); font-size:13px; line-height:1.5; color:var(--text); white-space:pre-wrap; word-break:break-word; width:100%; min-height:60vh; max-height:70vh; overflow:auto; margin:0; }
 
 /* ============================ RESPONSIVE ============================ */
 @media (max-width:860px){

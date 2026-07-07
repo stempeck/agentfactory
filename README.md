@@ -54,6 +54,8 @@ cd agentfactory
 
 This builds a container with all prerequisites, clones your target repo, and runs `quickstart.sh` inside it. When it finishes, the container is ready for `af up`.
 
+A clean install now also **reveals the web console before the shell**: when it finishes it prints the loopback URL `http://127.0.0.1:<HOSTPORT>/` (and opens your browser on macOS) immediately before dropping you into the interactive shell — so you no longer have to run `--web` yourself just to first see it. Use `--web` only to **re-open** the console later. See the **Web Console (optional)** section below and [`web/README.md`](web/README.md) for details.
+
 #### Using quickstart.sh (inside the docker container @ docker exec -it -u dev "af_ghusername_repo" bash)
 
 ```bash

@@ -53,6 +53,7 @@
       <button id="filter-gate" type="button" data-filter="gate" aria-pressed="false">Gate</button>
       <button id="filter-waiting" type="button" data-filter="waiting" aria-pressed="false">Waiting</button>
       <button id="filter-attention" type="button" data-filter="attention" aria-pressed="false">Attention</button>
+      <button id="filter-stopped" type="button" data-filter="stopped" aria-pressed="false">Stopped</button>
     </div>
   </div>
 
@@ -60,6 +61,11 @@
 
   <!-- live agent grid (populated from /api/agents) -->
   <ul class="grid" id="grid" aria-live="polite"></ul>
+
+  <!-- dark group: stopped agents, appended after the untouched lit pipeline (#500).
+       renderDarkGroup manages both hidden flags and the count itself, so both start hidden. -->
+  <h2 class="group-label" id="dark-label" hidden>Stopped · <span id="dark-count">0</span></h2>
+  <ul class="grid" id="dark-grid" aria-live="polite" hidden></ul>
 
   <!-- empty state (shown when nothing is running) -->
   <section class="empty" id="empty" aria-label="No agents running" hidden>
@@ -100,7 +106,7 @@
         <span class="ic" aria-hidden="true">✦</span>
         <div><strong id="sling-success-agent"></strong> is starting — it'll appear on the Floor in a moment.</div>
       </div>
-      <!-- persistent inline error region (K7): sling failures land here, reusing the .validation danger style (no .error class exists). -->
+      <!-- persistent inline error region: sling failures land here, reusing the .validation danger style (no .error class exists). -->
       <div class="validation" id="sling-error" role="alert" aria-live="polite" hidden></div>
       <div id="sling-form-host">
         <p class="keyhint" id="sling-form-placeholder">Choose an idle agent on the left to build its task form.</p>
@@ -213,8 +219,8 @@
           <span id="proto-vpath">Select a prototype</span>
           <span style="margin-inline-start:auto">sandboxed preview</span>
         </div>
-        <!-- bare `sandbox` = maximally restrictive (ux.md Decision 5A / security.md Decision 4): no
-             allow-scripts, no allow-same-origin — prototype JS cannot reach the app shell. -->
+        <!-- bare `sandbox` = maximally restrictive: no allow-scripts, no allow-same-origin —
+             prototype JS cannot reach the app shell. -->
         <iframe id="proto-frame" title="Sandboxed prototype preview" sandbox src="about:blank"></iframe>
       </div>
     </section>
@@ -242,6 +248,68 @@
       </form>
     </section>
   </div>
+</section>
+
+<!-- ============================ AGENT DETAIL VIEW (#500) ============================ -->
+<!-- The sixth in-memory view (route "agent/<name>"). Populated by AgentDetailViewModel from
+     GET /api/agents/{name}/detail. Read-only: the snapshot pane carries NO input element and is
+     filled via textContent only. The composer uses agent-* ids, never the sling section's own
+     id prefix, since a test elsewhere in this repo pins that other prefix to a single occurrence
+     in this file. -->
+<section id="view-agent" hidden>
+  <div class="view-head">
+    <button class="ghost inline" type="button" id="agent-back" style="margin-bottom:10px"><span aria-hidden="true">←</span> Floor</button>
+    <div class="badges" style="margin-bottom:6px"><span id="agent-badge"></span></div>
+    <h1 class="view-title" id="agent-name">Agent</h1>
+    <p class="view-sub"><span class="dot" aria-hidden="true"></span> <span id="agent-fresh">loading…</span></p>
+  </div>
+
+  <!-- Gate banner (conditional): shown only when the agent is parked at a gate; the composer sits
+       directly below it so the operator's input is one glance away. -->
+  <p class="online off" id="agent-gate" role="status" hidden><span class="pip" aria-hidden="true"></span> <span id="agent-gate-text"></span></p>
+
+  <!-- SECONDARY row: facts + mail composer share equal columns, directly below the gate banner so
+       the operator's input stays one glance from the banner. The Session snapshot is NOT here — it is
+       the page's primary element and gets its own full-width block below. -->
+  <div class="cols even">
+    <!-- Work status facts -->
+    <section class="panel" aria-label="Agent facts">
+      <h2>Work status</h2>
+      <div class="facts" id="agent-facts" aria-live="polite"></div>
+    </section>
+
+    <!-- Mail composer — agent-* ids, inline success/error regions -->
+    <section class="panel" aria-label="Send mail to this agent">
+      <h2>Send mail</h2>
+      <p class="muted" style="margin-bottom:12px">Message this agent's mailbox. It reads mail when it next checks its inbox.</p>
+      <div class="success" id="agent-mail-ok" hidden>
+        <span class="ic" aria-hidden="true">✦</span>
+        <div id="agent-mail-ok-msg"></div>
+      </div>
+      <div class="validation" id="agent-mail-err" role="alert" aria-live="polite" hidden></div>
+      <form id="agent-mail-form">
+        <div class="formrow">
+          <label class="lbl" for="agent-mail-subject">Subject</label>
+          <input class="field w" id="agent-mail-subject" maxlength="200" placeholder="What's this about?">
+        </div>
+        <div class="formrow">
+          <label class="lbl" for="agent-mail-body">Message</label>
+          <textarea class="field w" id="agent-mail-body" rows="6" placeholder="Write your message to the agent…"></textarea>
+        </div>
+        <button class="btn primary block" type="submit" id="agent-mail-send">Send mail</button>
+      </form>
+    </section>
+  </div>
+
+  <!-- PRIMARY: full-width read-only Session snapshot. Sized by its own #agent-snapshot/.snapshot-block
+       rule (NOT the Settings-sized shared .readonly-block). Read-only — carries no input element. -->
+  <section class="panel snapshot-panel" aria-label="Agent session">
+    <h2>Session snapshot <span class="muted" style="font-size:12px;font-weight:400">· read-only</span></h2>
+    <p class="keyhint" id="agent-snapshot-label">Read-only snapshot — refreshes every 5s while you're on this page.</p>
+    <p class="keyhint" id="agent-snapshot-note" hidden></p>
+    <pre class="snapshot-block mono" id="agent-snapshot" aria-label="Session snapshot (read-only)"></pre>
+    <p class="keyhint" id="agent-snapshot-captured" hidden></p>
+  </section>
 </section>
 </main>
 

@@ -48,7 +48,7 @@ func TestRunDispatch_NoInlineCrossValidationDuplicate(t *testing.T) {
 	if strings.Contains(string(src), `notify_on_complete agent %q not found in agents.json`) {
 		t.Errorf("internal/cmd/dispatch.go still contains the inline notify cross-validation; replace it with config.ValidateDispatchConfig")
 	}
-	if !strings.Contains(string(src), "config.ValidateDispatchConfig(dispatchCfg, agentsCfg)") {
-		t.Errorf("runDispatch should delegate to config.ValidateDispatchConfig(dispatchCfg, agentsCfg)")
+	if !strings.Contains(string(src), "config.ValidateDispatchConfig(dispatchCfg, agentsCfg, modelsCfg)") {
+		t.Errorf("runDispatch should delegate to config.ValidateDispatchConfig(dispatchCfg, agentsCfg, modelsCfg)")
 	}
 }

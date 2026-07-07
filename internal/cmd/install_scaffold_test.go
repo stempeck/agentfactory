@@ -3,7 +3,9 @@ package cmd
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -112,5 +114,103 @@ func TestInstallScaffold_StartupAgentsDefaultManagerOnly(t *testing.T) {
 	// Regression guard: the intended #408 watchdog_agents fix must be PRESERVED, not reverted.
 	if !reflect.DeepEqual(startup.WatchdogAgents, []string{"manager", "supervisor"}) {
 		t.Errorf("scaffold watchdog_agents = %v, want [manager supervisor] (keep the #408 fix)", startup.WatchdogAgents)
+	}
+}
+
+// TestInstallScaffold_ModelsJsonSeeded pins the models.json seed (issue #480): a fresh
+// `af install --init` must seed a models.json that PASSES ITS OWN VALIDATOR — because
+// LoadModelsConfig runs validateModelsConfig on every launch, a seed with an incomplete
+// endpoint (base_url without auth_token) or a non-empty ANTHROPIC_API_KEY would brick
+// the next launch / teach the broken local-profile pattern. This source-parses the REAL
+// install.go literal and round-trips it through the REAL LoadModelsConfig (not a grep),
+// then asserts the lmstudio profile ships a complete local-endpoint set — with the
+// explicit ANTHROPIC_API_KEY clear and a genuinely local model id.
+func TestInstallScaffold_ModelsJsonSeeded(t *testing.T) {
+	data, err := os.ReadFile("install.go")
+	if err != nil {
+		t.Fatalf("read install.go: %v", err)
+	}
+	modelsLiteral := extractScaffoldLiteral(t, string(data), `"models.json":`)
+
+	// Round-trip through the REAL loader/validator: write the seed to a temp
+	// factory and LoadModelsConfig must return nil error.
+	root := t.TempDir()
+	afDir := filepath.Join(root, ".agentfactory")
+	if err := os.MkdirAll(afDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(config.ModelsConfigPath(root), []byte(modelsLiteral), 0o644); err != nil {
+		t.Fatalf("write seed models.json: %v", err)
+	}
+	loaded, err := config.LoadModelsConfig(root)
+	if err != nil {
+		t.Fatalf("seed models.json must pass its own validator; LoadModelsConfig: %v\nliteral: %s", err, modelsLiteral)
+	}
+
+	// The default profile must exist; its model id is asserted against quickstart.sh
+	// by TestInstallScaffold_DefaultModel_MatchesQuickstart, not pinned here.
+	if _, ok := loaded.Models["default"]; !ok {
+		t.Fatalf("seed must define a `default` profile; got models=%v", loaded.Models)
+	}
+
+	// lmstudio profile ships the COMPLETE local-endpoint set: base_url + auth_token
+	// + ANTHROPIC_MODEL + the ANTHROPIC_API_KEY:"" clear.
+	lm, ok := loaded.Models["lmstudio"]
+	if !ok {
+		t.Fatalf("seed must define an `lmstudio` example profile; got models=%v", loaded.Models)
+	}
+	if lm["ANTHROPIC_BASE_URL"] == "" {
+		t.Error("lmstudio profile must set a non-empty ANTHROPIC_BASE_URL")
+	}
+	if lm["ANTHROPIC_AUTH_TOKEN"] == "" {
+		t.Error("lmstudio profile must set a non-empty ANTHROPIC_AUTH_TOKEN (base_url requires auth_token)")
+	}
+	// The local-endpoint example must name a model an LM Studio server can actually
+	// serve — a cloud id here means copying the example verbatim yields an agent
+	// requesting a nonexistent model (PR #482 review).
+	if got := lm["ANTHROPIC_MODEL"]; got != "qwen2.5-coder-32b" {
+		t.Errorf("lmstudio profile ANTHROPIC_MODEL = %q, want the local id %q", got, "qwen2.5-coder-32b")
+	}
+	if v, ok := lm["ANTHROPIC_API_KEY"]; !ok || v != "" {
+		t.Errorf("lmstudio profile must ship ANTHROPIC_API_KEY:\"\" (explicit key-clear); present=%v val=%q", ok, v)
+	}
+
+	// The durable per-agent home must be present (even if empty) for
+	// `af config models set` to write into.
+	if loaded.Agents == nil {
+		t.Error("seed should ship an `agents` map (the regen-immune per-agent default home)")
+	}
+}
+
+// TestInstallScaffold_DefaultModel_MatchesQuickstart pins install-seed ↔ quickstart
+// consistency: a fresh `af install --init` and a quickstart.sh bootstrap must yield the
+// SAME default model. The expected id is parsed from quickstart.sh's own
+// ${ANTHROPIC_MODEL:-...} fallback — never hardcoded — so a future quickstart model bump
+// fails here until the seed follows. The drift this guards against actually happened:
+// quickstart.sh moved to claude-fable-5 while the seed stayed on claude-opus-4-8, and a
+// literal-vs-literal assertion kept CI green (PR #482 review).
+func TestInstallScaffold_DefaultModel_MatchesQuickstart(t *testing.T) {
+	qs, err := os.ReadFile("../../quickstart.sh")
+	if err != nil {
+		t.Fatalf("read quickstart.sh: %v", err)
+	}
+	m := regexp.MustCompile(`\$\{ANTHROPIC_MODEL:-([^}]+)\}`).FindSubmatch(qs)
+	if m == nil {
+		t.Fatal("quickstart.sh no longer contains an ${ANTHROPIC_MODEL:-...} default — update this parity test alongside it")
+	}
+	want := string(m[1])
+
+	data, err := os.ReadFile("install.go")
+	if err != nil {
+		t.Fatalf("read install.go: %v", err)
+	}
+	modelsLiteral := extractScaffoldLiteral(t, string(data), `"models.json":`)
+	var seed config.ModelsConfig
+	if err := json.Unmarshal([]byte(modelsLiteral), &seed); err != nil {
+		t.Fatalf("unmarshal scaffold models.json literal: %v\nliteral: %s", err, modelsLiteral)
+	}
+
+	if got := seed.Models["default"]["ANTHROPIC_MODEL"]; got != want {
+		t.Errorf("seeded default profile ANTHROPIC_MODEL = %q, but quickstart.sh defaults to %q — af install --init and a quickstart bootstrap must agree on the default model", got, want)
 	}
 }

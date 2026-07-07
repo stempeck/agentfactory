@@ -1,0 +1,11 @@
+{
+  "agents": [
+    "manager"
+  ],
+  "quality": "default",
+  "fidelity": "default",
+  "start_dispatch": true,
+  "watchdog_agents": [
+    "mergepatrol"
+  ]
+}

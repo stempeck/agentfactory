@@ -110,10 +110,11 @@ func runCompactHandoffCore(ctx context.Context, cwd string, interactive bool) er
 
 	// Step 6 — Recycle via shared respawn
 	return respawnSession(RespawnOptions{
-		FactoryRoot: factoryRoot,
-		AgentName:   agentName,
-		AgentEntry:  *agentEntry,
-		PaneID:      pane,
+		FactoryRoot:  factoryRoot,
+		AgentName:    agentName,
+		AgentEntry:   *agentEntry,
+		PaneID:       pane,
+		AgentWorkDir: cwd,
 	})
 }
 

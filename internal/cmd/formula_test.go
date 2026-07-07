@@ -314,6 +314,45 @@ func TestGenerateAgentTemplate_DualGateDetection(t *testing.T) {
 	}
 }
 
+// Issue #517: the gate protocol's step 3 must instruct the agent to continue
+// via `af prime` in the same session, not claim its session ends.
+func TestGenerateAgentTemplate_GateProtocol_ContinuationWording(t *testing.T) {
+	f := &formula.Formula{
+		Name: "gated-formula",
+		Type: formula.TypeWorkflow,
+		Steps: []formula.Step{
+			{ID: "step1", Title: "Do Work", Description: "Work"},
+			{ID: "step2", Title: "Wait", Description: "Gate step", Gate: &formula.Gate{
+				Type: "approval", ID: "gate-1",
+			}},
+		},
+	}
+
+	content := generateAgentTemplate(f, f.Name, "autonomous")
+
+	if strings.Contains(content, "Your session ends. A fresh agent resumes when the gate resolves.") {
+		t.Error("gate protocol still contains the stale 'session ends' sentence")
+	}
+	// Broader than the exact sentence above: the generated doc has more than one
+	// spot that used to claim a session-ending lifecycle (the Gate Steps section
+	// AND the Available Commands bullet) — assert the whole doc is clean, not
+	// just the one sentence this fix originally targeted.
+	if strings.Contains(content, "session ends") {
+		t.Error("generated agent doc still contains a 'session ends' claim somewhere")
+	}
+	if !strings.Contains(content, "af prime") {
+		t.Error("gate protocol should instruct the agent to continue via `af prime`, not stop")
+	}
+	// The rest of the gate protocol (steps 1-2, header, count, structure table)
+	// must survive unchanged — this is a reword, not a removal.
+	if !strings.Contains(content, "### Gate Steps") {
+		t.Error("gate protocol section header missing")
+	}
+	if !strings.Contains(content, "af done --phase-complete --gate") {
+		t.Error("gate completion command missing from gate protocol")
+	}
+}
+
 func TestGenerateAgentTemplate_NameOverride(t *testing.T) {
 	f := &formula.Formula{
 		Name:        "investigate",

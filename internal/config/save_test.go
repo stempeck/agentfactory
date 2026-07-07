@@ -43,7 +43,7 @@ func TestSaveDispatchConfig_AtomicCrossFileValidated(t *testing.T) {
 		TriggerLabel: "agentic",
 		Mappings:     []DispatchMapping{{Labels: []string{"bug"}, Agent: "ghost"}},
 	}
-	if err := ValidateDispatchConfig(bad, agents); err == nil {
+	if err := ValidateDispatchConfig(bad, agents, nil); err == nil {
 		t.Fatal("ValidateDispatchConfig accepted a mapping to an unknown agent")
 	} else if !strings.Contains(err.Error(), "ghost") {
 		t.Errorf("error %q should name the unknown agent %q", err.Error(), "ghost")
@@ -59,7 +59,7 @@ func TestSaveDispatchConfig_AtomicCrossFileValidated(t *testing.T) {
 		Mappings:         []DispatchMapping{{Labels: []string{"bug"}, Agent: "debugger"}},
 		NotifyOnComplete: "ghost",
 	}
-	if err := ValidateDispatchConfig(badNotify, agents); err == nil {
+	if err := ValidateDispatchConfig(badNotify, agents, nil); err == nil {
 		t.Error("ValidateDispatchConfig accepted an unknown notify_on_complete agent")
 	}
 
@@ -72,7 +72,7 @@ func TestSaveDispatchConfig_AtomicCrossFileValidated(t *testing.T) {
 		IntervalSecs:     600,
 		RetryAfterSecs:   3600,
 	}
-	if err := ValidateDispatchConfig(good, agents); err != nil {
+	if err := ValidateDispatchConfig(good, agents, nil); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
 	if err := SaveDispatchConfig(DispatchConfigPath(dir), good); err != nil {

@@ -65,6 +65,96 @@ func TestConfigDispatchSet_RejectsUnknownAgent(t *testing.T) {
 	}
 }
 
+// TestConfigDispatchSet_TolerantOfIncompleteModelsJson (PR #482): af config dispatch
+// set is NOT a profile-selecting path, so a validation-failing models.json (here an
+// incomplete endpoint — base_url without auth_token) must NOT hard-fail an
+// otherwise-valid dispatch write. Mirrors the launch path's warn-and-fall-through
+// policy: warn, drop the model cross-check, proceed.
+func TestConfigDispatchSet_TolerantOfIncompleteModelsJson(t *testing.T) {
+	root := setupConfigFactory(t)
+
+	// Incomplete endpoint: base_url without auth_token — LoadModelsConfig rejects it.
+	if err := os.WriteFile(config.ModelsConfigPath(root),
+		[]byte(`{"models":{"local":{"ANTHROPIC_BASE_URL":"http://x:1"}}}`), 0o644); err != nil {
+		t.Fatalf("seed models.json: %v", err)
+	}
+
+	// A dispatch doc with NO model-bearing mapping — models.json is irrelevant to it.
+	body := `{"repos":["o/r"],"trigger_label":"agentic","mappings":[{"labels":["bug"],"agent":"debugger"}]}`
+	out, err := runConfigSet(t, runConfigDispatchSet, body)
+	if err != nil {
+		t.Fatalf("an incomplete models.json must not block an unrelated dispatch write; err=%v out=%q", err, out)
+	}
+	if !strings.Contains(out, "models.json") {
+		t.Errorf("the fall-through must warn about ignoring models.json; out=%q", out)
+	}
+	if _, e := config.LoadDispatchConfig(root); e != nil {
+		t.Fatalf("dispatch.json should have been written despite the bad models.json: %v", e)
+	}
+}
+
+// TestConfigDispatchSet_ValidModelsJson_UndefinedModel_StillRejected is the
+// no-regression guard: when models.json loads cleanly, the per-mapping model
+// cross-check must STILL reject a mapping naming an undefined model. The
+// tolerance added for a BROKEN models.json must not weaken validation of a GOOD one.
+func TestConfigDispatchSet_ValidModelsJson_UndefinedModel_StillRejected(t *testing.T) {
+	root := setupConfigFactory(t)
+
+	if err := os.WriteFile(config.ModelsConfigPath(root),
+		[]byte(`{"models":{"opus":{"ANTHROPIC_MODEL":"claude-opus-4-8"}}}`), 0o644); err != nil {
+		t.Fatalf("seed models.json: %v", err)
+	}
+
+	body := `{"repos":["o/r"],"trigger_label":"agentic","mappings":[{"labels":["bug"],"agent":"debugger","model":"ghost-model"}]}`
+	_, err := runConfigSet(t, runConfigDispatchSet, body)
+	if err == nil {
+		t.Fatal("a mapping naming an undefined model must still be rejected when models.json is valid")
+	}
+	if !strings.Contains(err.Error(), "ghost-model") {
+		t.Errorf("rejection should name the undefined model; got %v", err)
+	}
+}
+
+// TestLoadModelsConfigForCrossCheck_IncompleteEndpoint_WarnsReturnsNil unit-tests the
+// shared helper both af dispatch and af config dispatch set use: a validation-failing
+// models.json (incomplete endpoint) must warn and fall through to nil (so
+// ValidateDispatchConfig skips the model cross-check), never a hard error.
+func TestLoadModelsConfigForCrossCheck_IncompleteEndpoint_WarnsReturnsNil(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".agentfactory"), 0o755)
+	os.WriteFile(config.ModelsConfigPath(root),
+		[]byte(`{"models":{"local":{"ANTHROPIC_BASE_URL":"http://x:1"}}}`), 0o644)
+
+	var warn bytes.Buffer
+	if got := loadModelsConfigForCrossCheck(root, &warn); got != nil {
+		t.Errorf("a validation-failing models.json must fall through to nil; got %+v", got)
+	}
+	if !strings.Contains(warn.String(), "models.json") {
+		t.Errorf("must warn about ignoring models.json; got %q", warn.String())
+	}
+}
+
+// TestLoadModelsConfigForCrossCheck_Valid_ReturnsConfig is the companion: a clean
+// models.json loads, is returned (so the cross-check still runs), and does not warn.
+func TestLoadModelsConfigForCrossCheck_Valid_ReturnsConfig(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".agentfactory"), 0o755)
+	os.WriteFile(config.ModelsConfigPath(root),
+		[]byte(`{"models":{"opus":{"ANTHROPIC_MODEL":"claude-opus-4-8"}}}`), 0o644)
+
+	var warn bytes.Buffer
+	got := loadModelsConfigForCrossCheck(root, &warn)
+	if got == nil {
+		t.Fatal("a valid models.json must be returned, not nil")
+	}
+	if _, ok := got.Models["opus"]; !ok {
+		t.Errorf("returned config missing the 'opus' profile: %+v", got)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("a valid models.json must not warn; got %q", warn.String())
+	}
+}
+
 func TestConfigSet_AtomicValidatedWrite(t *testing.T) {
 	root := setupConfigFactory(t)
 	afDir := filepath.Join(root, ".agentfactory")
@@ -125,6 +215,76 @@ func TestConfigSet_CommandsRegisteredUnderConfig(t *testing.T) {
 	startup := findChild(configCmd, "startup")
 	if startup == nil || findChild(startup, "set") == nil {
 		t.Error("`config startup set` is not registered under configCmd")
+	}
+}
+
+// TestConfigModelsSet_RoundTrip (issue #480): `af config models set` reads a
+// ModelsConfig on stdin, validates it (via SaveModelsConfig's internal
+// validateModelsConfig), and writes models.json atomically — and rejects malformed
+// input without touching the file. It also asserts the command is reachable under the
+// EXISTING config parent.
+func TestConfigModelsSet_RoundTrip(t *testing.T) {
+	root := setupConfigFactory(t)
+	afDir := filepath.Join(root, ".agentfactory")
+
+	// A valid registry persists and reloads identically.
+	body := `{"default":"opus","models":{"opus":{"ANTHROPIC_MODEL":"claude-opus-4-8"},"lmstudio":{"ANTHROPIC_BASE_URL":"http://localhost:1234","ANTHROPIC_AUTH_TOKEN":"lm-studio","ANTHROPIC_MODEL":"local","ANTHROPIC_API_KEY":""}},"agents":{"manager":"opus"}}`
+	out, err := runConfigSet(t, runConfigModelsSet, body)
+	if err != nil {
+		t.Fatalf("runConfigModelsSet: %v (out=%q)", err, out)
+	}
+	for _, e := range mustReadDir(t, afDir) {
+		if strings.HasSuffix(e, ".tmp") {
+			t.Errorf("temp residue after atomic write: %s", e)
+		}
+	}
+	loaded, err := config.LoadModelsConfig(root)
+	if err != nil {
+		t.Fatalf("reload models.json: %v", err)
+	}
+	if loaded.Default != "opus" {
+		t.Errorf("default round-trip = %q, want \"opus\"", loaded.Default)
+	}
+	if loaded.Agents["manager"] != "opus" {
+		t.Errorf("agents map round-trip = %v, want manager->opus", loaded.Agents)
+	}
+	if loaded.Models["opus"]["ANTHROPIC_MODEL"] != "claude-opus-4-8" {
+		t.Errorf("opus profile round-trip mismatch: %+v", loaded.Models["opus"])
+	}
+	if v, ok := loaded.Models["lmstudio"]["ANTHROPIC_API_KEY"]; !ok || v != "" {
+		t.Errorf("empty ANTHROPIC_API_KEY must survive round-trip: present=%v val=%q", ok, v)
+	}
+
+	// An invalid registry (incomplete endpoint: base_url without auth_token) is rejected
+	// by the on-write validator and leaves the existing file untouched.
+	before, _ := os.ReadFile(config.ModelsConfigPath(root))
+	bad := `{"models":{"broken":{"ANTHROPIC_BASE_URL":"http://localhost:9999"}}}`
+	if _, err := runConfigSet(t, runConfigModelsSet, bad); err == nil {
+		t.Error("expected error for an incomplete-endpoint registry")
+	}
+	after, _ := os.ReadFile(config.ModelsConfigPath(root))
+	if !bytes.Equal(before, after) {
+		t.Errorf("models.json was modified on a rejected write:\nbefore=%s\nafter=%s", before, after)
+	}
+
+	// Malformed JSON on stdin is rejected non-zero.
+	if _, err := runConfigSet(t, runConfigModelsSet, `{not json`); err == nil {
+		t.Error("expected error for malformed JSON stdin")
+	}
+}
+
+func TestConfigModelsSet_RegisteredUnderConfig(t *testing.T) {
+	findChild := func(parent *cobra.Command, name string) *cobra.Command {
+		for _, c := range parent.Commands() {
+			if c.Name() == name {
+				return c
+			}
+		}
+		return nil
+	}
+	models := findChild(configCmd, "models")
+	if models == nil || findChild(models, "set") == nil {
+		t.Error("`config models set` is not registered under configCmd")
 	}
 }
 

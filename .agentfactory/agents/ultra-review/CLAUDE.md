@@ -35,6 +35,7 @@ false positives. Only findings scoring at or above {{min_confidence}} survive.
 |----------|--------|-------------|
 | pr_uri | input (cli) | Pull request to review: full GitHub URL, owner/repo#number, or bare number |
 | min_confidence | input (cli, default 70) | Minimum 0-100 confidence score a finding needs to be reported |
+| force_review | input (cli, default "false") | Set "true" to force a re-review of a PR this reviewer already reviewed. Waives ONLY the already-reviewed criterion — every other eligibility check still applies |
 
 ## Orchestrator Communication Contract
 
@@ -169,6 +170,7 @@ Repeat until all steps are complete.
 | Variable | Required | Source | Description |
 |----------|----------|--------|-------------|
 | pr_uri | yes | cli | Pull request to review: full GitHub URL (https://github.com/owner/repo/pull/N), owner/repo#N, or bare PR number (current repo) — OR a GitHub issue URL (.../issues/N), which the formula resolves to its single linked PR via the closing-keyword relationship, or fails fast |
+| force_review | no | cli | Force a full re-review even if this reviewer has already reviewed the PR. Waives ONLY eligibility criterion (d) (already-reviewed) at both the phase-1 and phase-6 checkpoints — criteria (a) closed/merged, (b) draft, and (c) doesn't-need-review still apply. Default 'false' preserves standard behavior: already-reviewed PRs stay ineligible. |
 | min_confidence | no | cli | Minimum 0-100 confidence score a finding needs to be included in the posted review |
 
 ### Available Commands
@@ -218,6 +220,7 @@ false positives. Only findings scoring at or above {{min_confidence}} survive.
 |----------|--------|-------------|
 | pr_uri | input (cli) | Pull request to review: full GitHub URL, owner/repo#number, or bare number |
 | min_confidence | input (cli, default 70) | Minimum 0-100 confidence score a finding needs to be reported |
+| force_review | input (cli, default "false") | Set "true" to force a re-review of a PR this reviewer already reviewed. Waives ONLY the already-reviewed criterion — every other eligibility check still applies |
 
 ## Orchestrator Communication Contract
 

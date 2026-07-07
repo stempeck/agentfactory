@@ -45,6 +45,20 @@ leaves the existing file untouched.`,
 	RunE: runConfigStartupSet,
 }
 
+var configModelsCmd = &cobra.Command{
+	Use:   "models",
+	Short: "Manage model configuration (models.json)",
+}
+
+var configModelsSetCmd = &cobra.Command{
+	Use:   "set",
+	Short: "Replace models.json from a JSON document on stdin",
+	Long: `Read a complete ModelsConfig as JSON on stdin, validate it, and write it
+atomically to models.json. On validation failure the command exits non-zero and
+leaves the existing file untouched.`,
+	RunE: runConfigModelsSet,
+}
+
 func init() {
 	// No --json flag: these commands only ever read JSON from stdin, so a --json flag
 	// would be a dead control (never consulted) that misrepresents the CLI contract.
@@ -53,6 +67,9 @@ func init() {
 
 	configStartupCmd.AddCommand(configStartupSetCmd)
 	configCmd.AddCommand(configStartupCmd)
+
+	configModelsCmd.AddCommand(configModelsSetCmd)
+	configCmd.AddCommand(configModelsCmd)
 }
 
 // decodeJSONStdin decodes a single JSON document from the command's input (stdin
@@ -86,7 +103,13 @@ func runConfigDispatchSet(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("loading agents.json for cross-file validation: %w", err)
 	}
-	if err := config.ValidateDispatchConfig(&cfg, agents); err != nil {
+	// models.json feeds the per-mapping model cross-check. This is a NON-selecting
+	// read (af config dispatch set writes dispatch.json, never launches a profile), so
+	// a validation error in a half-edited models.json must not block an otherwise-valid
+	// dispatch write: it warns and falls through with a nil config, skipping the
+	// cross-check rather than hard-failing (PR #482).
+	models := loadModelsConfigForCrossCheck(root, cmd.ErrOrStderr())
+	if err := config.ValidateDispatchConfig(&cfg, agents, models); err != nil {
 		return err
 	}
 
@@ -117,5 +140,30 @@ func runConfigStartupSet(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "Startup configuration saved.")
+	return nil
+}
+
+func runConfigModelsSet(cmd *cobra.Command, _ []string) error {
+	wd, err := getWd()
+	if err != nil {
+		return err
+	}
+	root, err := config.FindFactoryRoot(wd)
+	if err != nil {
+		return err
+	}
+
+	var cfg config.ModelsConfig
+	if err := decodeJSONStdin(cmd, &cfg); err != nil {
+		return err
+	}
+
+	// SaveModelsConfig re-runs validateModelsConfig before the atomic write, so an
+	// invalid registry (AF_* key, real api key, incomplete endpoint, undefined
+	// agent/default model) is rejected and the existing file is left untouched.
+	if err := config.SaveModelsConfig(config.ModelsConfigPath(root), &cfg); err != nil {
+		return err
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "Models configuration saved.")
 	return nil
 }

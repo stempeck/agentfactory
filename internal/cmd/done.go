@@ -39,7 +39,7 @@ If more steps remain, it outputs the next step. If all steps are complete, it
 mails WORK_DONE to the dispatcher and cleans up the checkpoint.
 
 For gate steps, use --phase-complete --gate <id> to register as a gate waiter.
-The session ends and a fresh agent is dispatched when the gate resolves.`,
+Run 'af prime' afterward to load your next step and continue.`,
 	RunE: runDone,
 }
 
@@ -137,8 +137,7 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 		}
 		// Try to close the gate bead as phase-complete signal
 		_ = store.Close(ctx, gate, "")
-		fmt.Printf("✓ Phase complete. Gate %s registered. Session ending.\n", gate)
-		return nil
+		fmt.Printf("✓ Phase complete. Gate %s registered. Continue: run 'af prime' to load your next step.\n", gate)
 	}
 
 	openChildren, err := store.List(ctx, issuestore.Filter{

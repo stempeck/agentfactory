@@ -738,3 +738,134 @@ func TestWebBridgeHostListenerToolGuard(t *testing.T) {
 		}
 	})
 }
+
+// TestQuickdockerWebRevealAtCompletion guards Issue #479 Phase 1 (commit 85c465fd) against
+// silent regression. Phase 1 made three coordinated edits with no test:
+//
+//  1. the completion-path web reveal `if ! ( _web_bridge "$CONTAINER_NAME" … )` runs AFTER
+//     the `Setup complete!` banner and BEFORE the final `docker exec … bash`, so the URL is
+//     revealed before the user's single landing shell (quickdocker.sh:702 → :705);
+//  2. Step-8's `docker exec` exports `-e AF_QUICKDOCKER_DRIVEN=1` (quickdocker.sh:641); and
+//  3. quickstart.sh's redundant `exec bash` is guarded by `-z "${AF_QUICKDOCKER_DRIVEN:-}"`
+//     (quickstart.sh:719 → :721), so the driven install lands ONE shell, not two.
+//
+// (2) and (3) are the two halves of a single coordinated edit (K6): dropping EITHER reopens
+// the double-shell hop, so BOTH are asserted (peer review's single enforcement gap).
+//
+// These are true mutation guards, not presence checks — the ordering subtests use
+// strings.Index ORDER comparisons so moving/dropping any edit goes RED (AC#3). The search is
+// anchored from `Setup complete!` because both `_web_bridge "$CONTAINER_NAME"` (the --web arm
+// at :381) and `docker exec -it -u dev "$CONTAINER_NAME" bash` (the --shell arm at :375)
+// appear a SECOND time before the banner; a whole-file Index would bind to the wrong lines.
+// The export is asserted with a whole-file Contains, not a `[^\n]*…quickstart.sh` regex —
+// Step-8 spans two physical lines (the `\` continuation on :641, `./quickstart.sh` on :642),
+// so `[^\n]*` cannot cross the newline and that regex would be a false-green.
+//
+// The isolation subtests run a docker-free bash harness (the structure mirrors the relay
+// wrapper, with `_web_bridge` stubbed) to pin the central safety property: the mandatory
+// subshell `( … )` confines `_web_bridge`'s `exit 1` under `set -euo pipefail`, so the shell
+// always lands. No docker — they run in the CI `unit` lane (bash only).
+func TestQuickdockerWebRevealAtCompletion(t *testing.T) {
+	root := findModuleRoot(t)
+	read := func(name string) string {
+		data, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		return string(data)
+	}
+
+	// ── AC#3 mutation guard: completion reveal runs after the banner and BEFORE the shell ──
+	t.Run("completion_reveal_then_shell", func(t *testing.T) {
+		content := read("quickdocker.sh")
+		idxBanner := strings.Index(content, "Setup complete!")
+		if idxBanner < 0 {
+			t.Fatal("AC: quickdocker.sh missing the `Setup complete!` banner anchor")
+		}
+		// Anchor from the banner so we bind to the COMPLETION call (:702) and the FINAL shell
+		// (:705), not the pre-banner --web (:381) / --shell (:375) arms that share the literals.
+		tail := content[idxBanner:]
+		idxWeb := strings.Index(tail, `_web_bridge "$CONTAINER_NAME"`)
+		idxShell := strings.Index(tail, `docker exec -it -u dev "$CONTAINER_NAME" bash`)
+		if idxWeb < 0 || idxShell < 0 || idxWeb >= idxShell {
+			t.Errorf("AC#2/#3: completion _web_bridge (idx=%d) must run AFTER `Setup complete!` and "+
+				"BEFORE the final `docker exec … bash` (idx=%d); -1 means the line was moved or removed",
+				idxWeb, idxShell)
+		}
+		// The reveal must stay subshell-wrapped: `_web_bridge` has five `exit 1` paths under
+		// `set -euo pipefail`, so only `if ! ( … )` confines them and lets the shell below land.
+		if !regexp.MustCompile(`if ! \( _web_bridge "\$CONTAINER_NAME"`).MatchString(tail) {
+			t.Error(`AC#3: completion reveal must be wrapped ` + "`if ! ( _web_bridge \"$CONTAINER_NAME\" … )`" +
+				` so a bridge exit 1 is confined and the shell still lands (do not tidy the subshell away)`)
+		}
+	})
+
+	// ── K6 export half: Step-8 must carry the coordination var (whole-file; occurs once) ──
+	t.Run("step8_exports_driven_var", func(t *testing.T) {
+		if !strings.Contains(read("quickdocker.sh"), "-e AF_QUICKDOCKER_DRIVEN=1") {
+			t.Error("K6/AC#3: Step-8 `docker exec` must export `-e AF_QUICKDOCKER_DRIVEN=1` so quickstart " +
+				"can suppress its redundant in-container `exec bash` (dropping it reopens the double-shell hop)")
+		}
+	})
+
+	// ── K6 guard half (REQUIRED — peer review's single enforcement gap): quickstart's
+	//    `exec bash` must be gated by the var, ordered guard-before-exec so dropping the
+	//    guard alone goes RED even if the export half is still present. ──
+	t.Run("quickstart_exec_bash_guarded", func(t *testing.T) {
+		qs := read("quickstart.sh")
+		idxGuard := strings.Index(qs, `-z "${AF_QUICKDOCKER_DRIVEN:-}"`)
+		idxExec := strings.Index(qs, "exec bash")
+		if idxGuard < 0 || idxExec < 0 || idxGuard >= idxExec {
+			t.Errorf(`K6/AC#3: quickstart.sh `+"`exec bash`"+` (idx=%d) must be guarded by `+
+				"`-z \"${AF_QUICKDOCKER_DRIVEN:-}\"`"+` (idx=%d) — ship both halves of K6 or neither`,
+				idxExec, idxGuard)
+		}
+	})
+
+	// ── Central safety property, docker-free: the subshell confines a failing bridge ──
+	// Mirrors the relay wrapper shape at quickdocker.sh:702-705 with `_web_bridge` stubbed to
+	// fail; the "shell that lands" is modelled by `echo LANDED` (no docker in the unit lane).
+	t.Run("isolation_subshell_confines_exit", func(t *testing.T) {
+		harness := "set -euo pipefail\n" +
+			"_web_bridge(){ echo boom >&2; exit 1; }\n" +
+			`if ! ( _web_bridge "x" "y" ); then echo NOTE >&2; fi` + "\n" +
+			"echo LANDED\n"
+		var stdout, stderr bytes.Buffer
+		cmd := exec.Command("bash", "-c", harness)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("AC#4: the `if ! ( _web_bridge … )` wrapper must NOT fail fatally when the bridge "+
+				"exit 1's — the subshell should confine it: %v\nstderr:\n%s", err, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "LANDED") {
+			t.Errorf("AC#4: the shell must always land — stdout missing LANDED:\nstdout:\n%s", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "NOTE") {
+			t.Errorf("AC#4: the non-fatal note branch must run when the bridge fails — stderr missing NOTE:\nstderr:\n%s", stderr.String())
+		}
+	})
+
+	// ── Negative control: PROVE the subshell is load-bearing. Without `( … )`, `_web_bridge`'s
+	//    `exit 1` exits the whole script (exit, not return), so LANDED is never reached. This is
+	//    why quickdocker.sh:702 must keep the subshell — it pins the mechanism, not just the
+	//    current outcome. ──
+	t.Run("isolation_without_subshell_aborts", func(t *testing.T) {
+		harness := "set -euo pipefail\n" +
+			"_web_bridge(){ echo boom >&2; exit 1; }\n" +
+			`if ! _web_bridge "x" "y"; then echo NOTE >&2; fi` + "\n" +
+			"echo LANDED\n"
+		var stdout bytes.Buffer
+		cmd := exec.Command("bash", "-c", harness)
+		cmd.Stdout = &stdout
+		cmd.Stderr = io.Discard
+		err := cmd.Run()
+		if err == nil {
+			t.Error("control: without the subshell, `_web_bridge`'s `exit 1` should abort the script (non-zero exit)")
+		}
+		if strings.Contains(stdout.String(), "LANDED") {
+			t.Errorf("control: without the subshell the shell must NOT land — got LANDED, which means the "+
+				"subshell at quickdocker.sh:702 is not what confines the exit:\nstdout:\n%s", stdout.String())
+		}
+	})
+}

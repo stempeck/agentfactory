@@ -221,6 +221,67 @@ func TestRunDone_PhaseComplete_RequiresGate(t *testing.T) {
 	}
 }
 
+// Issue #517: a gate step that is also a formula's FINAL step must still
+// reach the WORK_DONE completion path (formula-instance epic closed,
+// .runtime/hooked_formula removed) instead of short-circuiting at the gate
+// branch's early return.
+func TestRunDone_PhaseCompleteGate_FinalStep_ReachesCompletion(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	workDir := filepath.Join(dir, ".agentfactory", "agents", "manager")
+	ctx := t.Context()
+
+	mem := memstore.New()
+	instance, err := mem.Create(ctx, issuestore.CreateParams{
+		Title:  "Formula: gate-final-step-test",
+		Type:   issuestore.TypeEpic,
+		Labels: []string{"formula-instance"},
+	})
+	if err != nil {
+		t.Fatalf("seed instance: %v", err)
+	}
+
+	// The ONLY child step — this is the formula's final (and only) step, and
+	// the agent treats it as a gate: `af done --phase-complete --gate <id>`.
+	step, err := mem.Create(ctx, issuestore.CreateParams{
+		Title:    "Step: GATE final approval",
+		Parent:   instance.ID,
+		Type:     issuestore.TypeTask,
+		Labels:   []string{"formula-step"},
+		Assignee: "manager",
+	})
+	if err != nil {
+		t.Fatalf("seed step: %v", err)
+	}
+
+	origNewIssueStore := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return mem, nil }
+	defer func() { newIssueStore = origNewIssueStore }()
+
+	writeRuntimeFile(t, workDir, "hooked_formula", instance.ID)
+	writeStepPrimed(workDir, step.ID, "")
+
+	// phaseComplete=true, gate=<step.ID> (agents always pass the step's own
+	// bead ID as the gate id, per prime.go) — this is the scenario that, before
+	// the #517 fix, returns early at done.go's gate branch before ever reaching
+	// the completion check.
+	if err := runDoneCore(ctx, workDir, true, step.ID); err != nil {
+		t.Fatalf("runDoneCore (gate, final step): %v", err)
+	}
+
+	// Proof the completion path ran, not the gate branch's early return: the
+	// formula-instance epic must be terminal.
+	got, err := mem.Get(ctx, instance.ID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if !got.Status.IsTerminal() {
+		t.Errorf("formula-instance epic status = %q, want terminal — a final-step gate must reach the WORK_DONE completion path", got.Status)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".runtime", "hooked_formula")); !os.IsNotExist(err) {
+		t.Error("hooked_formula should be cleaned up when a final-step gate reaches completion")
+	}
+}
+
 // AC12: TestRunDone_RemovesCheckpoint — checkpoint removed on completion
 func TestRunDone_RemovesCheckpoint(t *testing.T) {
 	dir := t.TempDir()

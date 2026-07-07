@@ -1,0 +1,775 @@
+description = """
+## Overview
+Investigates a reported problem and produces a well-formed GitHub issue (or a
+comment on an existing one) that gives an implementer everything they need to find
+and understand the problem — without prescribing the fix.
+
+The problem to write up comes from the assigned bead — which may contain an inline
+problem description, a path to a problem document, or a link to an existing GitHub
+issue. This formula converts .claude/skills/github-issue/SKILL.md into a
+dispatchable workflow: Phase 1 (understand the problem, examine attached
+artifacts), Phase 2 (investigate the codebase via an Explore agent), Phase 3
+(reconcile findings against every reported symptom), Phase 4 (draft the issue
+body), Phase 5 (validate the draft against a 5-point checklist), Phase 6 (post via
+`gh api`), and Phase 7 (optionally create a bead and dispatch, if requested).
+
+## Your Role: Cartographer, Not Surgeon
+
+You are not fixing the reported problem. You are drawing the map for someone who
+will. Write every sentence as if you're briefing a colleague who will go deeper
+than you did — list every affected file and layer, note contextual gotchas, and
+write acceptance criteria that define "done" without defining "how." Never say
+"add this line to this file" or name a specific function/flag/command substitution
+as "the correct" fix — naming the mechanism is prescription even when offered as an
+example.
+
+**Be honest about what you find.** If a feature was half-implemented, say "this was
+never wired up." If there are no tests covering the flow, say so. Don't soften
+findings into neutral descriptions of state.
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| issue | cli | The issue ID assigned to this agent (the problem to write up) |
+
+## Failure Modes
+
+| Situation | Action |
+|-----------|--------|
+| A reconciliation row still shows a gap after re-investigating | Do NOT wait for a reply — mail Supervisor a non-blocking notice, record it under Open Questions in the draft, and proceed with the best available theory |
+| Investigation surfaces an adjacent problem | Include it by default; if excluded, record the exclusion and reason under Scope Decisions in the draft rather than dropping it silently |
+| A validate-draft checklist item is not "none" | Fix the draft now and re-run the checklist — do not post with an unresolved item |
+| Tests fail on main | Judgment call per the Scotty Principle table — fix, file, or proceed per severity |
+| Context filling up | Use af handoff to cycle to a fresh session |
+| Blocked / unclear problem statement | Mail Supervisor, do not guess |
+
+## Anti-Patterns to Avoid
+
+| Anti-Pattern | Why It's Bad | Instead |
+|-------------|-------------|---------|
+| "This is a one-line fix" | Minimizes scope, misses environments/tests | List all affected layers |
+| Naming specific deploy scripts | Assumes deploy path, misses staging/prod parity | Note that multiple environments exist |
+| Skipping test files | Implementer might skip test updates | Always list test files in affected layers |
+| Skipping artifact examination | Screenshots and pastes often contain the diagnosis | Examine every attached image, log, and config screenshot before exploring the codebase |
+| Waiting for a human reply on a reconciliation gap or scope decision | This agent runs unattended and cannot block | Escalate non-blocking via mail, record the gap/decision visibly in the draft, and proceed |
+| Prescribing a fix in the draft | Closes off the implementer's discovery, causes them to miss things | State findings and acceptance criteria only, never mechanisms |
+
+## !IMPORTANT - MANDATORY Exact Step Execution
+Execute each formula step EXACTLY as written, in order, with no modifications.
+Every step produces a file artifact at a known path. `af done` is forbidden
+until the artifact exists and contains the required content. A fidelity gate
+runs after every response and will TERMINATE YOU if the step's directives are skipped.
+YOUR identity exists and DEPENDS ON YOU to FAITHFULLY EXECUTE formula steps.
+"""
+formula = "github-issue"
+version = 1
+
+# ============================================================================
+# PRE-WORK INVARIANT STEPS
+# ============================================================================
+
+[[steps]]
+id = "load-context"
+title = "Load context and verify assignment"
+description = """
+Initialize your session and understand your assignment.
+
+**1. Prime your environment:**
+```bash
+af prime                    # Load role context
+```
+
+**2. Check your assignment:**
+
+The formula provides your assigned issue via `{{issue}}`. Read it carefully:
+```bash
+af bead show {{issue}}           # Full issue details
+```
+
+**3. Check inbox for additional context:**
+```bash
+af mail inbox
+# Read any HANDOFF or assignment messages
+```
+
+**4. Extract the problem to write up from the bead:**
+The bead is your source of truth. It may provide the problem in one of three forms:
+
+- **Inline problem description**: The bead description itself describes the
+  problem. This becomes a NEW GitHub issue in phase-6-post.
+- **Problem document path**: The bead references a file (e.g., `bugs/report.md`).
+  Read it completely. This also becomes a NEW GitHub issue in phase-6-post.
+- **Existing GitHub issue URL**: The bead contains a URL (e.g.,
+  `https://github.com/org/repo/issues/123`). Fetch it via
+  `gh api repos/<org>/<repo>/issues/<number>` (body + comments) — your write-up
+  is posted as a COMMENT on this issue in phase-6-post, not a new issue.
+
+Whichever form, capture the full problem statement — this is what
+phase-1-understand-problem investigates.
+
+**5. Verify you can proceed:**
+- No unresolved blockers on the issue
+- You understand what needs investigating
+- Required resources are available (repo access, `gh` auth)
+
+If blocked or unclear, mail Supervisor immediately:
+```bash
+af mail send supervisor -s "HELP: Unclear requirements" -m "Issue: {{issue}}
+Question: <what you need clarified>"
+```
+
+**Exit criteria:** You understand the problem to write up and can begin
+phase-1-understand-problem."""
+
+[[steps]]
+id = "branch-setup"
+title = "Set up working branch"
+needs = ["load-context"]
+description = """
+Ensure you're on a clean feature branch ready for work.
+
+**1. Check current branch state:**
+```bash
+git status
+git branch --show-current
+```
+
+**2. If not on a feature branch, create one:**
+```bash
+# Standard naming: agent/<your-name> or feature/<issue-id>
+git checkout -b agent/<name>
+```
+
+**3. Ensure clean working state:**
+```bash
+git status                  # Should show "working tree clean"
+git stash list              # Should be empty
+```
+
+If dirty state from previous work:
+```bash
+# If changes are relevant to this issue:
+git add -A && git commit -m "WIP: <description>"
+
+# If changes are unrelated cruft:
+git stash push -m "unrelated changes before {{issue}}"
+# Or discard if truly garbage:
+git checkout -- .
+```
+
+**4. Sync with main:**
+```bash
+git fetch origin
+git rebase origin/{{default_branch}}      # Get latest, rebase your branch
+```
+
+If rebase conflicts:
+- Resolve them carefully
+- Test after resolution
+- If stuck, mail Supervisor
+
+**Exit criteria:** You're on a clean feature branch, rebased on latest main."""
+
+[[steps]]
+id = "validate-contract"
+title = "Validate design contract (if present)"
+needs = ["branch-setup"]
+description = """
+Gate: incoming design contract inspection (Poka-yoke).
+
+Check if a design contract exists for this work:
+```bash
+# Look for design documents related to this issue
+ls .designs/{{issue}}/design-doc.md 2>/dev/null || echo "No design contract found"
+```
+
+**If design contract EXISTS:**
+- Read it completely
+- Extract key requirements and constraints
+- Note any specific implementation guidance
+- These become verification points for self-verify later
+
+**If NO design contract exists:**
+- This is acceptable — not all work has a prior design
+- Close this step with reason "No design contract found"
+- Proceed without contract verification
+
+**Exit criteria:** Design contract reviewed (if present), or step closed as N/A."""
+
+[[steps]]
+id = "preflight-tests"
+title = "Verify tests pass on main"
+needs = ["validate-contract"]
+description = """
+Check if the codebase is healthy BEFORE starting your work.
+
+**The Scotty Principle:** Don't walk past a broken warp core. But also don't
+let someone else's mess consume your entire mission.
+
+**1. Check tests on main:**
+```bash
+git stash                   # Save your branch state
+git checkout origin/{{default_branch}}
+# Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
+# Then run it. Examples: make test, npm test, cargo test, go test ./...
+```
+
+**2. If tests PASS:**
+```bash
+git checkout -              # Back to your branch
+git stash pop               # Restore state
+```
+Continue to phase-1-understand-problem step.
+
+**3. If tests FAIL on main:**
+
+Make a judgment call:
+
+| Situation | Action |
+|-----------|--------|
+| Quick fix (<15 min) | Fix it, commit to main, then continue |
+| Medium fix (15-60 min) | Fix if it blocks your work, else file bead |
+| Big fix (>1 hour) | File bead, notify Supervisor, proceed with your work |
+
+**Quick fix path:**
+```bash
+# Fix the issue
+git add <files>
+git commit -m "fix: <description> (pre-existing failure)"
+git push origin {{default_branch}}
+git checkout -
+git stash pop
+git rebase origin/{{default_branch}}      # Get your fix
+```
+
+**File and proceed path:**
+```bash
+af bead create --title "Pre-existing test failure: <description>" \
+  --type bug --priority 1
+
+af mail send supervisor -s "NOTICE: Main has failing tests" \
+  -m "Found pre-existing test failures on main.
+Filed: <bead-id>
+Proceeding with my assigned work ({{issue}})."
+
+git checkout -
+git stash pop
+```
+
+**Context consideration:**
+If fixing pre-existing failures consumed significant context:
+```bash
+af handoff -s "Fixed pre-existing failures, ready for assigned work" \
+  -m "Issue: {{issue}}
+Fixed: <what you fixed>
+Ready to start: phase-1-understand-problem step"
+```
+Fresh session continues from phase-1-understand-problem.
+
+**Exit criteria:** Tests pass on main (or issue filed), ready to begin
+phase-1-understand-problem."""
+
+# ============================================================================
+# DOMAIN STEPS — from .claude/skills/github-issue/SKILL.md
+# ============================================================================
+
+[[steps]]
+id = "phase-1-understand-problem"
+title = "Phase 1: Understand the problem as reported"
+needs = ["preflight-tests"]
+description = """
+Understand the problem captured in load-context before touching the codebase.
+
+**1. If the bead's problem source is a GitHub issue URL**, you already fetched its
+full body and comments in load-context via `gh api`. Re-read it carefully.
+
+**2. Read the problem description carefully** — note the exact symptoms, what was
+expected, and what actually happened. Do not paraphrase away specifics.
+
+**Examine all attached artifacts.** Screenshots, pasted logs, email contents, and
+configuration screenshots often carry more signal than the codebase itself. These
+are first-class evidence, not supplementary detail.
+
+- Download images with authenticated requests:
+  `curl -sL -H "Authorization: token $(gh auth token)" -o file.png "<url>"`
+- Use the Read tool to visually examine downloaded images
+- Note every concrete detail visible in artifacts (field values, status indicators,
+  error codes, configuration states)
+
+**Anti-pattern:** Do NOT skip artifact examination — screenshots and pastes often
+contain the diagnosis.
+
+**Exit criteria:** The problem as reported is fully understood, including every
+detail visible in attached artifacts."""
+
+[[steps]]
+id = "phase-2-investigate-codebase"
+title = "Phase 2: Map the codebase"
+needs = ["phase-1-understand-problem"]
+description = """
+Use an **Explore agent** (subagent_type=Explore) to map the technical landscape. The
+prompt should ask the agent to trace the full data/control flow related to the
+problem understood in phase-1-understand-problem. Be thorough — request that the
+agent search across all relevant directories (src, test, terraform, deploy scripts,
+config, etc.).
+
+The investigation must produce:
+- **Affected layers**: Frontend, backend, infrastructure, tests, docs — every layer
+  the problem touches or that an implementer would need to understand
+- **Affected files**: Absolute paths with brief descriptions of each file's role
+- **Data flow**: How data moves through the system (form -> API -> handler -> output)
+- **The break point**: Where exactly the expected behavior diverges from actual
+  behavior
+- **Contextual gotchas**: Things that aren't broken but are relevant — orphan
+  fields, naming mismatches, environment differences (staging vs prod), format
+  differences (stored codes vs display labels), etc.
+
+Save the findings to `todos/github-issue/investigation.md` — phase-3-reconcile-findings
+and phase-4-draft-issue both consume this file.
+
+**Anti-pattern:** Do NOT name a specific deploy script or assume a single
+environment — list all that exist and let the write-up note them.
+
+**Exit criteria:** `todos/github-issue/investigation.md` exists with all five
+categories of findings above."""
+
+[[steps]]
+id = "phase-3-reconcile-findings"
+title = "Phase 3: Reconcile findings with reported symptoms"
+needs = ["phase-2-investigate-codebase"]
+description = """
+**This phase is critical.** Before drafting anything, verify that your codebase
+findings actually explain the reported symptoms captured in
+phase-1-understand-problem.
+
+Enumerate every symptom from the problem statement and the specific finding that
+explains it:
+
+| Reported symptom (quote) | Finding that explains it (file:line or "gap") |
+|--------------------------|-----------------------------------------------|
+| ...                      | ...                                           |
+
+**If my findings say "X shouldn't happen" but the report says it does — the report
+is right and the investigation is incomplete.** Re-run phase-2-investigate-codebase
+with a narrower, more targeted Explore prompt before continuing.
+
+**Non-stalling gap handling (this agent runs unattended — it must NEVER wait for a
+human reply):**
+
+If a row still shows a "gap" after a second investigation pass, do NOT wait for a
+reply and do NOT block or stall the formula on it. Instead:
+1. Send a non-blocking, fire-and-forget notice: `af mail send supervisor -s "QUESTION: <topic>" -m "Issue: {{issue}}\nGap: <the symptom>\nWhat I need: <the specific question>"` — this is informational, not a blocking request; do not wait for a reply.
+2. Record the gap verbatim under an `## Open Questions` heading you will carry into
+   the draft in phase-4-draft-issue, so the gap stays visible to whoever reads the
+   posted issue instead of silently disappearing.
+3. Proceed with the best available theory for that row rather than halting the
+   formula.
+
+**Adjacent findings (non-stalling scoping decision):**
+
+Adjacent findings expand the deliverable **by default**. If the investigation
+surfaced problems beyond the reported one, include them in the write-up. Do NOT
+wait for a reply to decide whether to scope one out — an unattended agent cannot
+block on that. Instead:
+- Default: include the adjacent finding.
+- If you judge an adjacent finding should be excluded (e.g., clearly out of scope,
+  a separate unrelated system), you may exclude it, but you MUST record the
+  exclusion and your reasoning under a `## Scope Decisions` heading you will carry
+  into the draft — never drop a finding silently.
+
+**Exit criteria:** Every reported symptom is mapped to a finding or an explicit,
+mailed, and drafted-visible Open Question; every adjacent finding is either
+included or has a recorded Scope Decision. Save the reconciliation table, Open
+Questions, and Scope Decisions to `todos/github-issue/reconciliation.md` for
+phase-4-draft-issue to consume."""
+
+[[steps]]
+id = "phase-4-draft-issue"
+title = "Phase 4: Draft the GitHub issue"
+needs = ["phase-3-reconcile-findings"]
+description = """
+Draft the body locally to `todos/github-issue/draft.md`. Do NOT post yet —
+phase-5-validate-draft validates the draft and phase-6-post posts it.
+
+**If a GitHub issue already exists** (the bead's problem source was a GitHub issue
+URL): the draft is posted as a comment in phase-6-post.
+**If no GitHub issue exists** (the bead's problem source was inline text or a
+file): the draft becomes the body of a new issue in phase-6-post.
+
+Structure:
+
+```markdown
+## Investigation Notes
+
+[1-2 sentence summary of what's happening and where the break occurs]
+
+### Affected Layers & Files
+
+**[Layer Name]**
+- `path/to/file` — What this file does in context of the problem
+
+[Repeat for each layer: Frontend, Backend, Infrastructure, Tests, Docs, etc.]
+
+### Additional Context
+
+- [Gotcha 1: something non-obvious the implementer should know]
+- [Gotcha 2: environment differences, data format issues, etc.]
+- [Gotcha 3: related but not broken things worth being aware of]
+
+### Acceptance Criteria
+
+- [Observable behavior that defines "done"]
+- [Edge cases or existing behavior that must be preserved]
+- [Test coverage expectations]
+
+### Open Questions
+
+[Any gap rows recorded in phase-3-reconcile-findings — omit this section entirely
+if there were none]
+
+### Scope Decisions
+
+[Any adjacent-finding include/exclude decisions recorded in
+phase-3-reconcile-findings — omit this section entirely if every adjacent finding
+was included with no exclusions to record]
+```
+
+**Writing guidelines:**
+- Every file mentioned must be a real path confirmed by phase-2-investigate-codebase
+- Acceptance criteria must be testable statements, not implementation steps
+- Do NOT prescribe a fix — you are drawing the map, not writing the solution.
+  Never say "add this line to this file" or name a specific function/flag/command
+  substitution as "the correct" / "the equivalent" fix.
+
+**Exit criteria:** `todos/github-issue/draft.md` exists with the full structure
+above populated from phase-2 and phase-3 findings."""
+
+[[steps]]
+id = "phase-5-validate-draft"
+title = "Phase 5: Validate the Draft Before Posting"
+needs = ["phase-4-draft-issue"]
+description = """
+**MANDATORY pre-post checklist** — do NOT close this step, and do NOT proceed to
+phase-6-post, until every item below returns "none". Answer each by quoting the
+relevant passage from `todos/github-issue/draft.md`, or writing "none" only after
+reading every section of the draft.
+
+1. **Scope constraints** — Does the draft constrain the scope of the fix (e.g., "no
+   changes to X", "read-only on Y", "cleanup only", "no new features")? Quote every
+   such constraint. For each: did the bead's problem source state this, or did you
+   add it? If you added it, remove it.
+2. **Prescribed mechanisms** — Does the draft name a specific function, flag, file
+   path, command substitution, variable, or implementation approach as "the
+   correct" / "the right" / "the equivalent" / "the substitute"? Quote each. Remove
+   every one — naming the mechanism is prescription, including when offered as an
+   example.
+3. **Mechanical transforms** — Does any list or table in the draft imply the
+   implementer must transform each enumerated item identically to satisfy an
+   acceptance criterion (e.g., "N sites to rewrite", "zero matches after cleanup")?
+   Quote each. Rewrite as behavioral AC or keep the enumeration as context only.
+4. **Regex-compliance AC** — Does any AC item pass if `grep` returns specific match
+   counts (zero matches, N matches, exact string present/absent)? Quote each.
+   Rewrite as observable behavioral outcome.
+5. **Symptom coverage** — Does every reported symptom from
+   phase-3-reconcile-findings's table appear in the draft, tied to the finding that
+   explains it (or listed under Open Questions)? If not, add it or re-open
+   phase-2-investigate-codebase.
+
+**If ANY item is not "none"**, fix `todos/github-issue/draft.md` now and re-run this
+checklist until all five return "none". Do NOT proceed to phase-6-post with an
+unresolved item.
+
+**Exit criteria:** All five checklist items return "none" against the current draft."""
+
+[[steps]]
+id = "phase-6-post"
+title = "Phase 6: Post"
+needs = ["phase-5-validate-draft"]
+description = """
+Post `todos/github-issue/draft.md` now that phase-5-validate-draft has passed.
+
+**Existing issue comment** (bead's problem source was a GitHub issue URL):
+```bash
+gh api repos/{owner}/{repo}/issues/{number}/comments -X POST -f body="$(cat todos/github-issue/draft.md)"
+```
+
+**New issue** (bead's problem source was inline text or a file):
+```bash
+gh api repos/{owner}/{repo}/issues -X POST -f title="<title>" -f body="$(cat todos/github-issue/draft.md)"
+```
+
+Record the resulting issue URL (or comment URL) — prepare-for-review needs it.
+
+**Exit criteria:** The draft is posted; the issue/comment URL is recorded."""
+
+[[steps]]
+id = "phase-7-bead-dispatch"
+title = "Phase 7: Create Bead & Dispatch (if requested)"
+needs = ["phase-6-post"]
+description = """
+**Conditional step.** If the bead's problem source did NOT request dispatch (no
+"dispatch this" / "assign an agent" language), close this step immediately with
+reason "N/A: dispatch not requested".
+
+If dispatch was requested:
+
+1. Create a bead with `af bead create`:
+   - `--type bug` for defects, `--type feature` for new behavior
+   - `--title "..."` summarizing the problem
+   - Description should reference the GitHub issue URL from phase-6-post for full
+     context
+2. Dispatch with `af sling`:
+   - `af sling --agent <specialist> "task description"` for specialist agents
+     (e.g., `design-v5`, `ultra-implement`, `rootcause-all`)
+   - `af sling --formula <name>` to instantiate a formula
+
+**Exit criteria:** Bead created and dispatched, or step closed as N/A."""
+
+# ============================================================================
+# POST-WORK INVARIANT STEPS
+# ============================================================================
+
+[[steps]]
+id = "self-review"
+title = "Self-review changes"
+needs = ["phase-7-bead-dispatch"]
+description = """
+Review your own changes before running tests.
+
+**1. Review the diff:**
+```bash
+git diff origin/{{default_branch}}...HEAD     # All changes vs main
+git log --oneline origin/{{default_branch}}..HEAD  # All commits
+```
+
+**2. Check for common issues:**
+
+| Category | Look For |
+|----------|----------|
+| Bugs | Off-by-one, null handling, edge cases |
+| Security | Injection, auth bypass, exposed secrets |
+| Style | Naming, formatting, code organization |
+| Completeness | Missing error handling, incomplete paths |
+| Cruft | Debug prints, commented code, TODOs |
+
+**3. Fix issues found:**
+Don't just note them - fix them now. Amend or add commits as needed.
+
+**4. Verify no unintended changes:**
+```bash
+git diff --stat origin/{{default_branch}}...HEAD
+# Only files relevant to {{issue}} should appear
+```
+
+If you accidentally modified unrelated files, remove those changes.
+
+**Exit criteria:** Changes are clean, reviewed, and ready for testing."""
+
+[[steps]]
+id = "run-tests"
+title = "Run tests and verify coverage"
+needs = ["self-review"]
+description = """
+Verify your changes don't break anything and are properly tested.
+
+**1. Run the full test suite:**
+```bash
+# Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
+# Then run it. Examples: make test, npm test, cargo test, go test ./...
+```
+
+**ALL TESTS MUST PASS.** Do not proceed with failures.
+
+**2. If tests fail:**
+- Read the failure output carefully
+- Determine if your change caused it:
+  - If yes: Fix it. Return to phase-1-understand-problem if needed.
+  - If no (pre-existing): File a bead, but still must pass for your PR
+
+```bash
+# Check if failure exists on main:
+git stash
+git checkout {{default_branch}}
+# Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
+# Then run it. Examples: make test, npm test, cargo test, go test ./...
+git checkout -
+git stash pop
+```
+
+**3. Verify test coverage for new code:**
+- New features should have tests
+- Bug fixes should have regression tests
+- If you added significant code without tests, add them now
+
+**4. Validate terraform if .tf files were modified:**
+```bash
+# Check if any .tf files were changed in this branch
+TF_CHANGED=$(git diff --name-only origin/{{default_branch}}...HEAD -- '*.tf' | head -1)
+if [ -n "$TF_CHANGED" ]; then
+  echo "Terraform files modified — running validation..."
+  TF_DIR=$(dirname "$TF_CHANGED")
+  (cd "$TF_DIR" && terraform validate) || { echo "FAIL: terraform validate failed"; exit 1; }
+  terraform fmt -check -recursive "$TF_DIR" || { echo "FAIL: terraform fmt check failed — run 'terraform fmt'"; exit 1; }
+  echo "Terraform validation passed."
+fi
+```
+
+**5. Run any other quality checks:**
+```bash
+# Discover linting/build commands from CLAUDE.md, Makefile, package.json, etc.
+# Run linter if configured
+# Run build check if applicable
+```
+
+**Exit criteria:** All tests pass, terraform valid (if applicable), new code has appropriate test coverage."""
+
+[[steps]]
+id = "self-verify"
+title = "Verify implementation matches design contract (if present)"
+needs = ["run-tests"]
+description = """
+Gate: verify implementation matches design contract (Jidoka).
+
+**If a design contract was found in validate-contract:**
+- Re-read the design contract from `.designs/{{issue}}/design-doc.md`
+- For each requirement/constraint in the contract:
+  - Verify the implementation addresses it
+  - Check that no constraints are violated
+  - Cross-reference with the actual code changes
+- Document any deviations with justification
+
+**If NO design contract was found in validate-contract:**
+- Close this step with reason "No design contract to verify against"
+- Proceed to cleanup-workspace
+
+**Exit criteria:** Implementation verified against design contract (if present), or step closed as N/A."""
+
+[[steps]]
+id = "cleanup-workspace"
+title = "Clean up workspace"
+needs = ["self-verify"]
+description = """
+**Skill artifact cleanup:**
+The github-issue process creates working files that should NOT be merged. Remove
+them before finalizing:
+```bash
+rm -rf todos/github-issue/
+```
+
+The github-issue formula produces no other file artifacts — the work product is a
+GitHub issue (or comment) posted via `gh api`. Verify no accidental files were left
+behind.
+
+**1. Check for uncommitted changes:**
+```bash
+git status
+```
+Must show "working tree clean". If not:
+- Commit legitimate changes
+- Discard garbage: `git checkout -- .`
+
+**2. Check for untracked files:**
+```bash
+git status --porcelain
+```
+Should be empty. If not:
+- Add to .gitignore if appropriate
+- Remove if temporary: `rm <file>`
+- Commit if needed
+
+**3. Check stash:**
+```bash
+git stash list
+```
+Should be empty. If not:
+- Pop and commit: `git stash pop && git add -A && git commit`
+- Or drop if garbage: `git stash drop`
+
+**4. Push your branch (only if commits exist):**
+```bash
+if [ -n "$(git log origin/{{default_branch}}..HEAD --oneline)" ]; then
+  git push -u origin $(git branch --show-current)
+fi
+```
+
+**5. Verify nothing left behind:**
+```bash
+git status                  # Clean
+git stash list              # Empty
+```
+
+**Exit criteria:** Working artifacts removed, workspace clean, no cruft."""
+
+[[steps]]
+id = "prepare-for-review"
+title = "Prepare work for review"
+needs = ["cleanup-workspace"]
+description = """
+Verify work is complete and ready for submission.
+
+**Note:** Do NOT close the issue that assigned this work. The Supervisor closes it
+after review.
+
+**1. Verify the assignment shows your work:**
+```bash
+af bead show {{issue}}
+# Status should still be 'in_progress' (you're working on it)
+```
+
+**2. Add completion notes:**
+```bash
+af bead update {{issue}} --notes "Posted: <new issue URL or comment URL from phase-6-post>
+Symptom coverage: <N of N reported symptoms mapped to findings>
+Open Questions recorded: <count, or 'none'>
+Scope Decisions recorded: <count, or 'none'>
+Dispatch: <bead ID + agent, or 'not requested'>"
+```
+
+**Exit criteria:** Assignment updated with completion notes."""
+
+[[steps]]
+id = "submit-and-exit"
+title = "Submit and exit"
+needs = ["prepare-for-review"]
+description = """
+Signal completion. This formula's work product is a posted GitHub issue or
+comment, not a code PR — so this step focuses on signaling done.
+
+**1. Create a PR (only if commits exist on the branch):**
+```bash
+if [ -n "$(git log origin/{{default_branch}}..HEAD --oneline)" ]; then
+  gh pr create --title "chore: github-issue write-up for {{issue}}" \
+    --body "Investigation and write-up run for {{issue}}."
+fi
+```
+If no commits exist on the branch, skip PR creation.
+
+**2. Signal completion:**
+```bash
+af done
+```
+
+This closes the current formula step. When all steps are complete, it:
+- Mails WORK_DONE to the dispatcher
+- Cleans up the checkpoint and runtime artifacts
+
+**Ephemeral Agent Model:**
+Once you signal completion, you're done. The Supervisor will:
+1. Review the posted issue/comment (and any PR, if one was created)
+2. Close your assignment after review
+
+**3. You're done:**
+Your work is submitted — the issue/comment is posted to GitHub.
+
+If you have context remaining, you may:
+- Pick up new work from `af prime`
+- Or use `af handoff` to cycle to a fresh session
+
+**Exit criteria:** `af done` signaled, agent done."""
+
+[vars]
+[vars.issue]
+description = "The issue ID assigned to this agent (the problem to write up)"
+required = true
+source = "cli"

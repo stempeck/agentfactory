@@ -399,9 +399,9 @@ configure_shell() {
 
     {
         echo "$begin_marker"
-        echo 'export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-opus-4-8}"'
+        echo 'export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-fable-5}"'
         echo 'export ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL:-claude-opus-4-8}"'
-        echo 'export ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-6}"'
+        echo 'export ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-5}"'
         echo 'export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL:-xhigh}"'
         echo 'export CLAUDE_CODE_DISABLE_AUTO_MEMORY="${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-1}"'
         echo "$end_marker"
@@ -716,7 +716,7 @@ main() {
 main "$@"
 
 # If running in Docker, restart shell to pick up PATH changes
-if [[ -f /.dockerenv ]]; then
+if [[ -f /.dockerenv && -z "${AF_QUICKDOCKER_DRIVEN:-}" ]]; then
     echo "Restarting shell to apply PATH changes..."
     exec bash
 fi

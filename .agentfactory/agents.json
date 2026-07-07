@@ -36,6 +36,12 @@
       "directive": "Run af prime to load formula context.",
       "formula": "gherkin-breakdown"
     },
+    "github-issue": {
+      "type": "autonomous",
+      "description": "## Overview\nInvestigates a reported problem and produces a well-formed GitHub issue (or a\ncomment on an existing one) that gives an implementer everything they need to find\nand understand the problem — without prescribing the fix.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "github-issue"
+    },
     "investigate": {
       "type": "autonomous",
       "description": "## Overview \nInvestigate a codebase question or bug with structured analysis\n",

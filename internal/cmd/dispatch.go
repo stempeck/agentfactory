@@ -139,11 +139,17 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("loading agent config: %w", err)
 	}
+	// models.json feeds the per-mapping model cross-check (issue #480). Loading it
+	// is a NON-selecting read: a validation error (e.g. a half-edited incomplete
+	// endpoint) must not brick the daemon, so it warns and falls through with a nil
+	// config — the cross-check is skipped, not hard-failed (PR #482).
+	modelsCfg := loadModelsConfigForCrossCheck(root, cmd.ErrOrStderr())
 
 	// Cross-validate via the shared single source of truth: every mapping agent and an
-	// explicitly set notify_on_complete must exist in agents.json. config.ValidateDispatchConfig
-	// is the same validator the CLI/web config-write paths use, so the rule cannot drift.
-	if err := config.ValidateDispatchConfig(dispatchCfg, agentsCfg); err != nil {
+	// explicitly set notify_on_complete must exist in agents.json, and every mapping
+	// model must be a defined models.json profile. config.ValidateDispatchConfig is the
+	// same validator the CLI/web config-write paths use, so the rule cannot drift.
+	if err := config.ValidateDispatchConfig(dispatchCfg, agentsCfg, modelsCfg); err != nil {
 		return err
 	}
 
@@ -219,7 +225,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 				continue
 			}
 
-			agent := matchItemToAgent(item, itemMappings[i])
+			agent, model := matchItemToAgent(item, itemMappings[i])
 			if agent == "" {
 				stats.skipped++
 				continue
@@ -259,7 +265,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			// Phase 2 adds no workflow branch here; the captured sling stdout is
 			// the Phase-3 fallback source for instance-ID capture and is discarded
 			// on the non-workflow path (C-10: observable behavior unchanged).
-			if _, err := dispatchItem(root, agent, item.URL, dispatchCfg.NotifyOnComplete); err != nil {
+			if _, err := dispatchItem(root, agent, item.URL, dispatchCfg.NotifyOnComplete, model); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "dispatch %s failed: %v\n", itemKey, err)
 				stats.errors++
 				continue
@@ -332,9 +338,12 @@ func queryGitHubPRs(repo, triggerLabel string) ([]ghItem, error) {
 	return items, nil
 }
 
-// matchItemToAgent returns the agent name for the first mapping whose labels
-// are ALL present on the item (AND semantics), or empty string if no mapping matches.
-func matchItemToAgent(item ghItem, mappings []config.DispatchMapping) string {
+// matchItemToAgent returns the agent name and the per-mapping model (issue #480) for
+// the first mapping whose labels are ALL present on the item (AND semantics), or two
+// empty strings if no mapping matches. The model is surfaced from the SAME matched
+// mapping so the dispatch argv can thread `--model` without re-matching; an empty
+// model leaves the agent on its durable default.
+func matchItemToAgent(item ghItem, mappings []config.DispatchMapping) (agent, model string) {
 	itemLabels := make(map[string]bool, len(item.Labels))
 	for _, l := range item.Labels {
 		itemLabels[l.Name] = true
@@ -348,10 +357,10 @@ func matchItemToAgent(item ghItem, mappings []config.DispatchMapping) string {
 			}
 		}
 		if allMatch && len(m.Labels) > 0 {
-			return m.Agent
+			return m.Agent, m.Model
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // groupMappingsBySource splits mappings into issue and PR groups based on Source field.
@@ -401,7 +410,24 @@ var editItemLabels = func(repo string, number int, source string, add, remove []
 	return exec.Command("gh", args...).Run() // one atomic gh edit (W-8)
 }
 
-// dispatchItem invokes af sling --agent <name> --reset [--caller <caller>] <itemURL>.
+// buildSlingArgs builds the `af sling` argv for a dispatched item:
+// `sling --agent <name> --reset [--caller <caller>] [--model <model>] <itemURL>`.
+// --reset is unconditional; --caller and --model (issue #480) are appended only when
+// non-empty, mirroring each other, before the positional itemURL. Factored out of
+// dispatchItem so the argv contract is unit-testable without spawning a subprocess.
+func buildSlingArgs(agent, caller, model, itemURL string) []string {
+	args := []string{"sling", "--agent", agent, "--reset"}
+	if caller != "" {
+		args = append(args, "--caller", caller)
+	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	args = append(args, itemURL)
+	return args
+}
+
+// dispatchItem invokes af sling --agent <name> --reset [--caller <caller>] [--model <model>] <itemURL>.
 //
 // It returns sling's captured stdout alongside the exit error. The operator still
 // sees that stdout live (it is tee'd through os.Stdout via io.MultiWriter), so the
@@ -410,21 +436,19 @@ var editItemLabels = func(repo string, number int, source string, add, remove []
 // is the dir-agnostic fallback source for captureInstanceID (issue #378 K4); the
 // non-workflow caller discards it.
 //
+// model (issue #480) is the matched mapping's per-mapping model profile; empty
+// leaves the slung agent on its durable default (no --model appended).
+//
 // Package-var seam (issue #378 Phase 3): the workflow engine slings phases through
 // this var so tests swap it to a recorder without spawning a real `af sling`
 // subprocess. Promotion is behavior-preserving for production (same argv, same
 // stderr, same exit semantics) — C-10 observable behavior unchanged.
-var dispatchItem = func(root, agent, itemURL, caller string) (string, error) {
+var dispatchItem = func(root, agent, itemURL, caller, model string) (string, error) {
 	afBin, err := os.Executable()
 	if err != nil {
 		afBin = "af"
 	}
-	args := []string{"sling", "--agent", agent, "--reset"}
-	if caller != "" {
-		args = append(args, "--caller", caller)
-	}
-	args = append(args, itemURL)
-	c := exec.Command(afBin, args...)
+	c := exec.Command(afBin, buildSlingArgs(agent, caller, model, itemURL)...)
 	c.Dir = root
 	var buf bytes.Buffer
 	c.Stdout = io.MultiWriter(os.Stdout, &buf)
@@ -1315,7 +1339,9 @@ func (w *workflowCtx) slingPhase(phase, agent string, attempts int) error {
 	if err != nil {
 		return fmt.Errorf("%w for %q: %w", errResolvePhaseInput, phase, err)
 	}
-	stdout, err := dispatchItem(w.root, agent, inputURL, w.dispatchCfg.NotifyOnComplete)
+	// Workflow phases carry no per-mapping model today (model threading is scoped to
+	// the non-workflow dispatch path); pass "" so the phase agent stays on its default.
+	stdout, err := dispatchItem(w.root, agent, inputURL, w.dispatchCfg.NotifyOnComplete, "")
 	if err != nil {
 		return err
 	}

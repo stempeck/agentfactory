@@ -1,8 +1,10 @@
 // Package entrypoint hosts the hermetic test for the container-bootstrap web-UI launch guard
-// (quickstart.sh, Phase 5 / C0). It lives in its OWN package — outside the dir list scanned by
-// web/internal/server/lint_test.go's no-shell lint — so that running the real guard via
-// `exec.Command("bash", ...)` here does not trip that lint. There is no production code in this
-// package; it exists to make the IFF-available launch contract CI-visible.
+// (quickstart.sh, Phase 5 / C0). web/internal/server/lint_test.go's no-shell lint now walks the
+// WHOLE module, so this file is no longer "outside the scanned set"; instead it is NARROWLY
+// EXEMPTED by path (isExemptFromShellLint) so that running the real guard via
+// `exec.Command("bash", ...)` here does not trip the shell lint. The exemption scopes ONLY the
+// shell class — the mutating-af and tmux-input classes still apply here. There is no production
+// code in this package; it exists to make the IFF-available launch contract CI-visible.
 package entrypoint
 
 import (

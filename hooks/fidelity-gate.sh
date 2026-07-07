@@ -14,6 +14,23 @@
 ROLE=${AF_ROLE:-$(basename "$(pwd)")}
 AGENT_RUNTIME="$(pwd)/.runtime"
 
+# notify_grader_unavailable emits a one-time notice per agent per cause (issue #508)
+# when the haiku grader cannot produce a verdict, so a persistent outage — which
+# fails the gate open every turn (ADR-007 never-block) — becomes visible instead of
+# silent. Idempotent via a .runtime marker (the fidelity-gate per-agent-state idiom),
+# so it is one mail per cause, not a per-turn storm. Sent to the agent's own inbox
+# (ADR-007: no fire-and-forget escalation into a possibly-absent recipient).
+notify_grader_unavailable() {
+    cause="$1"
+    marker="$AGENT_RUNTIME/grader_notice_$cause"
+    [ -f "$marker" ] && return 0
+    mkdir -p "$AGENT_RUNTIME" 2>/dev/null
+    : > "$marker" 2>/dev/null
+    af mail send "$ROLE" -s "GRADER_UNAVAILABLE" \
+        -m "fidelity gate grader unavailable ($cause): the haiku grader produced no verdict this turn, so the gate is failing open. Check that the claude CLI is on PATH and ~/.claude credentials are valid." \
+        2>/dev/null
+}
+
 # Find prompt file via af root
 FACTORY_ROOT=${AF_ROOT:-$(af root 2>/dev/null)}
 if [ -z "$FACTORY_ROOT" ]; then
@@ -154,6 +171,7 @@ fi
 # Check claude CLI is available
 if ! command -v claude &>/dev/null; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT8: no_claude_binary" >> "$AGENT_RUNTIME/fidelity_debug.log" 2>/dev/null
+    notify_grader_unavailable "no_claude_binary"
     echo '{"ok": true}'
     exit 0
 fi
@@ -183,12 +201,18 @@ $TOOL_CONTEXT"
 fi
 
 # Run evaluation via haiku
-VERDICT=$(claude -p --model haiku --max-turns 1 \
+VERDICT=$(env -i HOME="$HOME" PATH="$PATH" claude -p --model haiku --max-turns 1 \
     --system-prompt "You are a JSON-only fidelity gate. You receive an assistant's response, the current formula step's contract, and the tool calls executed this turn. Evaluate adherence to the step contract considering BOTH the text AND the tool evidence. Respond with ONLY valid JSON, nothing else. $(cat "$PROMPT_FILE")" \
     "$EVAL_INPUT" 2>/dev/null)
 
 # Strip markdown code fences if present
 VERDICT=$(echo "$VERDICT" | sed 's/^```json//;s/^```//;/^$/d')
+
+# An empty verdict means the grader produced nothing (unavailable / transient) and the
+# gate is failing open this turn — surface it once per cause (idempotent), never block.
+if [ -z "$VERDICT" ]; then
+    notify_grader_unavailable "empty_verdict"
+fi
 
 COUNTER_FILE="$AGENT_RUNTIME/fidelity_violations"
 if [ -n "$VERDICT" ] && echo "$VERDICT" | jq -e '.ok == false' &>/dev/null; then

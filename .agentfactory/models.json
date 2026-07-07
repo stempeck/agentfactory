@@ -1,0 +1,28 @@
+{
+  "default": "default",
+  "models": {
+    "default": { "ANTHROPIC_MODEL": "claude-fable-5", "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5" },
+    "lmstudio": { "ANTHROPIC_BASE_URL": "http://localhost:1234", "ANTHROPIC_AUTH_TOKEN": "lm-studio", "ANTHROPIC_MODEL": "qwen2.5-coder-32b", "ANTHROPIC_API_KEY": "" },
+    "sonnet-5": { "ANTHROPIC_MODEL": "claude-sonnet-5" },
+    "opus-4-8": { "ANTHROPIC_MODEL": "claude-opus-4-8" },
+    "fable-5": { "ANTHROPIC_MODEL": "claude-fable-5" }
+  },
+  "agents": {
+    "design": "fable-5",
+    "design-plan-impl": "opus-4-8",
+    "design-v3": "fable-5",
+    "design-v7": "fable-5",
+    "factoryworker": "sonnet-5",
+    "gherkin-breakdown": "opus-4-8",
+    "investigate": "opus-4-8",
+    "mergepatrol": "opus-4-8",
+    "minimalworker": "opus-4-8",
+    "rapid-implement": "sonnet-5",
+    "rapid-increment": "opus-4-8",
+    "rapid-soldesign-plan": "opus-4-8",
+    "rootcause-all": "fable-5",
+    "supervisor": "opus-4-8",
+    "ultra-review": "fable-5",
+    "web-design": "opus-4-8"
+  }
+}
