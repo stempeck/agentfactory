@@ -154,3 +154,30 @@ jobs:
             fi
           done
           exit $FAILURES
+
+  toml-conformance:
+    name: toml-conformance
+    runs-on: ubuntu-latest
+    # The SHIPPED formula-editor engine (web/internal/web/static/scripts/toml-engine.js,
+    # embedded via //go:embed static) validates the user's edits in the browser. This job
+    # runs the SAME bytes headlessly against the live store formulas and cross-checks each
+    # parse against Python's tomllib (the ground truth) on every push — closing the
+    # "validator drifts silently as rules grow" risk. `make conformance` runs the exact
+    # same command locally (local<->CI parity).
+    steps:
+      - uses: actions/checkout@v4
+      # First setup-node in the repo: the self-hosted runner image bakes no node, so the
+      # harness (a plain Node script) needs it provided explicitly (Issue #435 lesson: pin
+      # runner tooling rather than depend on incidental image contents).
+      - name: install node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # The harness cross-checks every parse against tomllib (stdlib >= 3.11); mirror the
+      # unit job's setup-python@v5 3.12 pin.
+      - name: install python 3.12 (tomllib ground truth for the conformance harness)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: toml conformance (shipped engine vs tomllib over the live store)
+        run: node web/conformance/test-engine.js .agentfactory/store/formulas

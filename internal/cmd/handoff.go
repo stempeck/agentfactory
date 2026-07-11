@@ -11,7 +11,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/checkpoint"
-	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/tmux"
 )
@@ -64,7 +63,7 @@ func runHandoffCore(ctx context.Context, cwd, subject, message string, collect, 
 	}
 
 	// 2. Find factory root
-	factoryRoot, err := config.FindFactoryRoot(cwd)
+	factoryRoot, err := resolveInvokerRoot(cwd)
 	if err != nil {
 		return fmt.Errorf("finding factory root: %w", err)
 	}

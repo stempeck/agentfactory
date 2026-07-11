@@ -1,0 +1,1265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Line — Formula Editor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="../styles/variables.css">
+<link rel="stylesheet" href="../styles/main.css">
+</head>
+<body>
+<a class="skip-link" href="#board">Skip to the line</a>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="roster.html"><span class="gear" aria-hidden="true">⚙</span><span class="word">Foundry Console</span></a>
+    <nav class="nav" aria-label="Console">
+      <a href="roster.html">Shop floor</a>
+      <a href="editor.html" aria-current="page">The line</a>
+      <a href="wizard.html">Commission</a>
+    </nav>
+    <span class="spacer"></span>
+    <nav class="nav" aria-label="Prototype"><a href="../index.html">Prototype hub</a></nav>
+  </div>
+  <div class="wrap strip">
+    <span class="filetag" id="fileTag"><b>—</b></span>
+    <span id="modeTag"></span>
+    <span class="spacer"></span>
+    <button class="ghost" id="openFileBtn">Open a real .toml…</button>
+    <label class="sr-only" for="demoSel">Load an embedded demo formula</label>
+    <select class="ghost" id="demoSel" style="appearance:auto">
+      <option value="">Load demo…</option>
+      <option value="ultra-review.formula.toml">ultra-review — 16-step DAG (stress case)</option>
+      <option value="design.formula.toml">design — convoy fan-out (6 legs → synthesis)</option>
+      <option value="web-design.formula.toml">web-design — 22 steps, 5 gates</option>
+    </select>
+    <button class="ghost" id="pasteBtn">Paste TOML…</button>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="editor-toolbar">
+    <button class="btn magenta" id="fireBtn" aria-label="Test fire">🔥 Test fire <kbd style="font-size:.75em;opacity:.7">F</kbd></button>
+    <button class="btn primary" id="saveBtn" aria-label="Pour and save" disabled>🫙 Pour &amp; save</button>
+    <button class="btn" id="hatchBtn" aria-label="Maintenance hatch">🔧 Maintenance hatch</button>
+    <button class="btn" id="addStation" aria-label="Bolt on a station">＋ Bolt on a station</button>
+    <span class="spacer"></span>
+    <span class="state dirty" id="lineState"><span class="lamp-dot"></span><span id="lineStateTxt">…</span></span>
+  </div>
+
+  <div class="editor-grid">
+    <!-- identity sidebar -->
+    <aside class="panel identity" aria-label="Line identity">
+      <div>
+        <div class="nameplate" id="idName">—</div>
+        <div class="verline" id="idVer">—</div>
+        <div class="badges" style="margin-top:8px" id="idBadges"></div>
+      </div>
+      <div>
+        <div style="display:flex; align-items:baseline; gap:8px">
+          <h3 style="margin-bottom:6px">Nameplate</h3>
+          <button class="ghost" id="editIdentityBtn" aria-label="Edit nameplate" style="margin-inline-start:auto">edit</button>
+        </div>
+        <p class="hint" id="idDesc" style="line-height:1.45; max-height:72px; overflow:hidden"></p>
+        <p class="hint bad" id="fileNameHint" hidden></p>
+      </div>
+      <div>
+        <h3>Tool rack — skills</h3>
+        <div class="toolrack" id="skillRack"></div>
+        <button class="kv-row add" id="addSkill" aria-label="Rack a tool" style="margin-top:6px">＋ rack a tool</button>
+      </div>
+      <div>
+        <h3>Gauges — inputs</h3>
+        <div class="kv-rows" id="inputRows"></div>
+        <button class="kv-row add" id="addInput" aria-label="Add an input" style="margin-top:6px">＋ add an input</button>
+      </div>
+      <div>
+        <h3>Gauges — vars</h3>
+        <div class="kv-rows" id="varRows"></div>
+        <button class="kv-row add" id="addVar" aria-label="Add a var" style="margin-top:6px">＋ add a var</button>
+      </div>
+    </aside>
+
+    <!-- the board -->
+    <section id="board" class="board-stage" aria-label="The line — dependency board">
+      <div class="board-scroll" tabindex="0" aria-label="Conveyor board — scroll to walk the line">
+        <div class="board-canvas" id="canvas">
+          <svg class="belts" id="belts" aria-hidden="true"></svg>
+          <span class="spark" id="spark" aria-hidden="true"></span>
+        </div>
+      </div>
+      <p class="hint" style="margin-top:8px" id="boardHint">
+        Station positions are computed from the parsed TOML’s DAG — nothing is hand-placed.
+        Click a station to raise its control panel.
+      </p>
+    </section>
+
+    <!-- inspection ledger -->
+    <aside class="panel" aria-label="Inspection ledger">
+      <h2 style="font-size:16px">Inspection ledger</h2>
+      <div class="ledger" id="ledger">
+        <div class="check" data-check="parse"><span class="lamp-dot"></span> TOML parses</div>
+        <div class="check" data-check="ids"><span class="lamp-dot"></span> Station ids unique</div>
+        <div class="check" data-check="needs"><span class="lamp-dot"></span> All belts connect</div>
+        <div class="check" data-check="cycles"><span class="lamp-dot"></span> No circular belts</div>
+      </div>
+      <div class="fault-list" id="faults" style="margin-top:10px"></div>
+      <p class="hint" style="margin-top:10px">
+        The four checks mirror the engine’s <span class="mono">internal/formula</span> rules and run on every edit.
+        No green lamps, no pour — invalid TOML is never saved.
+      </p>
+    </aside>
+  </div>
+</main>
+
+<!-- control panel drawer -->
+<div class="control-panel" id="controlPanel" role="region" aria-label="Station control panel">
+  <div class="cp-inner">
+    <div class="cp-head">
+      <h2 id="cpTitle">Station</h2>
+      <code id="cpId">—</code>
+      <span class="spacer"></span>
+      <button class="btn" id="cpDuplicate">Duplicate</button>
+      <button class="btn danger" id="cpRemove">Unbolt station</button>
+      <button class="btn" id="cpClose">Lower panel</button>
+    </div>
+    <div class="cp-grid">
+      <div>
+        <h3 style="font-family:var(--font-display); text-transform:uppercase; font-size:13px; letter-spacing:.05em; margin-bottom:8px">Station plate</h3>
+        <div class="formrow">
+          <label class="lbl" for="stTitle">Title</label>
+          <input class="field" type="text" id="stTitle">
+        </div>
+        <div class="formrow">
+          <label class="lbl" for="stId">Station id</label>
+          <input class="field mono" type="text" id="stId">
+          <span class="hint">Renaming re-plugs every belt that references this id.</span>
+        </div>
+      </div>
+      <div>
+        <div id="needsSection">
+          <h3 style="font-family:var(--font-display); text-transform:uppercase; font-size:13px; letter-spacing:.05em; margin-bottom:8px">Patch bay — starts after</h3>
+          <div class="patchbay" id="patchbay"></div>
+          <div style="position:relative; margin-top:6px">
+            <button class="btn" id="plugBelt" aria-label="Plug in a belt">＋ Plug in a belt</button>
+            <div class="socket-list" id="socketList" hidden></div>
+          </div>
+        </div>
+        <div id="gateSection" style="margin-top:16px">
+          <h3 style="font-family:var(--font-display); text-transform:uppercase; font-size:13px; letter-spacing:.05em; margin-bottom:8px">Inspection arch</h3>
+          <label class="switch-row"><span class="switch"><input type="checkbox" id="gateToggle"><span class="track"></span></span> Human must approve here</label>
+          <div class="gate-dials" id="gateDials" hidden>
+            <div class="formrow"><label class="lbl" for="gateId">Arch id</label><input class="field mono" type="text" id="gateId"></div>
+            <div class="formrow"><label class="lbl" for="gateTimeout">Timeout</label><input class="field mono" type="text" id="gateTimeout" placeholder="24h"></div>
+          </div>
+        </div>
+      </div>
+      <div class="desc-wrap">
+        <h3 style="font-family:var(--font-display); text-transform:uppercase; font-size:13px; letter-spacing:.05em">Work instructions</h3>
+        <textarea class="field" id="stDesc" spellcheck="false" aria-label="Work instructions — the step description exactly as stored in the TOML"></textarea>
+        <p class="desc-note">This is the plain TOML string, verbatim — markdown and bash exactly as an agent will read them. The editor never invents markup inside it.</p>
+        <div style="display:flex; gap:8px">
+          <button class="btn primary" id="descApply" disabled>Apply instructions</button>
+          <button class="btn" id="descRevert" disabled>Revert</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- maintenance hatch -->
+<div class="hatch" id="hatch">
+  <div class="hatch-panel" role="dialog" aria-modal="true" aria-label="Maintenance hatch — raw TOML">
+    <header>
+      🔧 Maintenance hatch
+      <span class="hatch-tabs" role="group" aria-label="Hatch views">
+        <button id="tabSource" aria-pressed="true">Source</button>
+        <button id="tabDiff" aria-pressed="false">Diff vs file</button>
+      </span>
+      <span class="spacer"></span>
+      <button class="ghost" id="downloadBtn" aria-label="Download the TOML file">Download .toml</button>
+      <button class="btn" id="hatchClose" aria-label="Close and re-sync">Close &amp; re-sync</button>
+    </header>
+    <div class="toml-wrap" id="sourceView">
+      <div class="toml-gutter" id="tomlGutter" aria-hidden="true"></div>
+      <textarea class="toml-text" id="tomlText" spellcheck="false" wrap="off" aria-label="TOML source — the single source of truth"></textarea>
+    </div>
+    <pre class="diff-view" id="diffView" hidden></pre>
+    <footer>
+      <span class="hatch-banner" id="hatchBanner"></span>
+      <span class="hint" id="hatchHint">The text here IS the formula — the machines re-render from it as you type.</span>
+      <span class="spacer"></span>
+      <span class="hint mono" id="diffCount"></span>
+    </footer>
+  </div>
+</div>
+
+<!-- identity dialog -->
+<dialog class="plain" id="identityDialog">
+  <form method="dialog" class="db">
+    <h2>Nameplate</h2>
+    <div class="formrow">
+      <label class="lbl" for="fName">Formula name</label>
+      <input class="field mono" id="fName" type="text">
+      <span class="hint">The store convention binds the file name and this field together: <span class="mono" id="fNameBind"></span></span>
+    </div>
+    <div class="formrow">
+      <label class="lbl" for="fVersion">Version</label>
+      <input class="field mono" id="fVersion" type="number" min="1" step="1" style="max-width:120px">
+    </div>
+    <div class="formrow">
+      <label class="lbl" for="fDesc">Description</label>
+      <textarea class="field mono" id="fDesc" rows="6" spellcheck="false"></textarea>
+    </div>
+    <div style="display:flex; gap:10px; justify-content:flex-end">
+      <button class="btn" value="cancel">Cancel</button>
+      <button class="btn primary" value="ok" id="identitySave">Stamp it</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- input/var dialog -->
+<dialog class="plain" id="gaugeDialog">
+  <form method="dialog" class="db">
+    <h2 id="gaugeTitle">Input</h2>
+    <div class="formrow">
+      <label class="lbl" for="gName">Name</label>
+      <input class="field mono" id="gName" type="text" pattern="[A-Za-z_][A-Za-z0-9_]*">
+    </div>
+    <div class="formrow" id="gTypeRow">
+      <label class="lbl" for="gType">Type</label>
+      <select class="field" id="gType">
+        <option value="">(unset)</option>
+        <option value="string">string</option>
+        <option value="number">number</option>
+        <option value="boolean">boolean</option>
+      </select>
+    </div>
+    <div class="formrow" id="gReqRow">
+      <label class="switch-row"><span class="switch"><input type="checkbox" id="gRequired"><span class="track"></span></span> Required</label>
+    </div>
+    <div class="formrow" id="gSourceRow" hidden>
+      <label class="lbl" for="gSource">Source</label>
+      <select class="field" id="gSource">
+        <option value="">(implicit literal)</option>
+        <option value="cli">cli</option>
+        <option value="env">env</option>
+        <option value="literal">literal</option>
+        <option value="hook_bead">hook_bead</option>
+        <option value="bead_title">bead_title</option>
+        <option value="bead_description">bead_description</option>
+        <option value="deferred">deferred</option>
+      </select>
+    </div>
+    <div class="formrow">
+      <label class="lbl" for="gDefault">Default <span class="opt">optional</span></label>
+      <input class="field mono" id="gDefault" type="text">
+    </div>
+    <div class="formrow">
+      <label class="lbl" for="gDesc">Description <span class="opt">optional</span></label>
+      <textarea class="field" id="gDesc" rows="3"></textarea>
+    </div>
+    <div style="display:flex; gap:10px">
+      <button class="btn danger" value="remove" id="gaugeRemove">Remove</button>
+      <span class="spacer"></span>
+      <button class="btn" value="cancel">Cancel</button>
+      <button class="btn primary" value="ok" id="gaugeSave">Save gauge</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- skill dialog -->
+<dialog class="plain" id="skillDialog">
+  <form method="dialog" class="db">
+    <h2>Rack a tool</h2>
+    <div class="formrow">
+      <label class="lbl" for="skillName">Skill name</label>
+      <input class="field mono" id="skillName" type="text" list="skillList" pattern="[a-zA-Z][a-zA-Z0-9_-]*">
+      <datalist id="skillList">
+        <option value="frontend-design"></option><option value="code-review"></option>
+        <option value="verify"></option><option value="rootcause-analysis"></option>
+        <option value="dataviz"></option><option value="github-issue"></option>
+        <option value="plan-work"></option><option value="terraform-fix"></option>
+        <option value="testing-ui-dom"></option><option value="improve-skill"></option>
+      </datalist>
+      <span class="hint">Letters first, then letters, digits, underscores, or hyphens — the engine’s rule.</span>
+    </div>
+    <div style="display:flex; gap:10px; justify-content:flex-end">
+      <button class="btn" value="cancel">Cancel</button>
+      <button class="btn primary" value="ok">Rack it</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- paste dialog -->
+<dialog class="plain" id="pasteDialog">
+  <form method="dialog" class="db">
+    <h2>Paste TOML</h2>
+    <p class="hint" style="margin-bottom:10px">Fallback for browsers without the File System Access API: paste a formula here, edit visually, then download the result.</p>
+    <div class="formrow">
+      <label class="lbl" for="pasteName">File name</label>
+      <input class="field mono" id="pasteName" type="text" value="pasted.formula.toml">
+    </div>
+    <div class="formrow">
+      <label class="lbl" for="pasteText">TOML</label>
+      <textarea class="field mono" id="pasteText" rows="10" spellcheck="false"></textarea>
+    </div>
+    <div style="display:flex; gap:10px; justify-content:flex-end">
+      <button class="btn" value="cancel">Cancel</button>
+      <button class="btn primary" value="ok">Load it</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- confirm dialog -->
+<dialog class="confirm" id="confirmDialog">
+  <form method="dialog">
+    <div class="dh"><span class="warn" aria-hidden="true">!</span><h2 id="confirmTitle">Are you sure?</h2></div>
+    <div class="db"><p id="confirmBody"></p><p class="lose" id="confirmLose"></p></div>
+    <div class="df">
+      <button class="btn primary" value="cancel">Keep it</button>
+      <button class="btn danger" value="ok" id="confirmGo">Do it</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="slips" id="slips" aria-live="polite"></div>
+
+<script src="../scripts/toml-engine.js"></script>
+<script src="../scripts/demo-formulas.js"></script>
+<script src="../scripts/shared.js"></script>
+<script>
+(function () {
+  'use strict';
+  var Engine = window.TomlEngine, Demo = window.DemoFormulas, $ = AF.$;
+
+  var state = {
+    text: '', savedText: '', doc: null, parseError: null, findings: [],
+    fileName: '', mode: 'demo', handle: null,
+    selectedId: null, unitKey: 'steps', firing: false
+  };
+
+  var LAMPS = ['parse', 'ids', 'needs', 'cycles'];
+
+  /* ============================ core: text is truth ============================ */
+
+  function setText(t, opts) {
+    opts = opts || {};
+    state.text = t;
+    try {
+      state.doc = Engine.parse(t);
+      state.parseError = null;
+      state.findings = Engine.validate(state.doc.js);
+      var type = Engine.inferType(state.doc.js);
+      state.unitKey = type === 'convoy' ? 'legs' : type === 'expansion' ? 'template'
+                    : type === 'aspect' ? 'aspects' : 'steps';
+    } catch (e) {
+      state.doc = null;
+      state.parseError = e;
+      state.findings = [{ lamp: 'parse', message: e.message, ref: { pos: e.pos } }];
+    }
+    renderAll(opts);
+  }
+
+  function isDirty() { return state.text !== state.savedText; }
+  function isValid() { return state.findings.length === 0; }
+
+  function units() {
+    if (!state.doc) return [];
+    return state.doc.js[state.unitKey] || [];
+  }
+  function unitById(id) {
+    return units().find(function (u) { return u.id === id; }) || null;
+  }
+
+  // apply an engine op against current text+doc, then re-render
+  function apply(fn, opts) {
+    try {
+      var next = fn(state.text, state.doc);
+      setText(next, opts);
+      return true;
+    } catch (e) {
+      AF.slip('<strong>That edit didn’t take.</strong> ' + AF.esc(e.message), 'alarm');
+      return false;
+    }
+  }
+
+  /* ============================ rendering ============================ */
+
+  function renderAll(opts) {
+    renderStrip();
+    renderIdentity();
+    renderBoard();
+    renderLedger();
+    renderDrawer();
+    if (!opts.fromHatch) syncHatchText();
+    renderGutter();
+    if (!$('diffView').hidden) renderDiff();
+  }
+
+  function renderStrip() {
+    $('fileTag').innerHTML = '<b>' + AF.esc(state.fileName || '(untitled)') + '</b>';
+    $('modeTag').textContent = state.mode === 'file' ? 'editing the real file'
+      : state.mode === 'new' ? 'new — not yet in the store'
+      : 'store copy (in memory until poured)';
+    var st = $('lineState'), txt = $('lineStateTxt'), save = $('saveBtn');
+    if (!isDirty()) {
+      st.className = 'state saved';
+      txt.textContent = 'Line matches the ' + (state.mode === 'file' ? 'file' : 'loaded copy');
+      save.disabled = true;
+      save.title = 'Nothing to pour — no unsaved changes';
+    } else if (isValid()) {
+      st.className = 'state clean';
+      txt.textContent = 'All lamps green — the pour is ready';
+      save.disabled = false;
+      save.title = state.mode === 'file' ? 'Write changes back to ' + state.fileName : 'Save this formula';
+    } else {
+      st.className = 'state failed';
+      txt.textContent = state.findings.length + ' inspection fault' + (state.findings.length === 1 ? '' : 's') + ' — no pour until the lamps go green';
+      save.disabled = true;
+      save.title = 'Fix the inspection faults first — invalid TOML is never saved';
+    }
+  }
+
+  function renderIdentity() {
+    var js = state.doc ? state.doc.js : null;
+    $('idName').textContent = js && js.formula ? js.formula : '(unnamed line)';
+    var uk = state.unitKey;
+    var count = js ? (js[uk] || []).length : 0;
+    var gates = js ? (js[uk] || []).filter(function (u) { return u.gate; }).length : 0;
+    $('idVer').textContent = js
+      ? ('version ' + (js.version !== undefined ? js.version : '—') + ' · ' + count + ' station' + (count === 1 ? '' : 's')
+         + (uk !== 'steps' ? ' (' + uk + ')' : '') + (gates ? ' · ' + gates + ' arch' + (gates === 1 ? '' : 'es') : ''))
+      : 'TOML does not parse';
+    var type = js ? Engine.inferType(js) : '';
+    var badges = '';
+    if (type) badges += '<span class="badge ' + (type === 'convoy' ? 'violet' : 'cyan') + '">' + AF.esc(type) + '</span>';
+    if (gates) badges += '<span class="badge gate">⚑ ' + gates + ' gate' + (gates === 1 ? '' : 's') + '</span>';
+    $('idBadges').innerHTML = badges;
+    $('idDesc').textContent = js && js.description ? js.description.trim() : '';
+
+    var hint = $('fileNameHint');
+    if (js && js.formula && state.fileName && state.fileName !== js.formula + '.formula.toml') {
+      hint.hidden = false;
+      hint.textContent = 'Heads up: the store convention is ' + js.formula + '.formula.toml — this file is ' + state.fileName + '.';
+    } else hint.hidden = true;
+
+    // skills
+    var rack = $('skillRack');
+    rack.innerHTML = '';
+    ((js && js.skills) || []).forEach(function (s) {
+      var el = document.createElement('span');
+      el.className = 'tool';
+      el.innerHTML = AF.esc(s) + ' <button type="button" aria-label="Unrack ' + AF.esc(s) + '">✕</button>';
+      el.querySelector('button').addEventListener('click', function () { removeSkill(s); });
+      rack.appendChild(el);
+    });
+    if (js && !(js.skills || []).length) rack.innerHTML = '<span class="hint">No tools racked.</span>';
+
+    renderGaugeRows('inputs', $('inputRows'));
+    renderGaugeRows('vars', $('varRows'));
+  }
+
+  function renderGaugeRows(group, host) {
+    var js = state.doc ? state.doc.js : null;
+    host.innerHTML = '';
+    var obj = (js && js[group]) || {};
+    Object.keys(obj).forEach(function (name) {
+      var d = obj[name] || {};
+      var row = document.createElement('div');
+      row.className = 'kv-row';
+      var v = d.required ? '<span class="v req">REQUIRED</span>'
+        : d.default !== undefined ? '<span class="v">' + AF.esc(String(d.default)) + '</span>'
+        : d.source ? '<span class="v">' + AF.esc(d.source) + '</span>' : '<span class="v"></span>';
+      row.innerHTML = '<span class="k">' + AF.esc(name) + '</span>' + v +
+        '<button type="button" class="x" aria-label="Remove ' + AF.esc(name) + '">✕</button>';
+      row.style.cursor = 'pointer';
+      row.setAttribute('role', 'button'); row.tabIndex = 0;
+      row.setAttribute('aria-label', 'Edit ' + group.slice(0, -1) + ' ' + name);
+      function open() { openGaugeDialog(group, name); }
+      row.addEventListener('click', function (e) { if (e.target.className !== 'x') open(); });
+      row.addEventListener('keydown', function (e) { if (e.key === 'Enter') open(); });
+      row.querySelector('.x').addEventListener('click', function () { removeGauge(group, name); });
+      host.appendChild(row);
+    });
+    if (!Object.keys(obj).length) host.innerHTML = '<span class="hint">None.</span>';
+  }
+
+  /* ---- board ---- */
+  var NODE_W = 196, COL_W = 262, ROW_H = 122, PAD_X = 26, PAD_Y = 22;
+  var nodePos = {};
+
+  function renderBoard() {
+    var canvas = $('canvas'), svg = $('belts');
+    canvas.querySelectorAll('.station, .board-dark').forEach(function (el) { el.remove(); });
+    svg.innerHTML = '';
+    nodePos = {};
+    if (!state.doc) {
+      var dark = document.createElement('div');
+      dark.className = 'board-dark';
+      dark.style.cssText = 'padding:60px 30px; color:var(--muted); max-width:52ch';
+      dark.innerHTML = '<strong style="color:var(--danger)">The machines are dark — the TOML does not parse.</strong><br>' +
+        AF.esc(state.parseError.message) + '<br><br>Open the maintenance hatch to fix the source.';
+      canvas.appendChild(dark);
+      canvas.style.width = 'auto'; canvas.style.height = 'auto';
+      return;
+    }
+    var model = Engine.graphModel(state.doc.js);
+    var lay = Engine.layout(model);
+    var W = PAD_X * 2 + (lay.maxRank + 1) * COL_W - (COL_W - NODE_W);
+    var H = PAD_Y * 2 + Math.max(1, lay.maxRows) * ROW_H - 34;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    svg.setAttribute('width', W); svg.setAttribute('height', H);
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+
+    var missingByStep = {};
+    state.findings.forEach(function (f) {
+      if (f.ref && f.ref.stepId) missingByStep[f.ref.stepId] = true;
+    });
+
+    model.nodes.forEach(function (nd) {
+      var left = PAD_X + nd.rank * COL_W;
+      var top = PAD_Y + nd.row * ROW_H;
+      nodePos[nd.id] = { x: left, y: top };
+      var b = document.createElement('button');
+      b.className = 'station framed r-' + nd.rarity +
+        (nd.id === state.selectedId ? ' selected' : '') +
+        (missingByStep[nd.id] ? ' error' : '');
+      b.style.left = left + 'px';
+      b.style.top = top + 'px';
+      b.setAttribute('data-node', nd.id);
+      b.setAttribute('aria-label', 'Station ' + nd.id + (nd.gate ? ' — inspection arch' : '') + ', rarity ' + nd.rarity);
+      var inner = '<span class="plate">' + AF.esc(nd.id) + '</span>' +
+                  '<span class="desc">' + AF.esc(nd.title) + '</span>';
+      if (nd.gate) inner += '<span class="archline">' + AF.esc(nd.gate.id || 'gate') + ' · ⏱ ' + AF.esc(nd.gate.timeout || '—') + '</span>';
+      if (nd.synthesis) inner += '<span class="synthline">◈ synthesis — merges every leg</span>';
+      b.innerHTML = inner;
+      b.addEventListener('click', function () { select(nd.id); });
+      canvas.appendChild(b);
+    });
+
+    var NS = 'http://www.w3.org/2000/svg';
+    model.edges.forEach(function (e) {
+      var a = nodePos[e.from], b2 = nodePos[e.to];
+      if (!a || !b2) return;
+      var x1 = a.x + NODE_W, y1 = a.y + 38, x2 = b2.x, y2 = b2.y + 38;
+      var dx = Math.max(34, (x2 - x1) / 2);
+      var p = document.createElementNS(NS, 'path');
+      var toNode = lay.byId[e.to];
+      var cls = 'belt-edge';
+      if (toNode && toNode.rarity === 'epic') cls += ' lit-epic';
+      else if (toNode && toNode.rarity === 'rare') cls += ' lit-rare';
+      p.setAttribute('class', cls);
+      p.setAttribute('d', 'M' + x1 + ' ' + y1 + ' C' + (x1 + dx) + ' ' + y1 + ', ' + (x2 - dx) + ' ' + y2 + ', ' + x2 + ' ' + y2);
+      p.setAttribute('data-edge', e.from + '→' + e.to);
+      svg.appendChild(p);
+    });
+  }
+
+  /* ---- ledger ---- */
+  function renderLedger() {
+    var byLamp = {};
+    state.findings.forEach(function (f) { (byLamp[f.lamp] = byLamp[f.lamp] || []).push(f); });
+    LAMPS.forEach(function (lamp) {
+      var el = document.querySelector('.check[data-check="' + lamp + '"]');
+      el.className = 'check ' + (state.firing ? '' : (byLamp[lamp] ? 'fail' : (state.doc ? 'pass' : '')));
+    });
+    var host = $('faults');
+    host.innerHTML = '';
+    state.findings.forEach(function (f) {
+      var b = document.createElement('button');
+      b.className = 'fault';
+      b.innerHTML = (f.ref && f.ref.stepId ? '<span class="where">' + AF.esc(f.ref.stepId) + '</span> · ' : '') + AF.esc(f.message);
+      b.addEventListener('click', function () { locateFinding(f); });
+      host.appendChild(b);
+    });
+  }
+
+  function locateFinding(f) {
+    if (f.ref && f.ref.stepId && nodePos[f.ref.stepId]) {
+      select(f.ref.stepId);
+      var el = document.querySelector('[data-node="' + CSS.escape(f.ref.stepId) + '"]');
+      if (el) el.scrollIntoView({ block: 'nearest', inline: 'center' });
+    } else {
+      openHatch('source');
+      if (f.ref && typeof f.ref.pos === 'number') focusHatchAt(f.ref.pos);
+    }
+  }
+
+  /* ============================ selection + drawer ============================ */
+
+  function select(id) {
+    state.selectedId = id;
+    document.querySelectorAll('.station').forEach(function (el) {
+      el.classList.toggle('selected', el.getAttribute('data-node') === id);
+    });
+    renderDrawer();
+    $('controlPanel').classList.add('raised');
+  }
+
+  function closeDrawer() {
+    state.selectedId = null;
+    $('controlPanel').classList.remove('raised');
+    document.querySelectorAll('.station').forEach(function (el) { el.classList.remove('selected'); });
+  }
+
+  function renderDrawer() {
+    var u = state.selectedId ? unitById(state.selectedId) : null;
+    if (!u) {
+      if (state.selectedId) closeDrawer();
+      return;
+    }
+    $('cpTitle').textContent = (u.title || u.id).length > 70 ? (u.title || u.id).slice(0, 67) + '…' : (u.title || u.id);
+    $('cpId').textContent = state.unitKey.replace(/s$/, '') + ': ' + u.id + (u.gate ? ' · arch: ' + (u.gate.id || 'human') : '');
+    $('stTitle').value = u.title || '';
+    $('stId').value = u.id;
+    var isSteps = state.unitKey === 'steps' || state.unitKey === 'template';
+    $('needsSection').style.display = isSteps ? '' : 'none';
+    $('gateSection').style.display = state.unitKey === 'steps' ? '' : 'none';
+    if (isSteps) renderPatchbay(u);
+    if (state.unitKey === 'steps') {
+      $('gateToggle').checked = !!u.gate;
+      $('gateDials').hidden = !u.gate;
+      $('gateId').value = u.gate ? (u.gate.id || '') : 'inspection-' + u.id;
+      $('gateTimeout').value = u.gate ? (u.gate.timeout || '') : '24h';
+    }
+    $('stDesc').value = u.description || '';
+    descBaseline = u.description || '';
+    updateDescButtons();
+  }
+
+  function renderPatchbay(u) {
+    var pb = $('patchbay');
+    pb.innerHTML = '';
+    var needs = u.needs || [];
+    if (!needs.length) pb.innerHTML = '<span class="hint">First station on the belt — nothing upstream.</span>';
+    needs.forEach(function (n) {
+      var known = !!unitById(n);
+      var c = document.createElement('span');
+      c.className = 'cable';
+      if (!known) c.style.borderColor = 'var(--danger)';
+      c.innerHTML = AF.esc(n) + (known ? '' : ' <span class="hint bad">(missing)</span>') +
+        ' <button type="button" aria-label="Unplug belt from ' + AF.esc(n) + '">✕</button>';
+      c.querySelector('button').addEventListener('click', function () {
+        setNeeds(u.id, needs.filter(function (x) { return x !== n; }));
+        AF.slip('Unplugged the belt from <strong>' + AF.esc(n) + '</strong>.');
+      });
+      pb.appendChild(c);
+    });
+  }
+
+  function setNeeds(id, needs) {
+    apply(function (text, doc) {
+      return Engine.ops.setStepField(text, doc, id, 'needs',
+        needs.length ? Engine.fmt.stringArray(needs) : null, state.unitKey);
+    });
+  }
+
+  /* drawer field wiring */
+  $('cpClose').addEventListener('click', closeDrawer);
+
+  $('stTitle').addEventListener('change', function () {
+    var u = unitById(state.selectedId); if (!u) return;
+    var v = this.value.trim();
+    if (v === (u.title || '')) return;
+    apply(function (text, doc) {
+      return Engine.ops.setStepField(text, doc, u.id, 'title', v ? Engine.fmt.string(v) : null, state.unitKey);
+    });
+  });
+
+  $('stId').addEventListener('change', function () {
+    var u = unitById(state.selectedId); if (!u) return;
+    var v = this.value.trim();
+    if (v === u.id) return;
+    if (!v) { this.value = u.id; AF.slip('A station needs an id.', 'alarm'); return; }
+    if (unitById(v)) { this.value = u.id; AF.slip('<strong>' + AF.esc(v) + '</strong> is already on the line — ids must be unique.', 'alarm'); return; }
+    var old = u.id;
+    if (apply(function (text, doc) { return Engine.ops.renameStep(text, doc, old, v, state.unitKey); })) {
+      state.selectedId = v;
+      renderBoard(); renderDrawer();
+      AF.slip('Re-stamped <strong>' + AF.esc(old) + '</strong> → <strong>' + AF.esc(v) + '</strong> and re-plugged every belt that referenced it.', 'ok');
+    }
+  });
+
+  $('gateToggle').addEventListener('change', function () {
+    var u = unitById(state.selectedId); if (!u) return;
+    if (this.checked) {
+      var g = { type: 'human', id: $('gateId').value.trim() || 'inspection-' + u.id, timeout: $('gateTimeout').value.trim() || '24h' };
+      apply(function (text, doc) { return Engine.ops.setStepField(text, doc, u.id, 'gate', Engine.fmt.gate(g), state.unitKey); });
+      AF.slip('Arch swung over <strong>' + AF.esc(u.id) + '</strong> — the line will wait for a human here.');
+    } else {
+      apply(function (text, doc) { return Engine.ops.setStepField(text, doc, u.id, 'gate', null, state.unitKey); });
+      AF.slip('Arch removed from <strong>' + AF.esc(u.id) + '</strong>.');
+    }
+  });
+  function gateDialChange() {
+    var u = unitById(state.selectedId); if (!u || !u.gate) return;
+    var g = { type: u.gate.type || 'human', id: $('gateId').value.trim(), timeout: $('gateTimeout').value.trim() };
+    apply(function (text, doc) { return Engine.ops.setStepField(text, doc, u.id, 'gate', Engine.fmt.gate(g), state.unitKey); });
+  }
+  $('gateId').addEventListener('change', gateDialChange);
+  $('gateTimeout').addEventListener('change', gateDialChange);
+
+  /* plug belt */
+  $('plugBelt').addEventListener('click', function () {
+    var u = unitById(state.selectedId); if (!u) return;
+    var list = $('socketList');
+    if (!list.hidden) { list.hidden = true; return; }
+    var current = u.needs || [];
+    var candidates = units().map(function (x) { return x.id; })
+      .filter(function (id) { return id !== u.id && current.indexOf(id) === -1; });
+    list.innerHTML = candidates.length ? '' : '<span class="none">No other stations to plug into.</span>';
+    candidates.forEach(function (id) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = '◉ ' + id;
+      b.addEventListener('click', function () {
+        list.hidden = true;
+        setNeeds(u.id, current.concat([id]));
+        AF.slip('Plugged <strong>' + AF.esc(u.id) + '</strong> into <strong>' + AF.esc(id) + '</strong>. The cycle lamp will catch bad loops.');
+      });
+      list.appendChild(b);
+    });
+    list.hidden = false;
+  });
+  document.addEventListener('click', function (e) {
+    var list = $('socketList');
+    if (!list.hidden && !list.contains(e.target) && e.target !== $('plugBelt')) list.hidden = true;
+  });
+
+  /* description */
+  var descBaseline = '';
+  function updateDescButtons() {
+    var changed = $('stDesc').value !== descBaseline;
+    $('descApply').disabled = !changed;
+    $('descRevert').disabled = !changed;
+  }
+  $('stDesc').addEventListener('input', updateDescButtons);
+  $('descApply').addEventListener('click', function () {
+    var u = unitById(state.selectedId); if (!u) return;
+    var v = $('stDesc').value;
+    apply(function (text, doc) {
+      return Engine.ops.setStepField(text, doc, u.id, 'description', v ? Engine.fmt.string(v) : null, state.unitKey);
+    });
+    AF.slip('Instructions applied to <strong>' + AF.esc(u.id) + '</strong> — check the hatch diff to see the exact file change.', 'ok');
+  });
+  $('descRevert').addEventListener('click', function () {
+    $('stDesc').value = descBaseline;
+    updateDescButtons();
+  });
+
+  /* duplicate / remove */
+  $('cpDuplicate').addEventListener('click', function () {
+    var u = unitById(state.selectedId); if (!u) return;
+    var base = u.id + '-copy', id = base, k = 2;
+    while (unitById(id)) { id = base + '-' + (k++); }
+    apply(function (text, doc) {
+      return Engine.ops.addStep(text, doc, {
+        id: id, title: u.title, needs: (u.needs || []).slice(),
+        gate: u.gate ? { type: u.gate.type, id: (u.gate.id || 'gate') + '-copy', timeout: u.gate.timeout } : null,
+        description: u.description || ''
+      }, u.id, state.unitKey);
+    });
+    select(id);
+    AF.slip('Cast a copy: <strong>' + AF.esc(id) + '</strong>, bolted on right after the original.', 'ok');
+  });
+
+  $('cpRemove').addEventListener('click', function () {
+    var u = unitById(state.selectedId); if (!u) return;
+    confirmDo('Unbolt ' + u.id + '?',
+      'The station comes off the line and every belt plugged into it is unplugged.',
+      'Its work instructions are removed from the TOML.',
+      function () {
+        var id = u.id;
+        closeDrawer();
+        apply(function (text, doc) { return Engine.ops.removeStep(text, doc, id, state.unitKey); });
+        AF.slip('Unbolted <strong>' + AF.esc(id) + '</strong> and unplugged its belts.', 'ok');
+      });
+  });
+
+  /* add station */
+  $('addStation').addEventListener('click', function () {
+    if (!state.doc) { AF.slip('Fix the TOML first — can’t bolt a station onto a dark line.', 'alarm'); return; }
+    var base = 'new-station', id = base, k = 2;
+    while (unitById(id)) { id = base + '-' + (k++); }
+    var after = state.selectedId;
+    apply(function (text, doc) {
+      return Engine.ops.addStep(text, doc, {
+        id: id, title: 'Untitled station',
+        needs: after ? [after] : [],
+        description: 'Describe this station’s single job here.\n'
+      }, after, state.unitKey);
+    });
+    select(id);
+    var el = document.querySelector('[data-node="' + CSS.escape(id) + '"]');
+    if (el) el.scrollIntoView({ block: 'nearest', inline: 'center' });
+    AF.slip('Bolted <strong>' + AF.esc(id) + '</strong> onto the line' + (after ? ', downstream of <strong>' + AF.esc(after) + '</strong>' : '') + '.', 'ok');
+  });
+
+  /* ============================ identity edits ============================ */
+
+  $('editIdentityBtn').addEventListener('click', function () {
+    var js = state.doc && state.doc.js;
+    if (!js) { AF.slip('Fix the TOML first.', 'alarm'); return; }
+    $('fName').value = js.formula || '';
+    $('fVersion').value = js.version !== undefined ? js.version : 1;
+    $('fDesc').value = js.description || '';
+    $('fNameBind').textContent = (js.formula || '<name>') + '.formula.toml';
+    $('identityDialog').showModal();
+  });
+  $('fName').addEventListener('input', function () {
+    $('fNameBind').textContent = (this.value.trim() || '<name>') + '.formula.toml';
+  });
+  $('identityDialog').addEventListener('close', function () {
+    if ($('identityDialog').returnValue !== 'ok') return;
+    var js = state.doc.js;
+    var name = $('fName').value.trim();
+    var ver = parseInt($('fVersion').value, 10);
+    var desc = $('fDesc').value;
+    apply(function (text, doc) {
+      var t = text;
+      if (name !== (js.formula || '')) t = Engine.ops.setKV(t, doc, null, 'formula', Engine.fmt.string(name));
+      doc = Engine.parse(t);
+      if (!isNaN(ver) && ver !== js.version) t = Engine.ops.setKV(t, doc, null, 'version', String(ver));
+      doc = Engine.parse(t);
+      if (desc !== (js.description || '')) t = Engine.ops.setKV(t, doc, null, 'description', desc ? Engine.fmt.string(desc) : null);
+      return t;
+    });
+  });
+
+  /* skills */
+  function removeSkill(name) {
+    var js = state.doc.js;
+    var kept = (js.skills || []).filter(function (s) { return s !== name; });
+    apply(function (text, doc) {
+      return Engine.ops.setKV(text, doc, null, 'skills', kept.length ? Engine.fmt.stringArray(kept) : null);
+    });
+    AF.slip('Unracked <strong>' + AF.esc(name) + '</strong>.');
+  }
+  $('addSkill').addEventListener('click', function () {
+    if (!state.doc) return;
+    $('skillName').value = '';
+    $('skillDialog').showModal();
+  });
+  $('skillDialog').addEventListener('close', function () {
+    if ($('skillDialog').returnValue !== 'ok') return;
+    var name = $('skillName').value.trim();
+    if (!/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(name)) { AF.slip('Invalid skill name.', 'alarm'); return; }
+    var js = state.doc.js;
+    if ((js.skills || []).indexOf(name) !== -1) { AF.slip('That tool is already racked.', 'alarm'); return; }
+    var next = (js.skills || []).concat([name]);
+    apply(function (text, doc) {
+      return Engine.ops.setKV(text, doc, null, 'skills', Engine.fmt.stringArray(next));
+    });
+    AF.slip('Racked <strong>' + AF.esc(name) + '</strong>.', 'ok');
+  });
+
+  /* inputs / vars */
+  var gaugeCtx = null; // {group, name|null}
+  function openGaugeDialog(group, name) {
+    if (!state.doc) return;
+    gaugeCtx = { group: group, name: name };
+    var isInput = group === 'inputs';
+    $('gaugeTitle').textContent = (name ? 'Edit ' : 'New ') + (isInput ? 'input gauge' : 'var gauge');
+    $('gTypeRow').hidden = !isInput;
+    $('gReqRow').hidden = !isInput;
+    $('gSourceRow').hidden = isInput;
+    $('gaugeRemove').style.visibility = name ? 'visible' : 'hidden';
+    var d = name ? ((state.doc.js[group] || {})[name] || {}) : {};
+    $('gName').value = name || '';
+    $('gType').value = d.type || '';
+    $('gRequired').checked = !!d.required;
+    $('gSource').value = d.source || '';
+    $('gDefault').value = d.default !== undefined ? String(d.default) : '';
+    $('gDesc').value = d.description || '';
+    $('gaugeDialog').showModal();
+  }
+  $('addInput').addEventListener('click', function () { openGaugeDialog('inputs', null); });
+  $('addVar').addEventListener('click', function () { openGaugeDialog('vars', null); });
+
+  $('gaugeDialog').addEventListener('close', function () {
+    var rv = $('gaugeDialog').returnValue;
+    if (!gaugeCtx || (rv !== 'ok' && rv !== 'remove')) return;
+    var group = gaugeCtx.group, oldName = gaugeCtx.name;
+    if (rv === 'remove') { if (oldName) removeGauge(group, oldName); return; }
+    var name = $('gName').value.trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) { AF.slip('Gauge names are identifiers: letters/underscore first.', 'alarm'); return; }
+    var fields = {};
+    if (group === 'inputs') {
+      if ($('gType').value) fields.type = $('gType').value;
+      if ($('gRequired').checked) fields.required = true;
+    } else {
+      if ($('gSource').value) fields.source = $('gSource').value;
+    }
+    var defRaw = $('gDefault').value;
+    if (defRaw !== '') {
+      var type = $('gType').value;
+      if (group === 'inputs' && type === 'number') fields.default = Number(defRaw);
+      else if (group === 'inputs' && type === 'boolean') fields.default = defRaw === 'true';
+      else fields.default = defRaw;
+    }
+    if ($('gDesc').value.trim()) fields.description = $('gDesc').value.trim();
+    apply(function (text, doc) {
+      var t = text;
+      if (oldName) { t = Engine.ops.removeNamedTable(t, doc, group, oldName); doc = Engine.parse(t); }
+      return Engine.ops.addNamedTable(t, doc, group, name, fields);
+    });
+    AF.slip((oldName ? 'Recalibrated' : 'Fitted') + ' gauge <strong>' + AF.esc(name) + '</strong>.', 'ok');
+  });
+
+  function removeGauge(group, name) {
+    confirmDo('Remove ' + name + '?',
+      'The [' + group + '.' + name + '] table comes out of the TOML.',
+      '', function () {
+        apply(function (text, doc) { return Engine.ops.removeNamedTable(text, doc, group, name); });
+        AF.slip('Removed gauge <strong>' + AF.esc(name) + '</strong>.');
+      });
+  }
+
+  /* ============================ hatch ============================ */
+
+  function openHatch(tab) {
+    $('hatch').classList.add('open');
+    switchHatchTab(tab || 'source');
+    syncHatchText();
+    renderGutter();
+  }
+  function closeHatch() {
+    $('hatch').classList.remove('open');
+  }
+  function switchHatchTab(tab) {
+    var src = tab === 'source';
+    $('tabSource').setAttribute('aria-pressed', String(src));
+    $('tabDiff').setAttribute('aria-pressed', String(!src));
+    $('sourceView').style.display = src ? '' : 'none';
+    $('diffView').hidden = src;
+    $('hatchHint').textContent = src
+      ? 'The text here IS the formula — the machines re-render from it as you type.'
+      : 'Every changed line between the loaded file and the line as it stands now. Small diffs are the point.';
+    if (!src) renderDiff();
+  }
+  $('hatchBtn').addEventListener('click', function () { openHatch('source'); });
+  $('hatchClose').addEventListener('click', closeHatch);
+  $('tabSource').addEventListener('click', function () { switchHatchTab('source'); });
+  $('tabDiff').addEventListener('click', function () { switchHatchTab('diff'); });
+  $('downloadBtn').addEventListener('click', function () {
+    AF.download(state.fileName || 'formula.toml', state.text);
+    AF.slip('Downloaded <strong>' + AF.esc(state.fileName || 'formula.toml') + '</strong>.', 'ok');
+  });
+
+  function syncHatchText() {
+    var ta = $('tomlText');
+    if (document.activeElement !== ta && ta.value !== state.text) ta.value = state.text;
+  }
+
+  function renderGutter() {
+    var gut = $('tomlGutter');
+    var lines = state.text.split('\n').length;
+    var errLine = -1;
+    if (state.parseError && typeof state.parseError.pos === 'number') {
+      errLine = state.text.slice(0, state.parseError.pos).split('\n').length;
+    }
+    var out = [];
+    for (var i = 1; i <= lines; i++) {
+      out.push(i === errLine ? '<span class="rivet" title="Parse error here">⬤ ' + i + '</span>' : String(i));
+    }
+    gut.innerHTML = out.join('\n');
+    var banner = $('hatchBanner');
+    if (state.parseError) {
+      banner.textContent = (errLine > 0 ? 'Line ' + errLine + ': ' : '') + state.parseError.message;
+      banner.classList.add('on');
+    } else banner.classList.remove('on');
+  }
+
+  $('tomlText').addEventListener('input', AF.debounce(function () {
+    setText($('tomlText').value, { fromHatch: true });
+  }, 250));
+  $('tomlText').addEventListener('scroll', function () {
+    $('tomlGutter').scrollTop = this.scrollTop;
+  });
+
+  function focusHatchAt(pos) {
+    var ta = $('tomlText');
+    ta.focus();
+    ta.setSelectionRange(pos, pos);
+    var line = state.text.slice(0, pos).split('\n').length;
+    var lh = parseFloat(getComputedStyle(ta).lineHeight) || 19;
+    ta.scrollTop = Math.max(0, (line - 6) * lh);
+  }
+
+  function renderDiff() {
+    var view = $('diffView');
+    var diff = Engine.lineDiff(state.savedText, state.text);
+    $('diffCount').textContent = diff.changedLines + ' changed line' + (diff.changedLines === 1 ? '' : 's');
+    if (!diff.changedLines) {
+      view.innerHTML = '<span class="dline same">No differences — the line matches the loaded file.</span>';
+      return;
+    }
+    var out = [], ops = diff.ops, CTX = 2;
+    var keep = new Array(ops.length).fill(false);
+    ops.forEach(function (o, i) {
+      if (o.type !== 'ctx') {
+        for (var j = Math.max(0, i - CTX); j <= Math.min(ops.length - 1, i + CTX); j++) keep[j] = true;
+      }
+    });
+    var inGap = false;
+    ops.forEach(function (o, i) {
+      if (!keep[i]) { inGap = true; return; }
+      if (inGap) { out.push('<span class="dline hunk">···</span>'); inGap = false; }
+      var mark = o.type === 'add' ? '+' : o.type === 'del' ? '−' : ' ';
+      var cls = o.type === 'add' ? 'add' : o.type === 'del' ? 'del' : 'same';
+      out.push('<span class="dline ' + cls + '">' + mark + ' ' + AF.esc(o.text) + '</span>');
+    });
+    view.innerHTML = out.join('\n');
+  }
+
+  /* ============================ test fire ============================ */
+
+  var fireTimer = null;
+  $('fireBtn').addEventListener('click', fire);
+
+  function fire() {
+    if (state.firing) return;
+    var spark = $('spark');
+    document.querySelectorAll('.station').forEach(function (el) { el.classList.remove('firing'); });
+    if (!state.doc) {
+      LAMPS.forEach(function (l) { setLampClass(l, l === 'parse' ? 'fail' : ''); });
+      AF.slip('<strong>Line stopped at the furnace.</strong> ' + AF.esc(state.parseError.message) + ' — open the hatch and tighten that bolt.', 'alarm');
+      openHatch('source');
+      if (typeof state.parseError.pos === 'number') focusHatchAt(state.parseError.pos);
+      return;
+    }
+    var model = Engine.graphModel(state.doc.js);
+    var lay = Engine.layout(model);
+    var order = model.nodes.slice().sort(function (a, b2) { return a.rank - b2.rank || a.row - b2.row; });
+    var failing = null;
+    for (var i = 0; i < order.length && !failing; i++) {
+      var f = state.findings.find(function (ff) { return ff.ref && ff.ref.stepId === order[i].id; });
+      if (f) failing = { node: order[i], finding: f };
+    }
+    var globalFail = state.findings.find(function (ff) { return !ff.ref || !ff.ref.stepId; }) || null;
+
+    if (AF.reducedMotion) { finishFire(failing, globalFail); return; }
+
+    state.firing = true;
+    LAMPS.forEach(function (l) { setLampClass(l, 'running'); });
+    spark.className = 'spark lit';
+    var idx = 0;
+    function stepTo() {
+      if (idx >= order.length) {
+        spark.classList.remove('lit');
+        state.firing = false;
+        finishFire(failing, globalFail);
+        return;
+      }
+      var nd = order[idx];
+      var p = nodePos[nd.id];
+      spark.style.left = (p.x + NODE_W / 2 - 7) + 'px';
+      spark.style.top = (p.y - 12) + 'px';
+      var el = document.querySelector('[data-node="' + CSS.escape(nd.id) + '"]');
+      if (el) {
+        el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+        el.classList.add('firing');
+        setTimeout(function () { el.classList.remove('firing'); }, 700);
+      }
+      spark.classList.toggle('gold', !!nd.gate);
+      if (failing && failing.node.id === nd.id) {
+        spark.classList.add('alarmed');
+        state.firing = false;
+        setTimeout(function () { finishFire(failing, globalFail); }, 450);
+        return;
+      }
+      idx++;
+      fireTimer = setTimeout(stepTo, nd.gate ? 620 : 400);
+    }
+    stepTo();
+  }
+
+  function setLampClass(lamp, cls) {
+    var el = document.querySelector('.check[data-check="' + lamp + '"]');
+    el.className = 'check' + (cls ? ' ' + cls : '');
+  }
+
+  function finishFire(failing, globalFail) {
+    state.firing = false;
+    renderLedger();
+    var spark = $('spark');
+    if (failing) {
+      var el = document.querySelector('[data-node="' + CSS.escape(failing.node.id) + '"]');
+      if (el) el.classList.add('error');
+      AF.slip('<strong>Line stopped at ' + AF.esc(failing.node.id) + '.</strong> ' + AF.esc(failing.finding.message), 'alarm');
+    } else if (globalFail) {
+      AF.slip('<strong>Inspection fault.</strong> ' + AF.esc(globalFail.message), 'alarm');
+    } else {
+      spark.classList.remove('alarmed');
+      AF.slip('<strong>Clean run.</strong> All four inspections passed along the whole line.' + (isDirty() ? ' Pour &amp; save is unlocked.' : ''), 'ok');
+    }
+    setTimeout(function () { spark.className = 'spark'; }, 900);
+  }
+
+  /* ============================ open / save ============================ */
+
+  $('openFileBtn').addEventListener('click', function () {
+    if (!AF.fsSupported) {
+      AF.slip('This browser has no File System Access API — use <strong>Paste TOML…</strong> and Download instead.', 'alarm');
+      return;
+    }
+    guardDirty(function () {
+      AF.pickTomlFile().then(function (handle) {
+        return handle.getFile().then(function (file) {
+          return file.text().then(function (text) {
+            state.handle = handle;
+            state.fileName = handle.name;
+            state.mode = 'file';
+            state.savedText = text;
+            state.selectedId = null;
+            AF.stash.put('open-file', handle);
+            setText(text, {});
+            AF.slip('Opened the real <strong>' + AF.esc(handle.name) + '</strong> — edits pour straight back into it.', 'ok');
+          });
+        });
+      }).catch(function (e) {
+        if (e && e.name !== 'AbortError') AF.slip('Could not open the file: ' + AF.esc(e.message), 'alarm');
+      });
+    });
+  });
+
+  $('demoSel').addEventListener('change', function () {
+    var name = this.value;
+    this.value = '';
+    if (!name) return;
+    guardDirty(function () { loadDemo(name); });
+  });
+
+  function loadDemo(name) {
+    state.handle = null;
+    AF.stash.del('open-file');
+    state.fileName = name;
+    state.mode = 'demo';
+    state.savedText = Demo.files[name];
+    state.selectedId = null;
+    setText(Demo.files[name], {});
+    AF.slip('Loaded the store copy of <strong>' + AF.esc(name) + '</strong>. Pour &amp; save writes it back to the store.');
+  }
+
+  $('pasteBtn').addEventListener('click', function () {
+    guardDirty(function () { $('pasteDialog').showModal(); });
+  });
+  $('pasteDialog').addEventListener('close', function () {
+    if ($('pasteDialog').returnValue !== 'ok') return;
+    var text = $('pasteText').value;
+    if (!text.trim()) return;
+    state.handle = null;
+    AF.stash.del('open-file');
+    state.fileName = $('pasteName').value.trim() || 'pasted.formula.toml';
+    state.mode = 'new';
+    state.savedText = text;
+    state.selectedId = null;
+    setText(text, {});
+  });
+
+  $('saveBtn').addEventListener('click', function () {
+    if (!isDirty() || !isValid()) return;
+    if (state.mode === 'file' && state.handle) {
+      AF.verifyPermission(state.handle, true).then(function (okp) {
+        if (!okp) { AF.slip('Write permission denied — the pour stays locked.', 'alarm'); return; }
+        return state.handle.createWritable().then(function (w) {
+          return w.write(state.text).then(function () { return w.close(); });
+        }).then(function () {
+          state.savedText = state.text;
+          renderAll({});
+          AF.slip('<strong>Poured.</strong> ' + AF.esc(state.fileName) + ' written to disk — run <code>git diff</code> to see the minimal change.', 'ok');
+        });
+      }).catch(function (e) { AF.slip('Pour failed: ' + AF.esc(e.message), 'alarm'); });
+    } else {
+      Demo.pour(state.fileName || 'formula.toml', state.text).then(function () {
+        state.savedText = state.text;
+        state.mode = 'demo';
+        renderAll({});
+        AF.slip('<strong>Poured.</strong> ' + AF.esc(state.fileName) + ' written to the store — run <code>git diff</code> to see the minimal change.', 'ok');
+      }, function (e) {
+        AF.slip('Pour failed: ' + AF.esc(e.message), 'alarm');
+      });
+    }
+  });
+
+  /* ============================ confirm helper + guards ============================ */
+
+  var confirmCb = null;
+  function confirmDo(title, body, lose, cb) {
+    $('confirmTitle').textContent = title;
+    $('confirmBody').textContent = body;
+    $('confirmLose').textContent = lose || '';
+    confirmCb = cb;
+    $('confirmDialog').showModal();
+  }
+  $('confirmDialog').addEventListener('close', function () {
+    if ($('confirmDialog').returnValue === 'ok' && confirmCb) confirmCb();
+    confirmCb = null;
+  });
+
+  function guardDirty(cb) {
+    if (!isDirty()) { cb(); return; }
+    confirmDo('Unsaved changes', 'The line has unpoured changes.', 'They are lost if you load something else.', cb);
+  }
+
+  window.addEventListener('beforeunload', function (e) {
+    if (isDirty()) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  document.addEventListener('keydown', function (e) {
+    var tag = document.activeElement.tagName;
+    var typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+    if ((e.key === 'f' || e.key === 'F') && !typing) fire();
+    if (e.key === 'Escape') {
+      if ($('hatch').classList.contains('open')) closeHatch();
+      else closeDrawer();
+    }
+  });
+
+  /* ============================ boot ============================ */
+
+  function boot() {
+    var handoff = AF.takeHandoff();
+    if (handoff && handoff.text) {
+      sessionStorage.removeItem('af-open');
+      state.fileName = handoff.name || 'formula.toml';
+      state.mode = handoff.mode || 'new';
+      state.savedText = handoff.dirty ? '' : handoff.text;
+      if (handoff.mode === 'file') {
+        AF.stash.get('open-file').then(function (h) {
+          if (h) state.handle = h;
+          setText(handoff.text, {});
+        }, function () { setText(handoff.text, {}); });
+      } else {
+        setText(handoff.text, {});
+      }
+      return;
+    }
+    AF.stash.get('open-file').then(function (h) {
+      if (!h) { loadDemoQuiet(); return; }
+      AF.verifyPermission(h, false).then(function (okp) {
+        if (!okp) { loadDemoQuiet(); return; }
+        h.getFile().then(function (f) { return f.text(); }).then(function (text) {
+          state.handle = h; state.fileName = h.name; state.mode = 'file';
+          state.savedText = text;
+          setText(text, {});
+          AF.slip('Reconnected to <strong>' + AF.esc(h.name) + '</strong>.', 'ok');
+        }, loadDemoQuiet);
+      }, loadDemoQuiet);
+    }, loadDemoQuiet);
+  }
+  function loadDemoQuiet() {
+    state.fileName = 'ultra-review.formula.toml';
+    state.mode = 'demo';
+    state.savedText = Demo.files['ultra-review.formula.toml'];
+    setText(state.savedText, {});
+  }
+  boot();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Component — Station &amp; Rarity Frames</title>
+<link rel="stylesheet" href="../styles/variables.css">
+<link rel="stylesheet" href="../styles/main.css">
+<style>
+  .demo-row { position:relative; display:flex; gap:26px; flex-wrap:wrap; padding:22px 0; }
+  .demo-row .station { position:static; }
+  .spec { font-family:var(--font-mono); font-size:12px; color:var(--muted); margin-top:6px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="../index.html"><img class="gear" src="../assets/mark.svg" alt="" width="26" height="26"><span class="word">Foundry Console</span></a>
+    <span class="spacer"></span>
+    <nav class="nav" aria-label="Components">
+      <a href="station.html" aria-current="page">Station</a>
+      <a href="inspection.html">Inspection</a>
+      <a href="controls.html">Controls</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="view-head" style="margin-top:26px">
+    <h1 class="view-title">Station</h1>
+    <p class="view-sub">The DAG node. Its rarity frame is <b>computed from the parsed TOML</b> —
+      never hand-assigned: gate → legendary, more than one <span class="mono">needs</span> → epic,
+      exactly one → rare, none → common. Board positions come from longest-path ranking; this page
+      lays them statically only to show states.</p>
+  </div>
+
+  <section class="panel" style="margin-bottom:18px">
+    <h2 style="font-size:15px">Rarity states</h2>
+    <div class="demo-row">
+      <div>
+        <button class="station framed r-common"><span class="plate">intake-source</span><span class="desc">A root station — nothing upstream</span></button>
+        <p class="spec">.station.framed.r-common — 0 needs</p>
+      </div>
+      <div>
+        <button class="station framed r-rare"><span class="plate">derive-ui-reqs</span><span class="desc">Wired — one belt in</span></button>
+        <p class="spec">.station.framed.r-rare — 1 need</p>
+      </div>
+      <div>
+        <button class="station framed r-epic"><span class="plate">generate-prototype</span><span class="desc">A merge — parallel belts join here</span></button>
+        <p class="spec">.station.framed.r-epic — 2+ needs</p>
+      </div>
+      <div>
+        <button class="station framed r-legendary"><span class="plate">push-and-await-feedback</span><span class="desc">Inspection arch — a human signs off</span><span class="archline">design-feedback-1 · ⏱ 24h</span></button>
+        <p class="spec">.station.framed.r-legendary — has gate</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2 style="font-size:15px">Interaction states</h2>
+    <div class="demo-row">
+      <div>
+        <button class="station framed r-rare selected"><span class="plate">selected</span><span class="desc">Control panel raised for this station</span></button>
+        <p class="spec">.selected — magenta ring</p>
+      </div>
+      <div>
+        <button class="station framed r-rare error"><span class="plate">faulted</span><span class="desc">Named by a validation finding</span></button>
+        <p class="spec">.error — danger ring, never magenta</p>
+      </div>
+      <div>
+        <button class="station framed r-epic"><span class="plate">synthesis</span><span class="desc">Convoy merge node</span><span class="synthline">◈ synthesis — merges every leg</span></button>
+        <p class="spec">.synthline — convoy formulas only</p>
+      </div>
+    </div>
+    <p class="hint">Belt edges are SVG paths (<span class="mono">.belt-edge</span>) tinted by the
+      downstream station's rarity; the Test Fire spark (<span class="mono">.spark</span>) is the only
+      moving object on the board and turns gold at gates, red at the first fault.</p>
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,12 @@
+formula = "parity-workflow-cycle"
+type = "workflow"
+
+[[steps]]
+id = "a"
+title = "A"
+needs = ["b"]
+
+[[steps]]
+id = "b"
+title = "B"
+needs = ["a"]

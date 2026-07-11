@@ -94,6 +94,19 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	return runInstallRole(cmd, args[0])
 }
 
+// warnIfEnclosingFactory reports (but never blocks — ADR-017) when af install --init
+// runs inside the subtree of an existing enclosing factory. It is a bootstrap
+// warning: it describes geometry and claims no identity, so it MUST NOT convert into
+// a refusal. Env-free ancestor detection lives in config.FindEnclosingRoot (K5/K11).
+func warnIfEnclosingFactory(cmd *cobra.Command, cwd string) {
+	if enclosing, _ := config.FindEnclosingRoot(cwd); enclosing != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"warning: af install --init is running inside the subtree of an existing factory %s; "+
+				"the new factory will be nested inside it (proceeding)\n",
+			enclosing)
+	}
+}
+
 func runInstallInit(cmd *cobra.Command) error {
 	cwd, err := getWd()
 	if err != nil {
@@ -103,6 +116,11 @@ func runInstallInit(cmd *cobra.Command) error {
 	if data, err := os.ReadFile(filepath.Join(config.ConfigDir(cwd), ".factory-root")); err == nil {
 		return fmt.Errorf("cannot run af install --init inside a worktree (factory root: %s)", strings.TrimSpace(string(data)))
 	}
+
+	// K11 (#519 Phase 3): report — but never block (ADR-017) — an enclosing factory
+	// above cwd. Unlike the own-.factory-root refusal above, this is a geometry
+	// warning: a nested-but-deliberate inner factory is allowed to proceed.
+	warnIfEnclosingFactory(cmd, cwd)
 
 	// 1. Verify Python 3.12 before ANY filesystem mutation (C-16).
 	//    af install --init must abort cleanly if Python is missing or wrong
@@ -147,7 +165,7 @@ func runInstallInit(cmd *cobra.Command) error {
 		"startup.json": `{"agents":["manager"],"quality":"default","fidelity":"default","start_dispatch":true,"watchdog_agents":["manager","supervisor"]}`,
 		// Per-agent model registry (issue #480); the default model tracks quickstart.sh
 		// (see TestInstallScaffold_DefaultModel_MatchesQuickstart).
-		"models.json": `{"default":"default","models":{"default":{"ANTHROPIC_MODEL":"claude-fable-5","ANTHROPIC_DEFAULT_OPUS_MODEL":"claude-opus-4-8","ANTHROPIC_DEFAULT_SONNET_MODEL":"claude-sonnet-5"},"lmstudio":{"ANTHROPIC_BASE_URL":"http://localhost:1234","ANTHROPIC_AUTH_TOKEN":"lm-studio","ANTHROPIC_MODEL":"qwen2.5-coder-32b","ANTHROPIC_API_KEY":""},"sonnet-5":{"ANTHROPIC_MODEL":"claude-sonnet-5"}},"agents":{"factoryworker":"sonnet-5"}}`,
+		"models.json": `{"default":"default","models":{"default":{"ANTHROPIC_MODEL":"claude-opus-4-8","ANTHROPIC_DEFAULT_OPUS_MODEL":"claude-opus-4-8","ANTHROPIC_DEFAULT_SONNET_MODEL":"claude-sonnet-5"},"lmstudio":{"ANTHROPIC_BASE_URL":"http://localhost:1234","ANTHROPIC_AUTH_TOKEN":"lm-studio","ANTHROPIC_MODEL":"qwen2.5-coder-32b","ANTHROPIC_API_KEY":""},"sonnet-5":{"ANTHROPIC_MODEL":"claude-sonnet-5"},"opus-4-8":{"ANTHROPIC_MODEL":"claude-opus-4-8"},"fable-5":{"ANTHROPIC_MODEL":"claude-fable-5"}},"agents":{"design":"opus-4-8","design-plan-impl":"opus-4-8","design-v3":"opus-4-8","design-v7":"opus-4-8","factoryworker":"sonnet-5","gherkin-breakdown":"opus-4-8","investigate":"opus-4-8","mergepatrol":"opus-4-8","minimalworker":"opus-4-8","rapid-implement":"sonnet-5","fable-implement":"sonnet-5","rapid-increment":"opus-4-8","fable-increment":"opus-4-8","rapid-soldesign-plan":"opus-4-8","rootcause-all":"opus-4-8","supervisor":"opus-4-8","ultra-review":"opus-4-8","fable-review":"opus-4-8","web-design":"opus-4-8"}}`,
 	}
 
 	for name, content := range starterConfigs {
@@ -498,7 +516,7 @@ func runInstallRole(cmd *cobra.Command, role string) error {
 	}
 
 	// 1. Find factory root
-	factoryRoot, err := config.FindFactoryRoot(cwd)
+	factoryRoot, err := resolveInvokerRoot(cwd)
 	if err != nil {
 		return fmt.Errorf("not in a factory workspace: %w", err)
 	}
@@ -639,7 +657,7 @@ func runInstallAgents(cmd *cobra.Command) error {
 		return fmt.Errorf("cannot run af install --agents inside a worktree (factory root: %s); run from the main project checkout, not a worktree", strings.TrimSpace(string(data)))
 	}
 
-	factoryRoot, err := config.FindFactoryRoot(cwd) // as runInstallRole
+	factoryRoot, err := resolveInvokerRoot(cwd) // as runInstallRole
 	if err != nil {
 		return err
 	}

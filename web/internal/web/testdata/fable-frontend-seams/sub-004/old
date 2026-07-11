@@ -1,0 +1,1 @@
+  $('storeStatus').textContent = Object.keys(Demo.files).length + ' embedded demos · ' + (Demo.inventory.length - Object.keys(Demo.files).length) + ' more on the real floor';

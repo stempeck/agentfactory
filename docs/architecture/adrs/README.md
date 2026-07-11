@@ -34,6 +34,7 @@ anchored to file:line or commit SHA.
 | [017](ADR-017-no-customer-repo-mutations.md) | af infrastructure commands must not delete customer data | Accepted | `internal/cmd/formula.go:102-108`; designs 170/173 incident history |
 | [018](ADR-018-tests-never-disturb-running-factory.md) | Tests must never disturb a running factory | Accepted | `internal/session/names.go:7-12`; issues #309/#316/#317 |
 | [019](ADR-019-no-container-recreation.md) | af changes must never require recreating or destroying an existing factory container | Accepted | `quickdocker.sh:325-337,486-493`; `.designs/425` Rev-2; issue #428 |
+| [020](ADR-020-explicit-agent-installation.md) | Agent installation is explicit and customer-owned | Accepted | `internal/cmd/install.go:161`; `todos/stempeck_publish_oss.sh:208-213` |
 
 ---
 

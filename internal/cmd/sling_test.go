@@ -25,10 +25,18 @@ func installMemStore(t *testing.T) *memstore.Store {
 	t.Helper()
 	store := memstore.New()
 	orig := newIssueStore
+	origAt := newIssueStoreAt
 	newIssueStore = func(wd, actor string) (issuestore.Store, error) {
 		return store, nil
 	}
-	t.Cleanup(func() { newIssueStore = orig })
+	// newIssueStore delegates to newIssueStoreAt on the production path, and some
+	// verbs (agents list) now build their store via newIssueStoreAt directly with an
+	// already-resolved root — stub both seams onto the same store so either path
+	// returns the shared, test-populated memstore (issue #519 review follow-up).
+	newIssueStoreAt = func(root, actor string) (issuestore.Store, error) {
+		return store, nil
+	}
+	t.Cleanup(func() { newIssueStore = orig; newIssueStoreAt = origAt })
 	return store
 }
 
@@ -59,10 +67,14 @@ func installNoopLaunchSession(t *testing.T) {
 func installFailingIssueStore(t *testing.T) {
 	t.Helper()
 	orig := newIssueStore
+	origAt := newIssueStoreAt
 	newIssueStore = func(wd, actor string) (issuestore.Store, error) {
 		return nil, errors.New("issuestore disabled for test")
 	}
-	t.Cleanup(func() { newIssueStore = orig })
+	newIssueStoreAt = func(root, actor string) (issuestore.Store, error) {
+		return nil, errors.New("issuestore disabled for test")
+	}
+	t.Cleanup(func() { newIssueStore = orig; newIssueStoreAt = origAt })
 }
 
 // killStaleTmuxSession (a real `tmux kill-session` wrapper) now lives in
@@ -3216,6 +3228,73 @@ func TestDispatchToSpecialist_NonSpecialistCallerGetsIndependentWorktree(t *test
 	}
 }
 
+// TestDispatchToSpecialist_MintsFreshWorktreeAtCanonicalRoot pins the #519 review
+// follow-up (unresolved thread 3, sling.go:105) — invariant (c): after the
+// resolver-seam swap, a manager-slung parent still gets a FRESH, unique worktree
+// minted under <canonical-root>/.agentfactory/worktrees, with the worktree's own
+// meta recording FactoryRoot == the canonical root. That behavior rested entirely
+// on unchanged code plus pre-existing #86/#188 tests; nothing proved THIS PR
+// preserved it. This test closes that gap through the sling seam (not only
+// worktree.Create's own unit test).
+func TestDispatchToSpecialist_MintsFreshWorktreeAtCanonicalRoot(t *testing.T) {
+	installMemStore(t)
+	cap := installCapturingLaunchSession(t)
+
+	root, _ := createTestFormulaFactory(t, "test-specialist-formula", "specialist-agent")
+
+	// A manager dispatching from its own (factory-root) worktree.
+	managerWTID := "wt-mgr000"
+	t.Setenv("AF_WORKTREE", root)
+	t.Setenv("AF_WORKTREE_ID", managerWTID)
+
+	agents := map[string]interface{}{
+		"agents": map[string]interface{}{
+			"manager": map[string]interface{}{
+				"type":        "interactive",
+				"description": "Manager agent",
+			},
+			"specialist-agent": map[string]interface{}{
+				"type":        "autonomous",
+				"description": "Test specialist",
+				"formula":     "test-specialist-formula",
+			},
+		},
+	}
+	data, _ := json.Marshal(agents)
+	os.WriteFile(filepath.Join(root, ".agentfactory", "agents.json"), data, 0o644)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	callerWd := filepath.Join(root, ".agentfactory", "agents", "manager")
+	os.MkdirAll(callerWd, 0o755)
+
+	if err := dispatchToSpecialist(cmd, root, callerWd, "specialist-agent", "fix issue"); err != nil {
+		t.Fatalf("dispatchToSpecialist: %v", err)
+	}
+
+	// (i) minted UNDER the canonical root's worktrees dir.
+	wtDir := worktree.WorktreesDir(root)
+	if !strings.HasPrefix(cap.worktreePath, wtDir) {
+		t.Errorf("minted worktree %q is not under the canonical worktrees dir %q", cap.worktreePath, wtDir)
+	}
+	// (ii) a fresh, unique wt-id — not the manager's, not empty.
+	if cap.worktreeID == "" || cap.worktreeID == managerWTID {
+		t.Errorf("expected a fresh unique wt-id, got %q (manager's was %q)", cap.worktreeID, managerWTID)
+	}
+	// (iii) the worktree meta records FactoryRoot == the canonical root.
+	meta, err := worktree.ReadMeta(root, cap.worktreeID)
+	if err != nil {
+		t.Fatalf("ReadMeta(%q, %q): %v", root, cap.worktreeID, err)
+	}
+	if meta.FactoryRoot != root {
+		t.Errorf("minted worktree Meta.FactoryRoot = %q, want the canonical root %q", meta.FactoryRoot, root)
+	}
+}
+
 func TestDispatchToSpecialist_SpecialistCallerInheritsWorktree(t *testing.T) {
 	installMemStore(t)
 	cap := installCapturingLaunchSession(t)
@@ -3777,3 +3856,11 @@ func TestLaunchMessage_WithEndpoint(t *testing.T) {
 		t.Error("sling.go: launchAgentSession must preserve backward-compatible Launched format when no fields set")
 	}
 }
+
+// NOTE: TestInstantiateFormulaWorkflow_BeadsCarryFactoryRoot and its capturingStore
+// helper were removed with the #519 review follow-up (unresolved thread 4): the
+// bead-side CreateParams.FactoryRoot field was DROPPED because it was write-only
+// dead on every backend (mcpstore/memstore never persist it, and the read Issue DTO
+// has no such field), so the test only ever asserted intent at the CreateParams
+// layer, not persisted provenance. Durable factory-root provenance is carried by
+// the worktree meta.json (Meta.FactoryRoot, worktree.go), which is unaffected.

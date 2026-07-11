@@ -7,7 +7,16 @@
    ========================================================================== */
 
 /* Web fonts with full offline fallback stacks declared on the families below,
-   so the UI looks right even if the network is unavailable. */
+   so the UI looks right even if the network is unavailable.
+
+   #502 Decision 7 (font posture) is CONTINGENT on the Phase-5a operator sign-off, which does NOT exist
+   at Phase-4 time. Self-hosting WOFF2 + removing the CDN font import reverses a documented intentional
+   fall-back posture (server.go "intentionally left to fall back") and visibly changes all five existing
+   views (+~300-500KB embed, OFL license) — an operator decision, not one made inside this editor
+   integration. Phase 4 therefore takes the documented IDENTICAL-STACKS FALLBACK: the one import rule below
+   stays (it is CSP-blocked and harmless — the full offline fallback stacks carry the type), and no WOFF2
+   ships. The self-host swap lands in Phase 5a alongside the sign-off. (Pinned by the web package's
+   TestVariablesCSS_FontFallbackPosture.) */
 @import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Sora:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap');
 
 :root{
@@ -77,4 +86,18 @@
     radial-gradient(1000px 520px at 92% -4%, rgba(32,229,255,.09), transparent 60%),
     radial-gradient(900px 700px at 60% 120%, rgba(178,107,255,.08), transparent 60%),
     var(--ink);
+
+  /* ---- #502 rarity alias tokens: the formula editor's structure-derived rarity mapped onto the
+     console's EXISTING accents (no invented palette). Keys match TomlEngine.rarityOf's four strings.
+     legendary = has a human gate → signage amber; epic = merge point (>1 need) → neon violet;
+     rare = wired (1 need) → neon cyan; common = root (0 needs) → a quiet line grey (the one raw hex,
+     no existing token matches it). ---- */
+  --rarity-legendary:var(--signage-amber);
+  --rarity-epic:var(--neon-violet);
+  --rarity-rare:var(--neon-cyan);
+  --rarity-common:#575072;
+
+  /* ---- #502 preview canvas: replaces the raw #fff at main.css:538 (the sandboxed prototype iframe
+     paints a white page). Tokenized so the editor CSS carries no raw hex. ---- */
+  --viewer-bg:#fff;
 }

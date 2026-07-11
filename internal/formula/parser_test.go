@@ -224,6 +224,27 @@ needs = ["step1"]
 	}
 }
 
+func TestValidate_ExpansionCycle(t *testing.T) {
+	data := []byte(`
+formula = "test"
+type = "expansion"
+version = 1
+[[template]]
+id = "a"
+title = "Template A"
+needs = ["b"]
+[[template]]
+id = "b"
+title = "Template B"
+needs = ["a"]
+`)
+
+	_, err := Parse(data)
+	if err == nil {
+		t.Error("expected error for expansion cycle")
+	}
+}
+
 func TestTopologicalSort(t *testing.T) {
 	data := []byte(`
 formula = "test"

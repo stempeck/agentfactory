@@ -21,6 +21,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/lock"
 	"github.com/stempeck/agentfactory/internal/session"
+	"github.com/stempeck/agentfactory/internal/tmux"
 	"github.com/stempeck/agentfactory/internal/worktree"
 )
 
@@ -62,7 +63,7 @@ func runDone(cmd *cobra.Command, args []string) error {
 // runDoneCore contains the core logic for af done, separated from cobra for testability.
 func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate string) error {
 	// 1. Context discovery
-	factoryRoot, err := config.FindFactoryRoot(cwd)
+	factoryRoot, err := resolveInvokerRoot(cwd)
 	if err != nil {
 		return err
 	}
@@ -261,6 +262,32 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 		fmt.Fprintf(os.Stderr, "warning: skipping auto-terminate because WORK_DONE mail failed\n")
 	}
 
+	// Continuous-improvement hook (#483). On a qualifying final `af done`,
+	// keep the session alive and deliver the /improve-agent instruction. The fire
+	// condition is positional here — the velocity guard already returned above, and
+	// `caller`, `dispatched`, and `shouldTerminate` are settled. Evaluate BEFORE
+	// cleanupRuntimeArtifacts deletes the carrier files. The completion path stays
+	// byte-identical whenever the toggles are off (the factory-toggle gate below), and
+	// any error fails open (skip recorded, completion untouched).
+	improvementFired := false
+	var improvementInstr, improvementAgent string
+	if caller != "" && improvementFactoryEnabled(factoryRoot) {
+		fired, agent, instruction, reason := evaluateImprovementFire(cwd, factoryRoot, instanceID, caller, formulaName, shouldTerminate)
+		switch {
+		case fired:
+			improvementFired = true
+			improvementInstr = instruction
+			improvementAgent = agent
+			// Keep the session (and its worktree) alive; teardown and the lock
+			// release defer to `af improvement complete`. terminate_on_complete in
+			// the marker records the ORIGINAL shouldTerminate for that verb.
+			shouldTerminate = false
+		case reason != "":
+			fmt.Fprintf(os.Stderr, "warning: improvement hook did not fire: %s\n", reason)
+			_ = recordImprovementSkip(factoryRoot, agent, reason)
+		}
+	}
+
 	// Clean up checkpoint and runtime artifacts.
 	// Checkpoint is removed on workflow completion. It was never read during this
 	// done flow — recovery is fully handled by .runtime/hooked_formula + store.Ready above.
@@ -268,34 +295,10 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 	cleanupRuntimeArtifacts(cwd)
 
 	// Release identity lock (lock PID belongs to the Claude process from af prime,
-	// not af done; Release() simply deletes the file regardless of PID)
-	_ = lock.New(cwd).Release()
-
-	// Clean up worktree if this agent was running in one AND the session
-	// will be terminated. If the session survives (not dispatched, or mail
-	// failed), preserve the worktree so the shell CWD remains valid.
-	if shouldTerminate {
-		if wtID := readWorktreeID(cwd); wtID != "" {
-			agentName := os.Getenv("AF_ROLE")
-			if agentName == "" {
-				fmt.Fprintf(os.Stderr, "warning: AF_ROLE not set, skipping worktree cleanup\n")
-			} else {
-				if isWorktreeOwner(cwd) {
-					meta, empty, err := worktree.RemoveAgent(factoryRoot, wtID, agentName)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "warning: worktree RemoveAgent: %v\n", err)
-					} else if empty {
-						if rmErr := worktree.Remove(factoryRoot, meta); rmErr != nil {
-							fmt.Fprintf(os.Stderr, "warning: worktree cleanup: %v\n", rmErr)
-						}
-					}
-				} else {
-					if _, _, err := worktree.RemoveAgent(factoryRoot, wtID, agentName); err != nil {
-						fmt.Fprintf(os.Stderr, "warning: worktree RemoveAgent: %v\n", err)
-					}
-				}
-			}
-		}
+	// not af done; Release() simply deletes the file regardless of PID). Deferred to
+	// `af improvement complete` when the improvement hook fired and the session survives.
+	if !improvementFired {
+		_ = lock.New(cwd).Release()
 	}
 
 	if caller != "" && mailErr == nil {
@@ -304,12 +307,48 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 		fmt.Println("✓ All formula steps complete.")
 	}
 
-	// Auto-terminate dispatched sessions
+	// On fire, deliver the instruction over the redundant trio (#483).
+	if improvementFired {
+		deliverImprovement(improvementAgent, improvementInstr, formulaName)
+	}
+
+	// Tear down a dispatched session (worktree removal + self-terminate). Skipped
+	// when the session survives — not dispatched, or WORK_DONE mail failed — so the
+	// shell CWD and its worktree stay valid.
 	if shouldTerminate {
-		selfTerminate(cwd, factoryRoot)
+		finishDispatchedSession(cwd, factoryRoot)
 	}
 
 	return nil
+}
+
+// finishDispatchedSession runs the deferred teardown for a dispatched session:
+// worktree removal followed by tmux self-termination. Extracted verbatim from
+// sendWorkDoneAndCleanup's tail so the improvement-completion verb can
+// replay the exact same sequence instead of forking it.
+func finishDispatchedSession(cwd, factoryRoot string) {
+	if wtID := readWorktreeID(cwd); wtID != "" {
+		agentName := os.Getenv("AF_ROLE")
+		if agentName == "" {
+			fmt.Fprintf(os.Stderr, "warning: AF_ROLE not set, skipping worktree cleanup\n")
+		} else {
+			if isWorktreeOwner(cwd) {
+				meta, empty, err := worktree.RemoveAgent(factoryRoot, wtID, agentName)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "warning: worktree RemoveAgent: %v\n", err)
+				} else if empty {
+					if rmErr := worktree.Remove(factoryRoot, meta); rmErr != nil {
+						fmt.Fprintf(os.Stderr, "warning: worktree cleanup: %v\n", rmErr)
+					}
+				}
+			} else {
+				if _, _, err := worktree.RemoveAgent(factoryRoot, wtID, agentName); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: worktree RemoveAgent: %v\n", err)
+				}
+			}
+		}
+	}
+	selfTerminate(cwd, factoryRoot)
 }
 
 // readFormulaCaller reads the dispatcher address from .runtime/formula_caller.
@@ -320,6 +359,70 @@ func readFormulaCaller(workDir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// deliverImprovement runs the redundant delivery trio for a fired hook:
+// (a) the stdout instruction block (always emitted — the inline anchor), then
+// (b) best-effort self-mail of the full instruction (--priority urgent), then
+// (c) a best-effort short nudge pointer. Mail is sent BEFORE the nudge so the
+// nudge-triggered `af mail check --inject` surfaces the mailed instruction on the
+// next turn. Channel failures warn on stderr; the stdout block always emits.
+func deliverImprovement(agent, instruction, formulaName string) {
+	fmt.Println()
+	fmt.Println(instruction)
+
+	subject := fmt.Sprintf("IMPROVEMENT HOOK: refine %s", strings.TrimPrefix(formulaName, "Formula: "))
+	if err := sendImprovementMail(agent, subject, instruction); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: improvement self-mail failed: %v\n", err)
+	}
+
+	pointer := "IMPROVEMENT HOOK pending — check mail (af mail check) for the full instruction, then run: af improvement complete"
+	if err := deliverImprovementNudge(session.SessionName(agent), pointer); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: improvement nudge failed: %v\n", err)
+	}
+}
+
+// sendImprovementMail self-mails the full /improve-agent instruction to the
+// finishing agent with --priority urgent (mail.go:38 — no other subprocess caller
+// passes it). Declared as a var so tests observe delivery without shelling out
+// (mirrors sendWorkDoneMail); the isTestBinary() no-op keeps unit tests hermetic.
+var sendImprovementMail = func(agent, subject, instruction string) error {
+	if isTestBinary() {
+		return nil
+	}
+
+	afPath, err := os.Executable()
+	if err != nil {
+		afPath, _ = exec.LookPath("af")
+	}
+	if afPath == "" {
+		return fmt.Errorf("cannot find af binary")
+	}
+	cmd := exec.Command(afPath, "mail", "send", agent, "-s", subject, "-m", instruction, "--priority", "urgent")
+	cmd.Env = os.Environ()
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if stderr.Len() > 0 {
+			return fmt.Errorf("improvement mail to %s failed: %w\nsubprocess stderr: %s", agent, err, strings.TrimSpace(stderr.String()))
+		}
+		return fmt.Errorf("improvement mail to %s: %w", agent, err)
+	}
+	return nil
+}
+
+// deliverImprovementNudge sends the short directive pointer to the agent's live
+// session via the sanctioned NudgeSession channel (tmux.go:390). A var seam with an
+// isTestBinary() no-op: NudgeSession's guardOp PANICS on a production identity under
+// the guarded test build, so routing it through a seam (not the cmdTmux interface,
+// which lacks NudgeSession) is required.
+var deliverImprovementNudge = func(sessionName, message string) error {
+	if isTestBinary() {
+		return nil
+	}
+	return tmux.NewTmux().NudgeSession(sessionName, message)
 }
 
 // sendWorkDoneMail shells out to `af mail send` to notify the dispatcher.

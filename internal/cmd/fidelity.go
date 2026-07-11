@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/lock"
 )
 
@@ -38,7 +37,7 @@ func runFidelity(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	factoryRoot, err := config.FindFactoryRoot(cwd)
+	factoryRoot, err := resolveInvokerRoot(cwd)
 	if err != nil {
 		return err
 	}
@@ -120,6 +119,10 @@ func applyGate(root, formulaDir, gate, state string) error {
 		return os.WriteFile(qualityGateFile(root), []byte(state+"\n"), 0644)
 	case "fidelity":
 		return applyFidelityGate(root, formulaDir, state)
+	case "improvement":
+		// No active-formula guard: the improvement hook is advisory/fail-open, so
+		// disabling it never needs to block on .runtime/hooked_formula (unlike fidelity).
+		return os.WriteFile(improvementHookFile(root), []byte(state+"\n"), 0644)
 	}
 	return nil
 }

@@ -1,4 +1,4 @@
-.PHONY: build build-webui install clean clean-venv test generate test-integration check-formulas sync-formulas install-hooks check-skills sync-skills check-formula-skills check-regen
+.PHONY: build build-webui install clean clean-venv test conformance generate test-integration check-formulas sync-formulas install-hooks check-skills sync-skills check-formula-skills check-regen
 
 BINARY := af
 BUILD_DIR := .
@@ -57,6 +57,14 @@ AF_TEST_TMPDIR := $(HOME)/.cache/af-test
 test:
 	@mkdir -p $(AF_TEST_TMPDIR)
 	TMPDIR=$(AF_TEST_TMPDIR) GOTMPDIR=$(AF_TEST_TMPDIR) CGO_ENABLED=0 go test ./...
+
+# Conformance-test the SHIPPED formula-editor engine
+# (web/internal/web/static/scripts/toml-engine.js) against Python tomllib over the live
+# store formulas. This is the EXACT command the toml-conformance CI job runs, so
+# `make conformance` matches the CI lane byte-for-byte (local<->CI parity). Needs node +
+# python3.12 (tomllib) on PATH; it is a plain Node script, no build step.
+conformance:
+	node web/conformance/test-engine.js .agentfactory/store/formulas
 
 # The venv is rebuilt only when py/requirements.txt changes (marker file
 # guards re-install on every test run). Fails fast with a clear message if

@@ -116,7 +116,7 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 			if err := config.ValidateAgentName(from); err != nil {
 				return fmt.Errorf("invalid --from %q: %w", from, err)
 			}
-			root, err := config.FindFactoryRoot(wd)
+			root, err := resolveInvokerRoot(wd)
 			if err != nil {
 				return fmt.Errorf("validating --from: %w", err)
 			}
@@ -153,11 +153,18 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 	}
 	msg.Priority = mail.ParsePriority(priorityStr)
 
+	// Resolve the root through the sanctioned seam and hand it to NewRouter (thread
+	// 7a): the router must never re-resolve cwd ambiently. This is a state-writing
+	// verb, so a factory-root mismatch is a hard refusal (as storeForMail already is).
+	root, err := resolveInvokerRoot(wd)
+	if err != nil {
+		return err
+	}
 	store, err := storeForMail(wd)
 	if err != nil {
 		return err
 	}
-	router, err := mail.NewRouter(wd, store)
+	router, err := mail.NewRouter(root, store)
 	if err != nil {
 		return err
 	}
@@ -387,11 +394,17 @@ func runMailReply(cmd *cobra.Command, args []string) error {
 
 	reply := mail.NewReplyMessage(sender, original.From, subject, body, original)
 
+	// Resolve the root through the seam and pass it to NewRouter (thread 7a) — no
+	// ambient cwd resolution in the library. State-writing verb: mismatch refuses.
+	root, err := resolveInvokerRoot(wd)
+	if err != nil {
+		return err
+	}
 	store, err := storeForMail(wd)
 	if err != nil {
 		return err
 	}
-	router, err := mail.NewRouter(wd, store)
+	router, err := mail.NewRouter(root, store)
 	if err != nil {
 		return err
 	}
@@ -408,7 +421,7 @@ func runMailReply(cmd *cobra.Command, args []string) error {
 // Delegates to resolveAgentName (helpers.go) for three-tier resolution, then
 // validates against agents.json.
 func detectSender(wd string) (string, error) {
-	root, err := config.FindFactoryRoot(wd)
+	root, err := resolveInvokerRoot(wd)
 	if err != nil {
 		return "", fmt.Errorf("detecting sender: %w", err)
 	}

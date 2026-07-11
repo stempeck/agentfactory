@@ -1,0 +1,2 @@
+    castText = buildToml();
+    // prove the cast: it must parse and pass the four checks before it rolls out

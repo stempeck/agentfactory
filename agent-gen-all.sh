@@ -123,10 +123,17 @@ fi
 echo ""
 
 # --- Regenerate each formula -------------------------------------------------
-# For each formula in .agentfactory/store/formulas/, delete the existing agent (which removes
-# its template, config entry, and workspace via `af formula agent-gen --delete`)
-# and regenerate. We never touch internal/templates/roles/ directly — manager
-# and supervisor are builtin roles without formulas and must be left alone.
+# For each formula in .agentfactory/store/formulas/, regenerate the agent in place
+# (config entry, template, workspace) via `af formula agent-gen`. This loop's
+# domain is always a formula file that still exists, so there is never an orphan
+# to clean up here — a prior delete-then-regenerate here only ever destroyed and
+# immediately recreated a still-valid agent, wiping operator-owned agents.json
+# fields (continuous_improvement, model, sparse_paths, base_url, auth_token) on
+# every redeploy (issue #527). `af formula agent-gen` already preserves those
+# fields on regeneration; deliberate agent removal remains available via a
+# standalone `af formula agent-gen <name> --delete`, unaffected by this loop. We
+# never touch internal/templates/roles/ directly — manager and supervisor are
+# builtin roles without formulas and must be left alone.
 
 count=0
 failed=()
@@ -138,12 +145,8 @@ for f in "$FORMULA_DIR"/*.formula.toml; do
     echo ""
     echo "[$name]"
 
-    # Delete existing agent artifacts (fails gracefully if agent doesn't exist)
-    if ! af formula agent-gen "$name" --delete --af-src "$AF_SRC" 2>&1; then
-        echo "  (no existing agent to delete)"
-    fi
-
-    # Generate fresh
+    # Regenerate in place — preserves operator-owned fields via the existing
+    # agents.json merge.
     if af formula agent-gen "$name" --af-src "$AF_SRC"; then
         count=$((count + 1))
     else

@@ -11,15 +11,23 @@ import (
 // FindFormulaFile searches for a formula file by name in standard locations.
 //
 // Search order:
-//  1. Factory root formulas/ (found via config.FindFactoryRoot from workDir)
+//  1. Factory root formulas/ (config.FormulasDir(factoryRoot))
 //  2. User ~/formulas/ (via config.FormulasDir)
 //
 // File extensions tried: .formula.toml (primary), .formula.json (fallback)
-func FindFormulaFile(name string, workDir string) (string, error) {
+//
+// factoryRoot must be an ALREADY-VALIDATED root supplied by the caller — this
+// function does NOT resolve it from a working directory. Ambient cwd→root
+// resolution here would launder around the internal/cmd resolveInvokerRoot seam
+// (the #519 cross-check), so the cmd layer passes the root it already holds and the
+// drift guard enforces that this package never reintroduces config.FindFactoryRoot
+// (issue #519 review follow-up, thread 7a). An empty factoryRoot skips the factory
+// search path (home formulas only).
+func FindFormulaFile(name string, factoryRoot string) (string, error) {
 	var searchPaths []string
 
 	// 1. Factory root formulas (via config.FormulasDir)
-	if factoryRoot, err := config.FindFactoryRoot(workDir); err == nil {
+	if factoryRoot != "" {
 		searchPaths = append(searchPaths, config.FormulasDir(factoryRoot))
 	}
 

@@ -14,38 +14,62 @@
   var $ = function (sel) { return document.querySelector(sel); };
   var byId = function (id) { return document.getElementById(id); };
 
-  // Optional session token (present only when the server templated it for a
-  // non-loopback bind; on pure loopback it is absent and not required).
+  // Session token for the #502 write-tier routes (PUT /api/formulas/{name}, POST
+  // /api/factory/generate), which require it EVEN on pure loopback. The operator pastes it from the
+  // afweb startup log; it is held in sessionStorage (never templated into the served document, so the
+  // CSP script-src 'self' stays intact — no inline script). The legacy <meta name="af-token"> is a
+  // vestigial fallback for a future templated-delivery path.
+  var TOKEN_KEY = 'af-token';
   function authToken() {
+    try {
+      var t = window.sessionStorage.getItem(TOKEN_KEY);
+      if (t) return t;
+    } catch (e) { /* sessionStorage unavailable — fall through to the meta */ }
     var m = document.querySelector('meta[name="af-token"]');
     return m ? m.getAttribute('content') : '';
   }
+  function setAuthToken(tok) {
+    try { window.sessionStorage.setItem(TOKEN_KEY, tok); } catch (e) { /* ignore */ }
+  }
+  // First-write prompt: when a write is refused (401), ask the operator to paste the startup token
+  // once, store it, and let the caller retry. Returns the trimmed token, or '' if dismissed.
+  function promptForToken() {
+    var tok = window.prompt('Paste the session token printed in the afweb startup log to authorize this write:');
+    tok = (tok || '').trim();
+    if (tok) setAuthToken(tok);
+    return tok;
+  }
 
   // ---- API layer ----
+  // sendWrite issues one state-changing request carrying the current token; writeReq wraps it with a
+  // single first-write retry: a 401 prompts the operator for the token and retries once. Reads never
+  // require the token, so GET is unchanged.
+  function sendWrite(method, path, body) {
+    var h = { 'Content-Type': 'application/json' };
+    var t = authToken(); if (t) h['X-AF-Token'] = t;
+    return fetch(path, {
+      method: method, headers: h, credentials: 'same-origin',
+      body: body ? JSON.stringify(body) : '{}'
+    }).then(parse);
+  }
+  function writeReq(method, path, body) {
+    return sendWrite(method, path, body).then(function (env) {
+      if (env && env._status === 401 && promptForToken()) {
+        return sendWrite(method, path, body); // retry once with the freshly-pasted token
+      }
+      return env;
+    });
+  }
   var API = {
     get: function (path) {
       var h = {};
       var t = authToken(); if (t) h['X-AF-Token'] = t;
       return fetch(path, { headers: h, credentials: 'same-origin' }).then(parse);
     },
-    post: function (path, body) {
-      var h = { 'Content-Type': 'application/json' };
-      var t = authToken(); if (t) h['X-AF-Token'] = t;
-      return fetch(path, {
-        method: 'POST', headers: h, credentials: 'same-origin',
-        body: body ? JSON.stringify(body) : '{}'
-      }).then(parse);
-    },
-    // put sends the COMPLETE edited config document as the request body. The settings write path
-    // (PUT /api/settings/{file}) feeds that body straight to `af config <file> set` on stdin.
-    put: function (path, body) {
-      var h = { 'Content-Type': 'application/json' };
-      var t = authToken(); if (t) h['X-AF-Token'] = t;
-      return fetch(path, {
-        method: 'PUT', headers: h, credentials: 'same-origin',
-        body: body ? JSON.stringify(body) : '{}'
-      }).then(parse);
-    }
+    post: function (path, body) { return writeReq('POST', path, body); },
+    // put sends the COMPLETE edited document as the request body (settings: fed to `af config <file>
+    // set` on stdin; formulas: the {text, base_sha256} CAS save).
+    put: function (path, body) { return writeReq('PUT', path, body); }
   };
   function parse(res) {
     return res.json().catch(function () { return { ok: false, message: 'bad response' }; })
@@ -300,7 +324,8 @@
   };
 
   // ---- view toggles (exactly one #view-* section visible at a time) ----
-  var VIEW_IDS = ['view-floor', 'view-sling', 'view-dispatch', 'view-settings', 'view-prototypes', 'view-agent'];
+  var VIEW_IDS = ['view-floor', 'view-sling', 'view-dispatch', 'view-settings', 'view-prototypes', 'view-agent',
+    'view-formulas'];
   function showView(id) {
     VIEW_IDS.forEach(function (v) { var s = byId(v); if (s) s.hidden = (v !== id); });
   }
@@ -309,6 +334,7 @@
   function showDispatch() { showView('view-dispatch'); }
   function showSettings() { showView('view-settings'); }
   function showPrototypes() { showView('view-prototypes'); }
+  function showFormulas() { showView('view-formulas'); }
 
   // ---- sling view: idle-agent list ----
   function renderIdleList() {
@@ -1063,6 +1089,40 @@
         AgentDetailViewModel.activate(route.slice(6));
         return;
       }
+      // #534: the formulas family lives in the transplanted prototype behind #formulaFrame.
+      // Entering a route points the persistent iframe at the approved document; leaving the
+      // family never unloads it (the section only hides), so unsaved edits survive tab switches.
+      // In-frame navigation and dirty guarding are the prototype's own bytes. The formulas/new and
+      // formulas/{name} branches below exist to satisfy the route-contract trace for the three
+      // declared routes, but are currently unreachable: nothing in the shipped shell navigates to
+      // them (no hash/popstate router; the transplant uses its own cross-document <a href> links and
+      // never calls back into AppViewModel). Deep-linking is a declined/future enhancement
+      // (design 502, Decision 10).
+      if (route === 'formulas' || route === 'formulas/new' || route.indexOf('formulas/') === 0) {
+        this.currentRoute = route;
+        syncNav('formulas');
+        showFormulas();
+        var frame = byId('formulaFrame');
+        if (!frame) { return; }
+        if (route === 'formulas/new') { frame.src = '/formula-editor/screens/wizard.html'; return; }
+        if (route === 'formulas') {
+          if (!frame.getAttribute('src')) { frame.src = '/formula-editor/screens/roster.html'; }
+          return;
+        }
+        var name = route.slice('formulas/'.length);
+        API.get('/api/formulas/' + encodeURIComponent(name)).then(function (env) {
+          if (env.ok && env.data && typeof env.data.text === 'string') {
+            try {
+              window.sessionStorage.setItem('af-open',
+                JSON.stringify({ name: env.data.name + '.formula.toml', text: env.data.text, mode: 'demo' }));
+            } catch (e) { /* handoff degraded — the editor boots its default */ }
+            frame.src = '/formula-editor/screens/editor.html';
+          } else {
+            frame.src = '/formula-editor/screens/roster.html';
+          }
+        }, function () { frame.src = '/formula-editor/screens/roster.html'; });
+        return;
+      }
       this.currentRoute = route;
       syncNav(route);                                               // move the highlight first, for every route
       if (route === 'sling') { SlingViewModel.activate(); return; }
@@ -1322,6 +1382,10 @@
   else boot();
 
   // expose for verification / debugging (the logical view-model contract)
+  window.setAuthToken = setAuthToken; // #502 T10: operator/console pastes the startup token here
+  // window.API stays exposed for verification and for shell-level consumers; the transplanted
+  // formula editor (#534) talks to the write tier through its own live-store module instead.
+  window.API = API;
   window.AppViewModel = AppViewModel;
   window.PowerBarViewModel = PowerBarViewModel;
   window.ConfirmViewModel = ConfirmViewModel;

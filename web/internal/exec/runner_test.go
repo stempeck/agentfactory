@@ -28,6 +28,8 @@ type fakeRunner struct {
 	resp  map[string]Result // canned stdout keyed by verb
 	err   map[string]error  // canned error keyed by verb
 
+	chunks [][]byte // canned stream replayed to RunStream's onChunk, in order
+
 	// serialization-window hooks (used only by TestSling_SerializedPerAgent).
 	entered chan string   // receives the verb when a call enters Run
 	block   chan struct{} // Run blocks until this is closed
@@ -55,6 +57,24 @@ func (f *fakeRunner) RunStdin(ctx context.Context, stdin []byte, verb string, ar
 	}
 	if block != nil {
 		<-block
+	}
+	return r, e
+}
+
+// RunStream records the call (verb + argv, like RunStdin — a stream has no piped stdin) into the SAME
+// calls slice so lastCall/lastArgs assert it uniformly, then replays the canned chunks to onChunk in
+// order so a chunking test can assert delivery.
+func (f *fakeRunner) RunStream(ctx context.Context, onChunk func([]byte), verb string, args ...string) (Result, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, call{Verb: verb, Args: append([]string(nil), args...)})
+	chunks := f.chunks
+	r, e := f.resp[verb], f.err[verb]
+	f.mu.Unlock()
+
+	for _, c := range chunks {
+		if onChunk != nil {
+			onChunk(c)
+		}
 	}
 	return r, e
 }
@@ -597,7 +617,7 @@ func TestRun_AllVerbs_CarryCmdDir(t *testing.T) {
 	factoryRoot := t.TempDir()
 	// The exact allowlist from validate.go (allowedVerbs). A new verb added there without being added
 	// here is itself a prompt to re-confirm this invariant.
-	verbs := []string{"up", "down", "sling", "agents", "formula", "dispatch", "step", "config", "mail"}
+	verbs := []string{"up", "down", "sling", "agents", "formula", "dispatch", "step", "config", "mail", "install"}
 	for _, verb := range verbs {
 		t.Run(verb, func(t *testing.T) {
 			er := NewExecRunner(factoryRoot)

@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Component — Inspection Ledger &amp; Slips</title>
+<link rel="stylesheet" href="../styles/variables.css">
+<link rel="stylesheet" href="../styles/main.css">
+<style>
+  .cols3 { display:grid; gap:18px; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); align-items:start; }
+  .slips-demo { position:static; max-width:420px; display:flex; flex-direction:column; gap:8px; }
+  .spec { font-family:var(--font-mono); font-size:12px; color:var(--muted); margin-top:6px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="../index.html"><img class="gear" src="../assets/mark.svg" alt="" width="26" height="26"><span class="word">Foundry Console</span></a>
+    <span class="spacer"></span>
+    <nav class="nav" aria-label="Components">
+      <a href="station.html">Station</a>
+      <a href="inspection.html" aria-current="page">Inspection</a>
+      <a href="controls.html">Controls</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="view-head" style="margin-top:26px">
+    <h1 class="view-title">Inspection</h1>
+    <p class="view-sub">The validation surfaces. Exactly four lamps — the contract fixed in
+      iteration 1 — mirroring <span class="mono">internal/formula/validate.go</span>; every other
+      engine rule folds under the parse lamp. Lamps run live on every edit. No green lamps, no pour.</p>
+  </div>
+
+  <div class="cols3">
+    <section class="panel">
+      <h2 style="font-size:15px">The four lamps</h2>
+      <div class="ledger">
+        <div class="check pass"><span class="lamp-dot"></span> TOML parses</div>
+        <div class="check pass"><span class="lamp-dot"></span> Station ids unique</div>
+        <div class="check running"><span class="lamp-dot"></span> All belts connect</div>
+        <div class="check fail"><span class="lamp-dot"></span> No circular belts</div>
+      </div>
+      <p class="spec">.check / .pass .running .fail</p>
+    </section>
+
+    <section class="panel">
+      <h2 style="font-size:15px">Fault list</h2>
+      <div class="fault-list">
+        <button class="fault"><span class="where">refine-prototype-2</span> · step "refine-prototype-2" needs unknown step: check-consensus-1</button>
+        <button class="fault">cycle detected involving step: design-swarm</button>
+      </div>
+      <p class="spec">.fault — click locates: selects the station, or opens the hatch at the offending line</p>
+    </section>
+
+    <section class="panel">
+      <h2 style="font-size:15px">State chips</h2>
+      <div style="display:flex; flex-direction:column; gap:10px; align-items:flex-start">
+        <span class="state saved"><span class="lamp-dot"></span>Line matches the file</span>
+        <span class="state clean"><span class="lamp-dot"></span>All lamps green — the pour is ready</span>
+        <span class="state failed"><span class="lamp-dot"></span>2 inspection faults — no pour until the lamps go green</span>
+      </div>
+      <p class="spec">.state.saved / .clean / .failed (toolbar, editor)</p>
+    </section>
+  </div>
+
+  <section class="panel" style="margin-top:18px">
+    <h2 style="font-size:15px">Dispatch slips</h2>
+    <div class="slips-demo">
+      <div class="slip ok"><strong>Poured.</strong> ultra-review.formula.toml written to disk — run <code>git diff</code> to see the minimal change.</div>
+      <div class="slip">Unplugged the belt from <strong>load-context</strong>.</div>
+      <div class="slip alarm"><strong>Line stopped at check-consensus-1.</strong> A belt is cut — reconnect it, then fire again.</div>
+    </div>
+    <p class="spec">.slip / .ok .alarm — bottom-right, aria-live=polite, auto-expire 7s</p>
+  </section>
+</main>
+</body>
+</html>

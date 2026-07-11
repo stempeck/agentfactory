@@ -72,6 +72,7 @@ web/                 Optional web console — SEPARATE Go module (web/go.mod)
 - `af formula show --json` — print a formula's inputs and vars as JSON
 - `af dispatch status --json` — show dispatcher status and dispatch history as JSON (always exits 0; branch on `.state`)
 - `af config dispatch set` / `af config startup set` — replace dispatch.json / startup.json from a JSON document on stdin
+- `af improvement [on|off] [--agent <name>] | complete` — toggle/show the continuous-improvement hook (AND-gated, default off); `complete` finishes a pending improvement session
 
 ## Architecture
 

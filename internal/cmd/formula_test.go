@@ -1319,6 +1319,68 @@ func TestFormulaAgentGen_RegeneratesRoster(t *testing.T) {
 	}
 }
 
+// TestFormulaAgentGen_PreservesOperatorFields pins CFG-2 (issue #483, design Gap 6):
+// re-running agent-gen for an existing agent must NOT wipe operator-owned fields
+// (SparsePaths / BaseURL / AuthToken / ContinuousImprovement). Before the fix,
+// runFormulaAgentGen rebuilt a fresh AgentEntry with only Type/Description/
+// Directive/Formula and saved it, silently dropping everything the operator had set.
+func TestFormulaAgentGen_PreservesOperatorFields(t *testing.T) {
+	dir := setupFormulaFactory(t)
+	agentsPath := filepath.Join(dir, ".agentfactory", "agents.json")
+
+	// First run creates the investigate agent entry (carrying a formula field,
+	// so the regen below passes AddAgentEntry's manual-agent guard).
+	if _, _, err := runFormulaAgentGenInDir(t, dir, "investigate"); err != nil {
+		t.Fatalf("agent-gen create failed: %v", err)
+	}
+
+	// An operator hand-edits the entry to add fields agent-gen never writes.
+	// BaseURL must be a real http(s) URL — LoadAgentConfig validates the scheme.
+	cfg, err := config.LoadAgentConfig(agentsPath)
+	if err != nil {
+		t.Fatalf("load after create: %v", err)
+	}
+	entry := cfg.Agents["investigate"]
+	entry.SparsePaths = []string{"internal/", "docs/"}
+	entry.BaseURL = "http://localhost:1234/v1/messages"
+	entry.AuthToken = "sk-operator-secret"
+	entry.ContinuousImprovement = true
+	cfg.Agents["investigate"] = entry
+	if err := config.SaveAgentConfig(agentsPath, cfg); err != nil {
+		t.Fatalf("save operator fields: %v", err)
+	}
+
+	// Re-run agent-gen for the same agent (the regen path).
+	if _, _, err := runFormulaAgentGenInDir(t, dir, "investigate"); err != nil {
+		t.Fatalf("agent-gen regen failed: %v", err)
+	}
+
+	// The operator-owned fields must survive the regen intact.
+	reloaded, err := config.LoadAgentConfig(agentsPath)
+	if err != nil {
+		t.Fatalf("load after regen: %v", err)
+	}
+	got := reloaded.Agents["investigate"]
+
+	if len(got.SparsePaths) != 2 || got.SparsePaths[0] != "internal/" || got.SparsePaths[1] != "docs/" {
+		t.Errorf("SparsePaths = %v, want [internal/ docs/] — clobbered by regen", got.SparsePaths)
+	}
+	if got.BaseURL != "http://localhost:1234/v1/messages" {
+		t.Errorf("BaseURL = %q, want it preserved — clobbered by regen", got.BaseURL)
+	}
+	if got.AuthToken != "sk-operator-secret" {
+		t.Errorf("AuthToken = %q, want it preserved — clobbered by regen", got.AuthToken)
+	}
+	if !got.ContinuousImprovement {
+		t.Error("ContinuousImprovement = false, want true — clobbered by regen")
+	}
+
+	// The regenerated fields are still refreshed from the formula.
+	if got.Formula != "investigate" {
+		t.Errorf("Formula = %q, want investigate", got.Formula)
+	}
+}
+
 func TestFormulaAgentGen_DeleteSuccess(t *testing.T) {
 	dir := setupFormulaFactory(t)
 
@@ -1407,6 +1469,74 @@ func TestFormulaAgentGen_DeletePreservesOtherAgents(t *testing.T) {
 	}
 	if !strings.Contains(agentsStr, `"supervisor"`) {
 		t.Error("supervisor entry lost from agents.json after delete")
+	}
+}
+
+// TestFormulaAgentGen_DeleteWithoutRegen_StaysDeleted pins AC3 (issue #527):
+// deliberate, standalone removal (--delete with no regen call following it) must
+// stay a full, permanent wipe — regenerating a DIFFERENT, unrelated agent
+// afterward must not resurrect the deleted agent's entry or leak its operator
+// fields into the unrelated agent. This guards the #527 fix against a design that
+// solves the redeploy-loop bug by stashing operator fields somewhere keyed
+// loosely (e.g. "the last deleted agent") instead of precisely by agent name.
+func TestFormulaAgentGen_DeleteWithoutRegen_StaysDeleted(t *testing.T) {
+	dir := setupFormulaFactory(t)
+	agentsPath := filepath.Join(dir, ".agentfactory", "agents.json")
+	formulaDir := config.FormulasDir(dir)
+
+	secondFormula := `formula = "surveyor"
+description = "Survey a codebase area"
+type = "workflow"
+version = 1
+
+[[steps]]
+id = "scan"
+title = "Scan"
+description = "Scan"
+`
+	if err := os.WriteFile(filepath.Join(formulaDir, "surveyor.formula.toml"), []byte(secondFormula), 0644); err != nil {
+		t.Fatalf("writing second formula: %v", err)
+	}
+
+	if _, _, err := runFormulaAgentGenInDir(t, dir, "investigate"); err != nil {
+		t.Fatalf("agent-gen create failed: %v", err)
+	}
+
+	cfg, err := config.LoadAgentConfig(agentsPath)
+	if err != nil {
+		t.Fatalf("load after create: %v", err)
+	}
+	entry := cfg.Agents["investigate"]
+	entry.AuthToken = "sk-should-not-survive"
+	entry.ContinuousImprovement = true
+	cfg.Agents["investigate"] = entry
+	if err := config.SaveAgentConfig(agentsPath, cfg); err != nil {
+		t.Fatalf("save operator fields: %v", err)
+	}
+
+	if _, _, err := runFormulaAgentGenInDir(t, dir, "investigate", "--delete"); err != nil {
+		t.Fatalf("agent-gen --delete failed: %v", err)
+	}
+
+	// Regenerate an unrelated agent — must not resurrect "investigate" or leak
+	// its fields into "surveyor".
+	if _, _, err := runFormulaAgentGenInDir(t, dir, "surveyor"); err != nil {
+		t.Fatalf("agent-gen for unrelated agent failed: %v", err)
+	}
+
+	reloaded, err := config.LoadAgentConfig(agentsPath)
+	if err != nil {
+		t.Fatalf("load after unrelated regen: %v", err)
+	}
+	if _, exists := reloaded.Agents["investigate"]; exists {
+		t.Error("investigate entry resurrected by an unrelated agent's regen — deliberate delete did not stay deleted")
+	}
+	surveyor := reloaded.Agents["surveyor"]
+	if surveyor.AuthToken != "" {
+		t.Errorf("surveyor.AuthToken = %q, want empty — investigate's deleted secret leaked into an unrelated agent", surveyor.AuthToken)
+	}
+	if surveyor.ContinuousImprovement {
+		t.Error("surveyor.ContinuousImprovement = true, want false — investigate's deleted field leaked into an unrelated agent")
 	}
 }
 

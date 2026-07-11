@@ -18,10 +18,12 @@ import (
 // static/index.html. Same source-scan posture as nav_test.go; `staticDir`/`readAsset` are shared
 // package helpers (nav_test.go) and `laterPhaseLiteral` comes from agentdetail_test.go.
 //
-// Scope: this interlock covers the operator-console contract ONLY. The sibling
-// .designs/web-ui/final/design-contract.yaml is the Formula Editor's (issue #445) — its viewmodels
-// and screens do not exist in this app, so the path below is hardcoded and must NEVER become a
-// .designs/**/final/ glob (a glob returns both contracts and fails spuriously).
+// Scope: this interlock covers the operator-console contract ONLY, whose bindings live in app.js.
+// The sibling .designs/web-ui/final/design-contract.yaml is the Formula Editor's (issue #445); its
+// viewmodels now DO live in this app (static/scripts/formulas-*.js) and are traced by their own
+// sibling test, contracttrace_formula_test.go. Each path stays hardcoded and must NEVER become a
+// .designs/**/final/ glob: a glob would trace each contract against the other's assets and fail
+// spuriously. Two contracts, two paths, one checker (traceContract).
 var contractPath = filepath.Join("..", "..", "..", ".designs", "web", "final", "design-contract.yaml")
 
 // The screen-id → index.html section-id map is explicit because it is NOT mechanical:
@@ -43,17 +45,17 @@ var reContractBinding = regexp.MustCompile(`(?m)^\s+viewmodel: "([^"]+)"$`)
 // global_chrome items (also 2-space) are excluded by scoping extraction to the screens: region.
 var reContractScreenID = regexp.MustCompile(`(?m)^  - id: (\S+)\s*$`)
 
-// vmObjectBody slices the object-literal body of a top-level `var <name> = {` viewmodel out of
-// app.js. Every viewmodel is declared at 2-space indent inside the IIFE and closes with a
+// vmObjectBody slices the object-literal body of a top-level `var <name> = {` viewmodel out of js.
+// Every viewmodel is declared at 2-space indent inside the IIFE and closes with a
 // 2-space `};`, so the first "\n  };" terminates the literal; the fallbacks keep the checker
 // usable on trailing declarations and fixtures.
-func vmObjectBody(appJS, vmName string) (string, bool) {
+func vmObjectBody(js, vmName string) (string, bool) {
 	decl := "var " + vmName + " = {"
-	start := strings.Index(appJS, decl)
+	start := strings.Index(js, decl)
 	if start < 0 {
 		return "", false
 	}
-	rest := appJS[start:]
+	rest := js[start:]
 	if end := strings.Index(rest, "\n  };"); end >= 0 {
 		return rest[:end+len("\n  };")], true
 	}
@@ -63,13 +65,13 @@ func vmObjectBody(appJS, vmName string) (string, bool) {
 	return rest, true
 }
 
-// checkBinding validates one `viewmodel:` value against app.js. Shapes handled (all 47 current
-// values): bare object ("ConfirmViewModel"), bare member ("AppViewModel.goHome"), call-with-args
+// checkBinding validates one `viewmodel:` value against the traced script text. Shapes handled (all
+// 47 current values): bare object ("ConfirmViewModel"), bare member ("AppViewModel.goHome"), call-with-args
 // ("FloorViewModel.viewAgent(agent.name)"), and property paths ("SettingsViewModel.data.startup.agents",
 // "SettingsViewModel.data.dispatch.mappings[].label"). The FIRST segment after the viewmodel must be
 // a real member (4-space member indent — the VM literal's member position); deeper segments describe
 // data shape, not code, and are not traced. Method members must not be bare toast(...) stubs.
-func checkBinding(binding, appJS string) []string {
+func checkBinding(binding, js string) []string {
 	expr := binding
 	if i := strings.Index(expr, "("); i >= 0 {
 		expr = expr[:i]
@@ -79,9 +81,9 @@ func checkBinding(binding, appJS string) []string {
 		segs[i] = strings.TrimSuffix(strings.TrimSpace(segs[i]), "[]")
 	}
 	root := segs[0]
-	body, ok := vmObjectBody(appJS, root)
+	body, ok := vmObjectBody(js, root)
 	if !ok {
-		return []string{fmt.Sprintf("binding %q: viewmodel object %q not declared in app.js (no `var %s = {`)", binding, root, root)}
+		return []string{fmt.Sprintf("binding %q: viewmodel object %q not declared in the traced scripts (no `var %s = {`)", binding, root, root)}
 	}
 	if len(segs) == 1 {
 		return nil // bare-object binding — the declaration itself is the contract
@@ -89,7 +91,7 @@ func checkBinding(binding, appJS string) []string {
 	member := segs[1]
 	memberRe := regexp.MustCompile(`(?m)^    ` + regexp.QuoteMeta(member) + `\s*:`)
 	if !memberRe.MatchString(body) {
-		return []string{fmt.Sprintf("binding %q: %q is not a member of %s in app.js — stale binding (the phantom-claim class this test closes)", binding, member, root)}
+		return []string{fmt.Sprintf("binding %q: %q is not a member of %s in the traced scripts — stale binding (the phantom-claim class this test closes)", binding, member, root)}
 	}
 	// A body that is ONLY a toast call is a stub (the exact #500 View-button failure). Bodies
 	// merely CONTAINING toast (e.g. an error branch) do not match: after the single toast
@@ -104,7 +106,17 @@ func checkBinding(binding, appJS string) []string {
 // traceContract is a pure checker over content strings so the self-negative fixtures drive the
 // SAME code path as the real assets (precedent: scanTree in web/internal/server/lint_test.go).
 // It returns human-readable violations; empty means the contract traces clean.
-func traceContract(contractYAML, appJS, indexHTML string) []string {
+//
+// js, screens and exemptBindings are parameters, not package globals, because the repo carries TWO
+// contracts over two disjoint asset sets — this one over app.js, and the #445 editor contract over
+// the three formulas-*.js viewmodels (contracttrace_formula_test.go). One checker, two callers: a
+// second copy would be the drift the traces exist to catch.
+//
+// exemptBindings maps a binding to the reason it cannot resolve. It exists because a contract may be
+// internally inconsistent and yet unamendable (a signed v1). Passing nil — as this contract does —
+// means every binding must resolve. An exempt binding is a recorded divergence, and its caller is
+// expected to fail when the divergence disappears, so an entry cannot outlive its reason.
+func traceContract(contractYAML, js, indexHTML string, screens, exemptBindings map[string]string) []string {
 	var violations []string
 
 	// Bindings live in global_chrome + screens — everything BEFORE viewmodel_contracts:
@@ -118,7 +130,10 @@ func traceContract(contractYAML, appJS, indexHTML string) []string {
 		violations = append(violations, "no viewmodel bindings extracted — contract shape or extraction regex broken (non-vacuity guard)")
 	}
 	for _, m := range bindings {
-		violations = append(violations, checkBinding(m[1], appJS)...)
+		if _, exempt := exemptBindings[m[1]]; exempt {
+			continue
+		}
+		violations = append(violations, checkBinding(m[1], js)...)
 	}
 
 	// Screen ids: scoped to the screens: region (global_chrome shares the 2-space indent).
@@ -138,9 +153,9 @@ func traceContract(contractYAML, appJS, indexHTML string) []string {
 	}
 	for _, m := range ids {
 		id := m[1]
-		section, ok := contractScreenSections[id]
+		section, ok := screens[id]
 		if !ok {
-			violations = append(violations, fmt.Sprintf("unknown screen id %q — extend contractScreenSections (the id→section map is explicit: agent-detail → view-agent)", id))
+			violations = append(violations, fmt.Sprintf("unknown screen id %q — extend this contract's screen→section map (the mapping is explicit, NOT \"view-\"+id: agent-detail → view-agent, roster → view-formulas)", id))
 			continue
 		}
 		if c := strings.Count(indexHTML, `id="`+section+`"`); c != 1 {
@@ -166,7 +181,7 @@ func TestContractTrace_AllBindingsReal(t *testing.T) {
 	}
 	appJS := readAsset(t, filepath.Join(staticDir, "app.js"))
 	indexHTML := readAsset(t, filepath.Join(staticDir, "index.html"))
-	for _, v := range traceContract(string(raw), appJS, indexHTML) {
+	for _, v := range traceContract(string(raw), appJS, indexHTML, contractScreenSections, nil) {
 		t.Error(v)
 	}
 }
@@ -217,7 +232,7 @@ viewmodel_contracts:
 	// (a) Consistent fixture → ZERO violations (guards against an always-failing checker). This
 	// also proves two non-flags: a toast call inside a larger body (refresh's catch) is not a
 	// stub, and 6-space element ids are not extracted as screen ids.
-	if vs := traceContract(cleanContract, cleanAppJS, cleanIndexHTML); len(vs) != 0 {
+	if vs := traceContract(cleanContract, cleanAppJS, cleanIndexHTML, contractScreenSections, nil); len(vs) != 0 {
 		t.Errorf("checker must report ZERO violations on the consistent fixture, got %d: %v", len(vs), vs)
 	}
 
@@ -228,18 +243,18 @@ viewmodel_contracts:
 	if stubAppJS == cleanAppJS {
 		t.Fatal("fixture invalid: stub replacement did not apply")
 	}
-	if vs := traceContract(cleanContract, stubAppJS, cleanIndexHTML); !has(vs, "toast(...) stub") {
+	if vs := traceContract(cleanContract, stubAppJS, cleanIndexHTML, contractScreenSections, nil); !has(vs, "toast(...) stub") {
 		t.Errorf("checker must flag a binding whose body is ONLY a toast(...) call, got: %v", vs)
 	}
 
 	// (c) Mapped screen id whose section is missing from index.html.
-	if vs := traceContract(cleanContract, cleanAppJS, `<main></main>`); !has(vs, `id="view-agent"`) {
+	if vs := traceContract(cleanContract, cleanAppJS, `<main></main>`, contractScreenSections, nil); !has(vs, `id="view-agent"`) {
 		t.Errorf("checker must flag the agent-detail screen when index.html lacks its view-agent section, got: %v", vs)
 	}
 
 	// (d) Unmapped screen id — forces the explicit map to grow with the contract.
 	phantomContract := strings.Replace(cleanContract, "  - id: agent-detail", "  - id: phantom", 1)
-	if vs := traceContract(phantomContract, cleanAppJS, cleanIndexHTML); !has(vs, "unknown screen id") {
+	if vs := traceContract(phantomContract, cleanAppJS, cleanIndexHTML, contractScreenSections, nil); !has(vs, "unknown screen id") {
 		t.Errorf("checker must flag a screen id missing from contractScreenSections, got: %v", vs)
 	}
 
@@ -247,7 +262,7 @@ viewmodel_contracts:
 	staleContract := strings.Replace(cleanContract,
 		`viewmodel: "AgentDetailViewModel.refresh"`,
 		`viewmodel: "AgentDetailViewModel.launchSequence"`, 1)
-	if vs := traceContract(staleContract, cleanAppJS, cleanIndexHTML); !has(vs, "not a member") {
+	if vs := traceContract(staleContract, cleanAppJS, cleanIndexHTML, contractScreenSections, nil); !has(vs, "not a member") {
 		t.Errorf("checker must flag a binding whose member does not exist on the viewmodel, got: %v", vs)
 	}
 
@@ -255,7 +270,7 @@ viewmodel_contracts:
 	ghostContract := strings.Replace(cleanContract,
 		`viewmodel: "AgentDetailViewModel.refresh"`,
 		`viewmodel: "GhostViewModel.run"`, 1)
-	if vs := traceContract(ghostContract, cleanAppJS, cleanIndexHTML); !has(vs, "not declared") {
+	if vs := traceContract(ghostContract, cleanAppJS, cleanIndexHTML, contractScreenSections, nil); !has(vs, "not declared") {
 		t.Errorf("checker must flag a binding to an undeclared viewmodel object, got: %v", vs)
 	}
 }

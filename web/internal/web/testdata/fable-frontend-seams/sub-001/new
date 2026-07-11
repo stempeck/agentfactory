@@ -1,0 +1,10 @@
+    } else {
+      Demo.pour(state.fileName || 'formula.toml', state.text).then(function () {
+        state.savedText = state.text;
+        state.mode = 'demo';
+        renderAll({});
+        AF.slip('<strong>Poured.</strong> ' + AF.esc(state.fileName) + ' written to the store — run <code>git diff</code> to see the minimal change.', 'ok');
+      }, function (e) {
+        AF.slip('Pour failed: ' + AF.esc(e.message), 'alarm');
+      });
+    }

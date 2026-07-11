@@ -1,0 +1,5 @@
+formula = "parity-parse-bad-toml"
+type = "workflow"
+
+[[steps]
+id = "broken"

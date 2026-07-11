@@ -40,9 +40,17 @@ type Result struct {
 // piped to the child process's standard input. It exists because `af config <file> set` reads the
 // full config document on stdin (internal/cmd/config_set.go:60-65); Run has no stdin parameter, so
 // extending the seam (rather than mutating Run's signature) keeps every existing Run caller intact.
+//
+// RunStream is the streaming sibling of Run: the same argv-array contract, but the child's stdout is
+// delivered to onChunk as bytes arrive instead of being buffered and returned whole. It exists because
+// `af install --agents` is a long regeneration whose progress must reach the operator live (#502 Phase
+// 1d widens the seam; Phase 2's job runner consumes the stream). The seam is EXTENDED (not mutated): the
+// returned Result carries the exit code (Stdout stays empty — the bytes went to onChunk), so a caller
+// still learns the child's exit status the same way Run/RunStdin report it.
 type Runner interface {
 	Run(ctx context.Context, verb string, args ...string) (Result, error)
 	RunStdin(ctx context.Context, stdin []byte, verb string, args ...string) (Result, error)
+	RunStream(ctx context.Context, onChunk func([]byte), verb string, args ...string) (Result, error)
 }
 
 // Sentinel errors surfaced as friendly "agent busy" states by the server.
@@ -96,6 +104,59 @@ func (e *ExecRunner) Run(ctx context.Context, verb string, args ...string) (Resu
 // af-core prints when the config fails struct/cross-file validation.
 func (e *ExecRunner) RunStdin(ctx context.Context, stdin []byte, verb string, args ...string) (Result, error) {
 	return e.run(ctx, stdin, verb, args...)
+}
+
+// RunStream runs `af <verb> <args...>` and delivers the child's stdout to onChunk as bytes arrive.
+// It cannot funnel through run(), which wires stdout to a bytes.Buffer and blocks on cmd.Run() until
+// exit; a stream needs its own path: attach a pipe to the child's stdout, Start (not Run), pump the
+// pipe into onChunk until EOF, THEN Wait for the exit status. Verb allowlisting and the #432 cmd.Dir
+// pin are preserved exactly as in run(). The returned Result carries the ExitCode (Stdout stays empty —
+// stdout went to onChunk); a non-zero exit is surfaced as an error embedding the child's stderr, the
+// same mapping run() uses.
+func (e *ExecRunner) RunStream(ctx context.Context, onChunk func([]byte), verb string, args ...string) (Result, error) {
+	if err := ValidateVerb(verb); err != nil {
+		return Result{}, err
+	}
+	argv := afArgv(verb, args...)
+	cmd := e.execCommand(ctx, argv[0], argv[1:]...)
+	if e.root != "" { // pin the af child's working directory to the resolved factory root (#432), same as run()
+		cmd.Dir = e.root
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return Result{}, fmt.Errorf("af %s: stdout pipe: %w", verb, err)
+	}
+	if err := cmd.Start(); err != nil {
+		return Result{}, fmt.Errorf("af %s: %w", verb, err)
+	}
+
+	// Raw fixed-size reads (not bufio.Scanner, which would split on lines and could stall a
+	// progress stream that lacks a trailing newline). Each chunk is copied before onChunk sees it
+	// because buf is reused on the next iteration.
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := stdout.Read(buf)
+		if n > 0 && onChunk != nil {
+			onChunk(append([]byte(nil), buf[:n]...))
+		}
+		if rerr != nil {
+			break // io.EOF on a clean close; any read error ends the pump and Wait reports the real cause
+		}
+	}
+
+	err = cmd.Wait()
+	res := Result{Stderr: stderr.String()}
+	if err != nil {
+		var ee *osexec.ExitError
+		if errors.As(err, &ee) {
+			res.ExitCode = ee.ExitCode()
+			return res, fmt.Errorf("af %s: exit %d: %s", verb, res.ExitCode, stderr.String())
+		}
+		return res, fmt.Errorf("af %s: %w", verb, err)
+	}
+	return res, nil
 }
 
 // run is the shared core of Run/RunStdin. A nil stdin leaves the child's stdin unset (identical to
@@ -204,6 +265,17 @@ func (w *Wrapper) Up(ctx context.Context) (Result, error) {
 	return w.mutate(ctx, factoryLockKey, "", "up")
 }
 
+// GenerateAgents regenerates and reinstalls all formula-derived agents: `af install --agents`. The argv
+// is FIXED — exactly ["install","--agents"], no caller args, ever — so the sole `install` caller cannot
+// smuggle any other install subcommand or role argument (`af install --agents` itself rejects extras),
+// preserving the no-passthrough / exec-safety doctrine (design Decision 4 / AC-10). It is a factory-wide
+// mutation, so it takes the same posture as Up: the @factory lock (UI-vs-itself), no per-agent
+// pre-flight. (Phase 2's job runner drives the live progress stream via Runner.RunStream; this method is
+// the buffered, argv-pinned entry point the seam exposes.)
+func (w *Wrapper) GenerateAgents(ctx context.Context) (Result, error) {
+	return w.mutate(ctx, factoryLockKey, "", "install", "--agents")
+}
+
 // DownFactory stops the whole factory: `af down [--reset]`.
 func (w *Wrapper) DownFactory(ctx context.Context, reset bool) (Result, error) {
 	var args []string
@@ -282,6 +354,16 @@ func (w *Wrapper) FormulaShowJSON(ctx context.Context, formula string) (string, 
 		return "", err
 	}
 	return res.Stdout, nil
+}
+
+// FormulaValidate pipes a formula.toml document to `af formula validate --json`, which returns the
+// engine-of-record's composed verdict ({ok, findings:[{lamp,message}]}, always exit 0). It is a READ —
+// no lock, no pre-flight (like FormulaShowJSON) — and it reuses the ALREADY-allowlisted `formula` verb
+// via RunStdin (mirroring ConfigSet), so it needs no allowlist entry of its own. The write handler that
+// consumes it turns a rejecting verdict into a 422; the always-0 exit keeps that distinguishable from a
+// process failure by the body, not the exit code.
+func (w *Wrapper) FormulaValidate(ctx context.Context, text []byte) (Result, error) {
+	return w.runner.RunStdin(ctx, text, "formula", "validate", "--json")
 }
 
 // DispatchStatusJSON returns the raw stdout of `af dispatch status --json` (a read; no lock, no

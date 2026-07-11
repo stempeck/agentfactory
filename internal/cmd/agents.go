@@ -79,6 +79,10 @@ type agentListItem struct {
 	IsGate    bool              `json:"is_gate,omitempty"`
 	GateID    string            `json:"gate_id"`
 	Inputs    map[string]string `json:"inputs"`
+	// ForeignRoot is true when a live session's baked AF_ROOT resolves to a factory
+	// DIFFERENT from the querying factory (K9b, #519). Like gate_id it deliberately
+	// OMITS omitempty so the key set stays stable for jq/snapshot consumers.
+	ForeignRoot bool `json:"foreign_root"`
 }
 
 // runAgentsList is the RunE for `af agents list`. It enumerates agents.json and,
@@ -94,9 +98,16 @@ func runAgentsList(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return emitAgentsError(cmd, err)
 	}
-	root, err := config.FindFactoryRoot(cwd)
+	root, err := resolveInvokerRoot(cwd)
 	if err != nil {
-		return emitAgentsError(cmd, err)
+		// A factory-root mismatch must not break the agents-list JSON-array contract:
+		// downgrade it to a stderr warning and proceed on the cwd-resolved root. A
+		// not-found error still goes into the error envelope (nil RunE) as before.
+		if r, downgraded := downgradeRootMismatch(err); downgraded {
+			root = r
+		} else {
+			return emitAgentsError(cmd, err)
+		}
 	}
 	agentsCfg, err := config.LoadAgentConfig(config.AgentsConfigPath(root))
 	if err != nil {
@@ -104,7 +115,11 @@ func runAgentsList(cmd *cobra.Command, _ []string) error {
 	}
 
 	actor := os.Getenv("AF_ACTOR")
-	store, err := newIssueStore(cwd, actor)
+	// Build the store on the already-resolved (and possibly downgraded) root via
+	// newIssueStoreAt — NOT newIssueStore(cwd), which would re-run resolveInvokerRoot
+	// on the same cwd and re-raise the very mismatch just downgraded above, dropping
+	// this read-only verb into its error envelope (issue #519 review follow-up).
+	store, err := newIssueStoreAt(root, actor)
 	if err != nil {
 		return emitAgentsError(cmd, err)
 	}
@@ -119,14 +134,16 @@ func runAgentsList(cmd *cobra.Command, _ []string) error {
 	items := make([]agentListItem, 0, len(names))
 	for _, name := range names {
 		entry := agentsCfg.Agents[name]
-		running, _ := tmux.HasSession(session.SessionName(name))
+		sessionName := session.SessionName(name)
+		running, _ := tmux.HasSession(sessionName)
 		item := agentListItem{
-			Name:      name,
-			Type:      entry.Type,
-			Formula:   entry.Formula,
-			Running:   running,
-			StepState: "no_formula",
-			Inputs:    map[string]string{},
+			Name:        name,
+			Type:        entry.Type,
+			Formula:     entry.Formula,
+			Running:     running,
+			StepState:   "no_formula",
+			Inputs:      map[string]string{},
+			ForeignRoot: running && sessionForeignRoot(tmux, sessionName, root),
 		}
 		populateAgentStep(ctx, store, name, &item)
 		item.Status = deriveAgentStatus(running, item.StepState, item.IsGate)
@@ -134,6 +151,18 @@ func runAgentsList(cmd *cobra.Command, _ []string) error {
 	}
 
 	return emitAgents(cmd, items)
+}
+
+// sessionForeignRoot reports whether a live session's baked AF_ROOT resolves to a
+// factory different from the querying root (K9b, #519). Best-effort: a getter error
+// or an unset/empty AF_ROOT leaves it false — a read hiccup must never fail the
+// listing (mirrors populateAgentStep's fail-open posture).
+func sessionForeignRoot(tmux cmdTmux, sessionName, root string) bool {
+	envRoot, err := tmux.GetEnvironment(sessionName, "AF_ROOT")
+	if err != nil || envRoot == "" {
+		return false
+	}
+	return !config.SameResolvedRoot(envRoot, root)
 }
 
 // populateAgentStep fills item's formula/step/inputs fields from the agent's

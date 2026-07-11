@@ -52,6 +52,8 @@ type AgentEntry struct {
 	Model       string   `json:"model,omitempty"`
 	BaseURL     string   `json:"base_url,omitempty"`
 	AuthToken   string   `json:"auth_token,omitempty"`
+
+	ContinuousImprovement bool `json:"continuous_improvement,omitempty"`
 }
 
 var validAgentName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)

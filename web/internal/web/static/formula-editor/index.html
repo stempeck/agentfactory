@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Formula Editor — Final · Neon Bazaar Foundry</title>
+<link rel="stylesheet" href="styles/variables.css">
+<link rel="stylesheet" href="styles/main.css">
+<style>
+  .hub-grid { display:grid; gap:18px; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); margin-top:26px; }
+  .screen-card { overflow:hidden; display:flex; flex-direction:column; padding:0; }
+  .preview { position:relative; aspect-ratio:16/10; overflow:hidden; background:var(--ink); border-bottom:1px solid var(--line); }
+  .preview iframe { width:1280px; height:800px; border:0; transform:scale(0.26); transform-origin:0 0; pointer-events:none; }
+  .preview a.cover { position:absolute; inset:0; display:flex; align-items:flex-end; text-decoration:none; }
+  .preview a.cover span { margin:9px; padding:4px 10px; border-radius:5px; background:rgba(11,10,20,.85);
+    color:var(--text); font-size:12px; opacity:0; transition:opacity .14s; }
+  .preview a.cover:hover span, .preview a.cover:focus-visible span { opacity:1; }
+  .screen-card .body { padding:16px 17px 18px; display:flex; flex-direction:column; gap:10px; flex:1; }
+  .screen-card h2 { font-family:var(--font-display); text-transform:uppercase; letter-spacing:.03em; font-size:16px; }
+  dl.meta { display:grid; grid-template-columns:auto 1fr; gap:5px 12px; font-size:13px; }
+  dl.meta dt { color:var(--muted); font-size:10px; letter-spacing:.12em; text-transform:uppercase; padding-top:3px;
+    font-family:var(--font-display); font-weight:600; }
+  dl.meta dd { color:var(--text); line-height:1.45; }
+  .proof { font-family:var(--font-mono); font-size:12.5px; background:var(--ink); border:1px solid var(--line);
+    border-radius:var(--r-sm); padding:12px 14px; overflow-x:auto; white-space:pre; }
+  .swatches { display:flex; gap:5px; }
+  .swatches i { width:18px; height:18px; border-radius:4px; border:1px solid rgba(255,255,255,.18); }
+  ol.demo-bar { list-style:decimal; padding-left:22px; display:flex; flex-direction:column; gap:7px;
+    font-size:14px; line-height:1.5; }
+  ol.demo-bar code, .body code, p code { font-family:var(--font-mono); font-size:.9em; color:var(--neon-cyan); }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#screens">Skip to the screens</a>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="index.html"><img src="assets/mark.svg" alt="" width="26" height="26"><span class="word">Foundry Console</span></a>
+    <span class="spacer"></span>
+    <nav class="nav" aria-label="Screens">
+      <a href="screens/roster.html">Shop floor</a>
+      <a href="screens/editor.html">The line</a>
+      <a href="screens/wizard.html">Commission</a>
+      <a href="components/station.html">Components</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="view-head" style="margin-top:26px">
+    <p class="mono muted" style="font-size:12px; letter-spacing:.14em; text-transform:uppercase; margin-bottom:8px">
+      agentfactory · formula editor · FINAL — approved at iteration 2 of 5</p>
+    <h1 class="view-title">The Formula Editor</h1>
+    <p class="view-sub" style="margin-top:12px">
+      The approved design for <a href="https://github.com/stempeck/agentfactory-pro/issues/445">issue #445</a>:
+      a gamified, <b>fully working</b> editor for <code>.agentfactory/store/formulas/*.formula.toml</code>.
+      D (Foundry) structure, B's structure-derived rarity, the console's Neon Bazaar theme token-for-token.
+      The TOML text is the single source of truth: every visual edit is a comment-preserving minimal text
+      patch, validation mirrors the engine's <code>internal/formula</code> rules, and in Chromium it opens
+      and saves the real store files.
+    </p>
+  </div>
+
+  <div class="panel" style="margin-top:8px">
+    <h2 style="font-size:15px">The identity</h2>
+    <dl class="meta" style="grid-template-columns:auto 1fr; max-width:900px">
+      <dt>World</dt><dd>The factory floor at night — the console's Neon Bazaar. A formula is a living
+        assembly line of stations; gates are inspection arches; saving is pouring the cast.</dd>
+      <dt>Signature</dt><dd>Test Fire — a spark runs the computed DAG while the four inspection lamps
+        land — plus rarity frames <b>computed from structure</b>: gate → legendary (amber),
+        merge → epic (violet), wired → rare (cyan), root → common.</dd>
+      <dt>Palette</dt><dd><span class="swatches" style="display:inline-flex; vertical-align:middle; margin-right:8px"><i style="background:#0B0A14"></i><i style="background:#FF2E97"></i><i style="background:#20E5FF"></i><i style="background:#B26BFF"></i><i style="background:#FFC24B"></i></span>
+        Token-for-token the console's <code>variables.css</code>. Chakra Petch / Sora / Space Mono.</dd>
+      <dt>Risk</dt><dd>A real parser + comment-preserving patch engine inside a design prototype —
+        taken because the issue's core complaint was <i>trust</i>, and trust needed a working round-trip
+        to judge. The review confirmed it: "this is the binding architecture going forward."</dd>
+      <dt>Motion</dt><dd>Event-only: Test Fire, lamp changes, slips. <code>prefers-reduced-motion</code>
+        collapses all of it.</dd>
+    </dl>
+  </div>
+
+  <div class="hub-grid" id="screens">
+    <article class="panel screen-card">
+      <div class="preview">
+        <iframe src="screens/editor.html" title="Preview of the editor" loading="lazy" tabindex="-1"></iframe>
+        <a class="cover" href="screens/editor.html" aria-label="Open the editor"><span>Open the line →</span></a>
+      </div>
+      <div class="body">
+        <h2>The line — editor</h2>
+        <p class="hint" style="line-height:1.5">The core surface. Computed DAG board (nothing hand-placed),
+          patch-bay needs editing, gate arches, first-class inputs <b>and</b> vars gauges, verbatim work-instruction
+          editing, the maintenance hatch with live source + <b>diff-vs-file</b> view, Test Fire, and
+          pour-blocked-until-green saving.</p>
+        <p class="hint">Boots with the 16-step <code>ultra-review</code> stress case; the demo picker also loads
+          the convoy fan-out and the 5-gate <code>web-design</code> line.</p>
+      </div>
+    </article>
+    <article class="panel screen-card">
+      <div class="preview">
+        <iframe src="screens/roster.html" title="Preview of the shop floor" loading="lazy" tabindex="-1"></iframe>
+        <a class="cover" href="screens/roster.html" aria-label="Open the shop floor"><span>Open the shop floor →</span></a>
+      </div>
+      <div class="body">
+        <h2>Shop floor — roster</h2>
+        <p class="hint" style="line-height:1.5">Every formula as a rarity-framed card with stats parsed live from
+          its TOML. Search, open, recast (clone with the name stamped into file + TOML together), and the master
+          breaker with its hold-to-confirm restart warning.</p>
+        <p class="hint">Connect the real store folder (Chromium) and the cards become the actual files.</p>
+      </div>
+    </article>
+    <article class="panel screen-card">
+      <div class="preview">
+        <iframe src="screens/wizard.html" title="Preview of the commissioning wizard" loading="lazy" tabindex="-1"></iframe>
+        <a class="cover" href="screens/wizard.html" aria-label="Open the commissioning wizard"><span>Open commissioning →</span></a>
+      </div>
+      <div class="body">
+        <h2>Commission — wizard</h2>
+        <p class="hint" style="line-height:1.5">Character creation, one question per beat: stock (blank / recast /
+          pattern), nameplate with live file↔TOML binding and conflict checks, tool rack, then the lever.
+          The lever casts <b>real, validated TOML</b> and rolls it into the editor.</p>
+        <p class="hint">Component reference: <a href="components/station.html">station &amp; rarity</a> ·
+          <a href="components/inspection.html">inspection</a> · <a href="components/controls.html">controls</a>.</p>
+      </div>
+    </article>
+  </div>
+
+  <div class="panel" style="margin-top:26px">
+    <h2 style="font-size:15px">How to drive it — the round-trip demo</h2>
+    <ol class="demo-bar">
+      <li>Open <a href="screens/editor.html">the editor</a>. It boots on a byte-exact demo copy of
+        <code>ultra-review.formula.toml</code> — walk the 16-station line, click a station, raise its panel.</li>
+      <li><b>Real-file round trip (Chromium):</b> <i>Open a real .toml…</i> →
+        <code>.agentfactory/store/formulas/ultra-review.formula.toml</code>. Retitle a station, open
+        <i>Maintenance hatch → Diff vs file</i> — one changed line. Pour &amp; save, then <code>git diff</code>:
+        exactly that line. Comments and formatting untouched.</li>
+      <li>Load the <b>convoy</b> demo (six legs merging into synthesis) and the <b>web-design</b> demo
+        (22 stations, five legendary arches) from the demo picker.</li>
+      <li>Break something: unplug a belt or mangle the TOML in the hatch — lamps, fault list, locked pour.
+        Press <kbd>F</kbd> to Test Fire.</li>
+      <li>Headless proof of the engine against all 28 store formulas:</li>
+    </ol>
+    <pre class="proof">node .designs/web-ui/final/scripts/test-engine.js</pre>
+    <p class="hint" style="margin-top:10px">
+      No File System Access API (Firefox/Safari)? Everything works on demo copies, with <i>Paste TOML…</i>
+      and <i>Download</i> as the fallback loop. No <code>af</code> write verbs anywhere — authoring stays in
+      files, <code>af</code> remains the operating plane.
+    </p>
+  </div>
+
+  <footer style="margin-top:30px; padding-top:18px; border-top:1px solid var(--line); color:var(--muted); font-size:13px; max-width:76ch">
+    <p>Approved on the iteration-2 feedback form (Decision: APPROVED). Full history:
+      <code>.designs/web-ui/design-decisions.md</code> (including six binding production notes for the
+      <code>/web/</code> integration) and <code>.designs/web-ui/prototype-guide.md</code>. Iteration
+      snapshots live in <code>prototype-v1/</code> and <code>prototype-v2/</code>.</p>
+  </footer>
+</main>
+</body>
+</html>

@@ -233,6 +233,18 @@ check_claude() {
     return 0
 }
 
+check_playwright() {
+    log_step "Checking Playwright browser tooling"
+
+    if command_exists playwright && compgen -G "$HOME/.cache/ms-playwright/chromium-*" >/dev/null 2>&1; then
+        log_success "playwright with chromium installed"
+        return 0
+    fi
+
+    log_warn "playwright/chromium not found (optional — agents' visual checks escalate to the human gate without it)"
+    return 1
+}
+
 run_all_checks() {
     log_step "Running prerequisite checks"
     echo ""
@@ -249,6 +261,7 @@ run_all_checks() {
     check_python || ERRORS=$((ERRORS + 1))
     check_af || WARNINGS=$((WARNINGS + 1))
     check_claude || WARNINGS=$((WARNINGS + 1))
+    check_playwright || WARNINGS=$((WARNINGS + 1))
 
     echo ""
     echo "----------------------------------------"
@@ -365,6 +378,133 @@ install_claude() {
     return 1
 }
 
+install_playwright() {
+    log_step "Installing Playwright browser tooling (headless visual verification)"
+
+    # Optional tier: agents use `playwright screenshot` for visual triage of
+    # transplanted UIs. Every failure path degrades to log_warn + return 0 —
+    # a factory without a browser stays fully functional; agents' visual
+    # checks escalate to the human demo gate instead.
+
+    # Idempotent: CLI answers and a chromium build is already in the cache.
+    if command_exists playwright && playwright --version >/dev/null 2>&1 \
+        && compgen -G "$HOME/.cache/ms-playwright/chromium-*" >/dev/null 2>&1; then
+        log_success "Playwright already installed: $(playwright --version 2>/dev/null | head -1)"
+        return 0
+    fi
+
+    if ! command_exists npm; then
+        log_warn "npm not found; skipping Playwright — visual checks will escalate to the human gate"
+        return 0
+    fi
+
+    # Every command below writes to the install log; the terminal sees only
+    # clean status lines. The log is surfaced (tail) only on real failure —
+    # this runs once per factory across the whole fleet, so first-run noise
+    # multiplies by the number of factories.
+    local pw_log="/tmp/af-playwright-install.log"
+    : >"$pw_log"
+
+    if ! command_exists playwright; then
+        # The base image installs Node via the nodesource apt repo, so the npm
+        # global prefix is /usr and root-owned — an unprivileged `npm -g` is a
+        # guaranteed EACCES there. Probe prefix writability and pick the right
+        # path once, instead of failing loudly first.
+        local npm_root
+        npm_root="$(npm root -g 2>/dev/null || true)"
+        log_info "Installing playwright via npm (log: $pw_log)..."
+        if [ -n "$npm_root" ] && [ -w "$npm_root" ]; then
+            npm install -g playwright >>"$pw_log" 2>&1 || {
+                tail -20 "$pw_log"
+                log_warn "npm install playwright failed; skipping — visual checks will escalate to the human gate"
+                return 0
+            }
+        elif command_exists sudo && sudo -n true 2>/dev/null; then
+            sudo npm install -g playwright >>"$pw_log" 2>&1 || {
+                tail -20 "$pw_log"
+                log_warn "npm install playwright failed; skipping — visual checks will escalate to the human gate"
+                return 0
+            }
+        else
+            log_warn "npm global prefix not writable and no passwordless sudo; skipping playwright — visual checks will escalate to the human gate"
+            return 0
+        fi
+    fi
+
+    if ! command_exists playwright; then
+        log_warn "playwright not on PATH after install; skipping — visual checks will escalate to the human gate"
+        return 0
+    fi
+
+    # Ubuntu's apt chromium is a snap transition stub (snaps don't run in standard
+    # containers), so playwright's bundled chromium is the reliable path. --with-deps
+    # apt-installs the browser's shared libraries and needs passwordless sudo (the
+    # container 'dev' user has it).
+    # The apt run inside --with-deps prints a benign "debconf: delaying package
+    # configuration" warning (the slim base image lacks apt-utils) — it goes to
+    # the log with everything else.
+    log_info "Downloading chromium (first run only, ~250MB; log: $pw_log)..."
+    if command_exists sudo && sudo -n true 2>/dev/null; then
+        playwright install --with-deps chromium >>"$pw_log" 2>&1 || {
+            tail -20 "$pw_log"
+            log_warn "chromium download or system deps failed; visual checks will escalate to the human gate"
+            return 0
+        }
+    else
+        playwright install chromium >>"$pw_log" 2>&1 || {
+            tail -20 "$pw_log"
+            log_warn "chromium download failed; visual checks will escalate to the human gate"
+            return 0
+        }
+    fi
+
+    # Calibrate by rendering, not by version string: an installed-but-unrenderable
+    # browser must read as a warning, never a success.
+    local probe="/tmp/af-playwright-probe.png"
+    if playwright screenshot "data:text/html,<h1>af</h1>" "$probe" >/dev/null 2>&1 \
+        && [ -s "$probe" ]; then
+        log_success "Playwright chromium renders headlessly"
+    else
+        log_warn "Playwright installed but rendering probe failed — visual checks will escalate to the human gate"
+    fi
+    rm -f "$probe" 2>/dev/null || true
+    return 0
+}
+
+install_playwright_plugin() {
+    log_step "Installing Playwright Claude Code plugin (browser tools for all agents)"
+
+    # User-scope plugin: containers run every agent as this user, so one install
+    # surfaces the plugin's browser tools in every agent session. The plugin is
+    # the interface; install_playwright above provides the chromium it drives.
+    # Fail-soft throughout — quickstart re-runs (af install --agents) retry it.
+
+    if ! command_exists claude; then
+        log_warn "claude not installed; skipping playwright plugin (retried on next quickstart run)"
+        return 0
+    fi
+
+    if claude plugin list 2>/dev/null | grep -q "playwright@"; then
+        log_success "Playwright plugin already installed"
+        return 0
+    fi
+
+    if claude plugin install playwright@claude-plugins-official --scope user 2>&1; then
+        log_success "Playwright plugin installed (user scope — all agents)"
+        return 0
+    fi
+
+    # The official marketplace may not be configured yet on a fresh install.
+    log_info "Install failed; adding official marketplace and retrying..."
+    claude plugin marketplace add anthropics/claude-plugins-official 2>&1 || true
+    if claude plugin install playwright@claude-plugins-official --scope user 2>&1; then
+        log_success "Playwright plugin installed (user scope — all agents)"
+    else
+        log_warn "Playwright plugin install failed (may need claude auth or network) — retried on next quickstart run; agents fall back to the playwright CLI"
+    fi
+    return 0
+}
+
 #------------------------------------------------------------------------------
 # Phase 3: Configure
 #------------------------------------------------------------------------------
@@ -399,7 +539,7 @@ configure_shell() {
 
     {
         echo "$begin_marker"
-        echo 'export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-fable-5}"'
+        echo 'export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-opus-4-8}"'
         echo 'export ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL:-claude-opus-4-8}"'
         echo 'export ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-5}"'
         echo 'export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL:-xhigh}"'
@@ -648,6 +788,9 @@ main() {
     if ! check_claude; then
         install_claude || log_warn "Claude Code install failed (can be installed later)"
     fi
+
+    install_playwright
+    install_playwright_plugin
 
     # Phase 3: Configure
     log_step "Phase 3: Configuring workspace"

@@ -24,7 +24,7 @@ func Parse(data []byte) (*Formula, error) {
 	}
 
 	// Infer type from content if not explicitly set
-	f.inferType()
+	f.InferType()
 
 	if err := f.Validate(); err != nil {
 		return nil, err
@@ -33,8 +33,11 @@ func Parse(data []byte) (*Formula, error) {
 	return &f, nil
 }
 
-// inferType sets the formula type based on content when not explicitly set.
-func (f *Formula) inferType() {
+// InferType sets the formula type based on content when not explicitly set. Exported so callers that
+// need the stages separately — `af formula validate` composes decode → InferType → Validate →
+// TopologicalSort — infer the type exactly as Parse does, from one implementation. A fifth formula
+// type added below therefore cannot be missed by the verb.
+func (f *Formula) InferType() {
 	if f.Type != "" {
 		return
 	}

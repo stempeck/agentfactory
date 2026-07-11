@@ -168,3 +168,18 @@ func TestIsProductionIdentity(t *testing.T) {
 		})
 	}
 }
+
+// TestGetEnvironment_GuardBenignZero (K9b, #519 Phase 3) pins that the new
+// read-only env probe honors the ADR-018 light guard: in the default (guarded)
+// test build it returns the benign zero value without shelling out to real tmux,
+// exactly like ShowOption.
+func TestGetEnvironment_GuardBenignZero(t *testing.T) {
+	tm := NewTmux()
+	got, err := tm.GetEnvironment("af-someagent", "AF_ROOT")
+	if err != nil {
+		t.Fatalf("guarded GetEnvironment must not error: %v", err)
+	}
+	if got != "" {
+		t.Errorf("guarded GetEnvironment = %q, want empty", got)
+	}
+}

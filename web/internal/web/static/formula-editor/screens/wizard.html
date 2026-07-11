@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Commission a New Line — Formula Editor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="../styles/variables.css">
+<link rel="stylesheet" href="../styles/main.css">
+</head>
+<body>
+<a class="skip-link" href="#wizard">Skip to commissioning</a>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="roster.html"><span class="gear" aria-hidden="true">⚙</span><span class="word">Foundry Console</span></a>
+    <nav class="nav" aria-label="Console">
+      <a href="roster.html">Shop floor</a>
+      <a href="editor.html">The line</a>
+      <a href="wizard.html" aria-current="page">Commission</a>
+    </nav>
+    <span class="spacer"></span>
+    <nav class="nav" aria-label="Prototype"><a href="../index.html">Prototype hub</a></nav>
+  </div>
+</header>
+
+<main class="wrap wizard-wrap" id="wizard">
+  <div class="view-head">
+    <h1 class="view-title">Commission a new line</h1>
+    <p class="view-sub">One question per beat — like rolling a companion. The lever at the end
+      casts <b>real TOML</b> and rolls it into the editor.</p>
+  </div>
+
+  <div class="beats" role="list" aria-label="Commissioning beats">
+    <span class="beat-tab" data-tab="1" aria-current="step">1 · Stock</span>
+    <span class="beat-tab" data-tab="2">2 · Nameplate</span>
+    <span class="beat-tab" data-tab="3">3 · Tool rack</span>
+    <span class="beat-tab" data-tab="4">4 · The lever</span>
+  </div>
+
+  <!-- BEAT 1 -->
+  <section class="wstage panel" data-stage="1" aria-label="Beat 1: choose your stock">
+    <h2 class="beat-q">What do we cast from?</h2>
+    <p class="beat-sub">Every line starts as metal from somewhere.</p>
+    <fieldset style="border:none; padding:0; margin:0">
+      <legend class="sr-only">Choose your stock</legend>
+      <div class="stock-cards">
+        <label class="stock-card">
+          <input type="radio" name="stock" value="blank" checked>
+          <span class="ico" aria-hidden="true">🧱</span>
+          <h3>Blank billet</h3>
+          <p>Raw metal. One intake station to start; you bolt on the rest.</p>
+        </label>
+        <label class="stock-card">
+          <input type="radio" name="stock" value="recast">
+          <span class="ico" aria-hidden="true">♻️</span>
+          <h3>Recast a line</h3>
+          <p>Copy an existing formula, then rework it under a new nameplate.</p>
+        </label>
+        <label class="stock-card">
+          <input type="radio" name="stock" value="pattern">
+          <span class="ico" aria-hidden="true">📐</span>
+          <h3>Standard pattern</h3>
+          <p>A proven layout: intake → work → inspect (gate) → ship.</p>
+        </label>
+      </div>
+    </fieldset>
+    <div class="formrow" id="recastPick" hidden style="margin-top:14px; max-width:26rem">
+      <label class="lbl" for="recastSel">Line to recast</label>
+      <select class="field" id="recastSel"></select>
+      <span class="hint">Store copies plus anything in a connected store folder.</span>
+    </div>
+  </section>
+
+  <!-- BEAT 2 -->
+  <section class="wstage panel" data-stage="2" hidden aria-label="Beat 2: stamp the nameplate">
+    <h2 class="beat-q">What do we call it?</h2>
+    <p class="beat-sub">The name is stamped into the filename and the TOML together — they never drift apart.</p>
+    <div class="formrow" style="max-width:24rem">
+      <label class="lbl" for="lineName">Line name</label>
+      <input class="field mono" type="text" id="lineName" placeholder="e.g. release-notes" autocomplete="off" spellcheck="false">
+      <span class="hint" id="nameHint">Lowercase, digits, and hyphens.</span>
+    </div>
+    <div class="binding" style="max-width:30rem" aria-live="polite">
+      <span id="bindFile" class="b-ok">.agentfactory/store/formulas/&lt;name&gt;.formula.toml</span>
+      <span id="bindKey" class="b-ok">formula = "&lt;name&gt;"</span>
+    </div>
+    <div class="formrow" style="margin-top:14px">
+      <label class="lbl" for="lineDesc">What is this line for? <span class="opt">optional</span></label>
+      <textarea class="field" id="lineDesc" rows="2" placeholder="One or two sentences — becomes the TOML description."></textarea>
+    </div>
+  </section>
+
+  <!-- BEAT 3 -->
+  <section class="wstage panel" data-stage="3" hidden aria-label="Beat 3: rack the starting tools">
+    <h2 class="beat-q">What tools does it carry?</h2>
+    <p class="beat-sub">Skills ride with the line — every station can reach them. Skip freely; tools rack any time.</p>
+    <div class="toolrack" id="skillRack" role="group" aria-label="Skills"></div>
+    <div class="formrow" style="margin-top:14px; max-width:22rem">
+      <label class="lbl" for="customSkill">Another tool <span class="opt">optional</span></label>
+      <div style="display:flex; gap:8px">
+        <input class="field mono" id="customSkill" type="text" placeholder="skill-name" pattern="[a-zA-Z][a-zA-Z0-9_-]*">
+        <button class="btn" id="addCustomSkill" type="button" aria-label="Rack the custom skill">Rack it</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- BEAT 4 -->
+  <section class="wstage panel" data-stage="4" hidden aria-label="Beat 4: pull the commissioning lever">
+    <h2 class="beat-q">Pull the lever.</h2>
+    <p class="beat-sub" id="leverSub">The line rolls onto the floor as real TOML, open in the editor and ready to pour.</p>
+    <div class="lever-bay">
+      <button class="lever" id="lever" aria-label="Pull the commissioning lever">
+        <span class="stick" aria-hidden="true"></span>
+      </button>
+      <p class="hint" id="leverHint">Everything checks out. Pull it.</p>
+    </div>
+    <div class="panel summary-card" id="summary" hidden>
+      <h3 style="font-family:var(--font-display); text-transform:uppercase; letter-spacing:.04em">✓ Cast and rolling</h3>
+      <dl>
+        <dt>Nameplate</dt><dd id="sumName">—</dd>
+        <dt>File</dt><dd id="sumFile">—</dd>
+        <dt>Stock</dt><dd id="sumStock">—</dd>
+        <dt>Tool rack</dt><dd id="sumSkills">—</dd>
+      </dl>
+      <div style="display:flex; gap:10px; flex-wrap:wrap">
+        <button class="btn primary" id="openInEditor">Open the line in the editor</button>
+        <a class="btn" href="roster.html">Back to the floor</a>
+      </div>
+    </div>
+  </section>
+
+  <div class="wizard-nav">
+    <button class="btn" id="backBtn" aria-label="Back" disabled>← Back</button>
+    <span class="spacer"></span>
+    <button class="btn primary" id="nextBtn" aria-label="Next beat">Next beat →</button>
+  </div>
+</main>
+
+<div class="slips" id="slips" aria-live="polite"></div>
+
+<script src="../scripts/toml-engine.js"></script>
+<script src="../scripts/demo-formulas.js"></script>
+<script src="../scripts/shared.js"></script>
+<script>
+(function () {
+  'use strict';
+  var Engine = window.TomlEngine, Demo = window.DemoFormulas, $ = AF.$;
+
+  var SKILLS = ['frontend-design', 'code-review', 'verify', 'rootcause-analysis',
+                'dataviz', 'github-issue', 'plan-work', 'terraform-fix'];
+  var stage = 1;
+  var picked = { stock: 'blank', name: '', desc: '', skills: [] };
+  var recastSources = {};   // name -> text
+  var castText = null;
+
+  var taken = {};
+  Demo.inventory.forEach(function (f) { taken[f.replace(/\.formula\.toml$/, '')] = true; });
+
+  /* recast source list: demos now; connected store folder if remembered */
+  function fillRecast() {
+    var sel = $('recastSel');
+    sel.innerHTML = '';
+    Object.keys(Demo.files).forEach(function (name) {
+      recastSources[name] = Demo.files[name];
+      var o = document.createElement('option');
+      o.value = name; o.textContent = name.replace(/\.formula\.toml$/, '') + ' (store copy)';
+      sel.appendChild(o);
+    });
+    AF.stash.get('store-dir').then(function (dh) {
+      if (!dh) return;
+      dh.queryPermission({ mode: 'read' }).then(function (p) {
+        if (p !== 'granted') return;
+        (function walk(iter) {
+          iter.next().then(function (res) {
+            if (res.done) return;
+            var h = res.value;
+            if (h.kind === 'file' && /\.formula\.toml$/.test(h.name) && !recastSources[h.name]) {
+              h.getFile().then(function (f) { return f.text(); }).then(function (text) {
+                recastSources[h.name] = text;
+                taken[h.name.replace(/\.formula\.toml$/, '')] = true;
+                var o = document.createElement('option');
+                o.value = h.name; o.textContent = h.name.replace(/\.formula\.toml$/, '') + ' (store)';
+                sel.appendChild(o);
+              });
+            }
+            walk(iter);
+          });
+        })(dh.values());
+      });
+    }).catch(function () {});
+  }
+  fillRecast();
+
+  /* skill rack */
+  SKILLS.forEach(function (s) { addSkillButton(s); });
+  function addSkillButton(s, pressed) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'tool';
+    b.textContent = s;
+    b.setAttribute('aria-pressed', String(!!pressed));
+    if (pressed) styleTool(b, true);
+    b.addEventListener('click', function () {
+      var on = b.getAttribute('aria-pressed') === 'true';
+      b.setAttribute('aria-pressed', String(!on));
+      styleTool(b, !on);
+      if (on) picked.skills = picked.skills.filter(function (x) { return x !== s; });
+      else picked.skills.push(s);
+    });
+    $('skillRack').appendChild(b);
+    if (pressed) picked.skills.push(s);
+  }
+  function styleTool(b, on) {
+    b.style.borderColor = on ? 'var(--neon-cyan)' : 'var(--line)';
+    b.style.color = on ? 'var(--neon-cyan)' : 'var(--text)';
+    b.style.boxShadow = on ? '0 0 10px rgba(32,229,255,.3)' : 'none';
+  }
+  $('addCustomSkill').addEventListener('click', function () {
+    var v = $('customSkill').value.trim();
+    if (!/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(v)) { AF.slip('Skill names start with a letter: letters, digits, underscores, hyphens.', 'alarm'); return; }
+    if (picked.skills.indexOf(v) !== -1) { AF.slip('Already racked.', 'alarm'); return; }
+    addSkillButton(v, true);
+    $('customSkill').value = '';
+  });
+
+  /* stock */
+  document.querySelectorAll('input[name="stock"]').forEach(function (r) {
+    r.addEventListener('change', function () {
+      picked.stock = r.value;
+      $('recastPick').hidden = r.value !== 'recast';
+    });
+  });
+
+  /* nameplate */
+  var nameOk = false;
+  $('lineName').addEventListener('input', function () {
+    var v = this.value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    picked.name = v;
+    var file = $('bindFile'), key = $('bindKey'), hint = $('nameHint');
+    file.textContent = '.agentfactory/store/formulas/' + (v || '<name>') + '.formula.toml';
+    key.textContent = 'formula = "' + (v || '<name>') + '"';
+    if (!v) {
+      file.className = 'b-ok'; key.className = 'b-ok';
+      hint.className = 'hint'; hint.textContent = 'Lowercase, digits, and hyphens.';
+      nameOk = false; return;
+    }
+    if (taken[v]) {
+      file.className = 'b-bad'; key.className = 'b-bad';
+      hint.className = 'hint bad'; hint.textContent = 'That nameplate is taken — two lines can’t share a name.';
+      nameOk = false;
+    } else if (!/^[a-z]/.test(v)) {
+      file.className = 'b-bad'; key.className = 'b-bad';
+      hint.className = 'hint bad'; hint.textContent = 'Start with a lowercase letter.';
+      nameOk = false;
+    } else {
+      file.className = 'b-ok'; key.className = 'b-ok';
+      hint.className = 'hint good'; hint.textContent = 'Nameplate is free — file and TOML stamp together.';
+      nameOk = true;
+    }
+  });
+  $('lineDesc').addEventListener('input', function () { picked.desc = this.value.trim(); });
+
+  /* beats */
+  function showStage(n) {
+    stage = n;
+    document.querySelectorAll('.wstage').forEach(function (s) {
+      s.hidden = Number(s.getAttribute('data-stage')) !== n;
+    });
+    document.querySelectorAll('.beat-tab').forEach(function (t) {
+      var tn = Number(t.getAttribute('data-tab'));
+      if (tn === n) t.setAttribute('aria-current', 'step'); else t.removeAttribute('aria-current');
+      t.classList.toggle('done', tn < n);
+    });
+    $('backBtn').disabled = n === 1;
+    $('nextBtn').hidden = n === 4;
+  }
+  $('nextBtn').addEventListener('click', function () {
+    if (stage === 2 && !nameOk) {
+      AF.slip('Stamp a free nameplate first — it binds the file and the TOML.', 'alarm');
+      $('lineName').focus();
+      return;
+    }
+    if (stage < 4) showStage(stage + 1);
+  });
+  $('backBtn').addEventListener('click', function () { if (stage > 1) showStage(stage - 1); });
+
+  /* the lever: cast REAL toml */
+  function buildToml() {
+    var name = picked.name;
+    var desc = picked.desc || ('The ' + name + ' line.');
+    if (picked.stock === 'recast') {
+      var srcName = $('recastSel').value;
+      var src = recastSources[srcName];
+      try {
+        var doc = Engine.parse(src);
+        var t = Engine.ops.setKV(src, doc, null, 'formula', Engine.fmt.string(name));
+        if (picked.skills.length) {
+          doc = Engine.parse(t);
+          t = Engine.ops.setKV(t, doc, null, 'skills', Engine.fmt.stringArray(picked.skills));
+        }
+        return t;
+      } catch (e) {
+        AF.slip('The recast source does not parse: ' + AF.esc(e.message), 'alarm');
+        return null;
+      }
+    }
+    var lines = [];
+    lines.push('description = """');
+    lines.push(desc);
+    lines.push('"""');
+    lines.push('formula = ' + Engine.fmt.string(name));
+    lines.push('version = 1');
+    if (picked.skills.length) lines.push('skills = ' + Engine.fmt.stringArray(picked.skills));
+    lines.push('');
+    lines.push('[inputs.task]');
+    lines.push('description = "What this line is asked to do"');
+    lines.push('type = "string"');
+    lines.push('required = true');
+    lines.push('');
+    if (picked.stock === 'blank') {
+      lines.push('[[steps]]');
+      lines.push('id = "intake"');
+      lines.push('title = "Intake the task"');
+      lines.push('description = """');
+      lines.push('Read {{task}} and turn it into a concrete plan.');
+      lines.push('"""');
+    } else { // pattern
+      lines.push('[[steps]]');
+      lines.push('id = "intake"');
+      lines.push('title = "Intake the task"');
+      lines.push('description = """');
+      lines.push('Read {{task}} and turn it into a concrete plan of record.');
+      lines.push('"""');
+      lines.push('');
+      lines.push('[[steps]]');
+      lines.push('id = "work"');
+      lines.push('title = "Do the work"');
+      lines.push('needs = ["intake"]');
+      lines.push('description = """');
+      lines.push('Execute the plan. One station, one job the next can trust.');
+      lines.push('"""');
+      lines.push('');
+      lines.push('[[steps]]');
+      lines.push('id = "inspect"');
+      lines.push('title = "Hold for human inspection"');
+      lines.push('needs = ["work"]');
+      lines.push('gate = { type = "human", id = ' + Engine.fmt.string('inspect-' + name) + ', timeout = "24h" }');
+      lines.push('description = """');
+      lines.push('Present the work and hold under the arch until a human signs off.');
+      lines.push('"""');
+      lines.push('');
+      lines.push('[[steps]]');
+      lines.push('id = "ship"');
+      lines.push('title = "Ship it"');
+      lines.push('needs = ["inspect"]');
+      lines.push('description = """');
+      lines.push('Deliver the result and close out.');
+      lines.push('"""');
+    }
+    return lines.join('\n') + '\n';
+  }
+
+  $('lever').addEventListener('click', function () {
+    var lever = this;
+    if (lever.classList.contains('pulled')) return;
+    if (!picked.name || !nameOk) {
+      AF.slip('The nameplate is blank or taken — back to beat 2.', 'alarm');
+      showStage(2);
+      return;
+    }
+    castText = buildToml();
+    if (castText === null) return;
+    // prove the cast: it must parse and pass the four checks before it rolls out
+    try {
+      var findings = Engine.validate(Engine.parse(castText).js);
+      if (findings.length) {
+        AF.slip('The cast came out flawed: ' + AF.esc(findings[0].message), 'alarm');
+        return;
+      }
+    } catch (e) {
+      AF.slip('The cast did not parse: ' + AF.esc(e.message), 'alarm');
+      return;
+    }
+    lever.classList.add('pulled');
+    setTimeout(function () {
+      $('sumName').textContent = picked.name;
+      $('sumFile').textContent = picked.name + '.formula.toml';
+      $('sumStock').textContent = picked.stock === 'blank' ? 'blank billet'
+        : picked.stock === 'recast' ? 'recast of ' + $('recastSel').value.replace(/\.formula\.toml$/, '')
+        : 'standard pattern (intake → work → inspect ⚑ → ship)';
+      $('sumSkills').textContent = picked.skills.length ? picked.skills.join(', ') : 'none — rack tools any time';
+      $('summary').hidden = false;
+      $('leverHint').textContent = 'Cast, parsed, and all four lamps green.';
+      AF.slip('<strong>' + AF.esc(picked.name) + '</strong> cast — real TOML, validated.', 'ok');
+      $('summary').scrollIntoView({ block: 'nearest' });
+    }, AF.reducedMotion ? 0 : 450);
+  });
+
+  $('openInEditor').addEventListener('click', function () {
+    if (!castText) return;
+    AF.openInEditor({ name: picked.name + '.formula.toml', text: castText, mode: 'new', dirty: true }, null);
+  });
+
+  showStage(1);
+})();
+</script>
+</body>
+</html>

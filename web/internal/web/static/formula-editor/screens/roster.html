@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shop Floor — Formula Editor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="../styles/variables.css">
+<link rel="stylesheet" href="../styles/main.css">
+</head>
+<body>
+<a class="skip-link" href="#floor">Skip to the shop floor</a>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="roster.html"><span class="gear" aria-hidden="true">⚙</span><span class="word">Foundry Console</span></a>
+    <nav class="nav" aria-label="Console">
+      <a href="roster.html" aria-current="page">Shop floor</a>
+      <a href="editor.html">The line</a>
+      <a href="wizard.html">Commission</a>
+    </nav>
+    <span class="spacer"></span>
+    <nav class="nav" aria-label="Prototype"><a href="../index.html">Prototype hub</a></nav>
+  </div>
+  <div class="wrap strip">
+    <span class="dot" id="storeDot"></span>
+    <span class="filetag" id="storeTag">the live store — edits pour back through the console</span>
+    <span class="spacer"></span>
+    <button class="ghost" id="connectStore" aria-label="Connect the real store folder">Connect the real store folder…</button>
+  </div>
+</header>
+
+<main class="wrap" id="floor">
+  <div class="view-head">
+    <h1 class="view-title">Shop floor</h1>
+    <p class="view-sub" id="floorSub">
+      Every card is one agent formula. Frames are <b>computed from the parsed TOML</b>:
+      <span style="color:var(--rarity-legendary)">legendary</span> lines carry a human gate,
+      <span style="color:var(--rarity-epic)">epic</span> lines merge parallel belts,
+      <span style="color:var(--rarity-rare)">rare</span> lines are wired,
+      <span style="color:var(--rarity-common)">common</span> lines run free.
+    </p>
+  </div>
+
+  <div class="filterbar">
+    <label class="sr-only" for="filter">Find a line by name</label>
+    <input id="filter" class="field search" type="text" placeholder="Foreman’s clipboard — find a line…" autocomplete="off">
+    <span class="store-status" id="storeStatus"></span>
+    <a class="btn magenta" href="wizard.html" aria-label="Commission a new line">🔥 Commission a new line</a>
+  </div>
+
+  <ul role="list" class="floor-grid" id="grid"></ul>
+  <p class="hint" id="noLines" hidden style="margin-top:12px">No line answers to that name. Clear the clipboard, or commission a new one.</p>
+
+  <section class="breaker-bay" aria-label="Floor controls">
+    <div class="panel">
+      <h2>⚡ Master breaker</h2>
+      <p class="hint" style="margin-bottom:12px">
+        Recasts every agent from its formula (<span class="mono">af install --agents</span>),
+        then starts the floor (<span class="mono">af up</span>). The whole floor stops and restarts.
+      </p>
+      <button class="btn danger" id="liftCover" aria-haspopup="dialog" aria-label="Fire up the factory">Fire up the factory…</button>
+      <p class="hint mono" style="margin-top:10px">Streams the real run: af install --agents, then af up to restart the floor.</p>
+    </div>
+    <div class="panel">
+      <h2>🗂 The store</h2>
+      <p class="hint" style="margin-bottom:12px" id="storeExplain">
+        Every card is read live from <span class="mono">.agentfactory/store/formulas/</span> through the console.
+        Open, edit, and pour straight back into the store — or connect the folder directly
+        (Chromium browsers) to edit the files through the File System Access API instead.
+      </p>
+      <button class="btn primary" id="connectStore2" aria-label="Connect the store folder">Connect the store folder…</button>
+    </div>
+  </section>
+</main>
+
+<!-- work order (Generate All) -->
+<dialog class="confirm" id="orderDialog">
+  <form method="dialog">
+    <div class="dh"><span class="warn" aria-hidden="true">!</span><h2>Work order — fire up the factory</h2></div>
+    <div class="db">
+      <p><strong>The whole floor stops and restarts.</strong> Every running agent returns to its
+      station while the lines recast. Anything an agent is midway through waits until its line is back up.</p>
+      <p class="hint" style="margin-top:8px">Runs <span class="mono">af install --agents</span> then <span class="mono">af up</span>.</p>
+      <p class="lose" style="margin-top:12px">Hold the breaker for two seconds — mouse, touch, or held Enter.</p>
+      <button type="button" class="btn danger hold-btn" id="breakerHold" aria-label="Hold the breaker" style="margin-top:12px; width:100%; justify-content:center; padding:14px">
+        <span class="hold-fill" aria-hidden="true"></span>
+        ⚡ Hold the breaker — the floor restarts
+      </button>
+    </div>
+    <div class="df">
+      <button class="btn primary" value="cancel">Leave the cover down</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- furnace console -->
+<dialog class="plain furnace-console" id="consoleDialog">
+  <div class="db">
+    <h2>🔥 Furnace window — pouring the floor</h2>
+    <pre id="consoleOut" aria-live="polite"></pre>
+    <div class="klaxon" id="klaxon" role="alert"></div>
+    <div style="display:flex; justify-content:flex-end; margin-top:12px">
+      <button class="btn" id="consoleClose" disabled>Back to the floor</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- clone dialog -->
+<dialog class="plain" id="cloneDialog">
+  <form method="dialog" class="db">
+    <h2>Recast a line</h2>
+    <p class="hint" style="margin-bottom:10px">Casting <strong id="cloneSrc">—</strong> under a new nameplate.</p>
+    <div class="formrow">
+      <label class="lbl" for="cloneName">New line name</label>
+      <input class="field mono" id="cloneName" type="text" autocomplete="off" spellcheck="false">
+      <span class="hint" id="cloneHint">Lowercase, digits, and hyphens. The name stamps the file and the TOML together.</span>
+    </div>
+    <div class="binding" style="margin-bottom:14px">
+      <span id="cloneBindFile" class="b-ok">.agentfactory/store/formulas/&lt;name&gt;.formula.toml</span>
+      <span id="cloneBindKey" class="b-ok">formula = "&lt;name&gt;"</span>
+    </div>
+    <div style="display:flex; gap:10px; justify-content:flex-end">
+      <button class="btn" value="cancel">Cancel</button>
+      <button class="btn primary" value="ok" id="cloneGo">Cast the copy</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="slips" id="slips" aria-live="polite"></div>
+
+<script src="../scripts/toml-engine.js"></script>
+<script src="../scripts/demo-formulas.js"></script>
+<script src="../scripts/shared.js"></script>
+<script>
+(function () {
+  'use strict';
+  var Engine = window.TomlEngine, Demo = window.DemoFormulas, $ = AF.$;
+
+  /* catalog: {name, text, stats|null, mode:'demo'|'file', handle?} */
+  var catalog = [];
+  var dirHandle = null;
+
+  function buildDemoCatalog() {
+    catalog = [];
+    Object.keys(Demo.files).forEach(function (name) {
+      var text = Demo.files[name];
+      var entry = { name: name, text: text, mode: 'demo', stats: null };
+      try { entry.stats = Engine.stats(Engine.parse(text).js); } catch (e) { entry.error = e.message; }
+      catalog.push(entry);
+    });
+    // the rest of the floor, visible but locked until the real store is connected
+    Demo.inventory.forEach(function (name) {
+      if (Demo.files[name]) return;
+      catalog.push({ name: name, mode: 'locked', stats: null });
+    });
+  }
+
+  function connectStore() {
+    if (!AF.dirSupported) {
+      AF.slip('This browser has no directory picker — demo copies stay in memory. Use Chromium to edit the real store.', 'alarm');
+      return;
+    }
+    window.showDirectoryPicker({ mode: 'readwrite' }).then(function (dh) {
+      dirHandle = dh;
+      AF.stash.put('store-dir', dh);
+      return scanStore(dh);
+    }).catch(function (e) {
+      if (e && e.name !== 'AbortError') AF.slip('Could not open the folder: ' + AF.esc(e.message), 'alarm');
+    });
+  }
+
+  function scanStore(dh) {
+    var entries = [];
+    function walk(iter) {
+      return iter.next().then(function (res) {
+        if (res.done) return entries;
+        var h = res.value;
+        if (h.kind === 'file' && /\.formula\.toml$/.test(h.name)) entries.push(h);
+        return walk(iter);
+      });
+    }
+    return walk(dh.values()).then(function (handles) {
+      handles.sort(function (a, b) { return a.name < b.name ? -1 : 1; });
+      return Promise.all(handles.map(function (h) {
+        return h.getFile().then(function (f) { return f.text(); }).then(function (text) {
+          var entry = { name: h.name, text: text, mode: 'file', handle: h, stats: null };
+          try { entry.stats = Engine.stats(Engine.parse(text).js); } catch (e) { entry.error = e.message; }
+          return entry;
+        });
+      }));
+    }).then(function (list) {
+      catalog = list;
+      $('storeDot').className = 'dot ok';
+      $('storeTag').innerHTML = 'connected: <b>' + AF.esc(dirHandle.name) + '</b> — cards are the real files';
+      $('storeStatus').textContent = list.length + ' formulas in the store';
+      render($('filter').value.trim());
+      AF.slip('<strong>Store connected.</strong> ' + list.length + ' lines on the floor — every card is the real file now.', 'ok');
+    });
+  }
+
+  function render(filter) {
+    var grid = $('grid');
+    grid.innerHTML = '';
+    var shown = 0;
+    catalog.forEach(function (entry) {
+      var base = entry.name.replace(/\.formula\.toml$/, '');
+      if (filter && base.indexOf(filter.toLowerCase()) === -1) return;
+      shown++;
+      var li = document.createElement('li');
+      var s = entry.stats;
+      var rarity = s ? s.rarity : 'common';
+      if (entry.mode === 'locked') {
+        li.innerHTML =
+          '<div class="line-card framed r-common" style="opacity:.65">' +
+            '<span class="name">' + AF.esc(base) + '</span>' +
+            '<span class="note">On the real floor but not editable through the console. Connect the store folder to open it.</span>' +
+            '<span class="stats mono">' + AF.esc(entry.name) + '</span>' +
+          '</div>';
+        grid.appendChild(li);
+        return;
+      }
+      if (entry.error) {
+        li.innerHTML =
+          '<div class="line-card framed" style="--lit:var(--danger)">' +
+            '<span class="name">' + AF.esc(base) + '</span>' +
+            '<span class="note" style="color:var(--danger)">Does not parse: ' + AF.esc(entry.error) + '</span>' +
+            '<div class="acts"><button class="btn" data-open="' + AF.esc(entry.name) + '">Open the hatch</button></div>' +
+          '</div>';
+      } else {
+        li.innerHTML =
+          '<div class="line-card framed r-' + rarity + '">' +
+            '<span class="name">' + AF.esc(base) +
+              ' <span class="rarity-tag">' + rarity + '</span></span>' +
+            '<span class="note">' + AF.esc(s.description || '') + '</span>' +
+            '<span class="stats">' +
+              '<span><b>' + s.units + '</b> station' + (s.units === 1 ? '' : 's') + '</span>' +
+              (s.gates ? '<span style="color:var(--rarity-legendary)"><b>' + s.gates + '</b> arch' + (s.gates === 1 ? '' : 'es') + '</span>' : '') +
+              (s.merges ? '<span style="color:var(--rarity-epic)"><b>' + s.merges + '</b> merge' + (s.merges === 1 ? '' : 's') + '</span>' : '') +
+              '<span class="mono">' + AF.esc(s.type) + '</span>' +
+            '</span>' +
+            '<div class="acts">' +
+              '<button class="btn primary" data-open="' + AF.esc(entry.name) + '">Open the line</button>' +
+              '<button class="btn" data-clone="' + AF.esc(entry.name) + '">Recast</button>' +
+            '</div>' +
+          '</div>';
+      }
+      grid.appendChild(li);
+    });
+    $('noLines').hidden = shown > 0;
+    grid.querySelectorAll('[data-open]').forEach(function (b) {
+      b.addEventListener('click', function () { openEntry(b.getAttribute('data-open')); });
+    });
+    grid.querySelectorAll('[data-clone]').forEach(function (b) {
+      b.addEventListener('click', function () { openCloneDialog(b.getAttribute('data-clone')); });
+    });
+  }
+
+  function entryByName(name) {
+    return catalog.find(function (e) { return e.name === name; });
+  }
+
+  function openEntry(name) {
+    var entry = entryByName(name);
+    if (!entry || entry.mode === 'locked') return;
+    AF.openInEditor({ name: entry.name, text: entry.text, mode: entry.mode }, entry.handle || null);
+  }
+
+  /* ---------------- clone / recast ---------------- */
+  var cloneCtx = null;
+  function takenNames() {
+    var names = {};
+    catalog.forEach(function (e) { names[e.name.replace(/\.formula\.toml$/, '')] = true; });
+    return names;
+  }
+  function openCloneDialog(name) {
+    cloneCtx = entryByName(name);
+    if (!cloneCtx) return;
+    $('cloneSrc').textContent = name;
+    $('cloneName').value = '';
+    validateCloneName('');
+    $('cloneDialog').showModal();
+    $('cloneName').focus();
+  }
+  function validateCloneName(v) {
+    var file = $('cloneBindFile'), key = $('cloneBindKey'), hint = $('cloneHint'), go = $('cloneGo');
+    var okName = /^[a-z][a-z0-9-]*$/.test(v);
+    var taken = takenNames()[v];
+    file.textContent = '.agentfactory/store/formulas/' + (v || '<name>') + '.formula.toml';
+    key.textContent = 'formula = "' + (v || '<name>') + '"';
+    var good = okName && !taken;
+    file.className = good || !v ? 'b-ok' : 'b-bad';
+    key.className = good || !v ? 'b-ok' : 'b-bad';
+    if (!v) { hint.className = 'hint'; hint.textContent = 'Lowercase, digits, and hyphens. The name stamps the file and the TOML together.'; }
+    else if (taken) { hint.className = 'hint bad'; hint.textContent = 'That nameplate is taken — two lines can’t share a name.'; }
+    else if (!okName) { hint.className = 'hint bad'; hint.textContent = 'Lowercase letter first, then lowercase letters, digits, or hyphens.'; }
+    else { hint.className = 'hint good'; hint.textContent = 'Nameplate is free.'; }
+    go.disabled = !good;
+  }
+  $('cloneName').addEventListener('input', function () { validateCloneName(this.value.trim()); });
+  $('cloneDialog').addEventListener('close', function () {
+    if ($('cloneDialog').returnValue !== 'ok' || !cloneCtx) return;
+    var v = $('cloneName').value.trim();
+    if (!/^[a-z][a-z0-9-]*$/.test(v) || takenNames()[v]) return;
+    var src = cloneCtx;
+    var renamed;
+    try {
+      var doc = Engine.parse(src.text);
+      renamed = Engine.ops.setKV(src.text, doc, null, 'formula', Engine.fmt.string(v));
+    } catch (e) {
+      renamed = src.text; // unparseable source: clone the bytes, fix in the editor
+    }
+    var fileName = v + '.formula.toml';
+    if (dirHandle) {
+      dirHandle.getFileHandle(fileName, { create: true }).then(function (fh) {
+        return fh.createWritable().then(function (w) {
+          return w.write(renamed).then(function () { return w.close(); });
+        }).then(function () {
+          AF.slip('<strong>' + AF.esc(v) + '</strong> cast into the store as a real file.', 'ok');
+          return scanStore(dirHandle);
+        });
+      }).catch(function (e) { AF.slip('The cast failed: ' + AF.esc(e.message), 'alarm'); });
+    } else {
+      AF.openInEditor({ name: fileName, text: renamed, mode: 'new', dirty: true }, null);
+    }
+  });
+
+  /* ---------------- master breaker ---------------- */
+  $('liftCover').addEventListener('click', function () { $('orderDialog').showModal(); });
+
+  var holdBtn = $('breakerHold'), holding = false, holdT0 = 0, holdRAF = null;
+  function setFill(v) { holdBtn.querySelector('.hold-fill').style.transform = 'scaleX(' + v + ')'; }
+  function startHold() {
+    if (holding) return;
+    holding = true; holdT0 = performance.now();
+    (function tick(now) {
+      if (!holding) return;
+      var p = Math.min(1, (now - holdT0) / 2000);
+      setFill(p);
+      if (p >= 1) { holding = false; setFill(0); $('orderDialog').close('thrown'); breakerThrown(); return; }
+      holdRAF = requestAnimationFrame(tick);
+    })(performance.now());
+  }
+  function cancelHold() {
+    if (!holding) return;
+    holding = false; cancelAnimationFrame(holdRAF); setFill(0);
+    AF.slip('Breaker released early — the floor keeps running.');
+  }
+  holdBtn.addEventListener('pointerdown', startHold);
+  holdBtn.addEventListener('pointerup', cancelHold);
+  holdBtn.addEventListener('pointerleave', cancelHold);
+  holdBtn.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.repeat) { e.preventDefault(); startHold(); } });
+  holdBtn.addEventListener('keyup', function (e) { if (e.key === 'Enter') cancelHold(); });
+
+  function breakerThrown() {
+    var dlg = $('consoleDialog'), out = $('consoleOut');
+    out.innerHTML = '';
+    $('klaxon').classList.remove('on');
+    $('consoleClose').disabled = true;
+    dlg.showModal();
+    Demo.generateAll(out, function () {
+      $('consoleClose').disabled = false;
+    });
+  }
+  $('consoleClose').addEventListener('click', function () { $('consoleDialog').close(); });
+
+  /* ---------------- boot ---------------- */
+  $('filter').addEventListener('input', function () { render(this.value.trim()); });
+  $('connectStore').addEventListener('click', connectStore);
+  $('connectStore2').addEventListener('click', connectStore);
+
+  buildDemoCatalog();
+  $('storeStatus').textContent = Object.keys(Demo.files).length + ' formulas in the store · the live store';
+  render('');
+
+  // reconnect a previously chosen store folder without a prompt when permission persists
+  AF.stash.get('store-dir').then(function (dh) {
+    if (!dh) return;
+    dh.queryPermission({ mode: 'readwrite' }).then(function (p) {
+      if (p === 'granted') { dirHandle = dh; scanStore(dh); }
+      else {
+        $('storeTag').innerHTML = 'store folder remembered — <b>click Connect</b> to re-authorize';
+      }
+    });
+  }).catch(function () {});
+})();
+</script>
+</body>
+</html>

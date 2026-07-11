@@ -1,0 +1,1 @@
+    AF.slip('Loaded the demo copy of <strong>' + AF.esc(name) + '</strong>. Open the real file to edit the store itself.');

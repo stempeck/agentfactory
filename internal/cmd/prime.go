@@ -43,7 +43,7 @@ func runPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// 1. Find factory root
-	factoryRoot, err := config.FindFactoryRoot(cwd)
+	factoryRoot, err := resolveInvokerRoot(cwd)
 	if err != nil {
 		return err
 	}
@@ -125,7 +125,7 @@ func primeAgent(ctx context.Context, out io.Writer, factoryRoot, role, workDir s
 	acquireIdentityLock(workDir, sessionID)
 
 	// Output session metadata
-	fmt.Fprintf(out, "[AGENT FACTORY] role:%s pid:%d session:%s\n", role, os.Getpid(), sessionID)
+	fmt.Fprintf(out, "[AGENT FACTORY] role:%s pid:%d session:%s factory:%s\n", role, os.Getpid(), sessionID, factoryRoot)
 
 	// Render role template — try agent-specific template first, fall back to type default
 	tmpl := templates.New()

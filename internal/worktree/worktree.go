@@ -28,10 +28,14 @@ type Meta struct {
 	ID           string   `json:"id"`
 	Owner        string   `json:"owner"`
 	Branch       string   `json:"branch"`
-	Path         string   `json:"path"`           // relative to factory root
+	Path         string   `json:"path"` // relative to factory root
 	Agents       []string `json:"agents"`
 	CreatedAt    string   `json:"created_at"`
 	ParentBranch string   `json:"parent_branch"`
+	// FactoryRoot records the factory root that created this worktree (K9a, #519
+	// durable provenance). Additive and migration-safe — ReadMeta's json.Unmarshal
+	// zero-values it on pre-existing meta files.
+	FactoryRoot string `json:"factory_root,omitempty"`
 }
 
 type CreateOpts struct {
@@ -530,6 +534,7 @@ func Create(factoryRoot, agentName string, opts CreateOpts) (string, *Meta, erro
 		Agents:       []string{agentName},
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 		ParentBranch: parentBranch,
+		FactoryRoot:  factoryRoot,
 	}
 	if err := WriteMeta(factoryRoot, meta); err != nil {
 		return "", nil, fmt.Errorf("writing meta: %w", err)
@@ -1144,6 +1149,7 @@ func FindByGitRegistry(factoryRoot, agentName string) (*Meta, error) {
 		Agents:       reconstructAgents(factoryRoot, wtPath, wtID, agentName),
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
 		ParentBranch: recoverParentBranch(factoryRoot, branch, agentName),
+		FactoryRoot:  factoryRoot,
 	}
 	if err := WriteMeta(factoryRoot, meta); err != nil {
 		return nil, fmt.Errorf("self-healing meta for %s: %w", wtID, err)

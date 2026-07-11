@@ -1,0 +1,1 @@
+    AF.slip('Loaded the store copy of <strong>' + AF.esc(name) + '</strong>. Pour &amp; save writes it back to the store.');

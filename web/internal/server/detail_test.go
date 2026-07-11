@@ -394,4 +394,17 @@ func TestSecurityHeaders_CSPOnDocumentNotAPI(t *testing.T) {
 	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 		t.Errorf("detail Cache-Control = %q, want no-store", got)
 	}
+
+	// #534 — the transplanted formula-editor subtree carries its OWN document policy: the approved
+	// screens execute inline scripts (containment recorded on editorCSPPolicy; bytes CI-pinned by
+	// web/internal/web/reconstruct_test.go). The shell document above must NOT get script inline.
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/formula-editor/screens/roster.html", nil))
+	editorCSP := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(editorCSP, "script-src 'self' 'unsafe-inline'") {
+		t.Errorf("formula-editor documents must allow the approved inline scripts, got %q", editorCSP)
+	}
+	if strings.Contains(csp, "script-src 'self' 'unsafe-inline'") {
+		t.Errorf("the SHELL document must keep the strict script-src 'self' policy, got %q", csp)
+	}
 }

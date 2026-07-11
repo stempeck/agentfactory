@@ -1,0 +1,6 @@
+    } else {
+      AF.download(state.fileName || 'formula.toml', state.text);
+      state.savedText = state.text;
+      renderAll({});
+      AF.slip('<strong>Poured to a download.</strong> Move it into <code>.agentfactory/store/formulas/</code> — or open the real file to save in place.', 'ok');
+    }

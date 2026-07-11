@@ -1,0 +1,12 @@
+formula = "parity-expansion-cycle"
+type = "expansion"
+
+[[template]]
+id = "t1"
+title = "T1"
+needs = ["t2"]
+
+[[template]]
+id = "t2"
+title = "T2"
+needs = ["t1"]

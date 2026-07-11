@@ -1,0 +1,2 @@
+      if (type === 'workflow' || type === 'expansion') {
+        var cyc = findCycle(units);

@@ -368,7 +368,7 @@ func loadModelsForRead() (string, *config.ModelsConfig, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	root, err := config.FindFactoryRoot(wd)
+	root, err := resolveInvokerRoot(wd)
 	if err != nil {
 		return "", nil, err
 	}

@@ -234,6 +234,14 @@ func TestCreate(t *testing.T) {
 	if metaFromDisk.Owner != "solver" {
 		t.Errorf("meta.Owner: got %q, want %q", metaFromDisk.Owner, "solver")
 	}
+	// K9a (#519 Phase 3): the factory root that created the worktree is durable
+	// provenance in meta.json.
+	if meta.FactoryRoot != realDir {
+		t.Errorf("meta.FactoryRoot: got %q, want %q", meta.FactoryRoot, realDir)
+	}
+	if metaFromDisk.FactoryRoot != realDir {
+		t.Errorf("on-disk meta.FactoryRoot: got %q, want %q", metaFromDisk.FactoryRoot, realDir)
+	}
 	if !strings.HasPrefix(metaFromDisk.Branch, "af/solver-") {
 		t.Errorf("meta.Branch: got %q, want prefix %q", metaFromDisk.Branch, "af/solver-")
 	}
@@ -3319,5 +3327,59 @@ func TestDriftGuard_GenerateIDSuffixIsWorktreeSuffix(t *testing.T) {
 			t.Fatalf("isWorktreeSuffix(strings.TrimPrefix(GenerateID(), %q)) = false for id %q; "+
 				"the id<->suffix contract drifted (identity/containment legs would silently rot)", "wt-", id)
 		}
+	}
+}
+
+// TestMeta_FactoryRoot_RoundTrip (K9a, #519 Phase 3) pins that the durable
+// factory-root provenance survives a WriteMeta/ReadMeta round-trip.
+func TestMeta_FactoryRoot_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	original := &Meta{
+		ID:          "wt-provroot",
+		Owner:       "solver",
+		Branch:      "af/solver-provroot",
+		Path:        ".agentfactory/worktrees/wt-provroot",
+		Agents:      []string{"solver"},
+		CreatedAt:   "2026-07-07T00:00:00Z",
+		FactoryRoot: "/some/factory/root",
+	}
+	if err := WriteMeta(realDir, original); err != nil {
+		t.Fatalf("WriteMeta: %v", err)
+	}
+	got, err := ReadMeta(realDir, "wt-provroot")
+	if err != nil {
+		t.Fatalf("ReadMeta: %v", err)
+	}
+	if got.FactoryRoot != "/some/factory/root" {
+		t.Errorf("FactoryRoot: got %q, want %q", got.FactoryRoot, "/some/factory/root")
+	}
+}
+
+// TestReadMeta_LegacyMetaZeroValuesFactoryRoot (K9a, #519 Phase 3) proves the new
+// field is migration-safe: a meta.json written before the field existed unmarshals
+// with FactoryRoot == "" and no error — no migration needed.
+func TestReadMeta_LegacyMetaZeroValuesFactoryRoot(t *testing.T) {
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	if err := os.MkdirAll(WorktreesDir(realDir), 0o755); err != nil {
+		t.Fatalf("mkdir worktrees: %v", err)
+	}
+	legacy := `{"id":"wt-legacy","owner":"solver","branch":"af/solver-legacy","path":".agentfactory/worktrees/wt-legacy","agents":["solver"],"created_at":"2026-01-01T00:00:00Z","parent_branch":"main"}`
+	if err := os.WriteFile(metaPath(realDir, "wt-legacy"), []byte(legacy), 0o644); err != nil {
+		t.Fatalf("write legacy meta: %v", err)
+	}
+	got, err := ReadMeta(realDir, "wt-legacy")
+	if err != nil {
+		t.Fatalf("ReadMeta on legacy meta must not error: %v", err)
+	}
+	if got.FactoryRoot != "" {
+		t.Errorf("legacy FactoryRoot: got %q, want empty (migration-safe)", got.FactoryRoot)
 	}
 }

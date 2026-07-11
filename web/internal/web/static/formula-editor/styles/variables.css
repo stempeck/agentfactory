@@ -1,0 +1,78 @@
+/* ============================================================================
+   variables.css — Formula Editor FINAL · "NEON BAZAAR FOUNDRY" — DESIGN TOKENS ONLY
+   One converged direction: D (Foundry) structure re-skinned to the console's
+   approved Neon Bazaar theme. The :root token block below is copied VERBATIM
+   from web/internal/web/static/styles/variables.css (the binding source of
+   truth) — no invented palette. The only additions are the rarity aliases,
+   which map B's structure-derived rarity onto EXISTING console accents.
+
+   Motion discipline (iteration-1 feedback): no ambient animation. Movement is
+   reserved for meaningful events — Test Fire, validation results, dispatch
+   slips — and collapses entirely under prefers-reduced-motion.
+   ========================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Sora:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap');
+
+:root{
+  /* ---- base surfaces (deep blue-violet ink — never pure #000) ---- */
+  --ink:#0B0A14;
+  --panel:#15131F;
+  --panel-2:#1C1929;
+  --line:#2A2640;
+  --line-soft:#221F33;
+
+  /* ---- polychromatic neon ---- */
+  --neon-magenta:#FF2E97;
+  --neon-cyan:#20E5FF;
+  --neon-violet:#B26BFF;
+  --signage-amber:#FFC24B;
+
+  /* ---- text ---- */
+  --text:#EDEAFF;
+  --muted:#9A93B5;
+
+  /* ---- destructive — deliberately NOT the magenta brand ---- */
+  --danger:#FF5630;
+
+  /* ---- accessibility focus = the cyan accent ---- */
+  --focus:#20E5FF;
+
+  /* ---- type stacks (full fallbacks so it reads right offline) ---- */
+  --font-display:"Chakra Petch","Bahnschrift","Segoe UI Semibold",system-ui,sans-serif;
+  --font-body:"Sora","Segoe UI",Roboto,system-ui,Helvetica,Arial,sans-serif;
+  --font-mono:"Space Mono",ui-monospace,"SFMono-Regular","Cascadia Mono",Consolas,monospace;
+
+  /* ---- type scale ---- */
+  --t-xs:13px; --t-sm:15px; --t-md:20px; --t-lg:32px; --t-xl:48px;
+
+  /* ---- spacing ---- */
+  --space-1:4px; --space-2:6px; --space-3:8px; --space-4:11px; --space-5:14px;
+  --space-6:18px; --space-7:22px; --space-8:26px; --space-9:32px; --space-10:44px;
+
+  /* ---- radii ---- */
+  --r:12px; --r-sm:8px; --r-xs:6px;
+
+  /* ---- layout ---- */
+  --maxw:1280px;
+
+  /* ---- elevation ---- */
+  --shadow-pop:0 14px 40px rgba(0,0,0,.55);
+  --shadow-dialog:0 0 0 1px rgba(255,86,48,.25), 0 24px 70px rgba(0,0,0,.6);
+
+  /* ---- the night-market ambient field ---- */
+  --field:
+    radial-gradient(1100px 540px at 12% -8%, rgba(255,46,151,.10), transparent 60%),
+    radial-gradient(1000px 520px at 92% -4%, rgba(32,229,255,.09), transparent 60%),
+    radial-gradient(900px 700px at 60% 120%, rgba(178,107,255,.08), transparent 60%),
+    var(--ink);
+
+  /* ---- rarity aliases: B's semantics on the console's existing accents ----
+     legendary = has a human gate      → signage amber (the console's GATE hue)
+     epic      = merge point (>1 need) → neon violet
+     rare      = wired (1 need)        → neon cyan
+     common    = root (0 needs)        → quiet line grey                     */
+  --rarity-legendary:var(--signage-amber);
+  --rarity-epic:var(--neon-violet);
+  --rarity-rare:var(--neon-cyan);
+  --rarity-common:#575072;
+}

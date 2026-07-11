@@ -1,0 +1,7 @@
+formula = "parity-datetime-dialect"
+type = "workflow"
+pinned_at = 2020-01-01T00:00:00Z
+
+[[steps]]
+id = "run"
+title = "Run"

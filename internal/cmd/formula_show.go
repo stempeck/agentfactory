@@ -66,7 +66,19 @@ func runFormulaShow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return emitFormulaError(err)
 	}
-	path, err := formula.FindFormulaFile(name, cwd)
+	// Resolve the root through the seam (thread 7a); FindFormulaFile must receive an
+	// already-validated root, never re-resolve cwd. This is a read-only verb, so a
+	// factory-root mismatch downgrades to a warning and proceeds on the cwd-resolved
+	// root (CHECK-AS-WARNING), preserving the error-envelope contract.
+	root, err := resolveInvokerRoot(cwd)
+	if err != nil {
+		if r, downgraded := downgradeRootMismatch(err); downgraded {
+			root = r
+		} else {
+			return emitFormulaError(err)
+		}
+	}
+	path, err := formula.FindFormulaFile(name, root)
 	if err != nil {
 		return emitFormulaError(err)
 	}

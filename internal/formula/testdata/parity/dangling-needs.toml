@@ -1,0 +1,7 @@
+formula = "parity-dangling-needs"
+type = "workflow"
+
+[[steps]]
+id = "only"
+title = "Only"
+needs = ["ghost"]

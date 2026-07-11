@@ -1,0 +1,7 @@
+formula = "parity-bad-skill-name"
+type = "workflow"
+skills = ["Invalid Name!"]
+
+[[steps]]
+id = "run"
+title = "Run"
