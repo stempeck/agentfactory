@@ -536,6 +536,30 @@ func (t *Tmux) UnsetEnvironment(session, key string) error {
 	return err
 }
 
+// GetEnvironment reads a session-scoped environment variable
+// (show-environment -t <session> <key>) and returns its value trimmed. Like the
+// other read-only probes (ShowOption, GetPaneCommand, CapturePane) it uses the
+// lighter `t.guard` gate rather than guardOp — a read carries no destructive risk,
+// so under the test guard it is a benign no-op returning the zero value instead of
+// shelling out to real tmux (ADR-018). Best-effort by contract: tmux prints
+// "-<KEY>" and/or exits non-zero for an unset variable, which this treats as unset
+// (empty, no error) — callers must never abort on the result (K9b, #519).
+func (t *Tmux) GetEnvironment(session, key string) (string, error) {
+	if t.guard {
+		return "", nil // read-only probe: benign zero-value, no real exec
+	}
+	out, err := t.run("show-environment", "-t", session, key)
+	if err != nil {
+		return "", nil // unset var or absent session: best-effort "unknown", not a hard error
+	}
+	out = strings.TrimSpace(out)
+	// tmux prints "KEY=value" for a set var and "-KEY" for an unset one.
+	if rest, ok := strings.CutPrefix(out, key+"="); ok {
+		return rest, nil
+	}
+	return "", nil
+}
+
 // SetOption sets a session-scoped tmux option (set-option -t). It mirrors
 // SetEnvironment: the op carries a -t target, so the ADR-018 guard can protect it
 // (the op-string literal "set-option" names the real op in the guard panic).

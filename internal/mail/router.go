@@ -14,36 +14,34 @@ import (
 
 // Router dispatches messages to agents with group fan-out support.
 type Router struct {
-	workDir     string
 	factoryRoot string
 	store       issuestore.Store
 	agentsCfg   *config.AgentConfig
 	msgCfg      *config.MessagingConfig
 }
 
-// NewRouter creates a Router, discovering the factory root from workDir and
-// using the injected Store for issue persistence.
-func NewRouter(workDir string, store issuestore.Store) (*Router, error) {
-	root, err := config.FindFactoryRoot(workDir)
-	if err != nil {
-		return nil, fmt.Errorf("creating router: %w", err)
-	}
-
-	agentsPath := config.AgentsConfigPath(root)
+// NewRouter creates a Router rooted at an ALREADY-VALIDATED factory root and using
+// the injected Store for issue persistence. It does NOT resolve the root from a
+// working directory: ambient cwd→root resolution here would launder around the
+// internal/cmd resolveInvokerRoot seam (the #519 cross-check), so the cmd layer —
+// which already holds the validated root at every call site — must pass it in
+// (issue #519 review follow-up, thread 7a). The internal/cmd drift guard enforces
+// that this package never reintroduces config.FindFactoryRoot.
+func NewRouter(factoryRoot string, store issuestore.Store) (*Router, error) {
+	agentsPath := config.AgentsConfigPath(factoryRoot)
 	agentsCfg, err := config.LoadAgentConfig(agentsPath)
 	if err != nil {
 		return nil, fmt.Errorf("creating router: %w", err)
 	}
 
-	msgPath := config.MessagingConfigPath(root)
+	msgPath := config.MessagingConfigPath(factoryRoot)
 	msgCfg, err := config.LoadMessagingConfig(msgPath, agentsCfg)
 	if err != nil {
 		return nil, fmt.Errorf("creating router: %w", err)
 	}
 
 	return &Router{
-		workDir:     workDir,
-		factoryRoot: root,
+		factoryRoot: factoryRoot,
 		store:       store,
 		agentsCfg:   agentsCfg,
 		msgCfg:      msgCfg,

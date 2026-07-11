@@ -63,10 +63,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	root, err := config.FindFactoryRoot(wd)
+	root, err := resolveInvokerRoot(wd)
 	if err != nil {
 		return err
 	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "factory: %s\n", root)
 
 	t := newCmdTmux()
 	if !t.IsAvailable() {
@@ -362,6 +364,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 			allOK = false
 		} else if startupCfg.Fidelity != "" && startupCfg.Fidelity != "default" {
 			fmt.Fprintf(cmd.OutOrStdout(), "fidelity gate: %s\n", startupCfg.Fidelity)
+		}
+		if gErr := applyGate(root, root, "improvement", startupCfg.Improvement); gErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: improvement hook: %v\n", gErr)
+			allOK = false
+		} else if startupCfg.Improvement != "" && startupCfg.Improvement != "default" {
+			fmt.Fprintf(cmd.OutOrStdout(), "improvement hook: %s\n", startupCfg.Improvement)
 		}
 
 		// AC-5: start the dispatcher when configured (friendly-skips internally when

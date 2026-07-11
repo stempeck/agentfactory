@@ -125,10 +125,12 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	root, err := config.FindFactoryRoot(wd)
+	root, err := resolveInvokerRoot(wd)
 	if err != nil {
 		return err
 	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "factory: %s\n", root)
 
 	// Load configs
 	dispatchCfg, err := config.LoadDispatchConfig(root)
@@ -1443,10 +1445,12 @@ func runDispatchStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	root, err := config.FindFactoryRoot(wd)
+	root, err := resolveInvokerRoot(wd)
 	if err != nil {
 		return err
 	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "factory: %s\n", root)
 
 	t := newCmdTmux()
 	if running, _ := t.HasSession(dispatchSessionName); running {
@@ -1477,11 +1481,16 @@ func launchDispatchSession(cmd *cobra.Command, root string, t cmdTmux, interval 
 		afBin = "af"
 	}
 
-	loopCmd := buildDispatchLoopCmd(afBin, interval)
+	loopCmd := buildDispatchLoopCmd(afBin, root, interval)
 
 	if err := t.NewSession(dispatchSessionName, root); err != nil {
 		return fmt.Errorf("creating tmux session: %w", err)
 	}
+
+	// Bake AF_ROOT into the session env too (best-effort, mirrors agent sessions at
+	// session.go:379 and the watchdog at up.go:530). The inline export in loopCmd is
+	// the load-bearing half; this covers any pane tmux spawns fresh in the session.
+	_ = t.SetEnvironment(dispatchSessionName, "AF_ROOT", root)
 
 	if err := t.SendKeys(dispatchSessionName, loopCmd); err != nil {
 		return fmt.Errorf("sending loop command: %w", err)
@@ -1547,12 +1556,18 @@ func runDispatchStatus(cmd *cobra.Command, args []string) error {
 		}
 		return err
 	}
-	root, err := config.FindFactoryRoot(wd)
+	root, err := resolveInvokerRoot(wd)
 	if err != nil {
-		if jsonOut {
+		// A factory-root mismatch must not break the --json always-exit-0 contract:
+		// downgrade it to a stderr warning and proceed on the cwd-resolved root. A
+		// not-found error still propagates through the existing envelope path.
+		if r, downgraded := downgradeRootMismatch(err); downgraded {
+			root = r
+		} else if jsonOut {
 			return emitDispatchStatusError(cmd, err)
+		} else {
+			return err
 		}
-		return err
 	}
 
 	t := newCmdTmux()
@@ -1697,9 +1712,18 @@ func emitDispatchStatusJSON(cmd *cobra.Command, running bool, entries map[string
 }
 
 // buildDispatchLoopCmd constructs the shell loop command for the dispatcher tmux session.
-func buildDispatchLoopCmd(afBin string, interval int) string {
+//
+// It bakes an inline `export AF_ROOT=<root>` FIRST so every `af dispatch` cycle runs
+// env-aware under the K1 cross-check (issue #519 review follow-up). The inline export
+// — not tmux set-environment — is the load-bearing half: set-environment only reaches
+// NEW panes, but this loop runs in the shell already spawned by NewSession, mirroring
+// the agent-session launch idiom (session.go buildStartupCommand). Without it a
+// dispatcher parked in a nested layout would either silently capture into the wrong
+// factory (pre-#519) or have its state-writing verbs refuse (K5, post-#519).
+func buildDispatchLoopCmd(afBin, root string, interval int) string {
 	return fmt.Sprintf(
-		`trap 'echo "[$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)] dispatch loop exiting (signal)" | tee -a .runtime/dispatch.log; exit 1' TERM INT HUP; `+
+		`export AF_ROOT=%s; `+
+			`trap 'echo "[$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)] dispatch loop exiting (signal)" | tee -a .runtime/dispatch.log; exit 1' TERM INT HUP; `+
 			`while true; do `+
 			`echo "[$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)] dispatch cycle starting" >> .runtime/dispatch.log; `+
 			`%s dispatch 2>&1 | tee -a .runtime/dispatch.log; `+
@@ -1707,7 +1731,14 @@ func buildDispatchLoopCmd(afBin string, interval int) string {
 			`if [ $rc -ne 0 ]; then echo "[$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)] dispatch exited with code $rc" >> .runtime/dispatch.log; fi; `+
 			`sleep %d; `+
 			`done`,
-		afBin, interval)
+		shellQuote(root), afBin, interval)
+}
+
+// shellQuote wraps s in POSIX single quotes, escaping any embedded single quote with
+// the standard close-quote/escaped-quote/reopen-quote idiom (the internal/session
+// buildStartupCommand pattern, kept local so the cmd layer stays self-contained).
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // resolveDispatchInterval returns the flag value if non-zero, otherwise the config value.

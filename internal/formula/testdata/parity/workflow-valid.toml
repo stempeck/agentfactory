@@ -1,0 +1,11 @@
+formula = "parity-workflow-valid"
+type = "workflow"
+
+[[steps]]
+id = "plan"
+title = "Plan"
+
+[[steps]]
+id = "build"
+title = "Build"
+needs = ["plan"]

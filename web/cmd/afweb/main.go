@@ -23,6 +23,8 @@ import (
 	"github.com/stempeck/agentfactory-web/internal/exec"
 	"github.com/stempeck/agentfactory-web/internal/feedback"
 	"github.com/stempeck/agentfactory-web/internal/formschema"
+	"github.com/stempeck/agentfactory-web/internal/formulas"
+	"github.com/stempeck/agentfactory-web/internal/genjob"
 	"github.com/stempeck/agentfactory-web/internal/proto"
 	"github.com/stempeck/agentfactory-web/internal/readmodel"
 	"github.com/stempeck/agentfactory-web/internal/rendezvous"
@@ -53,6 +55,8 @@ func main() {
 	settings := config.New(root, wrapper)
 	protos := proto.New(root)                // serve on-disk prototypes under <root>/.designs/
 	feedbackWriter := feedback.New(root, rm) // gate-verify via the read-model (no new exec)
+	formulaStore := formulas.New(root)       // #502: live formula store (list/read/CAS write)
+	genJob := genjob.New(root)               // #502: detached singleton Generate-All runner
 
 	opts := []server.Option{
 		server.WithRoot(root), // surfaced via /healthz so a wrong-but-valid root is visible, not silent
@@ -62,8 +66,11 @@ func main() {
 		server.WithFormulaResolver(settings), // #455: Sling form resolves the DECLARED formula from agents.json (same *config.Service)
 		server.WithPrototypes(protos),
 		server.WithFeedback(feedbackWriter),
-		server.WithTailer(capture), // #500: GET /api/agents/{name}/detail session snapshot
-		server.WithMailer(wrapper), // #500: POST /api/agents/{name}/mail (Wrapper.MailSend, sender=operator)
+		server.WithTailer(capture),            // #500: GET /api/agents/{name}/detail session snapshot
+		server.WithMailer(wrapper),            // #500: POST /api/agents/{name}/mail (Wrapper.MailSend, sender=operator)
+		server.WithFormulaStore(formulaStore), // #502: GET/PUT /api/formulas[/{name}]
+		server.WithGenerator(genJob),          // #502: POST/GET /api/factory/generate
+		server.WithValidator(wrapper),         // #502: PUT-time `af formula validate` gate (reuses the exec wrapper)
 	}
 	if bind := os.Getenv("AF_BIND"); bind != "" {
 		opts = append(opts, server.WithBind(bind))
@@ -94,7 +101,7 @@ func main() {
 	_ = ln                                      // the listener stays open; srv.Listen() serves on it in its own goroutine
 	log.Printf("afweb: factory root: %s", root) // so an operator can see which factory this process resolved to
 	log.Printf("afweb: serving the Floor at %s/", url)
-	log.Printf("afweb: session token: %s  (required only when the bind is not loopback)", srv.Token())
+	log.Printf("afweb: session token: %s  (paste into the console to Save formulas / Generate; also required for all requests when the bind is not loopback)", srv.Token())
 
 	// Block forever; the server runs in its own goroutine.
 	select {}

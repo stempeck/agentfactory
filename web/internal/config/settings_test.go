@@ -40,6 +40,17 @@ func (f *fakeRunner) RunStdin(ctx context.Context, stdin []byte, verb string, ar
 	return f.res, f.err
 }
 
+// RunStream satisfies the extended Runner seam. This package never exercises streaming; a minimal
+// recorder (mirroring RunStdin) keeps the fake honest at zero cost.
+func (f *fakeRunner) RunStream(ctx context.Context, onChunk func([]byte), verb string, args ...string) (exec.Result, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.verb = verb
+	f.args = append([]string(nil), args...)
+	return f.res, f.err
+}
+
 var _ exec.Runner = (*fakeRunner)(nil)
 
 // a complete, valid DispatchConfig (the editor always sends the WHOLE document, never a patch).
@@ -196,6 +207,27 @@ func TestSettings_Read_StartupAbsentDefaults(t *testing.T) {
 	}
 	if got.Factory.Name != "demo" {
 		t.Fatalf("factory read-only view = %+v, want name=demo", got.Factory)
+	}
+}
+
+// #483 Phase 2b — a CLI-set improvement value must survive the web Read() decode. Before the
+// Startup mirror gained the Improvement field, encoding/json silently dropped the on-disk
+// `improvement` key, so a subsequent full-replace web save erased it. This is the read-side proof
+// of the round-trip: the value is decoded and carried, not dropped.
+func TestSettings_Read_PreservesImprovement(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, dotDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, startupPath(root), `{"agents":["manager"],"quality":"default","fidelity":"default","improvement":"on","start_dispatch":true}`)
+
+	svc := New(root, nil) // read path needs no Setter
+	got, err := svc.Read(context.Background())
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got.Startup.Improvement != "on" {
+		t.Fatalf("on-disk improvement was dropped by Read: got Startup.Improvement=%q, want \"on\" (Startup=%+v)", got.Startup.Improvement, got.Startup)
 	}
 }
 

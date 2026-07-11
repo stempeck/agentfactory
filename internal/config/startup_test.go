@@ -48,8 +48,48 @@ func TestLoadStartupConfig_AbsentFileDefaults(t *testing.T) {
 	if cfg.Fidelity != "default" {
 		t.Errorf("Fidelity = %q, want \"default\"", cfg.Fidelity)
 	}
+	if cfg.Improvement != "default" {
+		t.Errorf("Improvement = %q, want \"default\"", cfg.Improvement)
+	}
 	if cfg.StartDispatch {
 		t.Errorf("StartDispatch = true, want false")
+	}
+}
+
+// G4 (CFG-3 backward-compat trap): an existing startup.json that OMITS the new
+// "improvement" key must still load. Without the empty→"default" fill AND the
+// defaultStartupConfig seed, the enum loop would reject the unmarshalled "" and
+// every pre-existing file would fail to load. This test pins all four edits.
+func TestLoadStartupConfig_MissingImprovementFieldDefaults(t *testing.T) {
+	dir := writeStartupRoot(t, `{"quality":"on","fidelity":"off","start_dispatch":true}`)
+
+	cfg, err := LoadStartupConfig(dir)
+	if err != nil {
+		t.Fatalf("existing startup.json without \"improvement\" must still load, got %v", err)
+	}
+	if cfg.Improvement != "default" {
+		t.Errorf("Improvement = %q, want \"default\"", cfg.Improvement)
+	}
+}
+
+func TestLoadStartupConfig_BadImprovementValue(t *testing.T) {
+	dir := writeStartupRoot(t, `{"improvement":"maybe"}`)
+
+	_, err := LoadStartupConfig(dir)
+	if !errors.Is(err, ErrInvalidType) {
+		t.Fatalf("expected ErrInvalidType for bad improvement value, got %v", err)
+	}
+}
+
+func TestLoadStartupConfig_ImprovementRoundTrip(t *testing.T) {
+	dir := writeStartupRoot(t, `{"improvement":"on"}`)
+
+	cfg, err := LoadStartupConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Improvement != "on" {
+		t.Errorf("Improvement = %q, want \"on\"", cfg.Improvement)
 	}
 }
 

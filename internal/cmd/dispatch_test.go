@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -324,14 +325,17 @@ func TestBuildDispatchLoopCmd(t *testing.T) {
 	tests := []struct {
 		name     string
 		afBin    string
+		root     string
 		interval int
 		wantHas  []string
 	}{
 		{
 			name:     "default interval",
 			afBin:    "/usr/local/bin/af",
+			root:     "/home/dev/factory",
 			interval: 300,
 			wantHas: []string{
+				"export AF_ROOT='/home/dev/factory';",
 				"while true",
 				"/usr/local/bin/af dispatch",
 				"tee -a .runtime/dispatch.log",
@@ -346,8 +350,10 @@ func TestBuildDispatchLoopCmd(t *testing.T) {
 		{
 			name:     "custom interval",
 			afBin:    "/home/user/.local/bin/af",
+			root:     "/srv/factory",
 			interval: 60,
 			wantHas: []string{
+				"export AF_ROOT='/srv/factory';",
 				"while true",
 				"/home/user/.local/bin/af dispatch",
 				"sleep 60",
@@ -358,8 +364,10 @@ func TestBuildDispatchLoopCmd(t *testing.T) {
 		{
 			name:     "fallback af binary",
 			afBin:    "af",
+			root:     "/factory",
 			interval: 120,
 			wantHas: []string{
+				"export AF_ROOT='/factory';",
 				"af dispatch",
 				"sleep 120",
 				"trap",
@@ -370,11 +378,16 @@ func TestBuildDispatchLoopCmd(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := buildDispatchLoopCmd(tc.afBin, tc.interval)
+			cmd := buildDispatchLoopCmd(tc.afBin, tc.root, tc.interval)
 			for _, want := range tc.wantHas {
 				if !strings.Contains(cmd, want) {
-					t.Errorf("buildDispatchLoopCmd(%q, %d) missing %q\ngot: %s", tc.afBin, tc.interval, want, cmd)
+					t.Errorf("buildDispatchLoopCmd(%q, %q, %d) missing %q\ngot: %s", tc.afBin, tc.root, tc.interval, want, cmd)
 				}
+			}
+			// The export must come FIRST so the whole loop (and every `af dispatch`
+			// cycle) inherits AF_ROOT (issue #519 review follow-up).
+			if !strings.HasPrefix(cmd, "export AF_ROOT=") {
+				t.Errorf("buildDispatchLoopCmd must lead with the AF_ROOT export; got: %s", cmd)
 			}
 		})
 	}
@@ -553,6 +566,43 @@ func TestDispatchStart_AlreadyRunning(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "already running") {
 		t.Errorf("error = %q, want it to contain %q", err.Error(), "already running")
+	}
+}
+
+// TestLaunchDispatchSession_BakesAFRoot pins the #519 review follow-up (unresolved
+// thread 6, dispatch.go:1448): the launched af-dispatch session must carry AF_ROOT
+// so the dispatcher loop runs env-aware under the K1 cross-check — unlike the
+// pre-fix launch which started the loop env-less. Both halves are asserted: the
+// inline export in the loop command (load-bearing, reaches the running loop shell)
+// AND the session-env SetEnvironment (covers any fresh pane).
+func TestLaunchDispatchSession_BakesAFRoot(t *testing.T) {
+	root := t.TempDir()
+	fake := newFakeTmux()
+	cmd := &cobra.Command{}
+
+	_ = captureStdout(t, func() {
+		if err := launchDispatchSession(cmd, root, fake, 300); err != nil {
+			t.Fatalf("launchDispatchSession: %v", err)
+		}
+	})
+
+	wantSetEnv := "SetEnvironment " + dispatchSessionName + " AF_ROOT=" + root
+	if !slices.Contains(fake.ops, wantSetEnv) {
+		t.Errorf("dispatch session did not SetEnvironment AF_ROOT; want op %q in ops=%v", wantSetEnv, fake.ops)
+	}
+
+	var sentLoop string
+	prefix := "SendKeys " + dispatchSessionName + " "
+	for _, op := range fake.ops {
+		if strings.HasPrefix(op, prefix) {
+			sentLoop = strings.TrimPrefix(op, prefix)
+		}
+	}
+	if sentLoop == "" {
+		t.Fatalf("no SendKeys op recorded for the dispatch session; ops=%v", fake.ops)
+	}
+	if !strings.Contains(sentLoop, "export AF_ROOT="+shellQuote(root)) {
+		t.Errorf("dispatch loop command missing the inline AF_ROOT export; got: %s", sentLoop)
 	}
 }
 

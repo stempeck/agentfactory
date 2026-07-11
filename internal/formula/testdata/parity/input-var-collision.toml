@@ -1,0 +1,12 @@
+formula = "parity-input-var-collision"
+type = "workflow"
+
+[inputs.target]
+description = "shared name"
+
+[vars.target]
+source = "cli"
+
+[[steps]]
+id = "run"
+title = "Run"

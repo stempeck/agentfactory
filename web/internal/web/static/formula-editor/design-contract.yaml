@@ -1,0 +1,311 @@
+version: 1
+feature: "Formula Editor (gamified web UI for .agentfactory/store/formulas)"
+generated_from: "https://github.com/stempeck/agentfactory-pro/issues/445"
+generated_at: "2026-07-02T19:15:07Z"
+
+# Accessible names below are recorded EXACTLY as the DOM computes them
+# (aria-label wins over visible text; labeled controls use their label text).
+# Elements rendered per-formula by the engine (stations, cables, gauge rows,
+# faults) are contracted as dynamic templates with required: false — their
+# ids/names derive from user data, so a DOM regression asserts the stable
+# chrome and at least the boot-demo instances, not exact user content.
+
+screens:
+  - id: editor
+    prototype: screens/editor.html
+    route: "/formulas/:name"
+    elements:
+      - id: fireBtn
+        accessible: { role: button, name: "Test fire" }
+        purpose: "Run the Test Fire preview: a spark walks the computed DAG while the four validation lamps land"
+        required: true
+        viewmodel: "EditorViewModel.fire"
+      - id: saveBtn
+        accessible: { role: button, name: "Pour and save" }
+        purpose: "Write the TOML text back to its source; disabled unless dirty AND all four lamps pass"
+        required: true
+        viewmodel: "EditorViewModel.save"
+      - id: hatchBtn
+        accessible: { role: button, name: "Maintenance hatch" }
+        purpose: "Open the raw-TOML hatch (source of truth) with source and diff-vs-file tabs"
+        required: true
+        viewmodel: "EditorViewModel.openHatch"
+      - id: addStation
+        accessible: { role: button, name: "Bolt on a station" }
+        purpose: "Append a new step block to the TOML, wired to the current selection"
+        required: true
+        viewmodel: "EditorViewModel.addStation"
+      - id: openFileBtn
+        accessible: { role: button, name: "Open a real .toml…" }
+        purpose: "File System Access picker for a real store formula (Chromium)"
+        required: true
+        viewmodel: "EditorViewModel.openFile"
+      - id: demoSel
+        accessible: { role: combobox, name: "Load an embedded demo formula" }
+        purpose: "Load a byte-exact demo copy (ultra-review / design convoy / web-design)"
+        required: true
+        viewmodel: "EditorViewModel.loadDemo"
+      - id: pasteBtn
+        accessible: { role: button, name: "Paste TOML…" }
+        purpose: "Fallback intake for browsers without the File System Access API"
+        required: true
+        viewmodel: "EditorViewModel.openPasteDialog"
+      - id: board
+        accessible: { role: region, name: "The line — dependency board" }
+        purpose: "The computed DAG canvas; stations and belt edges render from the parsed TOML"
+        required: true
+        viewmodel: "EditorViewModel.renderBoard"
+      - id: stTitle
+        accessible: { role: textbox, name: "Title" }
+        purpose: "Edit the selected step's title (minimal patch on change)"
+        required: true
+        viewmodel: "EditorViewModel.applyTitle"
+      - id: stId
+        accessible: { role: textbox, name: "Station id" }
+        purpose: "Rename the selected step id; re-plugs every referencing needs entry"
+        required: true
+        viewmodel: "EditorViewModel.renameStation"
+      - id: gateToggle
+        accessible: { role: checkbox, name: "Human must approve here" }
+        purpose: "Add/remove the human gate inline table on the selected step"
+        required: true
+        viewmodel: "EditorViewModel.toggleGate"
+      - id: gateId
+        accessible: { role: textbox, name: "Arch id" }
+        purpose: "Gate id field (written into the gate inline table)"
+        required: true
+        viewmodel: "EditorViewModel.gate.id"
+      - id: gateTimeout
+        accessible: { role: textbox, name: "Timeout" }
+        purpose: "Gate timeout field (e.g. 24h)"
+        required: true
+        viewmodel: "EditorViewModel.gate.timeout"
+      - id: plugBelt
+        accessible: { role: button, name: "Plug in a belt" }
+        purpose: "Open the socket list of upstream step ids to add a needs entry"
+        required: true
+        viewmodel: "EditorViewModel.plugBelt"
+      - id: stDesc
+        accessible: { role: textbox, name: "Work instructions — the step description exactly as stored in the TOML" }
+        purpose: "Verbatim description editor — the plain TOML string, no invented markup"
+        required: true
+        viewmodel: "EditorViewModel.description"
+      - id: descApply
+        accessible: { role: button, name: "Apply instructions" }
+        purpose: "Apply the edited description as a single minimal patch"
+        required: true
+        viewmodel: "EditorViewModel.applyDescription"
+      - id: cpDuplicate
+        accessible: { role: button, name: "Duplicate" }
+        purpose: "Cast a copy of the selected step directly after it"
+        required: true
+        viewmodel: "EditorViewModel.duplicateStation"
+      - id: cpRemove
+        accessible: { role: button, name: "Unbolt station" }
+        purpose: "Remove the selected step (confirm dialog); auto-unplugs downstream needs and convoy synthesis.depends_on"
+        required: true
+        viewmodel: "EditorViewModel.removeStation"
+      - id: editIdentityBtn
+        accessible: { role: button, name: "Edit nameplate" }
+        purpose: "Open the identity dialog (formula name, version, description)"
+        required: true
+        viewmodel: "EditorViewModel.editIdentity"
+      - id: addSkill
+        accessible: { role: button, name: "Rack a tool" }
+        purpose: "Add a skill to the formula's skills array (engine-validated name)"
+        required: true
+        viewmodel: "EditorViewModel.addSkill"
+      - id: addInput
+        accessible: { role: button, name: "Add an input" }
+        purpose: "Open the gauge dialog to add an [inputs.*] table"
+        required: true
+        viewmodel: "EditorViewModel.addGauge('inputs')"
+      - id: addVar
+        accessible: { role: button, name: "Add a var" }
+        purpose: "Open the gauge dialog to add a [vars.*] table"
+        required: true
+        viewmodel: "EditorViewModel.addGauge('vars')"
+      - id: tomlText
+        accessible: { role: textbox, name: "TOML source — the single source of truth" }
+        purpose: "The document itself; typing here re-parses and re-renders every surface"
+        required: true
+        viewmodel: "EditorViewModel.text"
+      - id: tabDiff
+        accessible: { role: button, name: "Diff vs file" }
+        purpose: "Show exactly the changed lines the pour will write (minimal-diff proof)"
+        required: true
+        viewmodel: "EditorViewModel.renderDiff"
+      - id: hatchClose
+        accessible: { role: button, name: "Close and re-sync" }
+        purpose: "Close the hatch; machines already reflect the text"
+        required: true
+        viewmodel: "EditorViewModel.closeHatch"
+      - id: downloadBtn
+        accessible: { role: button, name: "Download the TOML file" }
+        purpose: "Download fallback for browsers without writable file handles"
+        required: true
+        viewmodel: "EditorViewModel.download"
+      # dynamic templates (per-formula content; asserted against the boot demo only)
+      - id: "station:{step-id}"
+        accessible: { role: button, name: "Station {step-id}[ — inspection arch], rarity {rarity}" }
+        purpose: "One DAG node per step/leg; rarity frame computed from structure; click raises the control panel"
+        required: false
+        viewmodel: "EditorViewModel.select"
+      - id: "cable:{needs-id}"
+        accessible: { role: button, name: "Unplug belt from {needs-id}" }
+        purpose: "One cable per needs entry in the patch bay"
+        required: false
+        viewmodel: "EditorViewModel.setNeeds"
+      - id: "fault:{finding}"
+        accessible: { role: button, name: "{finding message}" }
+        purpose: "Click-to-locate validation finding (selects the station or opens the hatch at the line)"
+        required: false
+        viewmodel: "EditorViewModel.locateFinding"
+
+  - id: roster
+    prototype: screens/roster.html
+    route: "/formulas"
+    elements:
+      - id: filter
+        accessible: { role: textbox, name: "Find a line by name" }
+        purpose: "Type-to-filter the formula cards"
+        required: true
+        viewmodel: "RosterViewModel.render"
+      - id: connectStore
+        accessible: { role: button, name: "Connect the real store folder" }
+        purpose: "Directory picker for .agentfactory/store/formulas; cards become the real files"
+        required: true
+        viewmodel: "RosterViewModel.connectStore"
+      - id: liftCover
+        accessible: { role: button, name: "Fire up the factory" }
+        purpose: "Open the Generate-All work order (factory restart warning)"
+        required: true
+        viewmodel: "RosterViewModel.liftCover"
+      - id: breakerHold
+        accessible: { role: button, name: "Hold the breaker" }
+        purpose: "Two-second hold-to-confirm for the factory restart; releasing early cancels"
+        required: true
+        viewmodel: "RosterViewModel.breakerThrown"
+      - id: cloneName
+        accessible: { role: textbox, name: "New line name" }
+        purpose: "Recast name; conflict-checked; stamps filename and formula field together"
+        required: true
+        viewmodel: "RosterViewModel.validateCloneName"
+      - id: cloneGo
+        accessible: { role: button, name: "Cast the copy" }
+        purpose: "Write the renamed clone (real file in store mode; editor handoff otherwise)"
+        required: true
+        viewmodel: "RosterViewModel.clone"
+      # dynamic templates
+      - id: "card:{formula}"
+        accessible: { role: button, name: "Open the line" }
+        purpose: "One rarity-framed card per formula, stats parsed live from its TOML"
+        required: false
+        viewmodel: "RosterViewModel.openEntry"
+      - id: "recast:{formula}"
+        accessible: { role: button, name: "Recast" }
+        purpose: "Clone action per card"
+        required: false
+        viewmodel: "RosterViewModel.openCloneDialog"
+
+  - id: wizard
+    prototype: screens/wizard.html
+    route: "/formulas/new"
+    elements:
+      - id: "stock (radio group: blank | recast | pattern)"
+        accessible: { role: radio, name: "Blank billet / Recast a line / Standard pattern" }
+        purpose: "Beat 1 — choose the casting stock"
+        required: true
+        viewmodel: "WizardViewModel.picked.stock"
+      - id: recastSel
+        accessible: { role: combobox, name: "Line to recast" }
+        purpose: "Source formula when stock = recast (demos + connected store)"
+        required: false
+        viewmodel: "WizardViewModel.picked.recastSource"
+      - id: lineName
+        accessible: { role: textbox, name: "Line name" }
+        purpose: "Beat 2 — nameplate; live file↔TOML binding preview; conflict-checked"
+        required: true
+        viewmodel: "WizardViewModel.picked.name"
+      - id: lineDesc
+        accessible: { role: textbox, name: "What is this line for? optional" }
+        purpose: "Becomes the TOML description"
+        required: true
+        viewmodel: "WizardViewModel.picked.desc"
+      - id: customSkill
+        accessible: { role: textbox, name: "Another tool optional" }
+        purpose: "Beat 3 — free-text skill entry, engine-validated"
+        required: true
+        viewmodel: "WizardViewModel.picked.skills"
+      - id: addCustomSkill
+        accessible: { role: button, name: "Rack the custom skill" }
+        purpose: "Add the free-text skill to the rack"
+        required: true
+        viewmodel: "WizardViewModel.addSkill"
+      - id: lever
+        accessible: { role: button, name: "Pull the commissioning lever" }
+        purpose: "Beat 4 — cast real TOML; validated by the four checks before it rolls out"
+        required: true
+        viewmodel: "WizardViewModel.pullLever"
+      - id: openInEditor
+        accessible: { role: button, name: "Open the line in the editor" }
+        purpose: "Hand the cast TOML to the editor (dirty, unsaved)"
+        required: true
+        viewmodel: "WizardViewModel.openInEditor"
+      - id: nextBtn
+        accessible: { role: button, name: "Next beat" }
+        purpose: "Advance one beat; blocked at beat 2 until the nameplate is free"
+        required: true
+        viewmodel: "WizardViewModel.showStage"
+      - id: backBtn
+        accessible: { role: button, name: "Back" }
+        purpose: "Return one beat"
+        required: true
+        viewmodel: "WizardViewModel.showStage"
+
+viewmodel_contracts:
+  - name: "EditorViewModel"
+    test_pattern: "**/*editor*.test.*"
+    properties:
+      - { name: text, type: string }          # the TOML document — single source of truth
+      - { name: savedText, type: string }     # as-loaded/as-saved baseline for dirty + diff
+      - { name: fileName, type: string }
+      - { name: mode, type: "string ('demo'|'file'|'new')" }
+      - { name: selectedId, type: "string|null" }
+      - { name: unitKey, type: "string ('steps'|'legs'|'template'|'aspects')" }
+      - { name: findings, type: "Finding[] (lamp: parse|ids|needs|cycles, message, ref)" }
+      - { name: isDirty, type: "boolean (computed: text !== savedText)" }
+      - { name: isValid, type: "boolean (computed: findings.length === 0)" }
+    methods:
+      - { name: setText, async: false }       # parse + validate + render; the only state entry point
+      - { name: select, async: false }
+      - { name: setNeeds, async: false }
+      - { name: fire, async: false }          # Test Fire preview; respects prefers-reduced-motion
+      - { name: save, async: true }           # refuses unless isDirty && isValid
+      - { name: openFile, async: true }       # File System Access; AbortError tolerated
+      - { name: loadDemo, async: false }
+      - { name: renderDiff, async: false }    # lineDiff(savedText, text)
+  - name: "RosterViewModel"
+    test_pattern: "**/*roster*.test.*"
+    properties:
+      - { name: catalog, type: "Entry[] (name, text, stats, mode: demo|file|locked, handle?)" }
+      - { name: dirHandle, type: "FileSystemDirectoryHandle|null" }
+    methods:
+      - { name: connectStore, async: true }
+      - { name: scanStore, async: true }      # *.formula.toml only; stats parsed per file
+      - { name: render, async: false }
+      - { name: openEntry, async: false }     # handoff (sessionStorage + IDB handle) to editor
+      - { name: validateCloneName, async: false }
+      - { name: breakerThrown, async: false } # prototype affordance; production streams af output
+  - name: "WizardViewModel"
+    test_pattern: "**/*wizard*.test.*"
+    properties:
+      - { name: stage, type: "number (1..4)" }
+      - { name: picked, type: "{ stock, name, desc, skills[] }" }
+      - { name: nameOk, type: boolean }
+      - { name: castText, type: "string|null" }
+    methods:
+      - { name: showStage, async: false }
+      - { name: buildToml, async: false }     # output must parse and pass all four checks
+      - { name: fillRecast, async: true }
+      - { name: openInEditor, async: false }

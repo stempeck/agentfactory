@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 )
 
@@ -139,7 +138,7 @@ func runBeadCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	factoryRoot, err := config.FindFactoryRoot(cwd)
+	factoryRoot, err := resolveInvokerRoot(cwd)
 	if err != nil {
 		return err
 	}
@@ -251,7 +250,7 @@ func runBeadList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	factoryRoot, err := config.FindFactoryRoot(cwd)
+	factoryRoot, err := resolveInvokerRoot(cwd)
 	if err != nil {
 		return err
 	}

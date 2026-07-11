@@ -21,6 +21,7 @@
       <a id="nav-sling" href="#sling" data-route="sling">Sling</a>
       <a id="nav-dispatch" href="#dispatch" data-route="dispatch">Dispatch</a>
       <a id="nav-prototypes" href="#prototypes" data-route="prototypes">Prototypes</a>
+      <a id="nav-formulas" href="#formulas" data-route="formulas">Formulas</a>
       <a id="nav-settings" href="#settings" data-route="settings">Settings</a>
     </nav>
     <div class="powerbar" aria-label="Factory power">
@@ -311,6 +312,16 @@
     <p class="keyhint" id="agent-snapshot-captured" hidden></p>
   </section>
 </section>
+
+<!-- #534: the formula editor is the APPROVED prototype (.designs/web-ui/final) transplanted
+     verbatim under /formula-editor/ — byte-fidelity is enforced by the reconstruction tripwire.
+     The shell mounts it in ONE persistent same-origin iframe: the prototype's own internal
+     navigation, sessionStorage handoff, and dirty guard work unmodified, and the iframe boundary
+     keeps shell styles out of transplanted markup. The frame survives view switches (sections
+     hide, never unload), so unsaved edits are not lost by visiting another tab. -->
+<section id="view-formulas" hidden>
+  <iframe id="formulaFrame" title="Formula editor" style="display:block;width:100%;height:calc(100vh - var(--topbar-h, 104px));border:0;background:var(--ink)"></iframe>
+</section>
 </main>
 
 <!-- ============================ SHARED: RESET DIALOG ============================ -->
@@ -332,6 +343,7 @@
 </dialog>
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
 
 <noscript>
   <p style="padding:24px;color:#EDEAFF">The AgentFactory Floor needs JavaScript to render the live agent skyline.</p>

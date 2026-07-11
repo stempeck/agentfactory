@@ -20,11 +20,13 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -37,6 +39,8 @@ import (
 	"github.com/stempeck/agentfactory-web/internal/exec"
 	"github.com/stempeck/agentfactory-web/internal/feedback"
 	"github.com/stempeck/agentfactory-web/internal/formschema"
+	"github.com/stempeck/agentfactory-web/internal/formulas"
+	"github.com/stempeck/agentfactory-web/internal/genjob"
 	"github.com/stempeck/agentfactory-web/internal/proto"
 	"github.com/stempeck/agentfactory-web/internal/readmodel"
 )
@@ -114,6 +118,35 @@ type MailSender interface {
 	MailSend(ctx context.Context, name, subject, body string) (exec.Result, error)
 }
 
+// FormulaStore is the live formula read/write boundary at <root>/.agentfactory/store/formulas
+// (#502). *formulas.Store satisfies it: List/Read/Write carry the containment ladder, sha256 CAS,
+// and atomic write. The seam references formulas.Entry (Name + ReadOnly), so a nil store 500s the
+// /api/formulas routes rather than serving an empty list that would read as "no formulas".
+type FormulaStore interface {
+	List() ([]formulas.Entry, error)
+	Read(name string) ([]byte, error)
+	Write(name string, content []byte, baseHash string) error
+}
+
+// Generator is the detached singleton Generate-All job runner (#502 Phase 2). *genjob.Job satisfies
+// it. Only Start takes a context (it gates the synchronous setup; the child is detached); Status/
+// Progress/Confirm are context-free reads. A nil generator 500s the /api/factory/generate routes.
+type Generator interface {
+	Start(ctx context.Context) error
+	Status() (genjob.State, error)
+	Progress(from int64) (genjob.Progress, error)
+	Confirm() (genjob.ConfirmPayload, error)
+}
+
+// Validator is the save-time engine-of-record verdict (#502 Decision 8). *exec.Wrapper satisfies it
+// via FormulaValidate, which pipes the formula text to `af formula validate --json` and returns the
+// composed {ok, findings} verdict with ALWAYS exit 0 — so the PUT handler branches on the body's ok,
+// never the exit code. It is a SEPARATE seam from Mutator so a fake validator can be injected without
+// every fake mutator in the suite growing the method.
+type Validator interface {
+	FormulaValidate(ctx context.Context, text []byte) (exec.Result, error)
+}
+
 // Envelope is the uniform response shape on every endpoint.
 type Envelope struct {
 	OK      bool        `json:"ok"`
@@ -123,17 +156,20 @@ type Envelope struct {
 
 // Server holds the routing + security configuration.
 type Server struct {
-	mut      Mutator
-	reader   Assembler
-	form     FormReader      // form-schema reader (nil ⇒ the /form and /sling routes 500)
-	formula  FormulaResolver // #455 static-config (agents.json) formula resolver (nil ⇒ /form and /sling routes 500)
-	dispatch DispatchReader  // dispatch reader (nil ⇒ GET /api/dispatch 500)
-	settings SettingsService // settings read/write (nil ⇒ /api/settings routes 500)
-	proto    Prototypes      // prototype server (nil ⇒ the /api/prototypes and /proto routes are unregistered)
-	feedback Feedback        // feedback writer (nil ⇒ the feedback route is unregistered)
-	tailer   Tailer          // #500 session-snapshot reader (nil ⇒ the agent-detail route 500s)
-	mailer   MailSender      // #500 operator-mail sender (nil ⇒ the agent-mail route 500s)
-	static   http.Handler
+	mut       Mutator
+	reader    Assembler
+	form      FormReader      // form-schema reader (nil ⇒ the /form and /sling routes 500)
+	formula   FormulaResolver // #455 static-config (agents.json) formula resolver (nil ⇒ /form and /sling routes 500)
+	dispatch  DispatchReader  // dispatch reader (nil ⇒ GET /api/dispatch 500)
+	settings  SettingsService // settings read/write (nil ⇒ /api/settings routes 500)
+	proto     Prototypes      // prototype server (nil ⇒ the /api/prototypes and /proto routes are unregistered)
+	feedback  Feedback        // feedback writer (nil ⇒ the feedback route is unregistered)
+	tailer    Tailer          // #500 session-snapshot reader (nil ⇒ the agent-detail route 500s)
+	mailer    MailSender      // #500 operator-mail sender (nil ⇒ the agent-mail route 500s)
+	fstore    FormulaStore    // #502 live formula store (nil ⇒ the /api/formulas routes 500)
+	generator Generator       // #502 Generate-All job runner (nil ⇒ the /api/factory/generate routes 500)
+	validator Validator       // #502 save-time af-validate gate (nil ⇒ PUT /api/formulas/{name} 500s)
+	static    http.Handler
 
 	root string // the resolved factory root this console serves; surfaced via GET /healthz so a
 	// wrong-but-valid root is visible, not silent
@@ -202,6 +238,21 @@ func WithMailer(m MailSender) Option {
 	return func(s *Server) { s.mailer = m }
 }
 
+// WithFormulaStore wires the #502 live formula store used by the /api/formulas routes.
+func WithFormulaStore(fs FormulaStore) Option {
+	return func(s *Server) { s.fstore = fs }
+}
+
+// WithGenerator wires the #502 Generate-All job runner used by the /api/factory/generate routes.
+func WithGenerator(g Generator) Option {
+	return func(s *Server) { s.generator = g }
+}
+
+// WithValidator wires the #502 save-time af-validate gate used by PUT /api/formulas/{name}.
+func WithValidator(v Validator) Option {
+	return func(s *Server) { s.validator = v }
+}
+
 // WithRoot records the resolved factory root this console serves. It is surfaced via GET /healthz
 // so an operator — or an automated probe — can see WHICH factory the console resolved to, making
 // a wrong-but-valid root visible rather than silent.
@@ -248,6 +299,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/dispatch", s.handleDispatch)
 	s.mux.HandleFunc("GET /api/settings", s.handleSettings)
 	s.mux.HandleFunc("PUT /api/settings/{file}", s.handleSettingsWrite)
+	// #502 Phase 3 — formula store + Generate-All, registered with Convention A (always registered;
+	// each handler nil-checks its seam and 500s when unwired). Convention A — not the proto/feedback
+	// Convention B below — keeps the route-table token test non-vacuous: a Convention-B route would be
+	// ABSENT when its seam is nil and the enumeration would pass trivially.
+	s.mux.HandleFunc("GET /api/formulas", s.handleFormulasList)
+	s.mux.HandleFunc("GET /api/formulas/{name}", s.handleFormulaGet)
+	s.mux.HandleFunc("PUT /api/formulas/{name}", s.handleFormulaPut)
+	s.mux.HandleFunc("POST /api/factory/generate", s.handleGeneratePost)
+	s.mux.HandleFunc("GET /api/factory/generate", s.handleGenerateGet)
 	if s.proto != nil {
 		// Enumeration (read) + traversal-contained on-disk static serving. The static subtree
 		// is mounted under StripPrefix so the proto handler receives "{id}/{asset}".
@@ -273,11 +333,32 @@ func (s *Server) routes() {
 // rather than allowlisting a font CDN, matching variables.css's own offline-fallback comment.
 const cspPolicy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
 
+// editorCSPPolicy is the document policy for the /formula-editor/ subtree ONLY (#534). The
+// transplanted formula editor is the APPROVED prototype verbatim, and the approved screens carry
+// their behavior in inline <script> blocks — the shell policy's bare script-src 'self' would leave
+// them rendered but dead. Enabling inline execution is CONTAINED here the way the /proto/ mount's
+// exclusion is recorded: the subtree holds nothing but the signed artifact plus its one declared
+// data seam, and web/internal/web/reconstruct_test.go byte-pins all of it in CI, so "inline scripts
+// in this subtree" and "the approved bytes" are the same set. The shell document keeps cspPolicy.
+const editorCSPPolicy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+
+// maxWriteBody caps a write-tier request body AT THE HANDLER, mirroring the formula store's
+// 1 MiB maxBodyLen (web/internal/formulas/store.go). Wrapping r.Body in http.MaxBytesReader
+// before decode makes an oversized PUT/POST fail during Read — refused before it is buffered
+// into memory — rather than only after the store's post-decode cap.
+const maxWriteBody = 1 << 20
+
 // withDocumentCSP wraps the HTML document handler so the CSP header is set on document responses
-// (set before the wrapped handler writes its status, so it sticks).
+// (set before the wrapped handler writes its status, so it sticks). Documents under
+// /formula-editor/ carry editorCSPPolicy (the transplanted prototype's inline scripts must run —
+// see the policy's containment note); every other document keeps the strict shell policy.
 func withDocumentCSP(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", cspPolicy)
+		if strings.HasPrefix(r.URL.Path, "/formula-editor/") {
+			w.Header().Set("Content-Security-Policy", editorCSPPolicy)
+		} else {
+			w.Header().Set("Content-Security-Policy", cspPolicy)
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -321,6 +402,25 @@ func (s *Server) authOK(r *http.Request) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) == 1
+}
+
+// guardWrite is the #502 write tier for the two formula/generate write routes. It layers a bearer
+// token ON TOP OF guard: everything guard enforces (auth when !loopback, plus the CSRF-Origin
+// allowlist on the state-changing request) AND a constant-time token compare that runs REGARDLESS of
+// s.loopback. authOK short-circuits true on pure loopback (any same-user local process is trusted for
+// the existing verbs); this tier must NOT — formula text is the one asset the design walls off from
+// the agent plane (Decision 5 / Lift A), so a bare local curl without the startup token is refused
+// even on loopback. The compare is distinct from authOK's (which only runs when !loopback). It writes
+// the rejection envelope and returns false when denied.
+func (s *Server) guardWrite(w http.ResponseWriter, r *http.Request) bool {
+	if !s.guard(w, r, true) { // auth (when !loopback) + CSRF-Origin; writes its own 401/403
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(bearerToken(r)), []byte(s.token)) != 1 {
+		s.write(w, http.StatusUnauthorized, Envelope{OK: false, Message: "authentication required"})
+		return false
+	}
+	return true
 }
 
 // originOK is the loopback CSRF allowlist: the request's Origin (or, if absent, its Host) must
@@ -891,6 +991,253 @@ func decodeFeedback(r *http.Request) (feedback.Input, bool) {
 		}
 	}
 	return feedback.Input{Decision: b.Decision, Checks: b.Checks, Notes: b.Notes}, true
+}
+
+// ---- #502 formula store + Generate-All handlers ----
+
+// formulaRow is one entry of the GET /api/formulas list. formulas.Entry carries only Name+ReadOnly,
+// so the list handler Reads each file to obtain the bytes and computes a content sha256 (the CAS
+// base a subsequent save re-derives). Full-text list is a deliberate 29-file-scale choice (design L206).
+type formulaRow struct {
+	Name     string `json:"name"`
+	Text     string `json:"text"`
+	SHA256   string `json:"sha256"`
+	ReadOnly bool   `json:"read_only"`
+}
+
+// handleFormulasList (read) returns every store formula with its text and content sha256. A store
+// listing failure is a 502 honest error (never an empty "no formulas"); a per-file read that vanishes
+// mid-list is skipped rather than failing the whole enumeration.
+//
+// A read-only entry is NOT a vanished one. List flags a filename that fails nameRE as ReadOnly, and
+// Read applies the same name rung, so it returns ErrInvalidName for exactly those entries. Skipping
+// them would omit the file from the roster entirely — the operator could not see it exists — and
+// formulaRow.ReadOnly could never be true, making the whole read-only-listing path dead code. They are
+// listed with the text omitted: "listed but never editable" (design-doc.md:171, :334).
+func (s *Server) handleFormulasList(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r, false) {
+		return
+	}
+	if s.fstore == nil {
+		s.write(w, http.StatusInternalServerError, Envelope{OK: false, Message: "formula store not configured"})
+		return
+	}
+	entries, err := s.fstore.List()
+	if err != nil {
+		s.write(w, http.StatusBadGateway, Envelope{OK: false, Message: err.Error()})
+		return
+	}
+	rows := make([]formulaRow, 0, len(entries))
+	for _, e := range entries {
+		text, rerr := s.fstore.Read(e.Name)
+		switch {
+		case rerr == nil:
+			rows = append(rows, formulaRow{Name: e.Name, Text: string(text), SHA256: hashHex(text), ReadOnly: e.ReadOnly})
+		case errors.Is(rerr, formulas.ErrInvalidName):
+			// Never editable, so no text and no sha256: a hash the client could hand back as a CAS
+			// base_sha256 would be a hash for a name Write refuses anyway.
+			rows = append(rows, formulaRow{Name: e.Name, ReadOnly: true})
+		default:
+			continue // a mid-list vanish is skipped, not a 502 for the whole roster
+		}
+	}
+	s.write(w, http.StatusOK, Envelope{OK: true, Data: map[string]any{"formulas": rows}})
+}
+
+// handleFormulaGet (read) returns one formula's text and content sha256. It maps the store's
+// name/containment rungs the same way the PUT path does: ErrNotFound→404, ErrInvalidName→400.
+func (s *Server) handleFormulaGet(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r, false) {
+		return
+	}
+	if s.fstore == nil {
+		s.write(w, http.StatusInternalServerError, Envelope{OK: false, Message: "formula store not configured"})
+		return
+	}
+	name := r.PathValue("name")
+	text, err := s.fstore.Read(name)
+	if err != nil {
+		switch {
+		case errors.Is(err, formulas.ErrNotFound):
+			s.write(w, http.StatusNotFound, Envelope{OK: false, Message: err.Error()})
+		case errors.Is(err, formulas.ErrInvalidName):
+			s.write(w, http.StatusBadRequest, Envelope{OK: false, Message: err.Error()})
+		default:
+			s.write(w, http.StatusBadGateway, Envelope{OK: false, Message: err.Error()})
+		}
+		return
+	}
+	s.write(w, http.StatusOK, Envelope{OK: true, Data: formulaRow{Name: name, Text: string(text), SHA256: hashHex(text)}})
+}
+
+// formulaPutBody is the PUT body: the complete edited formula text plus the CAS precondition. An empty
+// base_sha256 means create-only (the file must not already exist).
+type formulaPutBody struct {
+	Text       string `json:"text"`
+	BaseSHA256 string `json:"base_sha256"`
+}
+
+// handleFormulaPut (write-tier) is the save path: guardWrite (token even on loopback) → nil-seam 500 →
+// decode → 503 if a regeneration is in flight (validate can't run mid-rebuild) → save-time af-validate
+// (422 on a rejecting verdict body — never the exit code; 502 on a process/parse failure) → store CAS
+// write with the sentinel→status map → metadata-only audit line → 200. 422 and 503 are written
+// directly via s.write (writeMutation has no such case).
+func (s *Server) handleFormulaPut(w http.ResponseWriter, r *http.Request) {
+	if !s.guardWrite(w, r) {
+		return
+	}
+	if s.fstore == nil {
+		s.write(w, http.StatusInternalServerError, Envelope{OK: false, Message: "formula store not configured"})
+		return
+	}
+	if s.validator == nil {
+		s.write(w, http.StatusInternalServerError, Envelope{OK: false, Message: "validator not configured"})
+		return
+	}
+	name := r.PathValue("name")
+	r.Body = http.MaxBytesReader(w, r.Body, maxWriteBody)
+	var body formulaPutBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		s.write(w, http.StatusBadRequest, Envelope{OK: false, Message: `invalid body: expected {"text":"…","base_sha256":"…"}`})
+		return
+	}
+
+	// A regeneration reinstalls the af binary mid-flight, so save-validation cannot run reliably while
+	// one is in progress (design Risk: af unavailable mid-generate → 503). The generator seam is
+	// OPTIONAL for the PUT path — a nil generator is treated as "not running".
+	if s.generator != nil {
+		if st, err := s.generator.Status(); err == nil && st.Running {
+			s.write(w, http.StatusServiceUnavailable, Envelope{OK: false, Message: "factory is regenerating — retry"})
+			return
+		}
+	}
+
+	// Save-time engine-of-record gate. A non-nil error or non-zero exit is a PROCESS failure (af could
+	// not produce a verdict) → 502; a well-formed verdict with ok:false is a rejection → 422 carrying
+	// the findings. The verdict decision is BODY-driven — `af formula validate` exits 0 even on reject.
+	res, verr := s.validator.FormulaValidate(r.Context(), []byte(body.Text))
+	if verr != nil || res.ExitCode != 0 {
+		s.write(w, http.StatusBadGateway, Envelope{OK: false, Message: "formula validation could not run"})
+		return
+	}
+	verdict, perr := parseVerdict(res.Stdout)
+	if perr != nil {
+		s.write(w, http.StatusBadGateway, Envelope{OK: false, Message: "could not parse validation verdict"})
+		return
+	}
+	if !verdict.OK {
+		s.write(w, http.StatusUnprocessableEntity, Envelope{OK: false,
+			Message: "formula did not validate", Data: map[string]any{"findings": verdict.Findings}})
+		return
+	}
+
+	// CAS write. Read the current on-disk content first for the audit line's before-hash (best effort:
+	// a missing/unreadable file yields "" — a create).
+	beforeHash := ""
+	if cur, rerr := s.fstore.Read(name); rerr == nil {
+		beforeHash = hashHex(cur)
+	}
+	if err := s.fstore.Write(name, []byte(body.Text), body.BaseSHA256); err != nil {
+		switch {
+		case errors.Is(err, formulas.ErrConflict), errors.Is(err, formulas.ErrExists):
+			s.write(w, http.StatusConflict, Envelope{OK: false, Message: err.Error()})
+		case errors.Is(err, formulas.ErrNotFound):
+			s.write(w, http.StatusNotFound, Envelope{OK: false, Message: err.Error()})
+		default:
+			// ErrInvalidName + the body-fault rungs (ErrTooLarge/ErrNotUTF8/ErrHasNUL/ErrSymlink/
+			// ErrOutOfStore) are all client-side faults surfaced with the store's verbatim message.
+			s.write(w, http.StatusBadRequest, Envelope{OK: false, Message: err.Error()})
+		}
+		return
+	}
+	afterHash := hashHex([]byte(body.Text))
+	log.Printf("audit: formula write name=%s bytes=%d sha256_before=%s sha256_after=%s",
+		name, len(body.Text), orDash(beforeHash), afterHash)
+	s.write(w, http.StatusOK, Envelope{OK: true, Message: "formula saved", Data: map[string]string{"sha256": afterHash}})
+}
+
+// handleGeneratePost (write-tier) starts the singleton Generate-All job. confirm:true is required
+// (mirrors the reset-requires-confirm 422 precedent); a job already running is ErrBusy→409.
+func (s *Server) handleGeneratePost(w http.ResponseWriter, r *http.Request) {
+	if !s.guardWrite(w, r) {
+		return
+	}
+	if s.generator == nil {
+		s.write(w, http.StatusInternalServerError, Envelope{OK: false, Message: "generator not configured"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxWriteBody)
+	var body struct {
+		Confirm bool `json:"confirm"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body) // empty/invalid/oversized ⇒ confirm:false ⇒ 422 below
+	if !body.Confirm {
+		s.write(w, http.StatusUnprocessableEntity, Envelope{OK: false, Message: "generate requires confirm:true"})
+		return
+	}
+	if err := s.generator.Start(r.Context()); err != nil {
+		if errors.Is(err, genjob.ErrBusy) {
+			s.write(w, http.StatusConflict, Envelope{OK: false, Message: "a factory regeneration is already running"})
+			return
+		}
+		s.write(w, http.StatusBadGateway, Envelope{OK: false, Message: err.Error()})
+		return
+	}
+	log.Printf("audit: factory generate started")
+	s.write(w, http.StatusOK, Envelope{OK: true, Message: "factory regeneration started"})
+}
+
+// handleGenerateGet (read) is the delta-poll: it returns the job Progress from byte offset ?from=N
+// (absent/garbled ⇒ 0; the job clamps an over-large offset to EOF). The Progress json tags ARE the
+// {state, offset(next), data(log)} contract — it is serialized verbatim, never hand-reshaped.
+func (s *Server) handleGenerateGet(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r, false) {
+		return
+	}
+	if s.generator == nil {
+		s.write(w, http.StatusInternalServerError, Envelope{OK: false, Message: "generator not configured"})
+		return
+	}
+	from := int64(0)
+	if n, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("from")), 10, 64); err == nil && n > 0 {
+		from = n
+	}
+	prog, err := s.generator.Progress(from)
+	if err != nil {
+		s.write(w, http.StatusBadGateway, Envelope{OK: false, Message: err.Error()})
+		return
+	}
+	s.write(w, http.StatusOK, Envelope{OK: true, Data: prog})
+}
+
+// validateVerdict is the engine-of-record verdict emitted by `af formula validate --json`:
+// {ok, findings:[{lamp, message}]}. findings is always a non-nil array; the 422 payload forwards it.
+type validateVerdict struct {
+	OK       bool `json:"ok"`
+	Findings []struct {
+		Lamp    string `json:"lamp"`
+		Message string `json:"message"`
+	} `json:"findings"`
+}
+
+func parseVerdict(stdout string) (validateVerdict, error) {
+	var v validateVerdict
+	err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &v)
+	return v, err
+}
+
+// hashHex is the content sha256 the CAS base is derived from — the same formula the store uses
+// internally (store.go hashHex), re-implemented here because that one is unexported.
+func hashHex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 // ---- response helpers ----

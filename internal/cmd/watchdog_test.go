@@ -6,9 +6,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/checkpoint"
+	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/session"
 )
 
@@ -433,5 +435,123 @@ func TestBuildWatchdogScope(t *testing.T) {
 	single := buildWatchdogScope(nil, "solo")
 	if _, in := single["solo"]; !in || len(single) != 1 {
 		t.Errorf("single --agent should yield scope {solo}, got %v", single)
+	}
+}
+
+// --- Phase 4: REAP-1 watchdog reap matrix (AC-4) ---
+
+// reapCall records one reap invocation: the agent dir and the agentName the seam was
+// given (the AF_ROLE the reap subprocess needs for worktree removal).
+type reapCall struct{ dir, agentName string }
+
+// stubReapSession replaces the reap-session shell seam with a recorder of the reap
+// calls; auto-restored. Also installs a benign fake tmux so the non-reaped poll paths
+// do not touch a real session.
+func stubReapSession(t *testing.T) *[]reapCall {
+	t.Helper()
+	var reaped []reapCall
+	origReap := reapImprovementSession
+	reapImprovementSession = func(dir, agentName string) error {
+		reaped = append(reaped, reapCall{dir, agentName})
+		return nil
+	}
+	oldTmux := newWatchdogTmux
+	newWatchdogTmux = func() watchdogTmux { return &fakeWatchdogTmux{output: "working"} }
+	t.Cleanup(func() {
+		reapImprovementSession = origReap
+		newWatchdogTmux = oldTmux
+	})
+	return &reaped
+}
+
+func pollOnce(root string, scope map[string]struct{}) {
+	pollAgents(&cobra.Command{}, root, scope, map[string]*watchdogAgentState{}, map[string]int{}, 2)
+}
+
+func TestWatchdog_ReapImprovement_AgedReaped(t *testing.T) {
+	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
+	m := improvementMarker{Formula: "fx", Caller: "manager", FiredAt: time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)}
+	if err := writeImprovementMarker(root, "alpha", m); err != nil {
+		t.Fatal(err)
+	}
+	reaped := stubReapSession(t)
+
+	pollOnce(root, buildWatchdogScope([]string{"alpha"}, ""))
+
+	want := config.AgentDir(root, "alpha")
+	if len(*reaped) != 1 || (*reaped)[0].dir != want {
+		t.Fatalf("aged marker must be reaped for %q, got %v", want, *reaped)
+	}
+	// The reap must carry the agent name so the subprocess can inject AF_ROLE and
+	// actually remove the worktree (design HIGH-1: reclaim the MaxWorktrees slot).
+	if (*reaped)[0].agentName != "alpha" {
+		t.Errorf("reap must pass agentName 'alpha' (for AF_ROLE), got %q", (*reaped)[0].agentName)
+	}
+}
+
+func TestWatchdog_ReapImprovement_YoungUntouched(t *testing.T) {
+	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
+	m := improvementMarker{Formula: "fx", Caller: "manager", FiredAt: time.Now().UTC().Format(time.RFC3339)}
+	if err := writeImprovementMarker(root, "alpha", m); err != nil {
+		t.Fatal(err)
+	}
+	reaped := stubReapSession(t)
+
+	pollOnce(root, buildWatchdogScope([]string{"alpha"}, ""))
+
+	if len(*reaped) != 0 {
+		t.Fatalf("young marker must be left untouched, got reaped %v", *reaped)
+	}
+}
+
+func TestWatchdog_ReapImprovement_NoMarkerNoOp(t *testing.T) {
+	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
+	reaped := stubReapSession(t)
+
+	pollOnce(root, buildWatchdogScope([]string{"alpha"}, ""))
+
+	if len(*reaped) != 0 {
+		t.Fatalf("no marker must be a no-op, got reaped %v", *reaped)
+	}
+}
+
+func TestWatchdog_ReapImprovement_EnvOverride(t *testing.T) {
+	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
+	// A 2-minute-old marker: younger than the 30m default (no reap), older than a
+	// 1-minute override (reap).
+	m := improvementMarker{Formula: "fx", Caller: "manager", FiredAt: time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)}
+	if err := writeImprovementMarker(root, "alpha", m); err != nil {
+		t.Fatal(err)
+	}
+	reaped := stubReapSession(t)
+	scope := buildWatchdogScope([]string{"alpha"}, "")
+
+	// Default 30m ceiling: 2-minute marker is young ⇒ no reap.
+	pollOnce(root, scope)
+	if len(*reaped) != 0 {
+		t.Fatalf("under the 30m default a 2-min marker must NOT reap, got %v", *reaped)
+	}
+
+	// Override to 1 minute ⇒ the same marker is now aged ⇒ reap.
+	t.Setenv("AF_IMPROVEMENT_REAP_AFTER", "1")
+	pollOnce(root, scope)
+	if len(*reaped) != 1 {
+		t.Fatalf("AF_IMPROVEMENT_REAP_AFTER=1 must reap a 2-min marker, got %v", *reaped)
+	}
+}
+
+func TestWatchdog_ReapImprovement_OutOfScopeSkipped(t *testing.T) {
+	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true, "beta": true})
+	// beta has an aged marker but is NOT in the watchdog scope ⇒ never reaped.
+	m := improvementMarker{Formula: "fx", Caller: "manager", FiredAt: time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)}
+	if err := writeImprovementMarker(root, "beta", m); err != nil {
+		t.Fatal(err)
+	}
+	reaped := stubReapSession(t)
+
+	pollOnce(root, buildWatchdogScope([]string{"alpha"}, ""))
+
+	if len(*reaped) != 0 {
+		t.Fatalf("an out-of-scope agent's marker must not be reaped, got %v", *reaped)
 	}
 }

@@ -8,16 +8,17 @@ import "testing"
 type fakeCmdTmux struct{}
 
 func (fakeCmdTmux) IsAvailable() bool                                       { return false }
-func (fakeCmdTmux) NewSession(name, workDir string) error                  { return nil }
-func (fakeCmdTmux) HasSession(name string) (bool, error)                   { return false, nil }
-func (fakeCmdTmux) KillSession(name string) error                          { return nil }
-func (fakeCmdTmux) SendKeys(session, keys string) error                    { return nil }
+func (fakeCmdTmux) NewSession(name, workDir string) error                   { return nil }
+func (fakeCmdTmux) HasSession(name string) (bool, error)                    { return false, nil }
+func (fakeCmdTmux) KillSession(name string) error                           { return nil }
+func (fakeCmdTmux) SendKeys(session, keys string) error                     { return nil }
 func (fakeCmdTmux) SendKeysDelayed(session, keys string, delayMs int) error { return nil }
-func (fakeCmdTmux) GetPaneCommand(session string) (string, error)          { return "", nil }
+func (fakeCmdTmux) GetPaneCommand(session string) (string, error)           { return "", nil }
 func (fakeCmdTmux) IsAgentRunning(session string, expectedPaneCommands ...string) bool {
 	return false
 }
-func (fakeCmdTmux) SetEnvironment(session, key, value string) error { return nil }
+func (fakeCmdTmux) SetEnvironment(session, key, value string) error    { return nil }
+func (fakeCmdTmux) GetEnvironment(session, key string) (string, error) { return "", nil }
 
 func TestNewCmdTmuxSeam(t *testing.T) {
 	orig := newCmdTmux

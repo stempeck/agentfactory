@@ -411,13 +411,41 @@ func failObservable(runtimeDir, msg string) {
 var sendContainmentMail = func(wd, role, subject, body string) error {
 	msg := mail.NewMessage(role, role, subject, body)
 	msg.Priority = issuestore.PriorityUrgent
-	store, err := storeForMail(wd)
+	// Route the notification by SESSION IDENTITY (AF_ROOT / home factory), NOT the
+	// offending boundary cwd (wd) that triggered the alarm (issue #519 review
+	// follow-up, thread 7b). The containment hook fires precisely when an agent has
+	// strayed, so routing by the stray cwd would post the warning into — or, under
+	// the post-#519 cross-check, be refused by — the very wrong factory it is warning
+	// about, silently losing the alarm exactly when it is needed. This routes the
+	// notification only; it does NOT change how the escape boundary is decided (that
+	// stays AF_ROOT-shunning, containment.go's job).
+	root, err := containmentRoutingRoot(wd)
 	if err != nil {
 		return err
 	}
-	router, err := mail.NewRouter(wd, store)
+	store, err := newIssueStoreAt(root, os.Getenv("AF_ACTOR"))
+	if err != nil {
+		return err
+	}
+	router, err := mail.NewRouter(root, store)
 	if err != nil {
 		return err
 	}
 	return router.Send(context.Background(), msg)
+}
+
+// containmentRoutingRoot picks the factory a containment notification is delivered
+// to by SESSION IDENTITY: the launcher-baked AF_ROOT (the agent's home factory)
+// wins, so the stray-agent alarm reaches the REAL factory even when the agent's cwd
+// has wandered into a nested checkout. It falls back to the passed boundary only
+// when AF_ROOT is unset (a bare operator shell) — the watchdog AF_ROOT-first idiom
+// (resolveWatchdogRoot). It NEVER consults AF_ROOT to decide the escape boundary
+// (that remains runContainmentCheckCore's job); it only chooses the delivery root.
+func containmentRoutingRoot(boundary string) (string, error) {
+	if afRoot := os.Getenv("AF_ROOT"); afRoot != "" {
+		if root, err := config.FindFactoryRoot(afRoot); err == nil {
+			return root, nil
+		}
+	}
+	return config.FindFactoryRoot(boundary)
 }

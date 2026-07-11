@@ -29,9 +29,15 @@ func runAttach(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	root, err := config.FindFactoryRoot(wd)
+	root, err := resolveInvokerRoot(wd)
 	if err != nil {
-		return err
+		// attach is read-only: a factory-root mismatch downgrades to a stderr warning
+		// and proceeds on the cwd-resolved root. A not-found error still propagates.
+		if r, downgraded := downgradeRootMismatch(err); downgraded {
+			root = r
+		} else {
+			return err
+		}
 	}
 
 	// Validate agent exists

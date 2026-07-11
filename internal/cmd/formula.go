@@ -130,8 +130,16 @@ func runFormulaAgentGen(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Resolve the factory root through the sanctioned seam FIRST (thread 7a): both
+	// FindFormulaFile and the -o rendering below must use an already-validated root,
+	// never re-resolve cwd. Hard error if not found (needed for -o rendering too).
+	root, err := resolveInvokerRoot(wd)
+	if err != nil {
+		return err
+	}
+
 	// Find and parse formula
-	formulaPath, err := formula.FindFormulaFile(formulaName, wd)
+	formulaPath, err := formula.FindFormulaFile(formulaName, root)
 	if err != nil {
 		return fmt.Errorf("finding formula: %w", err)
 	}
@@ -154,12 +162,6 @@ func runFormulaAgentGen(cmd *cobra.Command, args []string) error {
 
 	// Generate agent template
 	tmplContent := generateAgentTemplate(f, agentName, agentGenType)
-
-	// Find factory root — hard error if not found (needed for -o rendering too)
-	root, err := config.FindFactoryRoot(wd)
-	if err != nil {
-		return err
-	}
 
 	skillsDir := filepath.Join(root, ".claude", "skills")
 	if err := f.ValidateSkills(skillsDir); err != nil {
@@ -234,6 +236,17 @@ func runFormulaAgentGen(cmd *cobra.Command, args []string) error {
 		Directive:   "Run af prime to load formula context.",
 		Formula:     f.Name,
 	}
+
+	// Preserve operator-owned fields that agent-gen never authors — regen only
+	// refreshes the formula-derived fields above, it must not wipe these. `existing`
+	// is the zero value for a fresh agent, so this is a no-op on first generation.
+	// AddAgentEntry's manual-agent guard still rejects any leak into a hand-authored
+	// (formula-less) agent even though the merge runs before the guard.
+	entry.Model = existing.Model
+	entry.SparsePaths = existing.SparsePaths
+	entry.BaseURL = existing.BaseURL
+	entry.AuthToken = existing.AuthToken
+	entry.ContinuousImprovement = existing.ContinuousImprovement
 
 	// Add entry (returns error for manual agents)
 	if err := config.AddAgentEntry(cfg, agentName, entry); err != nil {
@@ -353,7 +366,7 @@ func runFormulaAgentGenDelete(cmd *cobra.Command, agentName string) error {
 	}
 
 	// Find factory root
-	root, err := config.FindFactoryRoot(wd)
+	root, err := resolveInvokerRoot(wd)
 	if err != nil {
 		return err
 	}
@@ -791,8 +804,8 @@ type renderVar struct {
 	Name           string
 	Description    string
 	Required       bool
-	Source         string   // "cli" for inputs, actual source for vars
-	IsInput        bool     // true if from [inputs] block
+	Source         string // "cli" for inputs, actual source for vars
+	IsInput        bool   // true if from [inputs] block
 	HasDefault     bool
 	Default        string
 	RequiredUnless []string // only populated for inputs

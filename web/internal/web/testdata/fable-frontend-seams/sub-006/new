@@ -1,0 +1,3 @@
+    Demo.generateAll(out, function () {
+      $('consoleClose').disabled = false;
+    });

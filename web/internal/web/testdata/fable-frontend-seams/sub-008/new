@@ -1,0 +1,5 @@
+        return t;
+      } catch (e) {
+        AF.slip('The recast source does not parse: ' + AF.esc(e.message), 'alarm');
+        return null;
+      }

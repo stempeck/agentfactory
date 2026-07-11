@@ -1,0 +1,22 @@
+{
+  "_comment": "Parity verdict manifest for #502 Phase 1b. ONE source, TWO consumers: internal/formula/parity_test.go (Go composed verdict = Parse()+TopologicalSort()) and web/conformance/test-engine.js (JS TomlEngine.parse()+validate()). verdict/stage/lamp are keyed on category, never message text (validate.go 'cycle detected involving step' vs sort.go 'cycle detected in dependencies' vs JS cycles lamp all differ). stage is where the Go engine rejects: parse (TOML decode) | validate (Validate()) | toposort (TopologicalSort()). Post-Phase-0 every cycle rejects at validate, so no fixture reaches the toposort stage. lamp is the JS finding category the Node consumer asserts. See conflicts.md T8 (test data legally crosses the module wall).",
+  "fixtures": [
+    { "file": "workflow-valid.toml",       "verdict": "accept" },
+    { "file": "convoy-valid.toml",          "verdict": "accept" },
+    { "file": "expansion-valid.toml",       "verdict": "accept" },
+    { "file": "aspect-valid.toml",          "verdict": "accept" },
+    { "file": "dup-step-id.toml",           "verdict": "reject", "stage": "validate", "lamp": "ids",    "note": "duplicate step ids" },
+    { "file": "dangling-needs.toml",        "verdict": "reject", "stage": "validate", "lamp": "needs",  "note": "needs references an unknown step" },
+    { "file": "workflow-cycle.toml",        "verdict": "reject", "stage": "validate", "lamp": "cycles", "note": "workflow needs cycle (checkCycles)" },
+    { "file": "expansion-cycle.toml",       "verdict": "reject", "stage": "validate", "lamp": "cycles", "note": "C-1 escape: expansion cycle rejected at validate (checkTemplateCycles / delta-a)" },
+    { "file": "bad-var-source.toml",        "verdict": "reject", "stage": "validate", "lamp": "parse",  "note": "var source not in allow-list" },
+    { "file": "input-var-collision.toml",   "verdict": "reject", "stage": "validate", "lamp": "parse",  "note": "input and var share a name" },
+    { "file": "bad-skill-name.toml",        "verdict": "reject", "stage": "validate", "lamp": "parse",  "note": "skill name fails syntax regex" },
+    { "file": "missing-name.toml",          "verdict": "reject", "stage": "validate", "lamp": "parse",  "note": "formula name field absent" },
+    { "file": "bad-type.toml",              "verdict": "reject", "stage": "validate", "lamp": "parse",  "note": "type not one of convoy/workflow/expansion/aspect" },
+    { "file": "parse-bad-toml.toml",        "verdict": "reject", "stage": "parse",                     "note": "malformed TOML: rejected at decode (Go) / parse throw (JS)" }
+  ],
+  "parseDialect": [
+    { "file": "datetime-unknown-key.toml", "go": "accept", "js": "parse-error", "note": "Gap 13: BurntSushi discards a datetime on an unknown key (Go accepts); the JS engine rejects all datetimes at parse. The ONE intentional cross-engine divergence — pinned, not asserted equal." }
+  ]
+}

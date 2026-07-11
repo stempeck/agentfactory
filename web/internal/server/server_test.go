@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,8 @@ import (
 	"github.com/stempeck/agentfactory-web/internal/dispatch"
 	"github.com/stempeck/agentfactory-web/internal/exec"
 	"github.com/stempeck/agentfactory-web/internal/formschema"
+	"github.com/stempeck/agentfactory-web/internal/formulas"
+	"github.com/stempeck/agentfactory-web/internal/genjob"
 	"github.com/stempeck/agentfactory-web/internal/readmodel"
 )
 
@@ -94,6 +97,20 @@ func (f *fakeRunner) RunStdin(ctx context.Context, stdin []byte, verb string, ar
 			return r, nil
 		}
 	}
+	r, ok := f.resp[verb]
+	f.mu.Unlock()
+	if !ok {
+		return exec.Result{Stdout: "[]"}, nil
+	}
+	return r, nil
+}
+
+// RunStream satisfies the extended Runner seam. This phase adds no server routes that stream; a minimal
+// recorder (mirroring RunStdin's verb/argv capture) is enough to keep the fake compiling.
+func (f *fakeRunner) RunStream(ctx context.Context, onChunk func([]byte), verb string, args ...string) (exec.Result, error) {
+	f.mu.Lock()
+	f.verbs = append(f.verbs, verb)
+	f.args = append(f.args, append([]string(nil), args...))
 	r, ok := f.resp[verb]
 	f.mu.Unlock()
 	if !ok {
@@ -840,5 +857,562 @@ func TestDispatchAndSettings_NilDeps500(t *testing.T) {
 		if rec.Code != http.StatusInternalServerError {
 			t.Fatalf("GET %s with nil dep: code = %d, want 500", path, rec.Code)
 		}
+	}
+}
+
+// ============================================================================
+// #502 Phase 3 — Formula/Generate routes, write-token tier, 409/422/503 matrix.
+// New tests are named Auth*/Formula*/Generate*/RouteTable* so they match the
+// AC#1 -run "Auth|Formula|Generate|RouteTable" filter. Existing tests untouched.
+// ============================================================================
+
+// fakeFormulaStore is a hermetic FormulaStore double: canned List/Read returns, injectable store
+// sentinels on Write, and it records the Write args so a test can assert the CAS threading.
+type fakeFormulaStore struct {
+	entries  []formulas.Entry
+	readBody []byte
+	listErr  error
+	readErr  error
+	writeErr error // inject formulas.ErrConflict/ErrExists/ErrInvalidName/ErrNotFound
+
+	lastName string
+	lastBody []byte
+	lastBase string
+	writes   int
+}
+
+func (f *fakeFormulaStore) List() ([]formulas.Entry, error) { return f.entries, f.listErr }
+
+// Read models the REAL store's name-dependent rejection: formulas.Store.Read runs the same
+// name rung as Write (resolve→validateName), so it returns ErrInvalidName for exactly the
+// entries List flags ReadOnly. A fake that ignored `name` let TestFormulaList_OK assert
+// read_only:true while production silently dropped the row.
+func (f *fakeFormulaStore) Read(name string) ([]byte, error) {
+	if f.readErr != nil {
+		return nil, f.readErr
+	}
+	for _, e := range f.entries {
+		if e.Name == name && e.ReadOnly {
+			return nil, fmt.Errorf("%w: %q", formulas.ErrInvalidName, name)
+		}
+	}
+	return f.readBody, nil
+}
+func (f *fakeFormulaStore) Write(name string, content []byte, baseHash string) error {
+	f.writes++
+	f.lastName, f.lastBody, f.lastBase = name, append([]byte(nil), content...), baseHash
+	return f.writeErr
+}
+
+var _ FormulaStore = (*fakeFormulaStore)(nil)
+
+// fakeGenerator is a hermetic Generator double: injectable Start error (drive genjob.ErrBusy) and a
+// `running` flag surfaced through Status/Progress/Confirm so the 503/409 paths are steerable.
+type fakeGenerator struct {
+	startErr    error
+	running     bool
+	progress    genjob.Progress
+	statusErr   error
+	progressErr error
+	starts      int
+	lastFrom    int64
+}
+
+func (f *fakeGenerator) Start(ctx context.Context) error { f.starts++; return f.startErr }
+func (f *fakeGenerator) Status() (genjob.State, error) {
+	return genjob.State{Running: f.running}, f.statusErr
+}
+func (f *fakeGenerator) Progress(from int64) (genjob.Progress, error) {
+	f.lastFrom = from
+	p := f.progress
+	p.State.Running = f.running
+	return p, f.progressErr
+}
+func (f *fakeGenerator) Confirm() (genjob.ConfirmPayload, error) {
+	return genjob.ConfirmPayload{Running: f.running}, nil
+}
+
+var _ Generator = (*fakeGenerator)(nil)
+
+const wtoken = "0123456789abcdef0123456789abcdef"
+
+// formulaServer wires the two write seams (so the Convention-A routes reach the token gate + nil
+// checks) plus a validator over a fakeRunner returning verdictJSON. It sets a token so the write-tier
+// tests drive the real compare; loopback bind is New's default.
+func formulaServer(t *testing.T, store FormulaStore, gen Generator, verdictJSON string) (*Server, *fakeRunner) {
+	t.Helper()
+	fr := &fakeRunner{resp: map[string]exec.Result{"formula": {Stdout: verdictJSON}}}
+	w := exec.NewWrapper(fr, "")
+	s := New(&fakeMutator{}, fakeAssembler{}, nil,
+		WithToken(wtoken), WithFormulaStore(store), WithGenerator(gen), WithValidator(w))
+	return s, fr
+}
+
+// tokPUT / tokPOST wrap the loopback helpers and add a valid bearer token (loopback Origin already set).
+func tokPUT(path, body string) *http.Request {
+	r := loopbackPUT(path, body)
+	r.Header.Set("Authorization", "Bearer "+wtoken)
+	return r
+}
+func tokPOST(path, body string) *http.Request {
+	r := loopbackPOST(path, body)
+	r.Header.Set("Authorization", "Bearer "+wtoken)
+	return r
+}
+
+const okVerdict = `{"ok":true,"findings":[]}`
+const rejectVerdict = `{"ok":false,"findings":[{"lamp":"red","message":"missing [meta] table"}]}`
+
+// serve runs a request through the real mux and returns the recorder.
+func serve(s *Server, req *http.Request) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// ---- write-token tier ----
+
+// The write tier must run a constant-time compare EVEN on loopback (authOK short-circuits true there).
+func TestAuthWriteTokenRequiredOnLoopback(t *testing.T) {
+	fs := &fakeFormulaStore{}
+	g := &fakeGenerator{}
+	s, _ := formulaServer(t, fs, g, okVerdict)
+
+	// token-less PUT → 401, store never reached.
+	rec := serve(s, loopbackPUT("/api/formulas/foo", `{"text":"x","base_sha256":""}`))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("loopback token-less PUT: code = %d, want 401", rec.Code)
+	}
+	if fs.writes != 0 {
+		t.Fatalf("store.Write must not run for a token-less write (got %d)", fs.writes)
+	}
+
+	// token-less generate POST → 401, Start never reached.
+	rec = serve(s, loopbackPOST("/api/factory/generate", `{"confirm":true}`))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("loopback token-less generate: code = %d, want 401", rec.Code)
+	}
+	if g.starts != 0 {
+		t.Fatalf("job.Start must not run for a token-less generate (got %d)", g.starts)
+	}
+
+	// wrong token of equal length → 401 (constant-time compare, not mere presence).
+	req := loopbackPUT("/api/formulas/foo", `{"text":"x","base_sha256":""}`)
+	req.Header.Set("Authorization", "Bearer "+strings.Repeat("f", len(wtoken)))
+	if rec = serve(s, req); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("loopback wrong-length token PUT: code = %d, want 401", rec.Code)
+	}
+
+	// valid token → NOT 401 (the write proceeds).
+	if rec = serve(s, tokPUT("/api/formulas/foo", `{"text":"x","base_sha256":""}`)); rec.Code == http.StatusUnauthorized {
+		t.Fatalf("loopback valid-token PUT should be admitted, got 401")
+	}
+}
+
+// The write tier COMPOSES with the CSRF-Origin gate — it does not replace it.
+func TestAuthWriteTokenComposesWithOrigin(t *testing.T) {
+	s, _ := formulaServer(t, &fakeFormulaStore{}, &fakeGenerator{}, okVerdict)
+
+	// valid token + foreign Origin → still 403 (Origin gate runs).
+	bad := httptest.NewRequest(http.MethodPut, "/api/formulas/foo", strings.NewReader(`{"text":"x","base_sha256":""}`))
+	bad.Header.Set("Origin", "http://evil.example.com")
+	bad.Header.Set("Authorization", "Bearer "+wtoken)
+	if rec := serve(s, bad); rec.Code != http.StatusForbidden {
+		t.Fatalf("valid token + bad Origin: code = %d, want 403", rec.Code)
+	}
+
+	// good Origin + no token → 401 (token tier).
+	if rec := serve(s, loopbackPUT("/api/formulas/foo", `{"text":"x","base_sha256":""}`)); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("good Origin + no token: code = %d, want 401", rec.Code)
+	}
+}
+
+// ---- formula list / read ----
+
+func TestFormulaList_OK(t *testing.T) {
+	fs := &fakeFormulaStore{
+		entries:  []formulas.Entry{{Name: "good", ReadOnly: false}, {Name: "Bad_One", ReadOnly: true}},
+		readBody: []byte("[meta]\nname='x'\n"),
+	}
+	s, _ := formulaServer(t, fs, &fakeGenerator{}, okVerdict)
+
+	rec := serve(s, httptest.NewRequest(http.MethodGet, "/api/formulas", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/formulas: code = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Formulas []struct {
+				Name     string `json:"name"`
+				Text     string `json:"text"`
+				SHA256   string `json:"sha256"`
+				ReadOnly bool   `json:"read_only"`
+			} `json:"formulas"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("list response not JSON: %v", err)
+	}
+	if !env.OK || len(env.Data.Formulas) != 2 {
+		t.Fatalf("expected ok + 2 formulas, got %+v", env)
+	}
+	if env.Data.Formulas[0].Text == "" || env.Data.Formulas[0].SHA256 == "" {
+		t.Fatalf("list row must carry text + sha256: %+v", env.Data.Formulas[0])
+	}
+	if !env.Data.Formulas[1].ReadOnly {
+		t.Fatalf("non-conforming entry must be read_only:true")
+	}
+	if env.Data.Formulas[1].Text != "" {
+		t.Fatalf("read-only row must omit text (never editable), got %q", env.Data.Formulas[1].Text)
+	}
+}
+
+// TestFormulaList_RealStore_ReadOnlyRowSurvives — T1 (PRRT_kwDORt0n_M6Pw23U). The load-bearing
+// pinning test: it drives the handler over the REAL formulas.Store, so it cannot be satisfied by
+// correcting a fake. store.List() flags `My_Formula` ReadOnly (the name fails nameRE), while
+// store.Read() rejects that same name with ErrInvalidName — so a handler that treats any Read error
+// as a "mid-list vanish" silently drops the row and the whole ReadOnly feature is dead.
+// design-doc.md:171/:334 — "a non-conforming existing filename lists as an honest read-only fault card".
+func TestFormulaList_RealStore_ReadOnlyRowSurvives(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".agentfactory", "store", "formulas")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"My_Formula": "name = \"legacy\"\n", // uppercase + underscore: fails nameRE ⇒ ReadOnly
+		"good-one":   "name = \"good\"\n",   // conforming ⇒ editable
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s, _ := formulaServer(t, formulas.New(root), &fakeGenerator{}, okVerdict)
+	rec := serve(s, httptest.NewRequest(http.MethodGet, "/api/formulas", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/formulas: code = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var env struct {
+		Data struct {
+			Formulas []struct {
+				Name     string `json:"name"`
+				Text     string `json:"text"`
+				ReadOnly bool   `json:"read_only"`
+			} `json:"formulas"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("list response not JSON: %v", err)
+	}
+	if len(env.Data.Formulas) != 2 {
+		t.Fatalf("got %d rows, want 2 — the read-only formula was silently dropped: %+v", len(env.Data.Formulas), env.Data.Formulas)
+	}
+
+	byName := map[string]struct {
+		text     string
+		readOnly bool
+	}{}
+	for _, f := range env.Data.Formulas {
+		byName[f.Name] = struct {
+			text     string
+			readOnly bool
+		}{f.Text, f.ReadOnly}
+	}
+	ro, ok := byName["My_Formula"]
+	if !ok {
+		t.Fatalf("non-conforming formula absent from the roster: %v", byName)
+	}
+	if !ro.readOnly {
+		t.Errorf("My_Formula: read_only = false, want true")
+	}
+	if ro.text != "" {
+		t.Errorf("My_Formula: text = %q, want \"\" (listed but never editable)", ro.text)
+	}
+	ed, ok := byName["good-one"]
+	if !ok {
+		t.Fatalf("conforming formula absent from the roster: %v", byName)
+	}
+	if ed.readOnly {
+		t.Errorf("good-one: read_only = true, want false")
+	}
+	if ed.text == "" {
+		t.Errorf("good-one: text is empty, want the file bytes")
+	}
+}
+
+func TestFormulaRead_OK(t *testing.T) {
+	fs := &fakeFormulaStore{readBody: []byte("[meta]\nname='x'\n")}
+	s, _ := formulaServer(t, fs, &fakeGenerator{}, okVerdict)
+	rec := serve(s, httptest.NewRequest(http.MethodGet, "/api/formulas/good", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("read: code = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Name   string `json:"name"`
+			Text   string `json:"text"`
+			SHA256 string `json:"sha256"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("read response not JSON: %v", err)
+	}
+	if !env.OK || env.Data.Name != "good" || env.Data.Text == "" || env.Data.SHA256 == "" {
+		t.Fatalf("read row = %+v, want name/text/sha256 populated", env.Data)
+	}
+}
+
+func TestFormulaRead_NotFound(t *testing.T) {
+	fs := &fakeFormulaStore{readErr: formulas.ErrNotFound}
+	s, _ := formulaServer(t, fs, &fakeGenerator{}, okVerdict)
+	rec := serve(s, httptest.NewRequest(http.MethodGet, "/api/formulas/ghost", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("read absent: code = %d, want 404", rec.Code)
+	}
+}
+
+// ---- save (PUT) flow ----
+
+func TestFormulaSave_HappyPath(t *testing.T) {
+	fs := &fakeFormulaStore{}
+	s, fr := formulaServer(t, fs, &fakeGenerator{}, okVerdict)
+
+	body := `{"text":"[meta]\nname='foo'\n","base_sha256":"abc123"}`
+	rec := serve(s, tokPUT("/api/formulas/foo", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save: code = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if fs.writes != 1 || fs.lastName != "foo" {
+		t.Fatalf("store.Write not called once for foo: writes=%d name=%q", fs.writes, fs.lastName)
+	}
+	if fs.lastBase != "abc123" {
+		t.Fatalf("base_sha256 not threaded: got %q, want abc123", fs.lastBase)
+	}
+	if string(fs.lastBody) != "[meta]\nname='foo'\n" {
+		t.Fatalf("text not threaded byte-transparent: got %q", string(fs.lastBody))
+	}
+	// validate ran (the formula verb reached the runner) with the validate argv.
+	if args, ok := fr.argsFor("formula"); !ok || len(args) < 2 || args[0] != "validate" {
+		t.Fatalf("expected `af formula validate` to run; args=%v ok=%v", args, ok)
+	}
+}
+
+func TestFormulaSave_ValidateReject_422(t *testing.T) {
+	fs := &fakeFormulaStore{}
+	s, _ := formulaServer(t, fs, &fakeGenerator{}, rejectVerdict)
+	rec := serve(s, tokPUT("/api/formulas/foo", `{"text":"broken","base_sha256":""}`))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("validate reject: code = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if fs.writes != 0 {
+		t.Fatalf("store.Write must not run on a rejecting verdict (got %d)", fs.writes)
+	}
+	if !strings.Contains(rec.Body.String(), "missing [meta] table") {
+		t.Fatalf("422 body must carry the engine findings: %s", rec.Body.String())
+	}
+}
+
+func TestFormulaSave_StaleCAS_409(t *testing.T) {
+	fs := &fakeFormulaStore{writeErr: formulas.ErrConflict}
+	s, _ := formulaServer(t, fs, &fakeGenerator{}, okVerdict)
+	rec := serve(s, tokPUT("/api/formulas/foo", `{"text":"x","base_sha256":"deadbeef"}`))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("stale CAS: code = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "changed on disk") {
+		t.Fatalf("409 must carry the store's verbatim conflict message: %s", rec.Body.String())
+	}
+}
+
+func TestFormulaSave_CreateCollision_409(t *testing.T) {
+	fs := &fakeFormulaStore{writeErr: formulas.ErrExists}
+	s, _ := formulaServer(t, fs, &fakeGenerator{}, okVerdict)
+	rec := serve(s, tokPUT("/api/formulas/foo", `{"text":"x","base_sha256":""}`))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("create collision: code = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFormulaSave_InvalidName_400(t *testing.T) {
+	fs := &fakeFormulaStore{writeErr: formulas.ErrInvalidName}
+	s, _ := formulaServer(t, fs, &fakeGenerator{}, okVerdict)
+	rec := serve(s, tokPUT("/api/formulas/foo", `{"text":"x","base_sha256":""}`))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid name: code = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid formula name") {
+		t.Fatalf("400 must carry the store's verbatim name message: %s", rec.Body.String())
+	}
+}
+
+func TestFormulaSave_NotFound_404(t *testing.T) {
+	fs := &fakeFormulaStore{writeErr: formulas.ErrNotFound}
+	s, _ := formulaServer(t, fs, &fakeGenerator{}, okVerdict)
+	rec := serve(s, tokPUT("/api/formulas/foo", `{"text":"x","base_sha256":"deadbeef"}`))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("overwrite vanished: code = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFormulaSave_Regenerating_503(t *testing.T) {
+	fs := &fakeFormulaStore{}
+	s, fr := formulaServer(t, fs, &fakeGenerator{running: true}, okVerdict)
+	rec := serve(s, tokPUT("/api/formulas/foo", `{"text":"x","base_sha256":""}`))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("regenerating: code = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+	if fs.writes != 0 {
+		t.Fatalf("store.Write must not run while regenerating (got %d)", fs.writes)
+	}
+	if _, ran := fr.argsFor("formula"); ran {
+		t.Fatalf("validate must not run while regenerating (503 pre-empts it)")
+	}
+}
+
+func TestFormulaSave_ValidateProcessError_502(t *testing.T) {
+	fs := &fakeFormulaStore{}
+	// A non-zero exit with no verdict body = the validate process failed (NOT a rejecting verdict).
+	fr := &fakeRunner{resp: map[string]exec.Result{"formula": {ExitCode: 1}}}
+	w := exec.NewWrapper(fr, "")
+	s := New(&fakeMutator{}, fakeAssembler{}, nil,
+		WithToken(wtoken), WithFormulaStore(fs), WithGenerator(&fakeGenerator{}), WithValidator(w))
+	rec := serve(s, tokPUT("/api/formulas/foo", `{"text":"x","base_sha256":""}`))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("validate process error: code = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if fs.writes != 0 {
+		t.Fatalf("store.Write must not run on a validate process error (got %d)", fs.writes)
+	}
+}
+
+func TestFormulaSave_NilStore_500(t *testing.T) {
+	// No WithFormulaStore/WithValidator, but a token so guardWrite passes and the nil-check is reached.
+	s := New(&fakeMutator{}, fakeAssembler{}, nil, WithToken(wtoken))
+	rec := serve(s, tokPUT("/api/formulas/foo", `{"text":"x","base_sha256":""}`))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("nil store PUT: code = %d, want 500 (route registered under Convention A); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---- generate (POST/GET) ----
+
+func TestGenerateStart_HappyPath(t *testing.T) {
+	g := &fakeGenerator{}
+	s, _ := formulaServer(t, &fakeFormulaStore{}, g, okVerdict)
+	rec := serve(s, tokPOST("/api/factory/generate", `{"confirm":true}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("generate start: code = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if g.starts != 1 {
+		t.Fatalf("job.Start should run once, got %d", g.starts)
+	}
+}
+
+func TestGenerateStart_ConfirmMissing_422(t *testing.T) {
+	g := &fakeGenerator{}
+	s, _ := formulaServer(t, &fakeFormulaStore{}, g, okVerdict)
+	rec := serve(s, tokPOST("/api/factory/generate", `{"confirm":false}`))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("confirm missing: code = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if g.starts != 0 {
+		t.Fatalf("job.Start must not run without confirm (got %d)", g.starts)
+	}
+}
+
+func TestGenerateStart_Busy_409(t *testing.T) {
+	g := &fakeGenerator{startErr: genjob.ErrBusy}
+	s, _ := formulaServer(t, &fakeFormulaStore{}, g, okVerdict)
+	rec := serve(s, tokPOST("/api/factory/generate", `{"confirm":true}`))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("generate busy: code = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGeneratePoll_ReturnsProgress(t *testing.T) {
+	g := &fakeGenerator{progress: genjob.Progress{Offset: 42, Data: "log-bytes"}}
+	s, _ := formulaServer(t, &fakeFormulaStore{}, g, okVerdict)
+	rec := serve(s, httptest.NewRequest(http.MethodGet, "/api/factory/generate?from=7", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("poll: code = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if g.lastFrom != 7 {
+		t.Fatalf("?from=7 not threaded to Progress(from): got %d", g.lastFrom)
+	}
+	if !strings.Contains(rec.Body.String(), "offset") || !strings.Contains(rec.Body.String(), "state") {
+		t.Fatalf("progress payload must carry offset/state json keys: %s", rec.Body.String())
+	}
+	// absent from ⇒ 0
+	_ = serve(s, httptest.NewRequest(http.MethodGet, "/api/factory/generate", nil))
+	if g.lastFrom != 0 {
+		t.Fatalf("absent from must default to 0, got %d", g.lastFrom)
+	}
+}
+
+func TestGenerateStart_NilGenerator_500(t *testing.T) {
+	s := New(&fakeMutator{}, fakeAssembler{}, nil, WithToken(wtoken))
+	if rec := serve(s, tokPOST("/api/factory/generate", `{"confirm":true}`)); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("nil generator POST: code = %d, want 500", rec.Code)
+	}
+	if rec := serve(s, httptest.NewRequest(http.MethodGet, "/api/factory/generate", nil)); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("nil generator GET: code = %d, want 500", rec.Code)
+	}
+}
+
+// ---- route-table token enumeration ----
+
+// Exactly the two write routes require the token; on loopback every other route stays non-401.
+func TestRouteTableTokenTierEnumeration(t *testing.T) {
+	fs := &fakeFormulaStore{entries: []formulas.Entry{{Name: "foo"}}, readBody: []byte("x")}
+	g := &fakeGenerator{}
+	s, _ := formulaServer(t, fs, g, okVerdict)
+
+	type route struct {
+		method, path, body string
+		writeTier          bool
+	}
+	routes := []route{
+		{http.MethodPut, "/api/formulas/foo", `{"text":"x","base_sha256":""}`, true},
+		{http.MethodPost, "/api/factory/generate", `{"confirm":true}`, true},
+		{http.MethodGet, "/api/formulas", "", false},
+		{http.MethodGet, "/api/formulas/foo", "", false},
+		{http.MethodGet, "/api/factory/generate", "", false},
+		{http.MethodGet, "/api/agents", "", false},
+		{http.MethodGet, "/api/dispatch", "", false},
+		{http.MethodGet, "/api/settings", "", false},
+		{http.MethodPost, "/api/factory/up", "", false},
+		{http.MethodPost, "/api/factory/down", `{}`, false},
+	}
+
+	for _, rt := range routes {
+		var req *http.Request
+		switch rt.method {
+		case http.MethodGet:
+			req = httptest.NewRequest(http.MethodGet, rt.path, nil)
+		case http.MethodPut:
+			req = loopbackPUT(rt.path, rt.body) // NO token
+		default:
+			req = loopbackPOST(rt.path, rt.body) // NO token
+		}
+		rec := serve(s, req)
+		if rt.writeTier {
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("%s %s: token-less write got %d, want 401 (tier must fire on loopback)", rt.method, rt.path, rec.Code)
+			}
+		} else if rec.Code == http.StatusUnauthorized {
+			t.Errorf("%s %s: got 401 but this route must NOT require the token on loopback", rt.method, rt.path)
+		}
+	}
+
+	// token-supplied: the two write routes become NOT-401 (proving the 401 was the token gate).
+	if rec := serve(s, tokPUT("/api/formulas/foo", `{"text":"x","base_sha256":""}`)); rec.Code == http.StatusUnauthorized {
+		t.Errorf("PUT with a valid token must not be 401")
+	}
+	if rec := serve(s, tokPOST("/api/factory/generate", `{"confirm":true}`)); rec.Code == http.StatusUnauthorized {
+		t.Errorf("POST generate with a valid token must not be 401")
 	}
 }

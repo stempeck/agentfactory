@@ -15,6 +15,7 @@ type StartupConfig struct {
 	Agents         []string `json:"agents"`
 	Quality        string   `json:"quality"`
 	Fidelity       string   `json:"fidelity"`
+	Improvement    string   `json:"improvement"`
 	StartDispatch  bool     `json:"start_dispatch"`
 	WatchdogAgents []string `json:"watchdog_agents"`
 }
@@ -22,8 +23,10 @@ type StartupConfig struct {
 func defaultStartupConfig() *StartupConfig {
 	// Agents nil ⇒ "ALL" (the nil-vs-[] sentinel). WatchdogAgents nil/empty ⇒ the
 	// watchdog refuses to start / af up skips it (never "ALL") — issue #408 inverted
-	// that sentinel at the cmd layer. gates default ⇒ no-op.
-	return &StartupConfig{Quality: "default", Fidelity: "default"}
+	// that sentinel at the cmd layer. gates default ⇒ no-op. The absent-file load
+	// path returns this struct WITHOUT running validateStartupConfig, so Improvement
+	// must be seeded here too (backward-compat).
+	return &StartupConfig{Quality: "default", Fidelity: "default", Improvement: "default"}
 }
 
 // LoadStartupConfig loads and validates .agentfactory/startup.json. An absent
@@ -72,7 +75,10 @@ func validateStartupConfig(cfg *StartupConfig) error {
 	if cfg.Fidelity == "" {
 		cfg.Fidelity = "default"
 	}
-	for _, g := range []struct{ name, val string }{{"quality", cfg.Quality}, {"fidelity", cfg.Fidelity}} {
+	if cfg.Improvement == "" {
+		cfg.Improvement = "default"
+	}
+	for _, g := range []struct{ name, val string }{{"quality", cfg.Quality}, {"fidelity", cfg.Fidelity}, {"improvement", cfg.Improvement}} {
 		switch g.val {
 		case "on", "off", "default":
 		default:

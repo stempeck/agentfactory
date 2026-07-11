@@ -1,0 +1,10 @@
+formula = "parity-aspect-valid"
+type = "aspect"
+
+[[aspects]]
+id = "security"
+title = "Security"
+
+[[aspects]]
+id = "performance"
+title = "Performance"

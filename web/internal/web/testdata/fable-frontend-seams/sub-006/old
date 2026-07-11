@@ -1,0 +1,23 @@
+    var names = catalog.filter(function (e) { return e.stats; }).map(function (e) { return e.stats.name; });
+    if (!names.length) names = ['ultra-review', 'design', 'web-design'];
+    var script = [['$ af install --agents', 'dim']];
+    names.slice(0, 8).forEach(function (n) { script.push(['  ⟶ casting ' + n + ' ……… poured ✓', 'ok']); });
+    if (names.length > 8) script.push(['  ⟶ …' + (names.length - 8) + ' more lines poured ✓', 'ok']);
+    script.push(['$ af up', 'dim']);
+    names.slice(0, 8).forEach(function (n) { script.push(['  ⟶ line ' + n + ' ……… running', 'ok']); });
+    if (names.length > 8) script.push(['  ⟶ …' + (names.length - 8) + ' more lines running', 'ok']);
+    script.push(['FLOOR READY — ' + names.length + ' lines running. (Prototype: no real af call was made.)', 'ok']);
+    var i = 0;
+    (function next() {
+      if (i < script.length) {
+        var s = document.createElement('span');
+        s.className = script[i][1];
+        s.textContent = script[i][0] + '\n';
+        out.appendChild(s);
+        out.scrollTop = out.scrollHeight;
+        i++;
+        setTimeout(next, AF.reducedMotion ? 0 : 240);
+        return;
+      }
+      $('consoleClose').disabled = false;
+    })();

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -54,6 +55,7 @@ type cmdTmux interface {
 	GetPaneCommand(session string) (string, error)
 	IsAgentRunning(session string, expectedPaneCommands ...string) bool
 	SetEnvironment(session, key, value string) error
+	GetEnvironment(session, key string) (string, error)
 }
 
 // Compile-time check: the real *tmux.Tmux must satisfy cmdTmux (R-4 discipline).
@@ -216,9 +218,24 @@ var newIssueStore = func(wd, actor string) (issuestore.Store, error) {
 	if storeGuardActive {
 		return memstore.NewWithActor(actor), nil
 	}
-	root, err := config.FindFactoryRoot(wd)
+	root, err := resolveInvokerRoot(wd)
 	if err != nil {
 		return nil, err
+	}
+	return newIssueStoreAt(root, actor)
+}
+
+// newIssueStoreAt opens a store on an ALREADY-VALIDATED factory root, WITHOUT
+// re-running resolveInvokerRoot. A read-only verb that has downgraded a
+// factory-root mismatch to a warning (agents list, dispatch status) must build
+// its store on that downgraded root through THIS seam: routing back through
+// newIssueStore would re-resolve the same cwd and re-raise the very mismatch
+// just downgraded, dropping the verb into its error envelope (issue #519 review
+// follow-up). It is a seam so tests can substitute an in-memory store on the
+// production path (storeGuardActive=false) without contacting Python.
+var newIssueStoreAt = func(root, actor string) (issuestore.Store, error) {
+	if storeGuardActive {
+		return memstore.NewWithActor(actor), nil
 	}
 	return mcpstore.New(root, actor)
 }
@@ -229,6 +246,138 @@ func getWd() (string, error) {
 		return "", fmt.Errorf("cannot get working directory: %w", err)
 	}
 	return wd, nil
+}
+
+// mismatchError is the ux.md-owned contract text for a factory-root mismatch
+// (design-doc.md L169-175). It uses explicit argument indices because the
+// cwd-resolved (clone) root appears twice: %[1]s is that root, %[2]s is the
+// AF_ROOT-resolved session root. The "Error: " prefix is cobra's, not ours.
+const mismatchError = `factory root mismatch: cwd resolves to %[1]s
+but this session belongs to %[2]s  (AF_ROOT).
+A nested factory checkout is shadowing your real factory.
+cd back under your factory before re-running, or set AF_ROOT=%[1]s
+to affirm you really intend to operate on the nested checkout.`
+
+// rootMismatchError is returned by resolveInvokerRoot when the cwd-resolved root
+// disagrees with the AF_ROOT-resolved session root. It carries the cwd-resolved
+// root so read-only/status verbs can downgrade the refusal to a warning and
+// proceed on that root (downgradeRootMismatch), while state-writing verbs let it
+// propagate as a hard, pre-mutation refusal naming both roots (issue #519).
+type rootMismatchError struct {
+	resolved string // cwd-resolved (nested clone) root
+	envRoot  string // AF_ROOT-resolved session root
+}
+
+func (e *rootMismatchError) Error() string {
+	return fmt.Sprintf(mismatchError, e.resolved, e.envRoot)
+}
+
+// enclosingError is the refusal text for an env-less shell inside a nested factory
+// checkout that is enclosed by a DIFFERENT factory (K5, #519 Phase 3). Like
+// mismatchError it names both roots; %[1]s is the cwd-resolved (nested) root that
+// the attributable AF_ROOT hatch affirms (design-doc K5, ADR-003-compatible env
+// hatch), %[2]s is the enclosing factory above it.
+const enclosingError = `refusing to dispatch: cwd resolves to nested factory %[1]s
+which is enclosed by %[2]s.
+An env-less shell inside a nested checkout would silently capture this
+state-writing command into the wrong factory.
+cd back under %[2]s before re-running, or set AF_ROOT=%[1]s
+to affirm dispatching into the nested factory.`
+
+// enclosingRootError is returned by resolveInvokerRoot when the cwd-resolved root is
+// enclosed by a distinct factory AND no AF_ROOT affirms the intent (K5, #519). It
+// mirrors rootMismatchError: it carries the resolved (nested) root so the
+// CHECK-AS-WARNING verbs can downgrade the refusal to a warning and proceed on that
+// root (downgradeRootMismatch), while state-writing verbs let it propagate.
+type enclosingRootError struct {
+	resolved  string // cwd-resolved (nested) root
+	enclosing string // the enclosing factory root above it
+}
+
+func (e *enclosingRootError) Error() string {
+	return fmt.Sprintf(enclosingError, e.resolved, e.enclosing)
+}
+
+// warnEnclosingRoot emits the in-session (gen-0) enclosing signal on stderr: a
+// clone-born session whose AF_ROOT cross-check passes still learns, on every
+// state-writing verb, that its factory is nested inside another. A no-op when the
+// resolved root is not enclosed.
+func warnEnclosingRoot(resolved, enclosing string) {
+	if enclosing == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"warning: factory %s is nested inside enclosing factory %s; "+
+			"proceeding on the nested root (set AF_ROOT to affirm or cd back to override)\n",
+		resolved, enclosing)
+}
+
+// resolveInvokerRoot resolves the factory root from wd and, when the session
+// carries AF_ROOT, cross-checks the two; a mismatch is a hard error naming both
+// roots (issue #519). AF_ROOT is read here — not in internal/config — per ADR-004
+// (resolveWatchdogRoot precedent). This is the fourth deliberate resolver; do NOT
+// unify it with the nearest-marker walk (config.FindFactoryRoot), the watchdog
+// AF_ROOT-first resolver, or the containment AF_ROOT-shunning resolver — T-INT-4
+// encodes the carve-outs.
+func resolveInvokerRoot(wd string) (string, error) {
+	resolved, err := config.FindFactoryRoot(wd)
+	if err != nil {
+		return "", err // propagate the verbatim not-found string (root.go:36)
+	}
+	// K5 (#519 Phase 3): scan for an enclosing factory UNCONDITIONALLY (H3), on the
+	// resolved root, BEFORE every success return below. Best-effort — a scan error
+	// leaves enclosing empty and changes nothing (observability, not a gate).
+	enclosing, _ := config.FindEnclosingRoot(resolved)
+	afRoot := os.Getenv("AF_ROOT")
+	if afRoot == "" {
+		if enclosing != "" {
+			// Env-less nested shell: refuse the state-writing verb (CHECK-AS-WARNING
+			// verbs downgrade via downgradeRootMismatch). The AF_ROOT hatch affirms intent.
+			return "", &enclosingRootError{resolved: resolved, enclosing: enclosing}
+		}
+		return resolved, nil // operator shells / CI / install --init: identical to pre-seam behavior
+	}
+	// FULL resolve AF_ROOT, not a shallow stat: it may itself carry a .factory-root
+	// redirect (afweb rationale, web/internal/config/root.go:65-68).
+	envRoot, envErr := config.FindFactoryRoot(afRoot)
+	if envErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: AF_ROOT=%q does not resolve to a factory; using cwd-resolved root %s\n", afRoot, resolved)
+		warnEnclosingRoot(resolved, enclosing)
+		return resolved, nil // warn-and-proceed (watchdog fall-through posture)
+	}
+	if config.SameResolvedRoot(resolved, envRoot) {
+		warnEnclosingRoot(resolved, enclosing) // gen-0 in-session signal (H3)
+		return resolved, nil
+	}
+	return "", &rootMismatchError{resolved: resolved, envRoot: envRoot}
+}
+
+// downgradeRootMismatch inspects an error from resolveInvokerRoot. If it is a
+// factory-root mismatch, it warns on stderr naming both roots and returns the
+// cwd-resolved root with ok=true, so a read-only/status verb can proceed on that
+// root and keep its output contract (agents list stays a valid array; dispatch
+// status stays exit-0). Any other error (e.g. not-found) yields ok=false, and the
+// caller propagates err exactly as before.
+func downgradeRootMismatch(err error) (root string, ok bool) {
+	var mm *rootMismatchError
+	if errors.As(err, &mm) {
+		fmt.Fprintf(os.Stderr,
+			"warning: factory root mismatch: cwd resolves to %s but this session's AF_ROOT is %s; "+
+				"proceeding on the cwd-resolved root for this read-only command\n",
+			mm.resolved, mm.envRoot)
+		return mm.resolved, true
+	}
+	// K5 (#519 Phase 3): the enclosing-refusal is the same verb-class seam — the
+	// CHECK-AS-WARNING verbs downgrade it identically, proceeding on the nested root.
+	var enc *enclosingRootError
+	if errors.As(err, &enc) {
+		fmt.Fprintf(os.Stderr,
+			"warning: factory %s is nested inside enclosing factory %s; "+
+				"proceeding on the nested root for this read-only command\n",
+			enc.resolved, enc.enclosing)
+		return enc.resolved, true
+	}
+	return "", false
 }
 
 // resolveAgentName determines the agent name from cwd using three-tier resolution:

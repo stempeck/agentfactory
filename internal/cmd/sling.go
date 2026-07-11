@@ -102,10 +102,12 @@ func runSling(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	root, err := config.FindFactoryRoot(wd)
+	root, err := resolveInvokerRoot(wd)
 	if err != nil {
 		return err
 	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "factory: %s\n", root)
 
 	// Specialist dispatch: --agent without --formula
 	if slingFormulaName == "" && slingAgent != "" {
@@ -373,8 +375,8 @@ func runFormulaInstantiation(cmd *cobra.Command, root, wd string, args []string)
 func instantiateFormulaWorkflow(params InstantiateParams, w io.Writer) (string, map[string]string, string, error) {
 	ctx := params.Ctx
 
-	// 1. Find formula file
-	formulaPath, err := formula.FindFormulaFile(params.FormulaName, params.WorkDir)
+	// 1. Find formula file — pass the already-validated root (thread 7a); never cwd.
+	formulaPath, err := formula.FindFormulaFile(params.FormulaName, params.Root)
 	if err != nil {
 		return "", nil, "", fmt.Errorf("finding formula: %w", err)
 	}
@@ -535,7 +537,7 @@ func instantiateFormulaWorkflow(params InstantiateParams, w io.Writer) (string, 
 	}
 
 	// 6. Create beads
-	instanceID, stepIDs, err := instantiateFormula(ctx, store, f, sortedIDs, agentName)
+	instanceID, stepIDs, err := instantiateFormula(ctx, store, f, sortedIDs, agentName, params.Root)
 	if err != nil {
 		return "", nil, agentName, err
 	}
@@ -655,7 +657,7 @@ func persistResolvedVars(ctx context.Context, store issuestore.Store, instanceID
 	}
 }
 
-func instantiateFormula(ctx context.Context, store issuestore.Store, f *formula.Formula, sortedIDs []string, slingAgent string) (string, map[string]string, error) {
+func instantiateFormula(ctx context.Context, store issuestore.Store, f *formula.Formula, sortedIDs []string, slingAgent, root string) (string, map[string]string, error) {
 	// Create parent formula instance bead
 	parent, err := store.Create(ctx, issuestore.CreateParams{
 		Type:        issuestore.TypeEpic,

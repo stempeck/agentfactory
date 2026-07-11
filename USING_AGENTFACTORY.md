@@ -289,6 +289,21 @@ Then: `af install researcher && af up researcher`
 | `Stop` | Each response | `quality-gate.sh` — haiku grades against 7 generic principles, mails verdict on failure. **Off by default** — `af quality on` (or `echo on > "$(af root)/.agentfactory/.quality-gate"`) to enable. |
 | `Stop` | Each response | `fidelity-gate.sh` — haiku grades against the *current formula step's* title + description (ground truth from the step bead, not `af prime` output). Mails `STEP_FIDELITY` verdict on failure. Self-gates on `.runtime/hooked_formula` — generic supervisors with no active formula are unaffected. **On by default** (`af install --init` creates `.agentfactory/.fidelity-gate` with "on") — `af fidelity off` to disable. |
 
+### Continuous improvement hook
+
+On a qualifying final `af done`, af can keep the just-finished agent's session alive and hand it an `/improve-agent` instruction so it refines its **own** formula from that session's learnings before the session tears down. This hook fires from `af done` — **not** a Claude `Stop` hook — so it lives here rather than in the hook table above.
+
+**AND-gated, off by default.** The hook fires for an agent only when **both** toggles are on:
+
+- the **factory** toggle — `.agentfactory/.improvement-hook` reads `on` (set with `af improvement on`), **and**
+- that **agent's** `continuous_improvement` flag in `agents.json` is true (set with `af improvement on --agent <name>`).
+
+Unlike the fidelity gate, `.improvement-hook` is **never** seeded by `af install --init` — absent means off, so the whole capability stays inert until an operator explicitly enables both sides. `af improvement` (no args) prints the factory line, a per-agent effective (AND) table, and any pending sessions.
+
+**What fires, and what it does.** When both toggles are on and the finishing `af done` has a dispatcher (`.runtime/formula_caller`), af writes a `.runtime/improvement_pending` marker (recording the formula, caller, the formula's sha256, and whether the session would otherwise have auto-terminated), **defers** the session teardown and identity-lock release, and delivers the `/improve-agent` instruction over a redundant trio: the `af done` stdout, an urgent self-mail, and a one-line tmux nudge. The agent edits `.agentfactory/store/formulas/<agent>.formula.toml`, then runs `af improvement complete`, which validates the edited formula in-process, mails a `changed/unchanged` + `passed/FAILED` verdict to the caller (supervisor fallback), releases the deferred lock, and replays the deferred dispatched-session teardown.
+
+**Promotion is the human's responsibility.** The improvement self-edit lands in the store formula (`.agentfactory/store/formulas/<agent>.formula.toml`); to promote and install it, run `af install --agents`.
+
 ### Directory layout (after setup)
 
 ```
@@ -668,6 +683,10 @@ The quality gate is OFF by default. Create `<factory-root>/.agentfactory/.qualit
 ### Fidelity gate not running
 
 The fidelity gate is ON by default — `af install --init` creates `.agentfactory/.fidelity-gate` containing "on". To disable: `af fidelity off` or `echo off > "$(af root)/.agentfactory/.fidelity-gate"`. Also requires `claude`, `jq`, and `af` on PATH. Additionally, the fidelity gate self-gates on `.runtime/hooked_formula` — if no formula is active in the agent's working directory, the hook exits silently regardless of toggle state. Confirm with `af step current --json` (output should have `state == "ready"` for the gate to fire). The two gates use distinct PID-file locks (`.runtime/fidelity-gate.lock` vs `.runtime/quality-gate.lock`) and run independently — stale locks from dead processes are automatically recovered via PID-based detection. NOTICE: The Fidelity gate is MUCH less noisy because it only fires when claude doesn't properly follow a formula step, which doesn't happen very often.
+
+### Improvement hook not firing
+
+The continuous-improvement hook is AND-gated and OFF by default. If a finished agent never receives its `/improve-agent` instruction, run `af improvement` and confirm the factory line reads `on` and the agent's row shows `effective: fires` (both `af improvement on` and `af improvement on --agent <name>`; a fresh factory is always off). The hook fires only on a dispatched `WORK_DONE` `af done` (needs a non-empty `.runtime/formula_caller`), the store formula `.agentfactory/store/formulas/<agent>.formula.toml` must exist, and it won't re-fire while `.runtime/improvement_pending` is pending (run `af improvement complete` to clear). A stale session that never completed is auto-reaped only for agents in `startup.json`'s `watchdog_agents`; otherwise run `af improvement complete` yourself.
 
 ### Agent can't see project files
 

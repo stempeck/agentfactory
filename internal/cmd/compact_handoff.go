@@ -10,7 +10,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/checkpoint"
-	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/tmux"
 )
 
@@ -75,7 +74,7 @@ func runCompactHandoffCore(ctx context.Context, cwd string, interactive bool) er
 	}
 
 	// Step 2 — Context discovery
-	factoryRoot, err := config.FindFactoryRoot(cwd)
+	factoryRoot, err := resolveInvokerRoot(cwd)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "compact-handoff: finding factory root: %v, allowing compaction\n", err)
 		return nil

@@ -1,0 +1,6 @@
+formula = "parity-bad-type"
+type = "definitely-not-valid"
+
+[[steps]]
+id = "run"
+title = "Run"

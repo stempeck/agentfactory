@@ -86,7 +86,7 @@ func runConfigDispatchSet(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	root, err := config.FindFactoryRoot(wd)
+	root, err := resolveInvokerRoot(wd)
 	if err != nil {
 		return err
 	}
@@ -126,7 +126,7 @@ func runConfigStartupSet(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	root, err := config.FindFactoryRoot(wd)
+	root, err := resolveInvokerRoot(wd)
 	if err != nil {
 		return err
 	}
@@ -148,7 +148,7 @@ func runConfigModelsSet(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	root, err := config.FindFactoryRoot(wd)
+	root, err := resolveInvokerRoot(wd)
 	if err != nil {
 		return err
 	}

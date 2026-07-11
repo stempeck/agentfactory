@@ -28,13 +28,9 @@ func TestFindFormulaFile_FactoryRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// workDir is a subdirectory of root so FindFactoryRoot can walk up to it
-	workDir := filepath.Join(root, "subdir")
-	if err := os.MkdirAll(workDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	path, err := FindFormulaFile("my-formula", workDir)
+	// FindFormulaFile now takes an ALREADY-VALIDATED factory root (thread 7a); it no
+	// longer walks up from a working directory.
+	path, err := FindFormulaFile("my-formula", root)
 	if err != nil {
 		t.Fatalf("FindFormulaFile failed: %v", err)
 	}
@@ -61,10 +57,8 @@ func TestFindFormulaFile_HomeDir(t *testing.T) {
 	}
 	defer os.Remove(testFile)
 
-	// Use a workDir that won't find a factory root
-	workDir := t.TempDir()
-
-	path, err := FindFormulaFile("home-test-formula", workDir)
+	// Empty factory root ⇒ skip the factory search path, home formulas only (thread 7a).
+	path, err := FindFormulaFile("home-test-formula", "")
 	if err != nil {
 		t.Fatalf("FindFormulaFile failed: %v", err)
 	}
@@ -103,12 +97,8 @@ func TestFindFormulaFile_JSONFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	workDir := filepath.Join(root, "subdir")
-	if err := os.MkdirAll(workDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	path, err := FindFormulaFile("json-formula", workDir)
+	// FindFormulaFile now takes an already-validated factory root (thread 7a).
+	path, err := FindFormulaFile("json-formula", root)
 	if err != nil {
 		t.Fatalf("FindFormulaFile failed: %v", err)
 	}

@@ -64,10 +64,14 @@ func installMemStoreWithActor(t *testing.T, actor string) *memstore.Store {
 	t.Helper()
 	store := memstore.NewWithActor(actor)
 	orig := newIssueStore
+	origAt := newIssueStoreAt
 	newIssueStore = func(wd, _ string) (issuestore.Store, error) {
 		return store, nil
 	}
-	t.Cleanup(func() { newIssueStore = orig })
+	newIssueStoreAt = func(root, _ string) (issuestore.Store, error) {
+		return store, nil
+	}
+	t.Cleanup(func() { newIssueStore = orig; newIssueStoreAt = origAt })
 	return store
 }
 

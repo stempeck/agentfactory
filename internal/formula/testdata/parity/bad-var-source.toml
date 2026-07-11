@@ -1,0 +1,9 @@
+formula = "parity-bad-var-source"
+type = "workflow"
+
+[vars.region]
+source = "not_a_source"
+
+[[steps]]
+id = "run"
+title = "Run"

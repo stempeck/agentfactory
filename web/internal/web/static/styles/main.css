@@ -535,7 +535,7 @@ body.app{
   border-bottom:1px solid var(--line); font-family:var(--font-mono); font-size:12px; color:var(--muted); }
 .app .viewer .dots{ display:flex; gap:5px; }
 .app .viewer .dots i{ width:9px; height:9px; border-radius:50%; }
-.app .viewer iframe{ width:100%; height:430px; background:#fff; border:0; }
+.app .viewer iframe{ width:100%; height:430px; background:var(--viewer-bg); border:0; }
 
 .app .radios{ display:flex; flex-direction:column; gap:var(--space-3); margin-bottom:var(--space-5); }
 .app .radios label{ display:flex; gap:var(--space-4); align-items:center; border:1px solid var(--line);

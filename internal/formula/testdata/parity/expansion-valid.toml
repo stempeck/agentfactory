@@ -1,0 +1,11 @@
+formula = "parity-expansion-valid"
+type = "expansion"
+
+[[template]]
+id = "seed"
+title = "Seed"
+
+[[template]]
+id = "grow"
+title = "Grow"
+needs = ["seed"]

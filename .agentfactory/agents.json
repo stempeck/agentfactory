@@ -24,6 +24,24 @@
       "directive": "Run af prime to load formula context.",
       "formula": "design-v7"
     },
+    "fable-implement": {
+      "type": "autonomous",
+      "description": "Fixed-checklist implementation formula built on the aviation premise that safety comes from checklists nobody is allowed to skip, not from hoping every executor thinks like the best engineer.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "fable-implement"
+    },
+    "fable-increment": {
+      "type": "autonomous",
+      "description": "Fixed-checklist incremental implementation formula aimed at the UNRESOLVED review comments of an existing pull request, built on the aviation premise that safety comes from checklists nobody is allowed to skip.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "fable-increment"
+    },
+    "fable-review": {
+      "type": "autonomous",
+      "description": "Deep residence-powered code review of a pull request built on the refined aviation premise that the checklist doesn't fly the plane — the reviewer stays the pilot, and gates verify artifacts of execution, never opinions about opinions.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "fable-review"
+    },
     "factoryworker": {
       "type": "autonomous",
       "description": "## Overview\nFull agent work lifecycle from assignment through PR submission.",

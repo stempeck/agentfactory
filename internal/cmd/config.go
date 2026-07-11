@@ -65,7 +65,7 @@ func runConfigBuildHost(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	root, err := config.FindFactoryRoot(wd)
+	root, err := resolveInvokerRoot(wd)
 	if err != nil {
 		return err
 	}

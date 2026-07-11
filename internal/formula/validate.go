@@ -133,6 +133,10 @@ func (f *Formula) validateExpansion() error {
 		}
 	}
 
+	if err := f.checkTemplateCycles(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -188,6 +192,51 @@ func (f *Formula) checkCycles() error {
 
 	for _, step := range f.Steps {
 		if err := visit(step.ID); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// checkTemplateCycles detects circular dependencies in expansion templates using DFS.
+// It mirrors checkCycles but builds its dependency map from f.Template, since an
+// expansion formula's data lives in f.Template and f.Steps is empty.
+func (f *Formula) checkTemplateCycles() error {
+	deps := make(map[string][]string)
+	for _, tmpl := range f.Template {
+		deps[tmpl.ID] = tmpl.Needs
+	}
+
+	visited := make(map[string]bool)
+	inStack := make(map[string]bool)
+
+	var visit func(id string) error
+	visit = func(id string) error {
+		if inStack[id] {
+			// "template", not "step": this DFS walks f.Template. checkCycles walks f.Steps and keeps
+			// "step". The shipped toml-engine.js deliberately keeps "step" at its single emit site —
+			// its findCycle is type-agnostic and serves workflow and expansion alike.
+			return fmt.Errorf("cycle detected involving template: %s", id)
+		}
+		if visited[id] {
+			return nil
+		}
+		visited[id] = true
+		inStack[id] = true
+
+		for _, dep := range deps[id] {
+			if err := visit(dep); err != nil {
+				return err
+			}
+		}
+
+		inStack[id] = false
+		return nil
+	}
+
+	for _, tmpl := range f.Template {
+		if err := visit(tmpl.ID); err != nil {
 			return err
 		}
 	}

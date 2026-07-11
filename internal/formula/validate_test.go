@@ -322,3 +322,55 @@ Do NOT read the SKILL.md.`},
 	})
 }
 
+// ---- T5 (PRRT_kwDORt0n_M6Pw23b): a template is not a step ----
+
+// TestCheckTemplateCycles_MessageNamesTemplate — checkTemplateCycles walks f.Template, so its error
+// must name a template. The wording is a copy-paste from checkCycles (which walks f.Steps, where
+// "step" is correct). Cosmetic, but the message is what an operator reads at `af sling`.
+//
+// The rename is safe across every consumer: internal/cmd's classifyLamp keys on the substring
+// "cycle" (not "step"); the parity manifest and the JS conformance suite both key on the lamp
+// CATEGORY, never message text (testdata/parity/manifest.json `_comment`; conformance
+// test-engine.js:269-270). The shipped toml-engine.js keeps "step" deliberately: its findCycle is
+// type-agnostic and serves workflow and expansion from one emit site (decision D15).
+func TestCheckTemplateCycles_MessageNamesTemplate(t *testing.T) {
+	f := &Formula{
+		Name: "expansion-cycle",
+		Type: TypeExpansion,
+		Template: []Template{
+			{ID: "a", Needs: []string{"b"}},
+			{ID: "b", Needs: []string{"a"}},
+		},
+	}
+	err := f.checkTemplateCycles()
+	if err == nil {
+		t.Fatal("checkTemplateCycles: no error for a 2-cycle a→b→a")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "template") {
+		t.Errorf("got %q, want it to name a %q — checkTemplateCycles fires for an expansion template, not a step", msg, "template")
+	}
+	if strings.Contains(msg, "step") {
+		t.Errorf("got %q, which still calls a template a %q", msg, "step")
+	}
+}
+
+// TestCheckCycles_MessageStillNamesStep — the sibling must NOT change: checkCycles walks f.Steps.
+// Protective: guards against a careless find-and-replace across both emit sites.
+func TestCheckCycles_MessageStillNamesStep(t *testing.T) {
+	f := &Formula{
+		Name: "workflow-cycle",
+		Type: TypeWorkflow,
+		Steps: []Step{
+			{ID: "a", Needs: []string{"b"}},
+			{ID: "b", Needs: []string{"a"}},
+		},
+	}
+	err := f.checkCycles()
+	if err == nil {
+		t.Fatal("checkCycles: no error for a 2-cycle a→b→a")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "step") {
+		t.Errorf("got %q, want it to keep naming a %q", msg, "step")
+	}
+}

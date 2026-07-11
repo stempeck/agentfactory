@@ -80,13 +80,20 @@ func TestAgentDetail_StructuralInvariants(t *testing.T) {
 	}
 }
 
-// AC-3 (D5) — no non-empty innerHTML assignment anywhere in the module assets.
+// AC-3 (D5) — no non-empty innerHTML assignment in the SHELL assets. #534: the lint scopes to the
+// shell only. The transplanted formula editor (static/formula-editor/) is the APPROVED artifact —
+// its innerHTML usage is part of the signed bytes (amending the prototype to match a code rule is
+// forbidden), and it renders inside a same-origin iframe, not in the shell document.
 func TestAppJS_NoNonEmptyInnerHTML(t *testing.T) {
-	appJS := readAsset(t, filepath.Join(staticDir, "app.js"))
-	all := reAnyInnerHTMLAssign.FindAllString(appJS, -1)
-	empt := reEmptyInnerHTMLAssign.FindAllString(appJS, -1)
-	if len(all) != len(empt) {
-		t.Errorf("app.js: every innerHTML assignment must be an empty-string clear (found %d assignments, %d empty clears) — render via textContent / DOM nodes, never innerHTML = markup", len(all), len(empt))
+	for _, rel := range []string{
+		"app.js",
+	} {
+		src := readAsset(t, filepath.Join(staticDir, rel))
+		all := reAnyInnerHTMLAssign.FindAllString(src, -1)
+		empt := reEmptyInnerHTMLAssign.FindAllString(src, -1)
+		if len(all) != len(empt) {
+			t.Errorf("%s: every innerHTML assignment must be an empty-string clear (found %d assignments, %d empty clears) — render via textContent / DOM nodes, never innerHTML = markup", rel, len(all), len(empt))
+		}
 	}
 }
 

@@ -1,0 +1,10 @@
+formula = "parity-convoy-valid"
+type = "convoy"
+
+[[legs]]
+id = "left"
+title = "Left"
+
+[[legs]]
+id = "right"
+title = "Right"

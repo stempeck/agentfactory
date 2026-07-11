@@ -1,0 +1,3 @@
+    $('modeTag').textContent = state.mode === 'file' ? 'editing the real file'
+      : state.mode === 'new' ? 'new — not yet in the store'
+      : 'demo copy (in memory)';

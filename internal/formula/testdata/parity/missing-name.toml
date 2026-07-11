@@ -1,0 +1,5 @@
+type = "workflow"
+
+[[steps]]
+id = "run"
+title = "Run"

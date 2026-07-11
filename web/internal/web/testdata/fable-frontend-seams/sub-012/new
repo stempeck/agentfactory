@@ -1,0 +1,3 @@
+        Every card is read live from <span class="mono">.agentfactory/store/formulas/</span> through the console.
+        Open, edit, and pour straight back into the store — or connect the folder directly
+        (Chromium browsers) to edit the files through the File System Access API instead.

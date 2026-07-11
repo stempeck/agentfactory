@@ -1,0 +1,2 @@
+.designs/web-ui/final
+web/internal/web/static/formula-editor

@@ -1754,3 +1754,49 @@ func TestInstallAgentsWarnsShippedFormulaEdit(t *testing.T) {
 		}
 	})
 }
+
+// TestWarnIfEnclosingFactory_WarnsOnAncestorMarker (K11, #519 Phase 3): running
+// install --init inside the subtree of an existing factory emits a stderr warning
+// but never refuses (ADR-017 — a bootstrap warning reports geometry, claims no
+// identity).
+func TestWarnIfEnclosingFactory_WarnsOnAncestorMarker(t *testing.T) {
+	outer := t.TempDir()
+	realOuter, err := filepath.EvalSymlinks(outer)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	afDir := filepath.Join(realOuter, ".agentfactory")
+	if err := os.MkdirAll(afDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{"type":"factory","version":1}`), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	child := filepath.Join(realOuter, "nested", "child")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatalf("mkdir child: %v", err)
+	}
+
+	cmd := &cobra.Command{}
+	var errBuf bytes.Buffer
+	cmd.SetErr(&errBuf)
+	warnIfEnclosingFactory(cmd, child)
+
+	got := errBuf.String()
+	if !strings.Contains(got, "warning") || !strings.Contains(got, realOuter) {
+		t.Errorf("want an enclosing-factory warning naming %q, got: %q", realOuter, got)
+	}
+}
+
+// TestWarnIfEnclosingFactory_QuietWhenMarkerless (K11, #519 Phase 3): a
+// marker-less directory produces no new output.
+func TestWarnIfEnclosingFactory_QuietWhenMarkerless(t *testing.T) {
+	dir := t.TempDir()
+	cmd := &cobra.Command{}
+	var errBuf bytes.Buffer
+	cmd.SetErr(&errBuf)
+	warnIfEnclosingFactory(cmd, dir)
+	if errBuf.String() != "" {
+		t.Errorf("marker-less dir must be quiet, got: %q", errBuf.String())
+	}
+}

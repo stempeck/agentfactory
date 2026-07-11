@@ -32,6 +32,7 @@ type fakeTmux struct {
 	paneCommand   map[string]string
 	running       map[string]bool
 	claudeRunning map[string]bool
+	env           map[string]map[string]string // session -> key -> value (K9b GetEnvironment)
 }
 
 func newFakeTmux() *fakeTmux {
@@ -40,6 +41,7 @@ func newFakeTmux() *fakeTmux {
 		paneCommand:   map[string]string{},
 		running:       map[string]bool{},
 		claudeRunning: map[string]bool{},
+		env:           map[string]map[string]string{},
 	}
 }
 
@@ -75,6 +77,11 @@ func (f *fakeTmux) SetEnvironment(sess, key, value string) error {
 func (f *fakeTmux) UnsetEnvironment(sess, key string) error {
 	f.record(fmt.Sprintf("UnsetEnvironment %s %s", sess, key))
 	return nil
+}
+
+func (f *fakeTmux) GetEnvironment(sess, key string) (string, error) {
+	f.record(fmt.Sprintf("GetEnvironment %s %s", sess, key))
+	return f.env[sess][key], nil
 }
 
 // --- tmuxClient-only methods ---

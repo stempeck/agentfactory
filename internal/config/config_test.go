@@ -577,6 +577,58 @@ func TestLoadAgentConfig_NoModelFieldStillLoads(t *testing.T) {
 	}
 }
 
+func TestLoadAgentConfig_NoContinuousImprovementFieldStillLoads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents.json")
+	data := `{
+		"agents": {
+			"manager": {"type": "interactive", "description": "Manager"}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadAgentConfig(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agents["manager"].ContinuousImprovement {
+		t.Errorf("continuous_improvement = true, want false for a legacy entry without the field")
+	}
+}
+
+func TestSaveAgentConfig_ContinuousImprovementRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents.json")
+
+	original := &AgentConfig{
+		Agents: map[string]AgentEntry{
+			"gen-agent": {Type: "autonomous", Description: "Generated", Formula: "specialist-v1", ContinuousImprovement: true},
+		},
+	}
+
+	if err := SaveAgentConfig(path, original); err != nil {
+		t.Fatalf("SaveAgentConfig: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "continuous_improvement") {
+		t.Errorf("expected 'continuous_improvement' key in JSON output for true value, got: %s", data)
+	}
+
+	loaded, err := LoadAgentConfig(path)
+	if err != nil {
+		t.Fatalf("LoadAgentConfig: %v", err)
+	}
+	if !loaded.Agents["gen-agent"].ContinuousImprovement {
+		t.Errorf("continuous_improvement = false after round-trip, want true")
+	}
+}
+
 func TestSaveAgentConfig_OmitsEmptyModel(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agents.json")

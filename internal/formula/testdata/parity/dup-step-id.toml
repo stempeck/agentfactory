@@ -1,0 +1,10 @@
+formula = "parity-dup-step-id"
+type = "workflow"
+
+[[steps]]
+id = "same"
+title = "First"
+
+[[steps]]
+id = "same"
+title = "Second"

@@ -294,17 +294,18 @@ func TestAgentsList_JSON_SchemaSnapshot(t *testing.T) {
 	keys := arr[0]
 
 	want := map[string]bool{
-		"name":       true,
-		"type":       true,
-		"formula":    true,
-		"running":    true,
-		"status":     true,
-		"step_id":    true,
-		"step_title": true,
-		"step_state": true,
-		"is_gate":    true,
-		"gate_id":    true,
-		"inputs":     true,
+		"name":         true,
+		"type":         true,
+		"formula":      true,
+		"running":      true,
+		"status":       true,
+		"step_id":      true,
+		"step_title":   true,
+		"step_state":   true,
+		"is_gate":      true,
+		"gate_id":      true,
+		"inputs":       true,
+		"foreign_root": true,
 	}
 	if len(keys) != len(want) {
 		t.Errorf("key count = %d (%v), want %d", len(keys), keysOf(keys), len(want))
@@ -318,5 +319,39 @@ func TestAgentsList_JSON_SchemaSnapshot(t *testing.T) {
 		if !want[k] {
 			t.Errorf("unexpected key %q in output %q", k, out)
 		}
+	}
+}
+
+// TestAgentsList_ForeignRoot (K9b, #519 Phase 3) proves foreign_root is true for a
+// live session whose baked AF_ROOT resolves to a DIFFERENT factory than the
+// querying root, and false for a session whose AF_ROOT matches (best-effort — an
+// unset AF_ROOT also reads false).
+func TestAgentsList_ForeignRoot(t *testing.T) {
+	dir := setupTestFactoryForStep(t)
+	t.Chdir(dir)
+	writeAgentsJSON(t, dir, `{"agents":{`+
+		`"foreignagent":{"type":"autonomous","description":"f"},`+
+		`"homeagent":{"type":"autonomous","description":"h"}}}`)
+	installMemStore(t)
+	fake := installFakeTmuxPresent(t, session.SessionName("foreignagent"), session.SessionName("homeagent"))
+
+	otherRoot := t.TempDir()
+	fake.env[session.SessionName("foreignagent")] = map[string]string{"AF_ROOT": otherRoot}
+	fake.env[session.SessionName("homeagent")] = map[string]string{"AF_ROOT": dir}
+
+	out := invokeAgentsList(t)
+	var items []agentListItem
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &items); err != nil {
+		t.Fatalf("unmarshal %q: %v", out, err)
+	}
+	byName := map[string]agentListItem{}
+	for _, it := range items {
+		byName[it.Name] = it
+	}
+	if !byName["foreignagent"].ForeignRoot {
+		t.Errorf("foreignagent.foreign_root = false, want true (AF_ROOT %q != querying root %q)", otherRoot, dir)
+	}
+	if byName["homeagent"].ForeignRoot {
+		t.Errorf("homeagent.foreign_root = true, want false (AF_ROOT matches querying root)")
 	}
 }

@@ -468,6 +468,14 @@ func pollAgents(cmd *cobra.Command, root string, scope map[string]struct{}, agen
 			continue
 		}
 
+		// A stale improvement_pending marker (#483) is a
+		// zombie improvement session that never ran `af improvement complete` — it
+		// holds a worktree slot indefinitely. Reap it before the HasSession check,
+		// because the reap target may already be a dead session.
+		if maybeReapImprovement(root, name) {
+			continue
+		}
+
 		sessionID := session.SessionName(name)
 
 		running, err := tx.HasSession(sessionID)

@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Component — Controls, Cables &amp; Gauges</title>
+<link rel="stylesheet" href="../styles/variables.css">
+<link rel="stylesheet" href="../styles/main.css">
+<style>
+  .cols3 { display:grid; gap:18px; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); align-items:start; }
+  .stack { display:flex; flex-direction:column; gap:10px; align-items:flex-start; }
+  .spec { font-family:var(--font-mono); font-size:12px; color:var(--muted); margin-top:6px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="../index.html"><img class="gear" src="../assets/mark.svg" alt="" width="26" height="26"><span class="word">Foundry Console</span></a>
+    <span class="spacer"></span>
+    <nav class="nav" aria-label="Components">
+      <a href="station.html">Station</a>
+      <a href="inspection.html">Inspection</a>
+      <a href="controls.html" aria-current="page">Controls</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="view-head" style="margin-top:26px">
+    <h1 class="view-title">Controls</h1>
+    <p class="view-sub">The working surfaces. Game chrome lives at the edges; everything you type
+      into is quiet, dense, and set in Sora / Space Mono.</p>
+  </div>
+
+  <div class="cols3">
+    <section class="panel">
+      <h2 style="font-size:15px">Buttons</h2>
+      <div class="stack">
+        <button class="btn magenta">🔥 Test fire</button>
+        <button class="btn primary">🫙 Pour &amp; save</button>
+        <button class="btn primary" disabled title="Fix the inspection faults first">🫙 Pour &amp; save (locked)</button>
+        <button class="btn">🔧 Maintenance hatch</button>
+        <button class="btn danger">Unbolt station</button>
+        <button class="ghost">Open a real .toml…</button>
+      </div>
+      <p class="spec">.btn / .magenta .primary .danger [disabled] · .ghost</p>
+    </section>
+
+    <section class="panel">
+      <h2 style="font-size:15px">Patch bay — needs cables</h2>
+      <div class="patchbay" style="margin-bottom:10px">
+        <span class="cable">load-context <button type="button" aria-label="Unplug belt from load-context">✕</button></span>
+        <span class="cable">branch-setup <button type="button" aria-label="Unplug belt from branch-setup">✕</button></span>
+      </div>
+      <button class="btn">＋ Plug in a belt</button>
+      <p class="spec">.cable — one per needs entry; unplug patches the TOML array in place</p>
+      <h2 style="font-size:15px; margin-top:18px">Gauges (inputs / vars rows)</h2>
+      <div class="kv-rows">
+        <div class="kv-row"><span class="k">source</span><span class="v req">REQUIRED</span><button class="x" aria-label="Remove source">✕</button></div>
+        <div class="kv-row"><span class="k">design_style</span><span class="v">modern</span><button class="x" aria-label="Remove design_style">✕</button></div>
+        <button class="kv-row add">＋ add an input</button>
+      </div>
+      <p class="spec">.kv-row — click edits in the gauge dialog; both inputs AND vars are first-class</p>
+    </section>
+
+    <section class="panel">
+      <h2 style="font-size:15px">Fields &amp; switch</h2>
+      <div class="stack" style="width:100%">
+        <input class="field" type="text" placeholder="Foreman’s clipboard — find a line…" aria-label="Find a line by name (example)" style="max-width:280px">
+        <input class="field mono" type="text" value="inspection-branch-setup" style="max-width:280px" aria-label="Arch id example">
+        <label class="switch-row"><span class="switch"><input type="checkbox" checked><span class="track"></span></span> Human must approve here</label>
+        <span class="hint good">Nameplate is free — file and TOML stamp together.</span>
+        <span class="hint bad">That nameplate is taken — two lines can’t share a name.</span>
+      </div>
+      <p class="spec">.field(.mono) · .switch · .hint(.good/.bad)</p>
+      <h2 style="font-size:15px; margin-top:18px">Tool rack</h2>
+      <div class="toolrack">
+        <span class="tool">frontend-design <button type="button" aria-label="Unrack frontend-design">✕</button></span>
+        <span class="tool">code-review <button type="button" aria-label="Unrack code-review">✕</button></span>
+      </div>
+      <p class="spec">.tool — skills array, engine-validated names</p>
+    </section>
+  </div>
+
+  <section class="panel" style="margin-top:18px">
+    <h2 style="font-size:15px">Destructive-action grammar</h2>
+    <p class="hint" style="max-width:70ch; margin-bottom:12px">One shared confirm dialog for unbolt /
+      remove-gauge / discard-dirty; the factory restart alone gets the two-second hold-to-confirm breaker
+      (hold fill animates under the label). Danger is always <span class="mono">--danger</span> red-orange —
+      never the magenta brand.</p>
+    <button class="btn danger hold-btn" style="padding:14px 18px"><span class="hold-fill" style="transform:scaleX(.55)"></span>⚡ Hold the breaker — the floor restarts</button>
+    <p class="spec">.hold-btn .hold-fill — 2s hold; pointer or held Enter; releasing early cancels</p>
+  </section>
+</main>
+</body>
+</html>
