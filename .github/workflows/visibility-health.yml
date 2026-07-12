@@ -1,0 +1,64 @@
+# Monthly repo-health watchdog: verifies the discoverability surface (topics,
+# description, release, README badges) hasn't regressed and opens a single
+# issue when it has. Checks only — never commits, never touches content.
+name: visibility-health
+
+on:
+  schedule:
+    - cron: '17 8 3 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check discoverability surface
+        run: |
+          problems=""
+
+          topics=$(gh api "repos/$REPO" --jq '.topics | join(" ")')
+          for t in claude-code ai-agents multi-agent-systems agentic-ai golang; do
+            case " $topics " in
+              *" $t "*) ;;
+              *) problems="$problems- topic \`$t\` is missing\n" ;;
+            esac
+          done
+
+          desc=$(gh api "repos/$REPO" --jq '.description // ""')
+          [ -n "$desc" ] || problems="$problems- repo description is empty\n"
+
+          if ! gh api "repos/$REPO/releases/latest" --jq .tag_name >/dev/null 2>&1; then
+            problems="$problems- no published release\n"
+          fi
+
+          grep -q 'actions/workflows/test.yml/badge.svg' README.md \
+            || problems="$problems- CI badge missing from README\n"
+          grep -q 'img.shields.io/github/license' README.md \
+            || problems="$problems- license badge missing from README\n"
+
+          if [ -z "$problems" ]; then
+            echo "All visibility checks passed."
+            exit 0
+          fi
+
+          echo "Regressions found:"
+          printf '%b' "$problems"
+
+          title="Visibility health check: regressions found"
+          existing=$(gh issue list --repo "$REPO" --state open \
+            --search "\"$title\" in:title" --json number --jq 'length')
+          if [ "$existing" -gt 0 ]; then
+            echo "Open issue already exists — not filing a duplicate."
+            exit 0
+          fi
+
+          body=$(printf 'The monthly visibility health check found regressions:\n\n%b\nRestore these — they are the repo'"'"'s discoverability surface (topics pages, search snippets, README badges).' "$problems")
+          gh issue create --repo "$REPO" --title "$title" --body "$body"
