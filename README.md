@@ -1,22 +1,70 @@
-# Agentfactory
-**Why do I need Agentfactory?**
-1. You can give LLM steps to follow and at times it will use a heuristic and improvise, skipping steps
-2. Recency bias drives every prompt
-3. Improvization and Recency bias lead to bugs the next LLM builds around, compounding false assumptions
-4. No crash recovery for agents doing long-running or multi-agent operations
+# agentfactory — multi-agent orchestration for Claude Code
 
-SKILLs aren't enough on their own to solve this. You need an Agent with a better harness.
+**Turn your `SKILL.md` files into an autonomous agent workforce.** agentfactory is a
+multi-agent orchestration CLI that runs Claude Code agents through declarative TOML
+workflows — with crash recovery, context re-injection, and inter-agent mail built in.
 
-Agent Factory can easily harness your existing skills
+[![CI](https://github.com/stempeck/agentfactory/actions/workflows/test.yml/badge.svg)](https://github.com/stempeck/agentfactory/actions/workflows/test.yml)
+[![Go](https://img.shields.io/github/go-mod/go-version/stempeck/agentfactory)](go.mod)
+[![License: AGPL-3.0](https://img.shields.io/github/license/stempeck/agentfactory)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/stempeck/agentfactory)](https://github.com/stempeck/agentfactory/releases)
 
-**Vision:**
-You have SKILLs, now turn your SKILL.md's into your autonomous workforce.
+## Why agentfactory
 
-**Mission:**
-Create an instruction set workflow (formula) with `/formula-create /path/to/your/SKILL.md` and generate an autonomous agentfactory agent from it with `af formula agent-gen name-of-your-formula` with simple steps or multi-agent coordination.
+Long-running LLM agents fail in predictable ways. Give an agent a list of steps and at some
+point it will improvise — skip a step, substitute a heuristic, and keep going. Recency bias
+means whatever entered the context last dominates what the agent does next. When the context
+window fills and gets compressed, the agent quietly loses its identity, its place in the
+workflow, or both. And when a session crashes mid-task, there is usually nothing to recover:
+the plan lived inside the conversation.
 
-**Multi-agent orchestration CLI for Claude Code.**
-Turn your SKILL.md files into autonomous agents that execute structured workflows with context handoffs, inter-agent messaging, and crash recovery.
+Skills (`SKILL.md` files) capture *what you know*, but a skill alone can't hold an agent to a
+workflow — the agent needs a harness. agentfactory separates the two concerns: **personas**
+stay thin (identity, startup protocol, available commands), while **workflows live in
+formulas** — declarative TOML files with steps, DAG dependencies, variables, and quality
+gates. The `af` runtime bridges them: it instantiates a formula into trackable work items,
+re-injects identity and the current step on every prompt (surviving context compression),
+checkpoints progress so a crashed agent resumes where it stopped, and gives agents a mail
+system to coordinate multi-agent work.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    S["SKILL.md<br/>what you know"] -- "/formula-create" --> F["formula.toml<br/>steps · DAG deps · vars · gates"]
+    F -- "af formula agent-gen" --> A["agent workspace<br/>thin persona + hooks"]
+    A -- "af up" --> T["tmux session<br/>running Claude Code"]
+    T -- "af prime<br/>context re-injection" --> T
+    T -- "af done<br/>step advancement" --> F
+    T <-- "af mail" --> M[("inter-agent<br/>mail")]
+    T -- crash --> C["checkpoint<br/>resume on restart"] --> T
+```
+
+Three layers:
+
+1. **Agent templates** (`.md.tmpl`) — thin persona shells: identity, startup protocol, commands
+2. **Formulas** (`.formula.toml`) — declarative workflows: steps, DAG dependencies, variables, gates
+3. **`af` runtime** — instantiates formulas as work items, injects context via `af prime`, tracks progress via `af done`
+
+Agents don't need to know their full workflow. They run `af prime` to get the current step,
+execute it, run `af done` to advance, and repeat. On context compression, `af prime`
+re-injects identity and step context automatically. Deeper reading:
+[formulas reference](docs/formulas.md) · [agent lifecycle](docs/agent-lifecycle.md) ·
+[recovery model](docs/recovery-model.md) · [architecture corpus](docs/architecture/overview.md).
+
+## How it compares
+
+| | Workflow definition | Execution substrate | Crash / context-loss recovery |
+|---|---|---|---|
+| **agentfactory** | Declarative TOML DAGs, separate from personas | Claude Code sessions in tmux — inspectable, attachable | First-class: checkpoints + `af prime` re-injection |
+| **LangGraph** | Graphs built in Python/JS application code | Your app process calling model APIs | Checkpointing available; you build the harness |
+| **CrewAI** | Role/task definitions in Python code | Your app process calling model APIs | Not a core concern; retries at task level |
+| **Claude Code subagents** | Prompts inside one session | In-session fan-out | None — subagent state dies with the session |
+
+Honest scope: agentfactory orchestrates **Claude Code** specifically — it is not a
+model-agnostic framework. If you want programmatic graphs inside a Python app, LangGraph is
+the better fit. If you live in Claude Code and want autonomous, restartable, coordinated
+agents driven by workflows you can diff and review, that's what this is for.
 
 ## Quick Start
 
@@ -52,9 +100,14 @@ cd agentfactory
 ./quickdocker.sh <github-repo-path>
 ```
 
-This builds a container with all prerequisites, clones your target repo, and runs `quickstart.sh` inside it. When it finishes, the container is ready for `af up`.
+This builds a container with all prerequisites, clones your target repo, and runs
+`quickstart.sh` inside it. When it finishes, the container is ready for `af up`.
 
-A clean install now also **reveals the web console before the shell**: when it finishes it prints the loopback URL `http://127.0.0.1:<HOSTPORT>/` (and opens your browser on macOS) immediately before dropping you into the interactive shell — so you no longer have to run `--web` yourself just to first see it. Use `--web` only to **re-open** the console later. See the **Web Console (optional)** section below and [`web/README.md`](web/README.md) for details.
+A clean install now also **reveals the web console before the shell**: when it finishes it
+prints the loopback URL `http://127.0.0.1:<HOSTPORT>/` (and opens your browser on macOS)
+immediately before dropping you into the interactive shell — so you no longer have to run
+`--web` yourself just to first see it. Use `--web` only to **re-open** the console later. See
+the **Web Console (optional)** section below and [`web/README.md`](web/README.md) for details.
 
 #### Using quickstart.sh (inside the docker container @ docker exec -it -u dev "af_ghusername_repo" bash)
 
@@ -65,7 +118,8 @@ cd ~/projects/agentfactory/
 
 ### Authenticate Claude Code
 
-After installation, run `claude` once to authenticate. Agents require an authenticated Claude Code session to function.
+After installation, run `claude` once to authenticate. Agents require an authenticated Claude
+Code session to function.
 
 ## Usage
 
@@ -80,15 +134,8 @@ af install manager
 af install supervisor
 ```
 
-Add factory directories to `.gitignore`:
-
-```bash
-cat >> .gitignore << 'EOF'
-.agentfactory/
-.agentfactory/hooks/
-.agentfactory/store/
-EOF
-```
+`af install --init` automatically excludes factory directories from git via
+`.git/info/exclude` — no `.gitignore` changes needed.
 
 ### 2. Start agents
 
@@ -136,9 +183,11 @@ claude
 # e.g. ./.claude/skills/rapid-implement/SKILL.md")
 ```
 
-This generates a `.formula.toml` file in `.agentfactory/store/formulas/`. Be patient. It can take some time.
+This generates a `.formula.toml` file in `.agentfactory/store/formulas/`. Be patient. It can
+take some time.
 
-NOTICE: `.claude/skills/rapid-implement/SKILL.md` was provided in case you want to try creating your first coding agent.
+NOTICE: `.claude/skills/rapid-implement/SKILL.md` was provided in case you want to try
+creating your first coding agent.
 
 ### 2. Generate an agent from your formula (your-agent-name.formula.toml -> your-agent-name)
 
@@ -146,7 +195,8 @@ NOTICE: `.claude/skills/rapid-implement/SKILL.md` was provided in case you want 
 af formula agent-gen your-agent-name
 ```
 
-This creates the agent's workspace, CLAUDE.md template, hook configuration, and registers it in `agents.json`.
+This creates the agent's workspace, CLAUDE.md template, hook configuration, and registers it
+in `agents.json`.
 
 ### 3. Rebuild af with the new agent template
 
@@ -154,7 +204,8 @@ This creates the agent's workspace, CLAUDE.md template, hook configuration, and 
 make install
 ```
 
-Required because `af prime` reads templates from the compiled binary (`go:embed`). Without this, the agent falls back to the generic supervisor template on context compression.
+Required because `af prime` reads templates from the compiled binary (`go:embed`). Without
+this, the agent falls back to the generic supervisor template on context compression.
 
 ### 4. Start the agent
 
@@ -170,7 +221,8 @@ af sling --agent your-agent-name "do the thing"
 
 ### Batch regeneration
 
-To regenerate all specialist agents from formulas and re-bootstrap the factory, run the redeploy command from the main project checkout:
+To regenerate all specialist agents from formulas and re-bootstrap the factory, run the
+redeploy command from the main project checkout:
 
 ```bash
 af install --agents          # regenerate all + rebuild, then bootstrap
@@ -181,13 +233,15 @@ See `USING_AGENTFACTORY.md` for preconditions, data-safety, and `--no-build` not
 
 ## Included Formulas
 
-| Formula | Purpose |
-|---------|---------|
-| `design-v3` | Structured design exploration with constraint verification |
-| `design` | Basic design workflow |
-| `factoryworker` | General-purpose factory worker |
-| `gherkin-breakdown` | Break work into Gherkin scenarios |
-| `mergepatrol` | PR review and merge workflow |
+Nineteen formulas ship with the factory (see [docs/formulas.md](docs/formulas.md) for the format):
+
+| Family | Formulas | Purpose |
+|---------|----------|---------|
+| Implementation | `rapid-implement`, `rapid-increment`, `fable-implement`, `fable-increment` | Structured feature implementation with quality gates |
+| Design | `design`, `design-v3`, `design-v7`, `design-plan-impl`, `rapid-soldesign-plan`, `web-design` | Design exploration with constraint verification |
+| Review | `mergepatrol`, `ultra-review`, `fable-review` | PR review, merge workflow, deep multi-pass review |
+| Root cause | `rootcause-all`, `investigate` | Failure investigation and verified root-cause analysis |
+| Utility | `factoryworker`, `minimalworker`, `gherkin-breakdown`, `github-issue` | General workers, scenario breakdown, issue authoring |
 
 ## Included Skills
 
@@ -254,17 +308,7 @@ When the bind is ever non-loopback (not the default), the console additionally r
 session token (printed at startup) as defense-in-depth — but that is **not** a license to publish
 the port; the socket stays loopback whether you reach it via the `--web` bridge or the SSH forward.
 
-## Architecture
-
-Agentfactory has three layers:
-
-1. **Agent templates** (`.md.tmpl`) — thin persona shells that define identity, startup protocol, and available commands
-2. **Formulas** (`.formula.toml`) — declarative workflow definitions with steps, DAG dependencies, variables, and gates
-3. **`af` runtime** — bridges the two: instantiates formulas as beads, injects context via `af prime`, tracks progress via `af done`
-
-Agents don't need to know their full workflow. They run `af prime` to get the current step, execute it, run `af done` to advance, and repeat. On context compression, `af prime` re-injects identity and step context automatically.
-
-### Key directories
+## Key directories
 
 ```
 .agentfactory/
@@ -311,15 +355,35 @@ af prime                                                  # inject identity, get
 af done                                                   # complete and advance to next step (used by agents)
 ```
 
+## Roadmap
+
+- **Prebuilt release binaries** (GoReleaser) so `af` installs without a Go toolchain
+- **Richer shipped formula library** — more turnkey specialist agents out of the box
+- **Gate quality improvements** — reduce fidelity-gate false positives on passive steps ([#75](https://github.com/stempeck/agentfactory/issues/75))
+- **Default dispatch workflow** included with the factory ([#73](https://github.com/stempeck/agentfactory/issues/73))
+- **Web console growth** — deeper agent detail, formula authoring in the browser
+
+Have a use case these don't cover? [Open an issue](https://github.com/stempeck/agentfactory/issues/new/choose).
+
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, CLA requirements, and development setup.
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, CLA
+requirements, and development setup. Good entry points are labeled
+[good first issue](https://github.com/stempeck/agentfactory/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
 
 ## License
 
 AGPL-3.0. See [CONTRIBUTING.md](CONTRIBUTING.md) for commercial licensing inquiries.
 
 ### Disclaimer
-The contributors to this project take no responsibility for your agent (or their respective LLMs) actions.
+
+The contributors to this project take no responsibility for your agent (or their respective
+LLMs) actions.
+
+---
+
+Built and maintained by **[Glenn Stempeck](https://github.com/stempeck)** ·
+[LinkedIn](https://www.linkedin.com/in/glenn-stempeck/) ·
+[Medium](https://medium.com/@glennstempeck)
 
 Good luck, and enjoy your Factory of Agents!
