@@ -208,11 +208,6 @@ gate fails any undeclared file):
 - social-preview.png (committed — repo social-preview image source)
 - social-preview.svg (committed — editable source for the above)
 - architecture-diagram.png (committed — cycle-1 diagram export, predates cycle-N-diagram.png naming)
-- architecture.png (local only — operator's manual export, duplicate)
-- 03-show-hn.md (local only — plan-era draft, never posted, not happening)
-- 04-reddit.md (local only — plan-era draft, never posted, not happening)
-- 05-awesome-list-prs.md (local only — plan-era submission plans, unexecuted)
-- cycle-1-medium.html (local only — plan-era paste vehicle, regenerable)
 
 ## Sign-off
 Blank the line below to force re-approval of this runbook before the next cycle.

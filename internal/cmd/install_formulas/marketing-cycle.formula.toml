@@ -161,6 +161,10 @@ treat as the interview path below, updating rather than overwriting their file.
      flags), the source paths and commands that prove it in THIS repo
    - `## Verification Capability` — can this environment screenshot pages, or
      text-fetch only
+   - `## Standing Assets` — files in {{marketing_dir}} that no formula step produces
+     but that belong here anyway (one `- filename` line each, annotations allowed);
+     the manifest gate in cleanup fails any file that neither traces to a formula
+     step nor appears in this list
    - `## Privacy Mode` — ends with the literal line `Privacy-Decision: ______`. This is
      an EXPLICIT operator choice in the interview, never inferred from ignore rules:
      COMMITTED (default; state survives containers and travels with clones — but on a
@@ -508,8 +512,8 @@ ledger. The operator's own register, not yours.
 title sells the destination or a number that forces a double-take; if the title claims a
 number, the body MUST land that exact number. Subtitle carries the Positioning section's
 search phrases. Body: failure-mode hook → what shipped → honest limitations → repo link.
-Export any diagram as PNG (screenshot the repo host's rendered diagram; fix label
-collisions in the source before shipping).
+Export any diagram as PNG to `{{marketing_dir}}/cycle-{{issue}}-diagram.png` (screenshot
+the repo host's rendered diagram; fix label collisions in the source before shipping).
 3. **Short-form post** (platform per Channels): 150-200 words, question hook, PLAIN
 TEXT if the platform renders no markdown (check the Channels notes — literal asterisks
 shipping as text is a known failure), ends with a genuine question inviting replies.
@@ -700,8 +704,9 @@ defines.
 1. For each approved draft, prepare the platform mechanics per the Channels notes.
 Known platform traps to check for and handle (extend the Channels notes when you learn
 new ones): platforms that ignore pasted markdown need a rich-text paste vehicle (render
-the article to a local HTML file — semantic h2/strong/a/pre/code, image via relative
-src — and have the operator select-all → copy → paste); platforms that render no
+the article to `{{marketing_dir}}/cycle-{{issue}}-paste.html` — semantic
+h2/strong/a/pre/code, image via relative src — and have the operator select-all → copy →
+paste; the vehicle is regenerable scaffolding and is DELETED in phase-6); platforms that render no
 markdown need plain text; subtitle/description fields double as search metadata; topic
 tags per the platform's limit, mixed precise + broad-reach.
 2. Write `$(af root)/{{marketing_dir}}/cycle-{{issue}}-publish-checklist.md` with the
@@ -764,8 +769,9 @@ For each finding: post exact "search for / replace with" pairs as a comment on t
 cycle's publish issue (`gh issue comment` — post-publish edits keep the same URL), then
 re-verify after the operator applies them.
 
-Delete every diagnostic file (screenshots, fetch dumps) from the working tree before
-closing.
+Delete every diagnostic file (screenshots, fetch dumps) AND the paste vehicle
+`{{marketing_dir}}/cycle-{{issue}}-paste.html` from the working tree before closing —
+the vehicle is regenerable from the draft, and a stale copy fails the manifest gate.
 
 **Exit criteria:** All four items recorded per URL; diagnostics deleted; this check passes
 before `af done`:
@@ -814,9 +820,28 @@ git status --porcelain
 git stash list              # empty
 ```
 Commit legitimate stragglers, discard garbage, drop stale stashes. Verify no diagnostic
-files (screenshots, HTML paste vehicles outside {{marketing_dir}}) remain.
+files or paste vehicles remain anywhere.
 
-**Exit criteria:** Workspace clean, no cruft.
+**Artifact manifest gate — every file in {{marketing_dir}} must be accounted for.**
+This is what catches contamination: files no step produced, riding along as if the
+process made them. Each file must either match a formula artifact pattern or be
+declared in the runbook's `## Standing Assets` section:
+```bash
+cd "$(af root)/{{marketing_dir}}"
+FAIL=0
+for f in *; do
+  case "$f" in
+    approach.md|announced-ledger.md|cycle-*.md|cycle-*-diagram.png) continue ;;
+  esac
+  sed -n '/^## Standing Assets$/,/^## /p' approach.md | grep -q "^- $f" || { echo "MANIFEST FAIL: $f traces to no formula step and is not a declared standing asset"; FAIL=1; }
+done
+[ "$FAIL" -eq 0 ] && echo "MANIFEST: all files accounted for"
+```
+If any file fails: relocate it, declare it in Standing Assets (a deliberate, visible
+operator decision), or delete it. Do NOT close this step with an unaccounted file.
+
+**Exit criteria:** Workspace clean, no cruft, manifest gate prints
+"MANIFEST: all files accounted for".
 """
 
 [[steps]]
