@@ -10,8 +10,9 @@ here is a scar, not a hypothetical. Follow the steps in order. When a step says 
 - **Operator:** Glenn Stempeck. GitHub `stempeck` (active; `gstempeck` is his work-connected
   account — never touch it, never cross-link from it). Medium `@glennstempeck`. LinkedIn
   `/in/glenn-stempeck/`.
-- **Repo:** github.com/stempeck/agentfactory. Branch protection on main — merge PRs with
-  `gh pr merge --squash --admin` after CI is green.
+- **Repo:** github.com/stempeck/agentfactory. Branch protection on main. You open PRs;
+  ONLY the operator merges them. Never merge a PR, never push to main — no exceptions,
+  regardless of urgency or CI status.
 - **Auth preflight:** `gh api user -q .login` must return `stempeck`. Repo edits need `repo`
   scope; profile edits need `user` scope. If a call 404s with a scope hint, tell the operator to
   run `gh auth refresh -h github.com -s <scope>` — you cannot do the browser dance for him.
@@ -88,7 +89,8 @@ end the cycle.
    (`gh release create vX.Y.Z --target main --title ... --notes ...`).
 3. File real issues from real gaps (docs/architecture/gaps.md is a legitimate source); label
    good-first-issue only when genuinely scoped.
-4. `gh pr create`, then `gh pr checks <n> --watch`; merge with `--squash --admin` when green.
+4. `gh pr create`, then `gh pr checks <n> --watch`; when green, notify the operator on the
+   PR and HOLD — the operator merges, never you.
 5. Confirm standing surface: topics ≥ the core set, badges render, description/homepage intact
    (the monthly visibility-health workflow alarms on drift; don't duplicate it, just don't
    break it).
