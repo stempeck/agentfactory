@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#161b2e"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+
+  <!-- pipeline motif: skills -> formulas -> agents -->
+  <g font-family="Helvetica, Arial, sans-serif" font-size="26" text-anchor="middle">
+    <rect x="150" y="420" width="220" height="90" rx="14" fill="none" stroke="#3fb950" stroke-width="3"/>
+    <text x="260" y="458" fill="#3fb950">SKILL.md</text>
+    <text x="260" y="492" fill="#8b949e" font-size="20">what you know</text>
+
+    <path d="M 380 465 L 460 465" stroke="#8b949e" stroke-width="3" fill="none"/>
+    <path d="M 452 457 L 468 465 L 452 473 Z" fill="#8b949e"/>
+
+    <rect x="475" y="420" width="220" height="90" rx="14" fill="none" stroke="#58a6ff" stroke-width="3"/>
+    <text x="585" y="458" fill="#58a6ff">formula.toml</text>
+    <text x="585" y="492" fill="#8b949e" font-size="20">declarative DAG</text>
+
+    <path d="M 705 465 L 785 465" stroke="#8b949e" stroke-width="3" fill="none"/>
+    <path d="M 777 457 L 793 465 L 777 473 Z" fill="#8b949e"/>
+
+    <rect x="800" y="420" width="220" height="90" rx="14" fill="none" stroke="#d2a8ff" stroke-width="3"/>
+    <text x="910" y="458" fill="#d2a8ff" font-size="22">autonomous agent</text>
+    <text x="910" y="492" fill="#8b949e" font-size="20">crash-recoverable</text>
+  </g>
+
+  <text x="150" y="200" font-family="Helvetica, Arial, sans-serif" font-size="92" font-weight="bold" fill="#e6edf3">agentfactory</text>
+  <text x="150" y="270" font-family="Helvetica, Arial, sans-serif" font-size="34" fill="#8b949e">Multi-agent orchestration CLI for Claude Code</text>
+  <text x="150" y="320" font-family="Helvetica, Arial, sans-serif" font-size="34" fill="#8b949e">Turn your skills into an autonomous workforce.</text>
+
+  <text x="1130" y="600" font-family="Helvetica, Arial, sans-serif" font-size="22" fill="#484f58" text-anchor="end">github.com/stempeck/agentfactory</text>
+</svg>

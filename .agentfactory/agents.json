@@ -71,6 +71,12 @@
       "description": "Interactive agent for human-supervised work",
       "directive": "Read your memory and docs, and prove it."
     },
+    "marketing-cycle": {
+      "type": "autonomous",
+      "description": "Run one complete marketing cycle for the repository this factory serves: audit development since the last cycle, select one story with operator approval, refresh owned GitHub surfaces, stage drafts for operator publishing, verify every published page, and update the announced-features ledger.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "marketing-cycle"
+    },
     "mergepatrol": {
       "type": "autonomous",
       "description": "## Overview\nPR merge processor patrol loop.",
