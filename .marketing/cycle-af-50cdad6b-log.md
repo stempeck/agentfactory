@@ -86,3 +86,53 @@ Screenshots of the live console (Floor + Telemetry) captured this session confir
 UI matches these claims. No cost-per-step or per-step-token claim was made (the UI refuses both).
 
 GATE-3 addendum VERDICT: PASS
+
+## SELF-REVIEW
+
+Reviewed `git diff origin/main...HEAD` (4 commits: Tier A docs refresh, cycle artifacts,
+web-console revamp, GATE-4 resolution).
+
+Findings and fixes:
+- Stale claims reintroduced? None — the three fixes (af --version, 24 formulas, 10 skills) hold;
+  no reverted counts.
+- Broken links? None — README anchors `#observability` and `#web-console-optional` both resolve
+  to existing headers; every relative doc link (docs/*.md, docs/architecture/overview.md,
+  web/README.md, CONTRIBUTING.md, LICENSE) exists on disk.
+- Repo-host markdown rendering? Tables and fenced blocks balanced; the new Multi-provider table
+  row and skills rows render as normal GitHub tables.
+- Cruft (debug files, screenshots, scripts, TODOs)? None committed — all diagnostics
+  (shot*.js, shot-*.png, gate*-issue.md) live in the gitignored .runtime/ and are absent from
+  `git diff --name-only`. The two committed PNGs are intentional article assets.
+- Privacy mode (COMMITTED): the diff includes .marketing/ cycle artifacts alongside the doc
+  changes, exactly as committed mode requires. The pre-existing agent CLAUDE.md edit and runtime
+  files were deliberately excluded via scoped `git add`.
+- Manifest pre-check: every .marketing file matches a formula pattern (cycle-*.md,
+  cycle-*-diagram.png) or a declared Standing Asset.
+
+SELF-REVIEW VERDICT: PASS
+
+## SELF-VERIFY
+
+Verified cycle outputs against the approved runbook (the standing contract).
+
+- **Tier A — stale claims fixed, no unverified claim entered:** the diff contains all three
+  fixes (`af --version`, "Twenty-four formulas", "Ten skills"), and GATE-3 (+ addendum) proved
+  every command/flag/count/URL/web-console claim against source. PASS.
+- **Tier B — every draft operator-resolved, none self-approved:** Medium `Decision: READY`
+  (operator approved as written, #94); LinkedIn `Decision: EDITED` (operator supplied canonical
+  text). No draft carries a blank or agent-written decision. PASS.
+- **Tier law — zero external posts by the agent:** the only outward calls were GitHub issues
+  (#93 story, #94 drafts) and a push to the operator's own repo branch. Nothing was posted to
+  Medium, LinkedIn, or any external platform; both drafts remain staged for the operator to
+  publish. No PR merged (operator merges). PASS.
+- **Voice law — EDITED changes enumerated:** the LinkedIn file lists the mechanics-only changes
+  applied to the operator's text (Worflow->Workflow, GitHub URL filled, Medium URL placeholder),
+  prior draft preserved as reference, and the new short-form register recorded in the runbook
+  Voice section. PASS.
+- **Privacy mode — diff matches COMMITTED:** 8 .marketing/ cycle artifacts appear in the diff
+  alongside the doc changes, as committed mode requires; the pre-existing agent CLAUDE.md edit
+  and runtime files were excluded. PASS.
+
+No deviations.
+
+SELF-VERIFY VERDICT: PASS
