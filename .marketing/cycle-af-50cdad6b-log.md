@@ -32,3 +32,57 @@ URL. All recorded in the audit snapshot table.
 release list) returned data. No auth/scope failure encountered; nothing deferred.
 
 GATE-1 VERDICT: PASS
+
+## GATE-3 — Every public claim verified against source
+
+Checklist run over the full branch diff (`git diff origin/main...HEAD`: README.md,
+CHANGELOG.md, and the three cycle-2 `.marketing` artifacts).
+
+**1. Commands/flags/subcommands not proven this session via the Claim Verification Map?**
+— **none.** Every command asserted was run or `--help`-verified this session:
+- `af --version` → `af version v0.1.0-3-gb164332` (the stale `af version` was removed).
+- `af telemetry on|off|status|report|usage` + `--agent`/`--instance`/`--json` → `af telemetry --help`.
+- `af improvement on|off [--agent <name>]` → `af improvement --help` (AND-gated).
+- `af config models show` (set/check/attest) → `af config models --help`.
+- `af install --agents --litellm` → `af install --help` (`--litellm`: "gateway for running agents on OpenAI models").
+- `af sling --model` → `af sling --help` (`--model`).
+- `af down` factory-wide operator-only → CLAUDE.md CLI section + #92 title "operator-only factory teardown".
+- `gpt-fable-review`/`gpt-rootcause-all` "run on OpenAI models via the gateway" → models.json
+  maps both agents to the `codex` profile (`ANTHROPIC_BASE_URL: http://localhost:4000`,
+  `ANTHROPIC_MODEL: gpt-5.6-terra`, litellm key) — confirmed, not assumed.
+
+**2. Counts not recounted from the filesystem?** — **none.**
+- "Twenty-four formulas": `ls internal/cmd/install_formulas/*.toml | wc -l` = 24; README table
+  sums to 24 (Impl 4 + Design 7 + Review 4 + Root cause 2 + Multi-provider 2 + Utility 5).
+- "Ten skills": `ls -d internal/cmd/install_skills/*/ | wc -l` = 10; README table lists 10.
+
+**3. URLs not fetched/constructed from a verified pattern?** — **none.** The full diff
+contains two URLs, both verified live this session:
+- `https://github.com/stempeck/agentfactory/issues/93` — the gate-2 issue created this session (live).
+- `https://medium.com/@glennstempeck/95-...-b264170eb66c` — the repo's current homepage,
+  read from `gh repo view --json homepageUrl` this session.
+
+**4. Unshipped promises ("coming soon") outside a Roadmap section?** — **none.** Every
+README/CHANGELOG addition describes shipped, source-verified features; a grep for
+future-tense/coming-soon language over the README+CHANGELOG diff returned nothing. The
+Roadmap section is unchanged.
+
+GATE-3 VERDICT: PASS
+
+## GATE-3 addendum — web-console claims added in the #94 revamp
+
+Operator direction on #94 asked to surface the web console + telemetry. New README claims and
+their source evidence (verified via a code read of the web module this session):
+- Floor "lit sign = honest status": web/internal/web/static/app.js FloorViewModel + index.html
+  Floor section/filters (All/Working/Gate/Waiting/Attention/Stopped).
+- Telemetry view = per-step Duration + per-run token usage (Input/Output/Total) + session
+  metrics: web/internal/telemetryview/telemetryview.go (ReportRowDTO.DurationMS; UsageRowDTO
+  Input/Output/Total) and app.js render; nav tab index.html "Telemetry".
+- Degradation-as-data banner + honest per-step-token refusal ("token counts attributed per run,
+  not per step"): app.js renderTelemetryBanner + the Step-timings "Token data" column strings.
+- Browser formula authoring, agent detail + operator mail: index.html nav "Formulas"/agent
+  section; web/internal/server/server.go routes (/api/formulas, /api/agents/{name}/detail|mail).
+Screenshots of the live console (Floor + Telemetry) captured this session confirm the rendered
+UI matches these claims. No cost-per-step or per-step-token claim was made (the UI refuses both).
+
+GATE-3 addendum VERDICT: PASS

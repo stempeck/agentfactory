@@ -263,9 +263,12 @@ Ten skills are embedded and written to `.claude/skills/` during `af install`:
 
 ## Web Console (optional)
 
-Agentfactory ships an **optional** web console for managing the factory (the Floor view, slinging
-tasks, dispatch status, settings, and design prototypes). It is a separate Go module under `web/`
-and is **not** required to run `af`.
+Agentfactory ships an **optional** web console for managing the factory — the **Floor view** (a
+live skyline where every running agent is a lit sign showing its honest status), slinging tasks,
+dispatch status, browser **formula authoring**, agent detail with operator mail, design
+prototypes, settings, and a **Telemetry** view (per-step timing plus token and cost usage; see
+[Observability](#observability)). It is a separate Go module under `web/` and is **not** required
+to run `af`.
 
 **Build and install (best-effort):**
 
@@ -335,6 +338,11 @@ af telemetry usage                  # token usage and session metrics from the b
 `report` reads local records; `usage` queries the backend (it always exits 0 — branch on
 `.state`). Both accept `--json` for machine-readable output. Nothing is recorded unless you
 turn telemetry on.
+
+The optional [web console](#web-console-optional) surfaces the same data in a **Telemetry** view:
+per-step timing (Duration), per-run token usage, and session metrics — with a banner that reports
+any backend degradation as data rather than hiding it (when a backend can't attribute tokens to a
+single step, the console says so instead of inventing a number).
 
 ## Key directories
 
