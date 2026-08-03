@@ -1,0 +1,218 @@
+{
+  "_comment": "OTLP conformance fixture manifest for issue #329 Phase 2. ONE validator, TWO verdicts: every fixture listed here is fed to the same spec-derived validator, and the recorded verdict is what the validator must return. The corpus exists because the prior attempt at this wire format was validated against one tolerant receiver instead of against the spec, which demonstrates that receiver's tolerance and not conformance. An 'accept' fixture proves the validator is not rejecting everything; a 'reject' fixture proves it is not accepting everything. A conformance suite carrying only one verdict class is decorative. Provenance classes are kept in separate directories and MUST NOT be mixed: otlp-upstream/ holds verbatim upstream bytes whose git blob hash is recorded below and re-verified by the suite; reject/ holds single-deviation mutations of those bytes; synthetic/ and telemetry-dto/ hold hand-authored af-side material; openobserve-v0.91.3/ holds PII-scrubbed captures of what the pinned telemetry BACKEND answers, which is the foreign half of the contract and is not byte-provenanced precisely because it was scrubbed. See README.md.",
+  "otlp_proto_version_file": "OTLP_PROTO_VERSION",
+  "schema_file": "otlp-schema.json",
+  "fixtures": [
+    {
+      "file": "otlp-upstream/trace.json",
+      "verdict": "accept",
+      "provenance": "upstream",
+      "blob_sha1": "41130ff1aa0d7379812a2c7d7f89bbf80d72fe21",
+      "sha256": "f8f2870852b247f734a53ca7f022d4d942bd29732df54440494948af181bd373",
+      "bytes": 1229,
+      "note": "the canonical OTLP/JSON trace request published by the pinned release; the validator MUST accept it, which is the suite's proof that the validator itself is correct rather than merely strict"
+    },
+    {
+      "file": "reject/ids-base64.json",
+      "verdict": "reject",
+      "provenance": "derived-from-upstream",
+      "rule": "hex-id-encoding",
+      "note": "trace/span ids base64-encoded — this is what Go emits by default for a []byte field, and it is the defect class that sank the prior attempt"
+    },
+    {
+      "file": "reject/keys-snake-case.json",
+      "verdict": "reject",
+      "provenance": "derived-from-upstream",
+      "rule": "lower-camel-case-keys",
+      "note": "start_time_unix_nano / end_time_unix_nano — what a Go struct tag transcribed straight from the .proto produces"
+    },
+    {
+      "file": "reject/nanos-as-json-number.json",
+      "verdict": "reject",
+      "provenance": "derived-from-upstream",
+      "rule": "sixty-four-bit-decimal-string",
+      "note": "64-bit timestamps as bare JSON numbers — what encoding/json emits for a uint64 field without the string option"
+    },
+    {
+      "file": "reject/uint32-as-string.json",
+      "verdict": "reject",
+      "provenance": "derived-from-upstream",
+      "rule": "thirty-two-bit-json-number",
+      "note": "the mirror-image mistake: over-applying the decimal-string rule to a uint32 dropped-count"
+    },
+    {
+      "file": "reject/enum-as-name.json",
+      "verdict": "reject",
+      "provenance": "derived-from-upstream",
+      "rule": "integer-enums",
+      "note": "span kind as SPAN_KIND_SERVER — permitted by vanilla proto3 JSON, forbidden by the OTLP deviation"
+    },
+    {
+      "file": "reject/status-enum-as-name.json",
+      "verdict": "reject",
+      "provenance": "derived-from-upstream",
+      "rule": "integer-enums",
+      "note": "the same deviation on the status code, which is a different code path in most encoders"
+    },
+    {
+      "file": "reject/traceid-untruncated.json",
+      "verdict": "reject",
+      "provenance": "derived-from-upstream",
+      "rule": "hex-id-width",
+      "note": "64 hex chars — a full sha256 sum shipped without truncating to the 16-byte trace-id width"
+    },
+    {
+      "file": "reject/spanid-wrong-width.json",
+      "verdict": "reject",
+      "provenance": "derived-from-upstream",
+      "rule": "hex-id-width",
+      "note": "a span id at trace-id width — truncating to the wrong constant"
+    },
+    {
+      "file": "reject/null-value.json",
+      "verdict": "reject",
+      "provenance": "derived-from-upstream",
+      "rule": "no-null-values",
+      "note": "a nil Go map, slice or pointer marshals to null rather than being omitted"
+    },
+    {
+      "file": "reject/unknown-message-key.json",
+      "verdict": "reject",
+      "provenance": "derived-from-upstream",
+      "rule": "message-key-allowlist",
+      "note": "the pre-1.0 instrumentationLibrarySpans name; a conformant receiver silently ignores it, so the data simply never arrives and nothing reports the hole"
+    },
+    {
+      "file": "synthetic/api_request_events.json",
+      "verdict": "not-otlp",
+      "provenance": "synthetic",
+      "note": "af-side join material, not an OTLP payload; excluded from the conformance sweep and consumed only by the window-derivation tests. Replaced by a recorded-real capture in Phase 6b."
+    },
+    {
+      "file": "telemetry-dto/status-absent-off-unprobed.json",
+      "verdict": "not-otlp",
+      "provenance": "synthetic",
+      "note": "af telemetry status --json golden: nothing installed, nothing recording. See telemetry-dto/README.md."
+    },
+    {
+      "file": "telemetry-dto/status-absent-on-unprobed.json",
+      "verdict": "not-otlp",
+      "provenance": "synthetic",
+      "note": "af telemetry status --json golden: recording with nowhere to send. Pairs with status-absent-off-unprobed.json to prove the gate does not hide the config axis."
+    },
+    {
+      "file": "telemetry-dto/status-invalid-on-unprobed.json",
+      "verdict": "not-otlp",
+      "provenance": "synthetic",
+      "note": "af telemetry status --json golden: telemetry.json present but unloadable; the JSON surface still exits 0 where the human surface errors."
+    },
+    {
+      "file": "telemetry-dto/status-valid-noendpoint-on-unprobed.json",
+      "verdict": "not-otlp",
+      "provenance": "synthetic",
+      "note": "af telemetry status --json golden: configured with no endpoint, so records stay local and there is nothing to probe."
+    },
+    {
+      "file": "telemetry-dto/status-valid-endpoint-off-probed-ok.json",
+      "verdict": "not-otlp",
+      "provenance": "synthetic",
+      "note": "af telemetry status --json golden: recording off and the backend probed anyway. This is the fixture that pins the correction — the human formatter cannot produce this state."
+    },
+    {
+      "file": "telemetry-dto/status-valid-endpoint-on-probed-mixed.json",
+      "verdict": "not-otlp",
+      "provenance": "synthetic",
+      "note": "af telemetry status --json golden: one signal reachable, one answering 404 — the half-broken backend an operator cannot otherwise see."
+    },
+    {
+      "file": "telemetry-dto/status-valid-endpoint-on-unprobed-credential.json",
+      "verdict": "not-otlp",
+      "provenance": "synthetic",
+      "note": "af telemetry status --json golden: credential unreadable so no probe ran; the cause is stated in the operator's terms and never names the header."
+    },
+    {
+      "file": "telemetry-dto/status-healthy-all-green.json",
+      "verdict": "not-otlp",
+      "provenance": "synthetic",
+      "note": "af telemetry status --json golden: every axis healthy — the only status payload whose state is ok."
+    },
+    {
+      "file": "telemetry-dto/status-error-infra.json",
+      "verdict": "not-otlp",
+      "provenance": "synthetic",
+      "note": "af telemetry status --json golden: the infrastructure-failure envelope, which still exits 0 so a consumer branches on state rather than on the exit code."
+    },
+    {
+      "file": "telemetry-dto/report-empty.json",
+      "verdict": "not-otlp",
+      "provenance": "synthetic",
+      "note": "af telemetry report --json golden: healthy with no data yet — an empty row set is not an error."
+    },
+    {
+      "file": "telemetry-dto/report-rows.json",
+      "verdict": "not-otlp",
+      "provenance": "synthetic",
+      "note": "af telemetry report --json golden: one closed step and one open step, with durations as numbers rather than the human table's formatted strings."
+    },
+    {
+      "file": "telemetry-dto/report-corrupt.json",
+      "verdict": "not-otlp",
+      "provenance": "synthetic",
+      "note": "af telemetry report --json golden: zero rows and non-zero stats together, so a log whose every line is corrupt is never reported as 'no records yet'."
+    },
+    {
+      "file": "telemetry-dto/usage-ok.json",
+      "verdict": "not-otlp",
+      "provenance": "synthetic",
+      "note": "af telemetry usage --json golden: a healthy query — both halves ok, token rows and metric rows present, truncated false. Asserted against live emitter output by internal/cmd/telemetry_goldens_test.go, which is the root-lane half Six-Sigma Gap 4 asked for and the Usage DTO did not have. See telemetry-dto/README.md."
+    },
+    {
+      "file": "openobserve-v0.91.3/tokens_search_request.json",
+      "verdict": "not-otlp",
+      "provenance": "captured-backend",
+      "note": "the shipped agent-model-step-tokens SQL as a real POST <endpoint>/_search body; records the request shape (query.sql + microsecond start_time/end_time + from/size) that Phase 2's usage verb builds."
+    },
+    {
+      "file": "openobserve-v0.91.3/tokens_search_response_query_failed.json",
+      "verdict": "not-otlp",
+      "provenance": "captured-backend",
+      "note": "that request's live answer: HTTP 400 {\"code\":20004,...}. The shipped view's SQL does NOT run on this backend — the logs stream carries no af_overhead/input_tokens/output_tokens — so this is the recorded shape of a query_failed state, not a transport or credential failure."
+    },
+    {
+      "file": "openobserve-v0.91.3/tokens_search_request_ok.json",
+      "verdict": "not-otlp",
+      "provenance": "captured-backend",
+      "note": "a _search body the live logs schema does satisfy; the companion that keeps the success envelope from being hypothetical."
+    },
+    {
+      "file": "openobserve-v0.91.3/tokens_search_response_ok.json",
+      "verdict": "not-otlp",
+      "provenance": "captured-backend",
+      "note": "the HTTP 200 _search success envelope (took/hits/total/from/size/trace_id). hits is an array of column-keyed objects, which is what the Usage DTO projects from."
+    },
+    {
+      "file": "openobserve-v0.91.3/metrics_promql_response.json",
+      "verdict": "not-otlp",
+      "provenance": "captured-backend",
+      "note": "GET <endpoint>/prometheus/api/v1/query -> HTTP 200 vector for claude_code_token_usage, labelled af_agent/af_formula_instance/af_worktree_id. The metrics half deliberately uses the PromQL family, not _search."
+    },
+    {
+      "file": "openobserve-v0.91.3/metrics_promql_response_error.json",
+      "verdict": "not-otlp",
+      "provenance": "captured-backend",
+      "note": "a malformed PromQL query -> HTTP 400 {\"status\":\"error\",\"errorType\":...}. A THIRD error envelope shape, different from both _search error shapes — which is why classification reads the status code first."
+    },
+    {
+      "file": "openobserve-v0.91.3/search_response_401.json",
+      "verdict": "not-otlp",
+      "provenance": "captured-backend",
+      "note": "_search with no credential -> HTTP 401 {\"code\":401,\"message\":\"Unauthorized Access\"}. Pins credential_rejected apart from query_failed."
+    },
+    {
+      "file": "recorded-real/logs_schema_response.json",
+      "verdict": "not-otlp",
+      "provenance": "captured-backend",
+      "note": "fable-implement Step 1/#329 Phase 6b: GET <endpoint>/streams/default/schema?type=logs -> HTTP 200, captured live 2026-07-28 against this factory's own pinned backend. 74 real fields; independently reconfirms input_tokens/output_tokens/af_overhead are absent (E-4). Feeds tokensViewLogsPlaneColumns()'s pre-flight fixture and the step-6b evidence-completeness interlock (internal/cmd/telemetry_where_test.go)."
+    }
+  ]
+}

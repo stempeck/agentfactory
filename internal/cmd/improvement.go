@@ -32,13 +32,15 @@ enabling writes "on\n", disabling writes "off\n" to .agentfactory/.improvement-h
 Unlike af fidelity it is NEVER seeded by af install --init (absent ⇒ off).
 
 Promotion is the operator's. A fired hook has the agent edit its OWN store formula
-(.agentfactory/store/formulas/<agent>.formula.toml), but that store copy is derived:
+(<factory-root>/.agentfactory/store/formulas/<agent>.formula.toml — always the absolute
+factory-root path, never a worktree-relative one), but that store copy is derived:
 make sync-formulas is an unconditional cp and af install overwrites it on any byte-diff,
 so any redeploy or re-init REVERTS an un-promoted edit. To keep it, copy the change into
 internal/cmd/install_formulas/<agent>.formula.toml and rebuild (ADR-015).
 
-Trust boundary: the /improve-agent instruction is static — only the finishing formula's
-own name is substituted (operator provenance, never task-derived text). The self-edit is
+Trust boundary: the /improve-agent instruction is static — only its absolute edit target
+and the finishing formula's own name are substituted (operator provenance, never
+task-derived text). The self-edit is
 validated in-process by af improvement complete and surfaced by its outcome mail, so a
 human sees a changed/unchanged + passed/FAILED verdict before deciding whether to promote.
 
@@ -183,25 +185,39 @@ func recordImprovementSkip(factoryRoot, agent, reason string) error {
 }
 
 // improvementInstructionTemplate is the STATIC /improve-agent instruction (design
-// #483). Only the formula name is substituted — twice: once into the store path, once
-// into the `af formula show` verification command. No task-derived text ever enters it.
+// #483, corrected by issue #563). Two values are substituted: the absolute
+// factory-root edit target (never a worktree-relative fragment — a dispatched
+// agent's cwd is the worktree, and a relative path would resolve against it,
+// landing the edit in a git-tracked duplicate store nothing else reads, per #563),
+// and the bare formula name for the `af formula show` verification command. No
+// task-derived text ever enters it.
 const improvementInstructionTemplate = `IMPROVEMENT HOOK: use the Skill tool to load /improve-agent and improve the
-formula at .agentfactory/store/formulas/%s.formula.toml so that
+formula at %s so that
 future runs can leverage learnings from this session. Derive the evidence from
 this session's own context; apply the improvements that pass the skill's
 validation checklist without asking for confirmation. Do not commit or
-regenerate the agent — leave promotion to the human operator. Note: editing
-this path from a worktree session will produce a WORKTREE_CONTAINMENT advisory;
-it is expected for this sanctioned edit. After editing, verify with:
-af formula show %s --json (exit 0). When finished, run:
+regenerate the agent — leave promotion to the human operator. Note: this is the
+shared factory-root store, not any worktree-local copy; if you are running from
+a worktree, editing it may trigger a WORKTREE_CONTAINMENT advisory as a side
+effect of the cross-boundary write — that is expected and does not indicate a
+problem. After editing, verify with:
+af formula show %s --json and read the JSON body: a "state":"error" key means
+the formula is invalid, its absence means it parsed. When finished, run:
 af improvement complete`
 
+// The verification command takes the bare NAME, so `af formula show` resolves it through
+// formula.FindFormulaFile, which falls back to the home store (discover.go:34-36) while the
+// completion verdict joins the factory root directly with no fallback. The two therefore
+// share a parse algorithm but not a resolution one: a passing self-check is strong evidence
+// the edit parses, not a guarantee it agrees with the verdict. Divergence needs the
+// factory-root file to go missing AND a same-named home formula to exist.
+//
 // improvementFormula holds the prefix-stripped formula facts the hook needs: the
-// bare name, the operator-facing relative path (used in the marker and the
-// instruction text), and the absolute path (used to stat and hash the file).
+// bare name (used in the verification command) and the absolute path (used to
+// stat and hash the file, and as the edit target named in the instruction text —
+// #563: never a worktree-relative fragment).
 type improvementFormula struct {
 	Name    string
-	RelPath string
 	AbsPath string
 }
 
@@ -216,13 +232,12 @@ func improvementInstruction(root, formulaTitle string) (string, improvementFormu
 	}
 	f := improvementFormula{
 		Name:    name,
-		RelPath: ".agentfactory/store/formulas/" + name + ".formula.toml",
-		AbsPath: filepath.Join(config.FormulasDir(root), name+".formula.toml"),
+		AbsPath: config.FormulaStorePath(root, name),
 	}
 	if _, err := os.Stat(f.AbsPath); err != nil {
 		return "", improvementFormula{}, false
 	}
-	return fmt.Sprintf(improvementInstructionTemplate, name, name), f, true
+	return fmt.Sprintf(improvementInstructionTemplate, f.AbsPath, name), f, true
 }
 
 // formulaSHA256 returns the full-hex sha256 of the formula file's bytes, recorded in
@@ -273,7 +288,7 @@ func evaluateImprovementFire(cwd, factoryRoot, instanceID, caller, formulaTitle 
 	marker := improvementMarker{
 		InstanceID:          instanceID,
 		Formula:             formula.Name,
-		FormulaPath:         formula.RelPath,
+		FormulaPath:         formula.AbsPath,
 		Caller:              caller,
 		TerminateOnComplete: terminateOnComplete,
 		FormulaSHA256:       sha,
@@ -486,11 +501,12 @@ func runImprovementCompleteCore(agentDir, factoryRoot string, reap bool) error {
 		return fmt.Errorf("reading consumed improvement marker: %w", err)
 	}
 
-	// marker.FormulaPath is RELATIVE (.agentfactory/store/formulas/<name>.formula.toml);
-	// os.ReadFile resolves it against the process cwd, which is the worktree on the
-	// agent-run path. Reconstruct the abs path against the factory root instead
-	// (mirrors improvementInstruction's AbsPath at improvement.go).
-	absFormula := filepath.Join(config.FormulasDir(factoryRoot), marker.Formula+".formula.toml")
+	// Reconstruct the abs path from marker.Formula (the bare name) + factoryRoot
+	// rather than trusting marker.FormulaPath directly (mirrors improvementInstruction's
+	// AbsPath at improvement.go) — this stays correct even against a marker written
+	// by a pre-#563 binary, whose FormulaPath was relative and resolved against the
+	// wrong directory if read literally.
+	absFormula := config.FormulaStorePath(factoryRoot, marker.Formula)
 
 	// In-process validation (ADR-014-safe; formula.ParseFile is pure Go). Branch on
 	// the RETURNED error, NOT `af formula show`'s exit code (which is always 0).
@@ -508,8 +524,13 @@ func runImprovementCompleteCore(agentDir, factoryRoot string, reap bool) error {
 	if recipient == "" {
 		recipient = escalationTarget
 	}
-	subject, body := improvementOutcomeMessage(marker.Formula, changed, validationPassed, reap)
+	subject, body := improvementOutcomeMessage(marker.Formula, absFormula, changed, validationPassed, reap)
+	// Print the body too, not just the subject: the subject carries no path, and the mail
+	// below goes to marker.Caller (an agent) or supervisor (an agent). Without this the
+	// formula path reaches no surface a human reads, so "from the verdict alone the
+	// operator can determine where to act" would hold only by reading a peer's mailbox.
 	fmt.Println(subject)
+	fmt.Println(body)
 	if err := sendImprovementOutcomeMail(recipient, subject, body); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: improvement outcome mail to %s failed: %v\n", recipient, err)
 	}
@@ -526,9 +547,11 @@ func runImprovementCompleteCore(agentDir, factoryRoot string, reap bool) error {
 
 // improvementOutcomeMessage builds the verdict subject/body: the formula name,
 // a changed/unchanged word (sha256 delta), and a passed/FAILED word (validation).
-// Under reap it relabels the subject IMPROVEMENT_REAPED so a watchdog-forced
-// completion surfaces loudly to the caller.
-func improvementOutcomeMessage(formulaName string, changed, validationPassed, reap bool) (subject, body string) {
+// The body also names the absolute formulaPath (#563: from the verdict alone the
+// operator must be able to tell where to act — the bare name is not enough given
+// the underlying bug was location ambiguity). Under reap it relabels the subject
+// IMPROVEMENT_REAPED so a watchdog-forced completion surfaces loudly to the caller.
+func improvementOutcomeMessage(formulaName, formulaPath string, changed, validationPassed, reap bool) (subject, body string) {
 	changeWord := "unchanged"
 	if changed {
 		changeWord = "changed"
@@ -542,8 +565,12 @@ func improvementOutcomeMessage(formulaName string, changed, validationPassed, re
 		label = "IMPROVEMENT_REAPED"
 	}
 	subject = fmt.Sprintf("%s: %s — %s, validation %s", label, formulaName, changeWord, valWord)
-	body = fmt.Sprintf("Continuous-improvement self-edit of formula %s: %s, in-process validation %s.",
-		formulaName, changeWord, valWord)
+	// "Formula path", not "Edited at": the sentence is appended to unchanged verdicts too,
+	// where no edit happened anywhere, and AC6 is about the operator drawing a CORRECT
+	// conclusion. State the location without asserting an event; changeWord above already
+	// carries whether an edit occurred.
+	body = fmt.Sprintf("Continuous-improvement self-edit of formula %s: %s, in-process validation %s. Formula path: %s.",
+		formulaName, changeWord, valWord, formulaPath)
 	return subject, body
 }
 

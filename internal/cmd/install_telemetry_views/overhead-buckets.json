@@ -1,0 +1,97 @@
+{
+  "_comment": "The named non-step buckets. This view is the sole owner of the af.overhead-marked events the per-step view excludes.",
+  "name": "spend-outside-steps",
+  "title": "Spend outside steps",
+  "description": "Every request that no step owns, grouped by why. Quality-gate and fidelity-gate work appears as grader-overhead; spend before a run's first step began appears as unattributed; a session with no formula running appears as no-formula. Naming these rather than discarding them is what lets the reconciliation check add up.",
+  "af_view_schema": 1,
+  "af_decision_o4": "O-4 (view delivery) is hybrid: files on disk plus a best-effort dashboard push. See README.md.",
+  "af_assumptions": [
+    "COLUMN SPELLINGS AND JOIN VERIFIED AGAINST A LIVE BACKEND, THIS QUERY NOT EXECUTED: during review of PR #567 OpenObserve v0.91.3 was stood up from the pinned artifact and the per-step token view's query was run verbatim, confirming the ingest naming this view also relies on. This view's own query was NOT among those executed. This view computes max(af_step_seq) inside its step_windows CTE but never orders on it or emits it, so it is deliberately left uncast. A dashboard already published under this title is never replaced by a re-run of quickstart.sh, so an existing factory keeps the query it first received — re-import this file by hand to pick up changes. CI has no backend, so none of this is re-verified automatically.",
+    "The native claude_code.api_request shape (input_tokens, output_tokens, cost_usd) is the synthetic fixture's hypothesis, not a recorded capture - see internal/telemetry/testdata/synthetic/api_request_events.json, which P6b replaces. Whether these arrive as OTel logs or metrics is also an inference; if it is metrics, the stream name and column prefix both change.",
+    "Attribute names are rewritten on ingest. Trace resource attributes are prefixed with 'service_' and every dot becomes an underscore, so af.formula_instance is queryable only as service_af_formula_instance. OTLP logs do NOT get the prefix, so the same attribute is af_formula_instance on the native-event side of the join. _timestamp is microseconds while start_time/end_time are nanoseconds and duration is microseconds.",
+    "session-start, inter-step and compaction are named as buckets but are not separately derivable from the event shape recorded so far; they currently fall under unattributed. Splitting them needs richer native attributes and is P6b work."
+  ],
+  "af_join": {
+    "overhead": "own",
+    "window": "half-open",
+    "start_rule": "earliest",
+    "end_rule": "latest",
+    "tail": "preceding-step",
+    "instance_scoped": true,
+    "buckets": [
+      "grader-overhead",
+      "unattributed",
+      "no-formula",
+      "session-start",
+      "inter-step",
+      "compaction"
+    ]
+  },
+  "dashboard": {
+    "version": 8,
+    "title": "Spend outside steps",
+    "description": "Every request no step owns, grouped by why.",
+    "role": "",
+    "owner": "agentfactory",
+    "tabs": [
+      {
+        "tabId": "default",
+        "name": "Overhead",
+        "panels": [
+          {
+            "id": "panel-1",
+            "type": "table",
+            "title": "Spend outside steps",
+            "description": "",
+            "config": {
+              "show_legends": false
+            },
+            "queryType": "sql",
+            "queries": [
+              {
+                "query": "WITH step_windows AS (\n    -- Rule 2, earliest start wins. The af side has already applied earliest-wins when it computed\n    -- each step's duration, and only closed steps are exported, so in practice this aggregates one\n    -- row per step. MIN/MAX are kept because the rule must survive a second span for the same step\n    -- arriving later - a wide window is visible in the reconciliation view, a narrow one is not.\n    SELECT service_af_formula_instance AS formula_run,\n           af_step_id                  AS step,\n           service_af_agent            AS agent,\n           max(af_step_seq)            AS step_order,\n           max(af_model)               AS model,\n           min(start_time)             AS window_start_ns,\n           max(end_time)               AS window_end_ns\n    FROM \"traces\".\"default\"\n    WHERE service_name = 'agentfactory'\n      AND af_step_id <> ''\n    GROUP BY service_af_formula_instance, af_step_id, service_af_agent\n),\nrequests AS (\n    SELECT af_formula_instance AS formula_run,\n           af_agent            AS agent,\n           af_overhead,\n           _timestamp * 1000   AS at_ns,\n           input_tokens,\n           output_tokens,\n           cost_usd\n    FROM \"logs\".\"default\"\n),\nclassified AS (\n    SELECT r.*,\n           CASE\n               -- This view OWNS the overhead-marked events: it is the sole owner, which is what\n               -- lets the per-step view exclude them without the spend disappearing. The suffix\n               -- matches what AttributeEvent produces, so a grader event lands in\n               -- 'grader-overhead' on both sides. The bucket name IS the contract. An empty marker\n               -- is not a marker, matching AttributeEvent.\n               WHEN r.af_overhead IS NOT NULL AND r.af_overhead <> ''\n                   THEN r.af_overhead || '-overhead'\n               -- Spend by a session with no formula running at all.\n               WHEN r.formula_run IS NULL OR r.formula_run = '' THEN 'no-formula'\n               -- Spend before this agent's first step of the run began: session startup, or a\n               -- formula that never got going. The agent predicate matches the one the per-step\n               -- view joins on; without it an event from an agent that never closed a step would\n               -- be classed as step-attributed here and join nothing there, vanishing from both.\n               WHEN NOT EXISTS (\n                   SELECT 1 FROM step_windows w\n                   WHERE w.formula_run = r.formula_run\n                     AND w.agent       = r.agent\n                     AND r.at_ns >= w.window_start_ns\n               ) THEN 'unattributed'\n               ELSE 'step-attributed'\n           END AS bucket\n    FROM requests r\n)\nSELECT bucket,\n       formula_run,\n       agent,\n       count(*)                          AS requests,\n       sum(input_tokens)                 AS input_tokens,\n       sum(output_tokens)                AS output_tokens,\n       sum(input_tokens + output_tokens) AS total_tokens,\n       sum(cost_usd)                     AS cost_usd_reported\nFROM classified\n-- Rows the per-step view already owns are not repeated here. The two views use the same\n-- instance-and-agent scoping, so between them every request has exactly one owner.\nWHERE bucket <> 'step-attributed'\nGROUP BY bucket, formula_run, agent\nORDER BY total_tokens DESC",
+                "vrlFunctionQuery": "",
+                "customQuery": true,
+                "fields": {
+                  "stream": "default",
+                  "stream_type": "logs",
+                  "x": [
+                    {
+                      "label": "Bucket",
+                      "alias": "bucket",
+                      "column": "bucket"
+                    }
+                  ],
+                  "y": [
+                    {
+                      "label": "Tokens",
+                      "alias": "total_tokens",
+                      "column": "total_tokens",
+                      "aggregationFunction": "sum"
+                    }
+                  ],
+                  "z": [],
+                  "filter": {
+                    "filterType": "group",
+                    "logicalOperator": "AND",
+                    "conditions": []
+                  }
+                },
+                "config": {
+                  "promql_legend": ""
+                }
+              }
+            ],
+            "layout": {
+              "x": 0,
+              "y": 0,
+              "w": 48,
+              "h": 14,
+              "i": 1
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

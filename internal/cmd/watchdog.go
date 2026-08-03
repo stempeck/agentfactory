@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -63,7 +65,7 @@ var watchdogMaxConsecutiveFailures = 3
 // transitive coverage above already closes the C-CRIT-2 autonomy trap).
 var watchdogNudgeFn = func(sessionID string) error {
 	tx := tmux.NewTmux()
-	return tx.SendKeys(sessionID, "continue")
+	return tx.SendKeys(sessionID, "your job is to `af prime`, execute, `af done`, are you doing your job?") // Updated verbiage because "continue" could result in agents guessing about what to do next.
 }
 
 // watchdogTmux is the subset of *tmux.Tmux that pollAgents needs to inspect a
@@ -352,9 +354,61 @@ func runWatchdog(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(cmd.OutOrStdout(), "watchdog: shutting down\n")
 			return nil
 		case <-ticker.C:
-			pollAgents(cmd, root, scope, agentStates, failures, silenceThreshold)
+			watchdogTick(cmd, root, scope, agentStates, failures, silenceThreshold)
 		}
 	}
+}
+
+// telemetryBackendGuardInFlight bounds the periodic telemetry-backend liveness
+// check (fable-implement Step 1, R4) to at most one attempt in flight at a time,
+// across however many ticks fire while a prior attempt is still running — a 90s
+// cold start must not stack three 30s-spaced spawns (decisions.md D4). There is no
+// existing sync/atomic idiom elsewhere in this package to copy; this is the first.
+var telemetryBackendGuardInFlight atomic.Bool
+
+// watchdogTick is one tick's work: the existing agent poll, unchanged, plus the
+// telemetry-backend liveness guard fired BESIDE it — never folded into pollAgents,
+// which stays agent-scoped and untouched (DO-NOT-CHANGE, decisions.md, consumers.md).
+func watchdogTick(cmd *cobra.Command, root string, scope map[string]struct{}, agentStates map[string]*watchdogAgentState, failures map[string]int, silenceThreshold int) {
+	pollAgents(cmd, root, scope, agentStates, failures, silenceThreshold)
+	triggerTelemetryBackendGuard(cmd, root)
+}
+
+// triggerTelemetryBackendGuard fires ensureTelemetryBackendFn asynchronously so a
+// down backend's worst-case probe+relaunch latency (~12s) never delays this tick's
+// own pollAgents call or the next tick's readiness (DO-NOT-CHANGE: no ~12s latency
+// added to a down-tick). CompareAndSwap makes "at most one in-flight attempt" a
+// property a test can assert deterministically, rather than relying on the 10s
+// script budget staying under the 30s tick interval by timing luck alone.
+//
+// Scope: that guarantee is PROCESS-LOCAL. telemetryBackendGuardInFlight is a
+// package-level atomic, so it orders this process's ticks against each other and
+// nothing else. On a first af up the two callers are sequential anyway (the
+// cold-start guard at up.go:398 completes before launchWatchdog at :423), but af up
+// is idempotent and routinely re-run against a factory whose watchdog is already
+// ticking — two processes, one of them holding no knowledge of the other's attempt.
+// What bounds that case is not this flag: it is relaunch.sh's own
+// `tmux has-session -t telemetry || …` check-then-act (quickstart.sh:1105-1107) plus
+// tmux's refusal to create a duplicate session name, so the worst outcome is a
+// redundant probe and a refused second launch, never two backends.
+//
+// Note for the next test author: this goroutine writes to cmd.OutOrStdout() and
+// cmd.ErrOrStderr() while the main loop writes to the same writers (pollAgents'
+// warnings, the shutdown line). In production both are os.Stdout, so that is
+// interleaving only — but a test that points cobra at a shared bytes.Buffer AND lets
+// the real ensureTelemetryBackend run would have a genuine data race, and this
+// package cannot detect it: `make test` pins CGO_ENABLED=0 (Makefile:59), so -race
+// has never run over this code. Existing tests override ensureTelemetryBackendFn, so
+// nothing reaches the writers today; keep it that way, or give the test its own
+// writer.
+func triggerTelemetryBackendGuard(cmd *cobra.Command, root string) {
+	if !telemetryBackendGuardInFlight.CompareAndSwap(false, true) {
+		return // an attempt is already running; this tick skips it, never queues it
+	}
+	go func() {
+		defer telemetryBackendGuardInFlight.Store(false)
+		ensureTelemetryBackendFn(context.Background(), cmd, root)
+	}()
 }
 
 // buildWatchdogScope builds the monitoring scope set from a list of agent names,

@@ -1,0 +1,18 @@
+{
+  "v": 1,
+  "state": "degraded",
+  "installed": {
+    "present": true,
+    "valid": false,
+    "endpoint": "",
+    "header_count": 0
+  },
+  "recording": {
+    "enabled": true
+  },
+  "backend": {
+    "probed": false,
+    "signals": []
+  },
+  "unprobed_cause": ""
+}

@@ -1,0 +1,5 @@
+{
+  "v": 1,
+  "state": "error",
+  "error": "not in an agentfactory workspace (no .agentfactory/factory.json found)"
+}

@@ -1,0 +1,89 @@
+{
+  "_comment": "Step waterfall for one formula run, built from the step records af exports itself.",
+  "name": "step-waterfall",
+  "title": "Step duration by formula run",
+  "description": "How long each step of a formula run took, in order, with the agent and model that ran it. Built from af's own step records. Only closed steps appear: a step that is still running, or that crashed, has no end and therefore no duration - inventing one would put a fabricated number where nothing could later distinguish it from a measurement.",
+  "af_view_schema": 1,
+  "af_decision_o4": "O-4 (view delivery) is hybrid: files on disk plus a best-effort dashboard push. See README.md.",
+  "af_assumptions": [
+    "COLUMN SPELLINGS AND JOIN VERIFIED AGAINST A LIVE BACKEND, THIS QUERY NOT EXECUTED: during review of PR #567 OpenObserve v0.91.3 was stood up from the pinned artifact and the per-step token view's query was run verbatim, confirming the ingest naming this view also relies on. This view's own query was NOT among those executed. That live run observed af_step_seq as a string; the ordering key is now cast to an integer here, and the encoder emits it as an integer, so ordering is correct under either ingest typing. A dashboard already published under this title is never replaced by a re-run of quickstart.sh, so an existing factory keeps the query it first received — re-import this file by hand to pick up changes. CI has no backend, so none of this is re-verified automatically.",
+    "Attribute names are rewritten on ingest. Trace resource attributes are prefixed with 'service_' and every dot becomes an underscore, so af.formula_instance is queryable only as service_af_formula_instance. OTLP logs do NOT get the prefix, so the same attribute is af_formula_instance on the native-event side of the join. _timestamp is microseconds while start_time/end_time are nanoseconds and duration is microseconds.",
+    "duration is reported in microseconds, so the column is divided by 1000 to render milliseconds."
+  ],
+  "af_join": {
+    "overhead": "none",
+    "window": "not-applicable",
+    "start_rule": "not-applicable",
+    "end_rule": "not-applicable",
+    "tail": "not-applicable",
+    "instance_scoped": true,
+    "buckets": []
+  },
+  "dashboard": {
+    "version": 8,
+    "title": "Step duration by formula run",
+    "description": "How long each step took, in order.",
+    "role": "",
+    "owner": "agentfactory",
+    "tabs": [
+      {
+        "tabId": "default",
+        "name": "Steps",
+        "panels": [
+          {
+            "id": "panel-1",
+            "type": "table",
+            "title": "Step duration by formula run",
+            "description": "",
+            "config": {
+              "show_legends": false
+            },
+            "queryType": "sql",
+            "queries": [
+              {
+                "query": "SELECT service_af_formula_instance AS formula_run,\n       service_af_agent            AS agent,\n       CAST(af_step_seq AS BIGINT) AS step_order,\n       af_step_id                  AS step,\n       af_step_title               AS step_name,\n       af_model                    AS model,\n       af_status                   AS outcome,\n       start_time                  AS started_at_ns,\n       end_time                    AS ended_at_ns,\n       duration / 1000             AS duration_ms\nFROM \"traces\".\"default\"\nWHERE service_name = 'agentfactory'\n  AND af_step_id <> ''\nORDER BY service_af_formula_instance, CAST(af_step_seq AS BIGINT)",
+                "vrlFunctionQuery": "",
+                "customQuery": true,
+                "fields": {
+                  "stream": "default",
+                  "stream_type": "traces",
+                  "x": [
+                    {
+                      "label": "Step",
+                      "alias": "step_order",
+                      "column": "step_order"
+                    }
+                  ],
+                  "y": [
+                    {
+                      "label": "Duration (ms)",
+                      "alias": "duration_ms",
+                      "column": "duration_ms",
+                      "aggregationFunction": "max"
+                    }
+                  ],
+                  "z": [],
+                  "filter": {
+                    "filterType": "group",
+                    "logicalOperator": "AND",
+                    "conditions": []
+                  }
+                },
+                "config": {
+                  "promql_legend": ""
+                }
+              }
+            ],
+            "layout": {
+              "x": 0,
+              "y": 0,
+              "w": 48,
+              "h": 14,
+              "i": 1
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

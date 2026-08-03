@@ -51,6 +51,9 @@ func TestLoadStartupConfig_AbsentFileDefaults(t *testing.T) {
 	if cfg.Improvement != "default" {
 		t.Errorf("Improvement = %q, want \"default\"", cfg.Improvement)
 	}
+	if cfg.Telemetry != "default" {
+		t.Errorf("Telemetry = %q, want \"default\"", cfg.Telemetry)
+	}
 	if cfg.StartDispatch {
 		t.Errorf("StartDispatch = true, want false")
 	}
@@ -90,6 +93,43 @@ func TestLoadStartupConfig_ImprovementRoundTrip(t *testing.T) {
 	}
 	if cfg.Improvement != "on" {
 		t.Errorf("Improvement = %q, want \"on\"", cfg.Improvement)
+	}
+}
+
+// The same backward-compat trap as the improvement key, one gate later: every
+// startup.json in existence omits "telemetry", so it unmarshals to "" and the enum
+// loop would reject it. Adding the loop entry without the empty→"default" fill breaks
+// every pre-existing file. This test pins all four edits.
+func TestLoadStartupConfig_MissingTelemetryFieldDefaults(t *testing.T) {
+	dir := writeStartupRoot(t, `{"quality":"on","fidelity":"off","improvement":"on","start_dispatch":true}`)
+
+	cfg, err := LoadStartupConfig(dir)
+	if err != nil {
+		t.Fatalf("existing startup.json without \"telemetry\" must still load, got %v", err)
+	}
+	if cfg.Telemetry != "default" {
+		t.Errorf("Telemetry = %q, want \"default\"", cfg.Telemetry)
+	}
+}
+
+func TestLoadStartupConfig_BadTelemetryValue(t *testing.T) {
+	dir := writeStartupRoot(t, `{"telemetry":"yes"}`)
+
+	_, err := LoadStartupConfig(dir)
+	if !errors.Is(err, ErrInvalidType) {
+		t.Fatalf("expected ErrInvalidType for bad telemetry value, got %v", err)
+	}
+}
+
+func TestLoadStartupConfig_TelemetryRoundTrip(t *testing.T) {
+	dir := writeStartupRoot(t, `{"telemetry":"on"}`)
+
+	cfg, err := LoadStartupConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Telemetry != "on" {
+		t.Errorf("Telemetry = %q, want \"on\"", cfg.Telemetry)
 	}
 }
 

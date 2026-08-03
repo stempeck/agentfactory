@@ -1,0 +1,108 @@
+{
+  "_comment": "DERIVED artifact — not upstream bytes. Per-message JSON key allowlists and enum ranges transcribed from the .proto files of the pinned opentelemetry-proto release recorded in OTLP_PROTO_VERSION (see README.md for the exact source URLs and the transcription rule). Field names here are the lowerCamelCase forms the OTLP/JSON encoding mandates; the protos declare them in snake_case. The conformance validator reads THIS file rather than hardcoding the schema in Go, so re-pinning a newer release is a data change plus a re-transcription, never a silent code drift. Producer rule: an emitted key absent from its message's allowlist is a violation (a typo'd field name is silently discarded by a conformant receiver, which is exactly the class of defect that ships unnoticed). This is distinct from the receiver-side rule that unknown fields MUST be ignored.",
+  "messages": {
+    "ExportTraceServiceRequest": {
+      "keys": ["resourceSpans"],
+      "source": "collector/trace/v1/trace_service.proto — repeated ResourceSpans resource_spans = 1"
+    },
+    "ResourceSpans": {
+      "keys": ["resource", "scopeSpans", "schemaUrl"],
+      "source": "trace/v1/trace.proto L48-64"
+    },
+    "Resource": {
+      "keys": ["attributes", "droppedAttributesCount", "entityRefs"],
+      "source": "resource/v1/resource.proto"
+    },
+    "ScopeSpans": {
+      "keys": ["scope", "spans", "schemaUrl"],
+      "source": "trace/v1/trace.proto L68-83"
+    },
+    "InstrumentationScope": {
+      "keys": ["name", "version", "attributes", "droppedAttributesCount"],
+      "source": "common/v1/common.proto"
+    },
+    "Span": {
+      "keys": [
+        "traceId", "spanId", "traceState", "parentSpanId", "flags", "name", "kind",
+        "startTimeUnixNano", "endTimeUnixNano", "attributes", "droppedAttributesCount",
+        "events", "droppedEventsCount", "links", "droppedLinksCount", "status"
+      ],
+      "source": "trace/v1/trace.proto L96-303"
+    },
+    "Event": {
+      "keys": ["timeUnixNano", "name", "attributes", "droppedAttributesCount"],
+      "source": "trace/v1/trace.proto L224-238 (Span.Event)"
+    },
+    "Link": {
+      "keys": ["traceId", "spanId", "traceState", "attributes", "droppedAttributesCount", "flags"],
+      "source": "trace/v1/trace.proto L255-290 (Span.Link)"
+    },
+    "Status": {
+      "keys": ["message", "code"],
+      "source": "trace/v1/trace.proto L312-327"
+    },
+    "KeyValue": {
+      "keys": ["key", "value", "keyStrindex"],
+      "source": "common/v1/common.proto L77-97 — keyStrindex is Profiling-only and mutually exclusive with key; allowlisted for completeness of the transcription, never emitted by this producer"
+    },
+    "ArrayValue": {
+      "keys": ["values"],
+      "source": "common/v1/common.proto"
+    },
+    "KeyValueList": {
+      "keys": ["values"],
+      "source": "common/v1/common.proto"
+    },
+    "AnyValue": {
+      "keys": [
+        "stringValue", "boolValue", "intValue", "doubleValue",
+        "arrayValue", "kvlistValue", "bytesValue", "stringValueStrindex"
+      ],
+      "source": "common/v1/common.proto — oneof value"
+    }
+  },
+  "hex_id_fields": {
+    "traceId": 16,
+    "spanId": 8,
+    "parentSpanId": 8,
+    "_comment": "field name -> required decoded byte width. Values are case-insensitive hex strings, NOT base64 (spec deviation 1). 16 bytes = 32 hex chars, 8 bytes = 16 hex chars."
+  },
+  "decimal_string_fields": [
+    "startTimeUnixNano",
+    "endTimeUnixNano",
+    "timeUnixNano",
+    "intValue"
+  ],
+  "_decimal_string_comment": "64-bit integers (fixed64/int64) are encoded as JSON decimal STRINGS by proto3 JSON mapping. A bare JSON number here is the single most common Go mistake, because encoding/json emits a number for int64/uint64 unless the field carries the string option.",
+  "json_number_fields": [
+    "kind",
+    "code",
+    "flags",
+    "droppedAttributesCount",
+    "droppedEventsCount",
+    "droppedLinksCount"
+  ],
+  "_json_number_comment": "uint32/fixed32/enum fields are JSON NUMBERS, not strings. Over-applying the decimal-string rule to these is the mirror-image mistake.",
+  "enums": {
+    "kind": {
+      "min": 0,
+      "max": 5,
+      "names_forbidden": [
+        "SPAN_KIND_UNSPECIFIED", "SPAN_KIND_INTERNAL", "SPAN_KIND_SERVER",
+        "SPAN_KIND_CLIENT", "SPAN_KIND_PRODUCER", "SPAN_KIND_CONSUMER"
+      ],
+      "source": "trace/v1/trace.proto L156-178"
+    },
+    "code": {
+      "min": 0,
+      "max": 2,
+      "names_forbidden": ["STATUS_CODE_UNSET", "STATUS_CODE_OK", "STATUS_CODE_ERROR"],
+      "source": "trace/v1/trace.proto L318-323"
+    }
+  },
+  "http": {
+    "content_type": "application/json",
+    "default_traces_path": "/v1/traces",
+    "source": "docs/specification.md — OTLP/HTTP Request; both are stated as MUST/default at the pinned tag"
+  }
+}

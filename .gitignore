@@ -52,6 +52,10 @@ state.json
 !.agentfactory/dispatch.json
 !.agentfactory/factory.json
 !.agentfactory/messaging.json
+# Decision O-3 (issue #329 P5a): .agentfactory/telemetry.json and secrets/telemetry.auth are
+# DELIBERATELY left in the ignored tier (like models.json / litellm.yaml / secrets/litellm.key),
+# NOT allowlisted above. quickstart.sh's setup_telemetry() re-seeds telemetry.json (it can carry a
+# factory-specific endpoint), and telemetry.auth is a secret that must never be committed.
 .agentfactory/agents/**
 !.agentfactory/agents/*/
 !.agentfactory/agents/*/.claude/
@@ -83,6 +87,7 @@ NEXTSTEPS.md
 GHERKINSCENARIOS.feature
 run-*.sh
 /todos/ultra-implement/*
+/todos/fable-implement/*
 loop-logs/
 /todos/rootcause*
 /todos/rapid/*

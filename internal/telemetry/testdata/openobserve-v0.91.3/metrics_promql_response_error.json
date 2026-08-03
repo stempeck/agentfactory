@@ -1,0 +1,6 @@
+{
+  "status": "error",
+  "errorType": "bad_data",
+  "error": "Execution error: unexpected left brace '{' inside braces",
+  "trace_id": "00000000000000000000000000000000"
+}

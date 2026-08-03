@@ -17,6 +17,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/lock"
+	"github.com/stempeck/agentfactory/internal/telemetry"
 	"github.com/stempeck/agentfactory/internal/templates"
 )
 
@@ -37,6 +38,8 @@ func init() {
 }
 
 func runPrime(cmd *cobra.Command, args []string) error {
+	start := time.Now()
+
 	cwd, err := getWd()
 	if err != nil {
 		return err
@@ -48,6 +51,15 @@ func runPrime(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// 1a. One gate read for the whole invocation, carried to every site that may record.
+	// Reading it a second time further down would be a second place for the exact-match rule
+	// to drift, and would break the stated off-path budget of one gate-file read per verb.
+	ctx := withVerbTelemetry(cmd.Context(), verbTelemetry{
+		verb:    "prime",
+		start:   start,
+		enabled: telemetryFactoryEnabled(factoryRoot),
+	})
+
 	// 2. Check if cwd is factory root — fan out to all agents
 	rel, err := filepath.Rel(factoryRoot, cwd)
 	if err != nil {
@@ -58,14 +70,15 @@ func runPrime(cmd *cobra.Command, args []string) error {
 		if primeHookMode {
 			return fmt.Errorf("cannot use --hook from factory root (hook mode is per-agent)")
 		}
-		return runPrimeAll(cmd.Context(), cmd.OutOrStdout(), factoryRoot)
+		return runPrimeAll(ctx, cmd.OutOrStdout(), factoryRoot)
 	}
 
 	// 3. Handle --hook mode (single-agent path)
+	sessionChanged := false
 	if primeHookMode {
 		sessionID := readHookSessionIDFromStdin()
 		if sessionID != "" {
-			persistSessionID(cwd, sessionID)
+			sessionChanged = persistSessionID(cwd, sessionID)
 		}
 	}
 
@@ -75,7 +88,22 @@ func runPrime(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	return primeAgent(cmd.Context(), cmd.OutOrStdout(), factoryRoot, role, cwd)
+	// 4a. A session begins only when the persisted id actually changes. The SessionStart hook
+	// fires on resume as well as on a fresh session, so recording per firing would multiply one
+	// session into many and make every per-session view wrong. Recorded here rather than beside
+	// the write above because the role is not resolved until now, and the store refuses a
+	// record whose agent name it cannot validate.
+	if sessionChanged && verbTelemetryFrom(ctx).enabled {
+		// The formula's human name lives in the instance bead title, and resolving it here
+		// would put a store round trip on the SessionStart hook path. The instance id — which
+		// the identity derivation reads from .runtime/ — is the join key; only closing records
+		// become spans, so nothing downstream loses anything.
+		ev := telemetryRecordFor(ctx, factoryRoot, cwd, role, "", "")
+		ev.Event = telemetry.EventSessionStart
+		appendTelemetryRecord(factoryRoot, ev)
+	}
+
+	return primeAgent(ctx, cmd.OutOrStdout(), factoryRoot, role, cwd)
 }
 
 // runPrimeAll primes all provisioned agents when run from the factory root.
@@ -167,7 +195,22 @@ func primeAgent(ctx context.Context, out io.Writer, factoryRoot, role, workDir s
 	outputStartupDirective(out, agentEntry.Type)
 
 	// Inject formula workflow context if active (self-guarding -- no-op when no formula)
-	outputFormulaContext(ctx, out, workDir)
+	primed := outputFormulaContext(ctx, out, workDir)
+
+	// A step begins the first time an agent is primed for it. Re-primes after a handoff or a
+	// respawn are the same step continuing, and recording each one would restart its clock.
+	// Emitted here rather than at the write site because this frame is the one that already
+	// holds the factory root and the agent name; the write site has neither.
+	if vt := verbTelemetryFrom(ctx); vt.enabled && primed != nil && primed.isNew {
+		ev := telemetryRecordFor(ctx, factoryRoot, workDir, role, primed.instanceID, "")
+		ev.Event = telemetry.EventStepStart
+		ev.Formula = telemetryFormulaName(primed.formula)
+		ev.StepID = primed.stepID
+		ev.StepSeq = primed.stepSeq
+		ev.StepTitle = primed.stepTitle
+		appendTelemetryRecord(factoryRoot, ev)
+	}
+
 	outputCheckpointContext(out, workDir)
 
 	// Write checkpoint for crash recovery (skip during hook mode -- session just starting)
@@ -255,19 +298,41 @@ func readHookSessionIDFromStdin() string {
 	return readHookSessionID(os.Stdin)
 }
 
-// persistSessionID writes the session ID to <dir>/.runtime/session_id.
-func persistSessionID(dir, sessionID string) {
+// persistSessionID writes the session ID to <dir>/.runtime/session_id and reports whether that
+// changed it. The write stays an unconditional overwrite; only the answer is new. Comparison is
+// whitespace-insensitive because this writer stores the id bare while other writers in the
+// repository terminate their runtime files with a newline.
+func persistSessionID(dir, sessionID string) bool {
 	runtimeDir := filepath.Join(dir, ".runtime")
+	prev, _ := os.ReadFile(filepath.Join(runtimeDir, "session_id"))
 	os.MkdirAll(runtimeDir, 0o755)
-	os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte(sessionID), 0o644)
+	// A failed write means there is no new session on disk, so reporting a change would put a
+	// record into the log for a session nothing else can observe.
+	if err := os.WriteFile(filepath.Join(runtimeDir, "session_id"), []byte(sessionID), 0o644); err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(prev)) != strings.TrimSpace(sessionID)
 }
 
-func writeStepPrimed(workDir, stepID, description string) {
+// writeStepPrimed records which step the agent has read instructions for, and reports whether
+// that is a step it had not primed before.
+//
+// Only the step id decides that, never the description hash the marker also carries: re-priming
+// after a step's description changed is still the same step, and treating it as a new one would
+// restart a clock that is already running.
+func writeStepPrimed(workDir, stepID, description string) bool {
 	runtimeDir := filepath.Join(workDir, ".runtime")
+	prev, _ := os.ReadFile(filepath.Join(runtimeDir, "step_primed"))
+	primedID, _, _ := strings.Cut(strings.TrimSpace(string(prev)), ":")
 	os.MkdirAll(runtimeDir, 0o755)
 	h := sha256.Sum256([]byte(description))
 	content := fmt.Sprintf("%s:%x", stepID, h[:4])
-	os.WriteFile(filepath.Join(runtimeDir, "step_primed"), []byte(content), 0o644)
+	// As above: an unwritten marker is not a primed step, and the close-side check would
+	// reject it anyway.
+	if err := os.WriteFile(filepath.Join(runtimeDir, "step_primed"), []byte(content), 0o644); err != nil {
+		return false
+	}
+	return primedID != stepID
 }
 
 type errorTrackingWriter struct {
@@ -377,13 +442,29 @@ func readHookedFormulaID(workDir string) string {
 	return strings.TrimSpace(string(data))
 }
 
+// primedStep is what outputFormulaContext learned about the step it just primed: everything a
+// step_start record needs, plus whether this prime was the step's first.
+//
+// It is returned rather than recorded in place because this function has neither the factory
+// root nor the agent name, while its caller has both — and because returning a value leaves
+// every existing call site, which uses this as a bare statement, compiling untouched.
+type primedStep struct {
+	instanceID string
+	formula    string
+	stepID     string
+	stepTitle  string
+	stepSeq    int
+	isNew      bool
+}
+
 // outputFormulaContext injects formula workflow context into the prime output.
 // Lazy-constructs the issue store via the newIssueStore seam only when a
 // formula is hooked, so non-hooked prime paths don't need bd on PATH.
-func outputFormulaContext(ctx context.Context, out io.Writer, workDir string) {
+// Returns nil whenever no step was primed.
+func outputFormulaContext(ctx context.Context, out io.Writer, workDir string) *primedStep {
 	instanceID := readHookedFormulaID(workDir)
 	if instanceID == "" {
-		return
+		return nil
 	}
 
 	actor := os.Getenv("AF_ACTOR")
@@ -395,7 +476,7 @@ func outputFormulaContext(ctx context.Context, out io.Writer, workDir string) {
 		fmt.Fprintf(out, "**Formula:** %s\n", instanceID)
 		fmt.Fprintln(out, "**Status:** unknown (step query failed)")
 		fmt.Fprintf(out, "Error: %v\n", err)
-		return
+		return nil
 	}
 
 	result, err := store.Ready(ctx, issuestore.Filter{MoleculeID: instanceID})
@@ -406,7 +487,7 @@ func outputFormulaContext(ctx context.Context, out io.Writer, workDir string) {
 		fmt.Fprintf(out, "**Formula:** %s\n", instanceID)
 		fmt.Fprintln(out, "**Status:** unknown (step query failed)")
 		fmt.Fprintf(out, "Error: %v\n", err)
-		return
+		return nil
 	}
 	totalSteps := result.TotalSteps
 	if totalSteps == 0 {
@@ -438,18 +519,18 @@ func outputFormulaContext(ctx context.Context, out io.Writer, workDir string) {
 		})
 		if err != nil {
 			fmt.Fprintf(out, "**Status:** error querying formula state: %v\n", err)
-			return
+			return nil
 		}
 		if len(openChildren) > 0 {
 			fmt.Fprintln(out, "**Status:** blocked")
 			fmt.Fprintln(out, "")
 			fmt.Fprintln(out, "Some formula steps remain but are not actionable.")
-			return
+			return nil
 		}
 		fmt.Fprintln(out, "**Status:** all_complete")
 		fmt.Fprintln(out, "")
 		fmt.Fprintln(out, "All formula steps are complete.")
-		return
+		return nil
 	}
 
 	step := result.Steps[0]
@@ -459,7 +540,7 @@ func outputFormulaContext(ctx context.Context, out io.Writer, workDir string) {
 	})
 	if err != nil {
 		fmt.Fprintf(out, "**Status:** error querying open steps: %v\n", err)
-		return
+		return nil
 	}
 	openCount := len(openChildren)
 	stepNum := totalSteps - openCount + 1
@@ -502,9 +583,19 @@ func outputFormulaContext(ctx context.Context, out io.Writer, workDir string) {
 	fmt.Fprintln(tracker, "1. Complete the current step")
 	fmt.Fprintln(tracker, "2. Run `af done` to close it and advance")
 	fmt.Fprintln(tracker, "3. If gate step: run `af done --phase-complete --gate <gate-id>`")
+	fmt.Fprintln(tracker, "4. Run `af prime` again immediately, in the same turn. Only end your turn when steps are blocked or the formula is complete.")
 
-	if !tracker.failed {
-		writeStepPrimed(workDir, step.ID, description)
+	if tracker.failed {
+		// The instructions never reached the agent, so the step has not actually begun.
+		return nil
+	}
+	return &primedStep{
+		instanceID: instanceID,
+		formula:    formulaName,
+		stepID:     step.ID,
+		stepTitle:  step.Title,
+		stepSeq:    stepNum,
+		isNew:      writeStepPrimed(workDir, step.ID, description),
 	}
 }
 

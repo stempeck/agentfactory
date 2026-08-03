@@ -32,6 +32,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/stempeck/agentfactory-web/internal/config"
@@ -43,6 +44,7 @@ import (
 	"github.com/stempeck/agentfactory-web/internal/genjob"
 	"github.com/stempeck/agentfactory-web/internal/proto"
 	"github.com/stempeck/agentfactory-web/internal/readmodel"
+	"github.com/stempeck/agentfactory-web/internal/telemetryview"
 )
 
 // Mutator is the mutating surface (the exec wrapper). exec.Wrapper satisfies it.
@@ -147,6 +149,15 @@ type Validator interface {
 	FormulaValidate(ctx context.Context, text []byte) (exec.Result, error)
 }
 
+// Telemetry is the #580 read projection of the `af telemetry` JSON surface. Each method returns the
+// CLI's own payload bytes, or an error when the RELAY failed — never when the telemetry surface
+// merely reported a degraded state, which is data and travels at HTTP 200.
+type Telemetry interface {
+	Status(ctx context.Context) (json.RawMessage, error)
+	Report(ctx context.Context, agent, instance string) (json.RawMessage, error)
+	Usage(ctx context.Context, agent, instance string) (json.RawMessage, error)
+}
+
 // Envelope is the uniform response shape on every endpoint.
 type Envelope struct {
 	OK      bool        `json:"ok"`
@@ -169,6 +180,11 @@ type Server struct {
 	fstore    FormulaStore    // #502 live formula store (nil ⇒ the /api/formulas routes 500)
 	generator Generator       // #502 Generate-All job runner (nil ⇒ the /api/factory/generate routes 500)
 	validator Validator       // #502 save-time af-validate gate (nil ⇒ PUT /api/formulas/{name} 500s)
+	// #580 telemetry read projection. Note the nil behaviour is the OPPOSITE of every seam above:
+	// nil ⇒ the three routes render a designed not-installed payload at 200, never a 500. An unwired
+	// reader is a state the operator needs to see, and an error wall would report it as a fault of
+	// the console rather than a fact about the factory.
+	telemetry Telemetry
 	static    http.Handler
 
 	root string // the resolved factory root this console serves; surfaced via GET /healthz so a
@@ -253,6 +269,11 @@ func WithValidator(v Validator) Option {
 	return func(s *Server) { s.validator = v }
 }
 
+// WithTelemetry wires the #580 telemetry read projection used by the three GET /api/telemetry routes.
+func WithTelemetry(t Telemetry) Option {
+	return func(s *Server) { s.telemetry = t }
+}
+
 // WithRoot records the resolved factory root this console serves. It is surfaced via GET /healthz
 // so an operator — or an automated probe — can see WHICH factory the console resolved to, making
 // a wrong-but-valid root visible rather than silent.
@@ -308,6 +329,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/formulas/{name}", s.handleFormulaPut)
 	s.mux.HandleFunc("POST /api/factory/generate", s.handleGeneratePost)
 	s.mux.HandleFunc("GET /api/factory/generate", s.handleGenerateGet)
+	// #580 — the telemetry read surface, registered with Convention A for a second reason beyond the
+	// one recorded above. This surface has the strongest seam-nil temptation yet ("telemetry is not
+	// installed, so don't mount the routes"), and yielding to it would 404 the not-installed state —
+	// indistinguishable from a typo'd URL, which is exactly the blank failure this feature exists to
+	// replace with a named one.
+	s.mux.HandleFunc("GET /api/telemetry", s.handleTelemetry)
+	s.mux.HandleFunc("GET /api/telemetry/report", s.handleTelemetryReport)
+	s.mux.HandleFunc("GET /api/telemetry/usage", s.handleTelemetryUsage)
 	if s.proto != nil {
 		// Enumeration (read) + traversal-contained on-disk static serving. The static subtree
 		// is mounted under StripPrefix so the proto handler receives "{id}/{asset}".
@@ -1238,6 +1267,153 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// ---- #580 telemetry read surface ----
+//
+// Three read-tier relays of the root CLI's telemetry JSON. The governing rule, and the reason this
+// feature exists: degradation is DATA. Every state the CLI can express — recording on with nothing
+// installed, a credential that cannot be read, a backend answering on one signal and 404ing on
+// another — arrives as HTTP 200 with the verdict in the payload. The Envelope's ok:false form is
+// reserved for a failure of the RELAY, where nothing was measured at all.
+//
+// Three deliberate departures from the neighbouring handlers, each of which would otherwise be
+// copied by pattern-matching and each of which would defeat the feature:
+//
+//   - A nil seam renders a designed payload at 200. Every other Convention-A handler here 500s.
+//   - A payload whose own state says "error" is relayed, not converted into a 502.
+//   - The relay's failure message is a constant. The exec seam embeds the child's stderr in its
+//     error text, and a credential failure names the header there; anything derived from it would
+//     travel into a browser.
+//
+// Each handler sets no-store before any branch can write, because the response is only honest while
+// it is fresh, and a header set after the body has begun is silently discarded.
+//
+// The nil-seam check deliberately precedes filter validation. With no reader wired, no query runs
+// whatever the filters say, so the unwired console is the dominant fact and a 400 about a malformed
+// filter would report a secondary problem while hiding the primary one.
+
+// telemetryRelayFailed is the single message for every way the relay can fail — spawn error,
+// non-zero exit, empty output, unreadable JSON, a deadline, or a state this console does not
+// understand. It carries no detail from the underlying error on purpose.
+const telemetryRelayFailed = "the telemetry command could not be read; see the console log"
+
+// Per-handler deadlines. Each MUST be at least its backing CLI's own worst case, or a slow-but-
+// working read is killed and reported as a transport failure on exactly the paths where a degraded
+// verdict is the thing worth having.
+//
+//   - status: the CLI probes three signals SEQUENTIALLY, each bounded at a 10s ceiling, so its worst
+//     case is 30s. (Note the design's scale dimension describes those probes as concurrent; the code
+//     is a plain loop, and the code is what runs. Deriving this budget from the prose would give 10s
+//     — a third of what is needed.) Plus margin for spawn, config load, and two file reads.
+//   - report: a linear scan of local per-agent record files. No network, no CLI-side ceiling; the
+//     design names 5s and the scan is comfortably inside it.
+//   - usage: the CLI holds ONE budget for the whole verb, ceilinged at 10s, and every request it
+//     makes derives from that, so the total cannot exceed it. Plus spawn margin.
+const (
+	telemetryStatusBudget = 35 * time.Second
+	telemetryReportBudget = 5 * time.Second
+	telemetryUsageBudget  = 15 * time.Second
+)
+
+// telemetryFilters reads and validates the two optional filters.
+//
+// An empty value means "no filter" and is not validated: a query string cannot distinguish an absent
+// parameter from a present-but-empty one, and both shape rules reject the empty string — so
+// validating unconditionally would refuse the ordinary unfiltered request. A NON-empty value that
+// fails its rule is a client error, and it is the one place on this surface where refusing is the
+// honest answer, because nothing was measured and there is no state to report.
+//
+// The messages come from the validators, which do not quote the value they rejected. That is
+// deliberate and it matters more here than at the CLI: this text becomes a field of a JSON payload
+// delivered to a browser, so echoing a hostile value would hand an injection attempt a second
+// delivery route.
+func (s *Server) telemetryFilters(w http.ResponseWriter, r *http.Request) (agent, instance string, ok bool) {
+	agent = strings.TrimSpace(r.URL.Query().Get("agent"))
+	instance = strings.TrimSpace(r.URL.Query().Get("instance"))
+
+	if agent != "" {
+		if err := exec.ValidateTelemetryAgent(agent); err != nil {
+			s.write(w, http.StatusBadRequest, Envelope{OK: false, Message: err.Error()})
+			return "", "", false
+		}
+	}
+	if instance != "" {
+		if err := exec.ValidateTelemetryInstance(instance); err != nil {
+			s.write(w, http.StatusBadRequest, Envelope{OK: false, Message: err.Error()})
+			return "", "", false
+		}
+	}
+	return agent, instance, true
+}
+
+// telemetryRelay writes the outcome of one relay: the CLI's own bytes at 200, or a transport error.
+func (s *Server) telemetryRelay(w http.ResponseWriter, raw json.RawMessage, err error) {
+	if err != nil {
+		s.write(w, http.StatusBadGateway, Envelope{OK: false, Message: telemetryRelayFailed})
+		return
+	}
+	s.write(w, http.StatusOK, Envelope{OK: true, Data: raw})
+}
+
+// handleTelemetry relays `af telemetry status --json`: the install / recording / backend axes, with
+// a header COUNT and never a header identity.
+func (s *Server) handleTelemetry(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r, false) {
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if s.telemetry == nil {
+		s.write(w, http.StatusOK, Envelope{OK: true, Data: telemetryview.NotInstalledStatus()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), telemetryStatusBudget)
+	defer cancel()
+	raw, err := s.telemetry.Status(ctx)
+	s.telemetryRelay(w, raw, err)
+}
+
+// handleTelemetryReport relays `af telemetry report --json`: per-step timing rows from local
+// records, plus the malformed/dropped counts that keep corruption from reading as "no records yet".
+func (s *Server) handleTelemetryReport(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r, false) {
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if s.telemetry == nil {
+		s.write(w, http.StatusOK, Envelope{OK: true, Data: telemetryview.NotInstalledReport()})
+		return
+	}
+	agent, instance, ok := s.telemetryFilters(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), telemetryReportBudget)
+	defer cancel()
+	raw, err := s.telemetry.Report(ctx, agent, instance)
+	s.telemetryRelay(w, raw, err)
+}
+
+// handleTelemetryUsage relays `af telemetry usage --json`: token usage and session metrics from the
+// backend. This is the one read that needs a reachable endpoint, so it is also the one whose
+// degraded states carry the most information — all of it in the payload.
+func (s *Server) handleTelemetryUsage(w http.ResponseWriter, r *http.Request) {
+	if !s.guard(w, r, false) {
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if s.telemetry == nil {
+		s.write(w, http.StatusOK, Envelope{OK: true, Data: telemetryview.NotInstalledUsage()})
+		return
+	}
+	agent, instance, ok := s.telemetryFilters(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), telemetryUsageBudget)
+	defer cancel()
+	raw, err := s.telemetry.Usage(ctx, agent, instance)
+	s.telemetryRelay(w, raw, err)
 }
 
 // ---- response helpers ----

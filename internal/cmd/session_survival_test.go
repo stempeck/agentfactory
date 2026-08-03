@@ -96,8 +96,11 @@ func writeRouterConfig(t *testing.T, root string) {
 		}
 	}
 	write("factory.json", `{"type":"factory","version":1,"name":"test"}`)
-	write("agents.json", `{"agents":{"manager":{"type":"interactive","description":"manager"},`+
-		`"watchdog":{"type":"autonomous","description":"watchdog"}}}`)
+	// "watchdog" is NOT a roster agent — the name is reserved (#548 H-2) because it aliases the
+	// af-watchdog control-plane session. It appears below only as the mail SENDER (a
+	// control-plane identity, not an agents.json entry); the recipient "manager" is the
+	// production identity this exercise drives.
+	write("agents.json", `{"agents":{"manager":{"type":"interactive","description":"manager"}}}`)
 	write("messaging.json", `{}`)
 }
 

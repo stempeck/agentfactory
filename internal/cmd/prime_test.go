@@ -3,12 +3,14 @@ package cmd
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
+	"github.com/stempeck/agentfactory/internal/worktree"
 )
 
 func setupTestFactoryForPrime(t *testing.T) string {
@@ -254,6 +256,126 @@ func TestPrimeAgent_UnknownAgent(t *testing.T) {
 	err := primeAgent(t.Context(), &buf, root, "nonexistent", agentDir)
 	if err == nil {
 		t.Fatal("primeAgent should fail for unknown agent")
+	}
+}
+
+// TestPrimeAgent_ManagerCatalogReference_ResolvesThroughWorktreeLocalRoot pins issue #575 against
+// the ACTUAL production code path a manager agent experiences on every SessionStart hook fire and
+// every `af handoff` cycle, not just against the template renderer in isolation. primeAgent
+// deliberately overrides RoleData.RootDir to the worktree's own LOCAL root via
+// config.FindLocalRoot (see the "Use localRoot for RootDir" comment in primeAgent) -- the same
+// value `af root` prints -- so this is the ONLY test exercising the one production shape where
+// RootDir and the factory root diverge.
+//
+// The catalog is reachable at that local root because worktreeSymlinks links
+// .agentfactory/AGENTS.md into the worktree; this test establishes that link with the REAL
+// worktree.EnsureWorktreeLinks rather than hand-making a file, and then EXECUTES the rendered
+// instruction from the agent's own working directory. String-matching a path would prove the
+// anchor while saying nothing about reachability, and reachability is the whole point.
+func TestPrimeAgent_ManagerCatalogReference_ResolvesThroughWorktreeLocalRoot(t *testing.T) {
+	factoryRoot := setupTestFactoryForPrime(t)
+	catalogSentinel := "## BEGIN AgentFactory Agents\n| `manager` | interactive | Factory coordinator |\n"
+	if err := os.WriteFile(config.AgentsMdPath(factoryRoot), []byte(catalogSentinel), 0o644); err != nil {
+		t.Fatalf("write factory-root AGENTS.md: %v", err)
+	}
+
+	// A worktree nested under the factory root, carrying its OWN .factory-root marker -- exactly
+	// what config.FindLocalRoot detects and stops at, per its doc comment ("the worktree root for
+	// worktree agents").
+	worktreeRoot := filepath.Join(factoryRoot, ".agentfactory", "worktrees", "wt-real")
+	if err := os.MkdirAll(filepath.Join(worktreeRoot, ".agentfactory"), 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeRoot, ".agentfactory", ".factory-root"), []byte(factoryRoot), 0o644); err != nil {
+		t.Fatalf("write .factory-root marker: %v", err)
+	}
+	agentDir := filepath.Join(worktreeRoot, ".agentfactory", "agents", "manager")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("mkdir agent dir: %v", err)
+	}
+	// Production establishes the worktree's shared-resource links here; use the real function so
+	// this test tracks that mechanism instead of a hand-rolled imitation of it.
+	if err := worktree.EnsureWorktreeLinks(factoryRoot, worktreeRoot); err != nil {
+		t.Fatalf("EnsureWorktreeLinks: %v", err)
+	}
+
+	// Sanity-check the test's own premise: FindLocalRoot must actually diverge from factoryRoot
+	// here, or this test would pass vacuously regardless of the fix.
+	if lr, err := config.FindLocalRoot(agentDir); err != nil || lr != worktreeRoot {
+		t.Fatalf("test setup bug: FindLocalRoot(agentDir) = (%q, %v), want (%q, nil) -- the worktree-vs-factory-root divergence this test depends on isn't present", lr, err, worktreeRoot)
+	}
+
+	var buf strings.Builder
+	if err := primeAgent(t.Context(), &buf, factoryRoot, "manager", agentDir); err != nil {
+		t.Fatalf("primeAgent failed: %v", err)
+	}
+	output := buf.String()
+
+	wantCmd := `cat "` + worktreeRoot + `/.agentfactory/AGENTS.md"`
+	if !strings.Contains(output, wantCmd) {
+		t.Errorf("primeAgent output should instruct reading the catalog at the agent's own local root (%q), got:\n%s", wantCmd, output)
+	}
+	if strings.Contains(output, `cat "`+factoryRoot+`/.agentfactory/AGENTS.md"`) {
+		t.Errorf("primeAgent output reaches outside the worktree to the shared factory root -- agents should be pointed at the tree they work in, got:\n%s", output)
+	}
+
+	// Run the actual extracted instruction from the agent's real working directory, proving it is
+	// not just textually correct but genuinely executable and returns the live shared catalog
+	// through the worktree link.
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "cat ") && strings.Contains(trimmed, "AGENTS.md") {
+			cmd := exec.Command("sh", "-c", trimmed)
+			cmd.Dir = agentDir
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("primeAgent's own catalog-read instruction %q failed to execute from the agent's real working directory: %v\noutput: %s", trimmed, err, out)
+			}
+			if !strings.Contains(string(out), "manager") {
+				t.Errorf("catalog-read instruction did not return the live catalog, got: %s", out)
+			}
+			return
+		}
+	}
+	t.Fatal("primeAgent output contains no catalog-read 'cat ... AGENTS.md' instruction")
+}
+
+// TestPrimeAgent_RootDirIsAbsolute protects the property that actually fixed issue #575: the
+// rendered root must be ABSOLUTE, so every path derived from it works from any cwd. The original
+// bug was a bare cwd-relative reference, and it would return unnoticed if RootDir ever rendered
+// empty or relative -- an empty anchor still yields an absolute-LOOKING "/.agentfactory/..." path,
+// which is why this asserts the rendered root itself, in both production shapes.
+func TestPrimeAgent_RootDirIsAbsolute(t *testing.T) {
+	factoryRoot := setupTestFactoryForPrime(t)
+
+	worktreeRoot := filepath.Join(factoryRoot, ".agentfactory", "worktrees", "wt-abs")
+	if err := os.MkdirAll(filepath.Join(worktreeRoot, ".agentfactory"), 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeRoot, ".agentfactory", ".factory-root"), []byte(factoryRoot), 0o644); err != nil {
+		t.Fatalf("write .factory-root marker: %v", err)
+	}
+
+	for _, tc := range []struct{ name, agentDir, wantRoot string }{
+		{"worktree_agent", filepath.Join(worktreeRoot, ".agentfactory", "agents", "manager"), worktreeRoot},
+		{"factory_agent", config.AgentDir(factoryRoot, "manager"), factoryRoot},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.MkdirAll(tc.agentDir, 0o755); err != nil {
+				t.Fatalf("mkdir agent dir: %v", err)
+			}
+			var buf strings.Builder
+			if err := primeAgent(t.Context(), &buf, factoryRoot, "manager", tc.agentDir); err != nil {
+				t.Fatalf("primeAgent failed: %v", err)
+			}
+			want := "- **Factory root**: `" + tc.wantRoot + "`"
+			if !strings.Contains(buf.String(), want) {
+				t.Errorf("primeAgent should render the absolute root %q, got:\n%s", want, buf.String())
+			}
+			if !filepath.IsAbs(tc.wantRoot) {
+				t.Fatalf("test setup bug: %q is not absolute", tc.wantRoot)
+			}
+		})
 	}
 }
 

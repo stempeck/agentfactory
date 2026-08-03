@@ -111,11 +111,15 @@ func TestT_INT_4_FindRootResolversConfinedToSeam(t *testing.T) {
 	// invoker-root binding). Peer-review-corrected 5-entry set — the outline body's
 	// 4-entry list omitted runContainmentCheckCore and would fail on day one.
 	localAllow := map[string]bool{
-		"resolveAgentName":        true, // helpers.go — identity read
-		"primeAgent":              true, // prime.go — worktree RootDir read
-		"runContainmentCheckCore": true, // containment.go — containment-boundary fallback (D-5 class)
-		"resolveBoundary":         true, // containment.go — containment-boundary read
-		"root_cmd":                true, // root_cmd.go rootSubCmd closure — `af root` prints the LOCAL root
+		"resolveAgentName":             true, // helpers.go — identity read
+		"primeAgent":                   true, // prime.go — worktree RootDir read
+		"runContainmentCheckCore":      true, // containment.go — containment-boundary fallback (D-5 class)
+		"resolveBoundary":              true, // containment.go — containment-boundary read
+		"root_cmd":                     true, // root_cmd.go rootSubCmd closure — `af root` prints the LOCAL root
+		"callerDispatched":             true, // authority.go (#541 K3) — dispatch-provenance identity read of the target's local agent dir; not a state-writing verb
+		"callerIsInteractive":          true, // authority.go (#548 P1) — manager-tier caller-type identity read (resolves the caller's own agents.json entry); not a state-writing verb, same class as callerDispatched
+		"writeTeardownRefusedArtifact": true, // authority.go (#541 K4) — best-effort forensic breadcrumb to the caller's OWN local agent dir; not a state-writing verb
+		"writeTeardownGrantedArtifact": true, // authority.go (#548 P2/C-5) — allow-path mirror of writeTeardownRefusedArtifact: best-effort granted-stop breadcrumb to the caller's OWN local agent dir; not a state-writing verb
 	}
 
 	var violations []string

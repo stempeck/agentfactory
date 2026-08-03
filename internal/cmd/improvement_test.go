@@ -564,6 +564,43 @@ func TestImprovementComplete_OutcomeChangedUnchanged(t *testing.T) {
 	}
 }
 
+// TestImprovementComplete_RealSecondEdit_ChangedWithRealFile closes AC9's literal
+// "using a real formula edit rather than a forged baseline hash" coverage gap: unlike
+// TestImprovementComplete_OutcomeChangedUnchanged (which forges the recorded hash to
+// simulate "changed"), this test performs a REAL second write to the formula file
+// before completion runs, so the sha-mismatch is a genuine artifact of an edit, not a
+// planted marker value.
+func TestImprovementComplete_RealSecondEdit_ChangedWithRealFile(t *testing.T) {
+	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
+	agentDir := config.AgentDir(root, "alpha")
+	absFormula := writeFormulaFile(t, root, "fx", true)
+	baselineSHA, err := formulaSHA256(absFormula)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, subject, _ := stubTeardownAndMail(t)
+
+	m := improvementMarker{Formula: "fx", Caller: "manager", TerminateOnComplete: false, FormulaSHA256: baselineSHA, FiredAt: time.Now().UTC().Format(time.RFC3339)}
+	if err := writeImprovementMarker(root, "alpha", m); err != nil {
+		t.Fatal(err)
+	}
+
+	// A REAL second edit — not a forged hash.
+	if err := os.WriteFile(absFormula, []byte("formula = \"fx\"\n\n[[steps]]\nid = \"s1\"\n[[steps]]\nid = \"s2\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runImprovementCompleteCore(agentDir, root, false); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if !strings.Contains(*subject, "changed") {
+		t.Errorf("a real second edit must report 'changed', got %q", *subject)
+	}
+	if !strings.Contains(*subject, "validation passed") {
+		t.Errorf("a valid second edit must report 'validation passed', got %q", *subject)
+	}
+}
+
 func TestImprovementComplete_OutcomeSupervisorFallback(t *testing.T) {
 	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
 	agentDir := config.AgentDir(root, "alpha")

@@ -1,0 +1,93 @@
+{
+  "_comment": "Session total versus the sum of the buckets. Makes attribution drift visible instead of silent.",
+  "name": "attribution-check",
+  "title": "Does the accounting add up",
+  "description": "Compares a run's total token usage against the sum of what the steps, the overhead buckets and the unattributed bucket each claim. The step figure is taken through the same join the per-step view uses, so a join that drops or double-counts rows shows up here as a non-zero difference. Anything other than zero is worth knowing before the per-step numbers are trusted.",
+  "af_view_schema": 1,
+  "af_decision_o4": "O-4 (view delivery) is hybrid: files on disk plus a best-effort dashboard push. See README.md.",
+  "af_assumptions": [
+    "COLUMN SPELLINGS AND JOIN VERIFIED AGAINST A LIVE BACKEND, THIS QUERY NOT EXECUTED: during review of PR #567 OpenObserve v0.91.3 was stood up from the pinned artifact and the per-step token view's query was run verbatim, confirming the ingest naming this view also relies on. This view's own query was NOT among those executed. This view computes max(af_step_seq) inside its step_windows CTE but never orders on it or emits it, so it is deliberately left uncast. A dashboard already published under this title is never replaced by a re-run of quickstart.sh, so an existing factory keeps the query it first received — re-import this file by hand to pick up changes. CI has no backend, so none of this is re-verified automatically.",
+    "The native claude_code.api_request shape (input_tokens, output_tokens, cost_usd) is the synthetic fixture's hypothesis, not a recorded capture - see internal/telemetry/testdata/synthetic/api_request_events.json, which P6b replaces. Whether these arrive as OTel logs or metrics is also an inference; if it is metrics, the stream name and column prefix both change.",
+    "Attribute names are rewritten on ingest. Trace resource attributes are prefixed with 'service_' and every dot becomes an underscore, so af.formula_instance is queryable only as service_af_formula_instance. OTLP logs do NOT get the prefix, so the same attribute is af_formula_instance on the native-event side of the join. _timestamp is microseconds while start_time/end_time are nanoseconds and duration is microseconds."
+  ],
+  "af_join": {
+    "overhead": "reconcile",
+    "window": "half-open",
+    "start_rule": "earliest",
+    "end_rule": "latest",
+    "tail": "preceding-step",
+    "instance_scoped": true,
+    "buckets": [
+      "steps",
+      "overhead",
+      "unattributed"
+    ]
+  },
+  "dashboard": {
+    "version": 8,
+    "title": "Does the accounting add up",
+    "description": "Run total versus the sum of every bucket.",
+    "role": "",
+    "owner": "agentfactory",
+    "tabs": [
+      {
+        "tabId": "default",
+        "name": "Reconciliation",
+        "panels": [
+          {
+            "id": "panel-1",
+            "type": "table",
+            "title": "Does the accounting add up",
+            "description": "",
+            "config": {
+              "show_legends": false
+            },
+            "queryType": "sql",
+            "queries": [
+              {
+                "query": "WITH step_windows AS (\n    -- Rule 2, earliest start wins. The af side has already applied earliest-wins when it computed\n    -- each step's duration, and only closed steps are exported, so in practice this aggregates one\n    -- row per step. MIN/MAX are kept because the rule must survive a second span for the same step\n    -- arriving later - a wide window is visible in the reconciliation view, a narrow one is not.\n    SELECT service_af_formula_instance AS formula_run,\n           af_step_id                  AS step,\n           service_af_agent            AS agent,\n           max(af_step_seq)            AS step_order,\n           max(af_model)               AS model,\n           min(start_time)             AS window_start_ns,\n           max(end_time)               AS window_end_ns\n    FROM \"traces\".\"default\"\n    WHERE service_name = 'agentfactory'\n      AND af_step_id <> ''\n    GROUP BY service_af_formula_instance, af_step_id, service_af_agent\n),\nbillable_requests AS (\n    -- Rule 1, overhead exclusion: an event carrying af.overhead belongs to its overhead bucket and\n    -- to NO step, even when it fired mid-step. Without this a quality gate running inside a step is\n    -- counted into that step's \"exact\" cost and the reconciliation view still balances, so the only\n    -- symptom is a step that looks more expensive than the work it did. An EMPTY marker is not a\n    -- marker, matching AttributeEvent, which requires a non-empty bucket name.\n    SELECT af_formula_instance AS formula_run,\n           af_agent            AS agent,\n           _timestamp * 1000   AS at_ns,\n           input_tokens,\n           output_tokens\n    FROM \"logs\".\"default\"\n    WHERE af_overhead IS NULL OR af_overhead = ''\n),\nranked AS (\n    SELECT e.formula_run,\n           e.agent,\n           w.step,\n           w.step_order,\n           w.model,\n           e.input_tokens,\n           e.output_tokens,\n           CASE WHEN e.at_ns < w.window_end_ns THEN 0 ELSE 1 END AS is_tail,\n           row_number() OVER (\n               PARTITION BY e.formula_run, e.agent, e.at_ns\n               -- A window that contains the event wins outright. Among containing windows the\n               -- earliest start wins, matching AttributeEvent, which returns the first container in\n               -- start order. Otherwise the tail goes to the window with the greatest end at or\n               -- before the event, which is also what AttributeEvent does.\n               ORDER BY CASE WHEN e.at_ns < w.window_end_ns THEN 0 ELSE 1 END,\n                        CASE WHEN e.at_ns < w.window_end_ns THEN w.window_start_ns END ASC,\n                        w.window_end_ns DESC\n           ) AS pick\n    FROM billable_requests e\n    JOIN step_windows w\n      -- Instance AND agent scoping are explicit. AttributeEvent omits both because its caller\n      -- supplies one agent's records at a time; SQL over a shared stream has no such caller, and\n      -- without these predicates one agent's events attribute to another agent's steps.\n      ON w.formula_run = e.formula_run\n     AND w.agent       = e.agent\n     -- Rule 3a, half-open window: the start instant belongs to the step.\n     AND e.at_ns >= w.window_start_ns\n),\nsession_totals AS (\n    -- Counted by a plain scan, deliberately NOT from the buckets below. If this were derived from\n    -- the same partition it would agree with itself by construction and the view would prove\n    -- nothing.\n    SELECT af_formula_instance AS formula_run,\n           sum(input_tokens + output_tokens) AS session_total_tokens\n    FROM \"logs\".\"default\"\n    GROUP BY af_formula_instance\n),\nstep_totals AS (\n    -- Taken through the per-step view's OWN join and de-duplication, so a join that drops rows or\n    -- matches an event twice shows up below as drift instead of hiding.\n    SELECT formula_run, sum(input_tokens + output_tokens) AS step_tokens\n    FROM ranked\n    WHERE pick = 1\n    GROUP BY formula_run\n),\noverhead_totals AS (\n    SELECT af_formula_instance AS formula_run,\n           sum(input_tokens + output_tokens) AS overhead_tokens\n    FROM \"logs\".\"default\"\n    WHERE af_overhead IS NOT NULL AND af_overhead <> ''\n    GROUP BY af_formula_instance\n),\nunattributed_totals AS (\n    SELECT e.formula_run, sum(e.input_tokens + e.output_tokens) AS unattributed_tokens\n    FROM billable_requests e\n    WHERE NOT EXISTS (\n        SELECT 1 FROM step_windows w\n        WHERE w.formula_run = e.formula_run\n          AND w.agent       = e.agent\n          AND e.at_ns >= w.window_start_ns\n    )\n    GROUP BY e.formula_run\n),\nagents_launched AS (\n    -- Review L-4: session counts filter af.overhead, because a grader invocation forwards the same\n    -- identity attributes and would otherwise be counted as another session launched.\n    SELECT af_formula_instance AS formula_run,\n           count(DISTINCT af_agent) AS agents_launched\n    FROM \"logs\".\"default\"\n    WHERE af_overhead IS NULL OR af_overhead = ''\n    GROUP BY af_formula_instance\n)\nSELECT t.formula_run,\n       a.agents_launched,\n       t.session_total_tokens,\n       -- An empty bucket is zero here, not unknown: a run with no gated steps genuinely spent\n       -- nothing on overhead, and leaving it NULL would blank out the whole drift column.\n       COALESCE(s.step_tokens, 0)          AS step_tokens,\n       COALESCE(o.overhead_tokens, 0)      AS overhead_tokens,\n       COALESCE(u.unattributed_tokens, 0)  AS unattributed_tokens,\n       -- The reason this view exists. Every request belongs to exactly one bucket, so this\n       -- difference must be zero; anything else is attribution drift, and drift that is visible is\n       -- a different problem from drift that is silent.\n       t.session_total_tokens\n           - (COALESCE(s.step_tokens, 0)\n            + COALESCE(o.overhead_tokens, 0)\n            + COALESCE(u.unattributed_tokens, 0)) AS drift_tokens\nFROM session_totals t\nLEFT JOIN step_totals         s ON s.formula_run = t.formula_run\nLEFT JOIN overhead_totals     o ON o.formula_run = t.formula_run\nLEFT JOIN unattributed_totals u ON u.formula_run = t.formula_run\nLEFT JOIN agents_launched     a ON a.formula_run = t.formula_run\nORDER BY abs(t.session_total_tokens\n           - (COALESCE(s.step_tokens, 0)\n            + COALESCE(o.overhead_tokens, 0)\n            + COALESCE(u.unattributed_tokens, 0))) DESC",
+                "vrlFunctionQuery": "",
+                "customQuery": true,
+                "fields": {
+                  "stream": "default",
+                  "stream_type": "logs",
+                  "x": [
+                    {
+                      "label": "Formula run",
+                      "alias": "formula_run",
+                      "column": "formula_run"
+                    }
+                  ],
+                  "y": [
+                    {
+                      "label": "Drift",
+                      "alias": "drift_tokens",
+                      "column": "drift_tokens",
+                      "aggregationFunction": "sum"
+                    }
+                  ],
+                  "z": [],
+                  "filter": {
+                    "filterType": "group",
+                    "logicalOperator": "AND",
+                    "conditions": []
+                  }
+                },
+                "config": {
+                  "promql_legend": ""
+                }
+              }
+            ],
+            "layout": {
+              "x": 0,
+              "y": 0,
+              "w": 48,
+              "h": 14,
+              "i": 1
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

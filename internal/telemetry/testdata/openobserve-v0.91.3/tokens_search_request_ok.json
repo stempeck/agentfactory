@@ -1,0 +1,9 @@
+{
+  "query": {
+    "sql": "SELECT af_agent, af_formula_instance, count(*) AS requests FROM \"default\" WHERE af_agent IS NOT NULL GROUP BY af_agent, af_formula_instance ORDER BY requests DESC",
+    "start_time": 1779936569000000,
+    "end_time": 1785120569000000,
+    "from": 0,
+    "size": 10
+  }
+}

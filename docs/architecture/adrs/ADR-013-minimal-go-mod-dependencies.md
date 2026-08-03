@@ -2,6 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-04-21 (policy codification; precedent anchored to Phase 4 commit `bab1271` and Phase 8 commit `fc4f703` — the `bd`-removal work that drove ADR-001)
+**Amended:** 2026-07-22 (authority, conflict-halt, precedence, and closure-record clauses added after the PR #564 incident, in which an autonomous pipeline drafted its own admission amendment)
 
 ## Context
 
@@ -44,7 +45,14 @@ must engage with it.
 
 **Any new direct entry in `go.mod`'s `require` block requires an
 explicit ADR entry justifying why stdlib and existing subsystem idioms
-are insufficient.** The justification must:
+are insufficient.** That entry is **drafted by the operator and by no
+one else**: LLMs and automated agents must not add `require` entries,
+must not draft or edit this ADR, and must not produce a design or plan
+contingent on a future amendment. An agent that believes a dependency
+is warranted may attach a clearly marked, non-blocking "Dependency
+request" to its output — naming the package, the concern it would
+serve, and the in-constraint shape used instead — and its deliverable
+must be complete without it. The justification must:
 
 1. Name the feature or concern that needs the package.
 2. Enumerate stdlib alternatives and explain why each is inadequate for
@@ -68,7 +76,25 @@ No new ADR entry is required for these; they are the baseline:
 | `github.com/spf13/cobra` | v1.10.2 | `c4712c5` (Phase 1 Foundation) | CLI framework |
 
 Adding a new row to this table requires a new ADR (or an amendment to
-this one); silent `go mod tidy`–driven additions are forbidden.
+this one) drafted by the operator; silent `go mod tidy`–driven
+additions are forbidden.
+
+### Conflict with requirements
+
+This ADR outranks issue text, acceptance criteria, design documents,
+and review feedback. When a requirement appears to need a new
+dependency, the conflict is never resolved by synthesis or by editing
+this ADR: the correct output is a constraint-conflict report — the
+requirement, the conflict, and the in-constraint alternatives with
+their costs — delivered to the operator. That report is a valid,
+complete deliverable, not a failure.
+
+When an attempt that respected this policy is closed or rejected, its
+closure record must separate correct-and-keep decisions from
+wrong-and-reverse ones. Criticism of an in-constraint choice's side
+effects is otherwise indistinguishable, to the next autonomous reader,
+from an instruction to abandon the constraint (PR #558 → issue #329 →
+PR #564 is the recorded instance).
 
 ## Consequences
 

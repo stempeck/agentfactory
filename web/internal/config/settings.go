@@ -71,6 +71,7 @@ type Startup struct {
 	Quality        string   `json:"quality"`
 	Fidelity       string   `json:"fidelity"`
 	Improvement    string   `json:"improvement"`
+	Telemetry      string   `json:"telemetry"`
 	StartDispatch  bool     `json:"start_dispatch"`
 	WatchdogAgents []string `json:"watchdog_agents"`
 }
@@ -143,7 +144,7 @@ func New(root string, set Setter) *Service {
 // defaultStartup mirrors internal/config/startup.go defaultStartupConfig — the C-4 backward-compat
 // invariant: an absent startup.json yields defaults, not an error.
 func defaultStartup() Startup {
-	return Startup{Quality: "default", Fidelity: "default", Improvement: "default"}
+	return Startup{Quality: "default", Fidelity: "default", Improvement: "default", Telemetry: "default"}
 }
 
 // Read assembles the curated settings document. dispatch.json / factory.json absence yields a zero

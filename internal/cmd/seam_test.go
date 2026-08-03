@@ -19,6 +19,7 @@ func (fakeCmdTmux) IsAgentRunning(session string, expectedPaneCommands ...string
 }
 func (fakeCmdTmux) SetEnvironment(session, key, value string) error    { return nil }
 func (fakeCmdTmux) GetEnvironment(session, key string) (string, error) { return "", nil }
+func (fakeCmdTmux) CurrentSessionName() (string, error)                { return "", nil }
 
 func TestNewCmdTmuxSeam(t *testing.T) {
 	orig := newCmdTmux

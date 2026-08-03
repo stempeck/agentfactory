@@ -181,3 +181,9 @@ jobs:
           python-version: '3.12'
       - name: toml conformance (shipped engine vs tomllib over the live store)
         run: node web/conformance/test-engine.js .agentfactory/store/formulas
+      # The telemetry banner's backend axis, driven with real status DTOs. The Go-side
+      # checks are source scans and cannot see reachability: a collapse predicate can be
+      # structurally perfect and still never be true (PR #585, S3). This runs the shipped
+      # app.js and asserts the lines the operator would actually see.
+      - name: telemetry banner behaviour (shipped app.js, real DTOs)
+        run: node web/conformance/test-telemetry-banner.js

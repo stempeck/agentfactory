@@ -63,8 +63,11 @@ Use --interval to override the interval_seconds from dispatch.json.`,
 	stopCmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Stop background dispatch polling",
-		Long:  "Stop kills the af-dispatch tmux session, ending background polling.",
-		RunE:  runDispatchStop,
+		Long: `Stop kills the af-dispatch tmux session, ending background polling.
+
+AUTHORITY: Stopping the dispatcher is a factory-wide teardown — an operator action.
+Inside an af-managed agent session this command refuses; run it from a host shell.`,
+		RunE: runDispatchStop,
 	}
 	dispatchCmd.AddCommand(stopCmd)
 
@@ -1532,6 +1535,12 @@ func startDispatch(cmd *cobra.Command, root string, t cmdTmux) error {
 }
 
 func runDispatchStop(cmd *cobra.Command, args []string) error {
+	// K7 (#541): stopping the dispatcher is a factory-wide teardown action; refuse
+	// it in agent context before touching tmux. Operator context returns nil.
+	if err := requireOperatorTeardown("af dispatch stop"); err != nil {
+		return err
+	}
+
 	t := newCmdTmux()
 	if running, _ := t.HasSession(dispatchSessionName); !running {
 		return fmt.Errorf("dispatcher is not running")

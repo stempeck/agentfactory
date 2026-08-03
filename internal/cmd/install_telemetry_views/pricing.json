@@ -1,0 +1,38 @@
+{
+  "_comment": "Editable price list, used only as a cross-check and as a fallback for requests that carry no cost of their own. Keys are models.json PROFILE names, because a profile name is the only model identifier the telemetry actually carries.",
+  "af_decision_o4": "O-4 (view delivery) is hybrid: files on disk plus a best-effort dashboard push. See README.md.",
+  "provenance": "seed defaults - published list prices, NOT verified at install time",
+  "rates_verified": false,
+  "currency": "USD",
+  "unit": "per 1,000,000 tokens",
+  "keyed_by": "models.json profile name. resolveRecordModel records cfg.Agents[agent] or cfg.Default, so af.model_profile and af.model both carry a profile name and never a model id. Add a row for each profile in your own models.json.",
+  "unknown_model_policy": "A profile that is not listed here renders NULL, never 0. Absence is deliberate: adding a catch-all or a zero-priced row would turn every unrecognised profile into a free one, which is worse than an empty cell because it looks like an answer. To price a profile, add a row - do not add a default.",
+  "editing": "The Cost per agent view carries a copy of this list inside its query, because a dashboard cannot read a file. A test keeps the two identical, so edit this file and re-run quickstart.sh to republish, or edit the query on the dashboard directly for a one-off.",
+  "verify_before_relying": "These are seed defaults so the fallback path is exercised, not an authoritative price list. Confirm each rate against current published pricing before using this view for billing. The cost reported by the request itself always takes precedence over anything here.",
+  "deliberately_absent": {
+    "fable-5": "no published rate available at seed time; renders NULL until priced",
+    "lmstudio": "runs locally through LM Studio; there is no per-token charge"
+  },
+  "models": {
+    "default": {
+      "model_id": "claude-opus-4-8",
+      "input_per_mtok_usd": 15.0,
+      "output_per_mtok_usd": 75.0
+    },
+    "opus-4-8": {
+      "model_id": "claude-opus-4-8",
+      "input_per_mtok_usd": 15.0,
+      "output_per_mtok_usd": 75.0
+    },
+    "sonnet-5": {
+      "model_id": "claude-sonnet-5",
+      "input_per_mtok_usd": 3.0,
+      "output_per_mtok_usd": 15.0
+    },
+    "gpt-4o": {
+      "model_id": "gpt-4o",
+      "input_per_mtok_usd": 2.5,
+      "output_per_mtok_usd": 10.0
+    }
+  }
+}

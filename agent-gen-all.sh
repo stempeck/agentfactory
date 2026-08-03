@@ -54,6 +54,9 @@ echo ""
 # --- Stop running agents (--delete refuses while tmux sessions are live) -----
 
 echo "stopping agents..."
+# K16 (#541): deliver the AC-6 guidance in-band — the 2>/dev/null on the next line
+# masks the refusal text when this script runs inside an agent session.
+echo "note: if 'af down --all' below is refused, that is expected — factory-wide teardown is an operator action; skip it and continue."
 af down --all 2>/dev/null || true
 
 # --- Sync formulas from source -----------------------------------------------

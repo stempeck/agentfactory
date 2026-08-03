@@ -22,6 +22,7 @@
       <a id="nav-dispatch" href="#dispatch" data-route="dispatch">Dispatch</a>
       <a id="nav-prototypes" href="#prototypes" data-route="prototypes">Prototypes</a>
       <a id="nav-formulas" href="#formulas" data-route="formulas">Formulas</a>
+      <a id="nav-telemetry" href="#telemetry" data-route="telemetry">Telemetry</a>
       <a id="nav-settings" href="#settings" data-route="settings">Settings</a>
     </nav>
     <div class="powerbar" aria-label="Factory power">
@@ -321,6 +322,62 @@
      hide, never unload), so unsaved edits are not lost by visiting another tab. -->
 <section id="view-formulas" hidden>
   <iframe id="formulaFrame" title="Formula editor" style="display:block;width:100%;height:calc(100vh - var(--topbar-h, 104px));border:0;background:var(--ink)"></iframe>
+</section>
+
+<!-- ============================ TELEMETRY VIEW ============================ -->
+<!-- #580 W5. `hidden` is load-bearing: boot() never calls showView, so first-paint visibility is
+     governed by this attribute alone. The section carries its OWN freshness stamp and Refresh
+     because the shared chrome strip is not route-aware — #refresh is hardcoded to the Floor. -->
+<section id="view-telemetry" hidden>
+  <div class="view-head">
+    <h1 class="view-title">Telemetry</h1>
+    <p class="view-sub">Step timings, token usage, and session metrics for this factory. Degradation is reported as data — every state below names what is wrong and what to do about it.</p>
+  </div>
+
+  <!-- Banner STACK, not a single slot: one line per degraded axis, fixed order
+       installed -> recording -> backend, so every combination renders distinctly. -->
+  <div class="tel-banner" id="tel-banner" role="status" aria-live="polite"></div>
+
+  <section class="panel" aria-label="Telemetry controls">
+    <div class="tel-controls">
+      <div class="tel-field">
+        <label for="tel-agent">Agent</label>
+        <select class="field" id="tel-agent"><option value="">All agents</option></select>
+      </div>
+      <div class="tel-field">
+        <label for="tel-instance">Formula instance</label>
+        <select class="field" id="tel-instance"><option value="">All runs</option></select>
+      </div>
+      <button class="ghost inline" type="button" id="tel-refresh"><span aria-hidden="true">⟳</span> Refresh</button>
+    </div>
+    <div class="validation" id="tel-filter-err" role="alert" aria-live="polite" hidden></div>
+    <p class="tel-meta">
+      <span id="tel-fresh">not loaded yet</span>
+      · endpoint <span class="tel-mono" id="tel-endpoint">—</span>
+    </p>
+    <!-- Two truths, one page apart: the gate is the CURRENT recording state; startup.json's
+         telemetry key is the STARTUP DEFAULT. They are different artifacts and can disagree. -->
+    <p class="tel-meta" id="tel-gate">recording state not read yet</p>
+  </section>
+
+  <section class="panel" aria-label="Step timings">
+    <h2>Step timings</h2>
+    <div class="tel-pane" id="tel-steps" aria-live="polite"></div>
+    <p class="tel-note" id="tel-steps-note"></p>
+  </section>
+
+  <section class="panel" aria-label="Token usage">
+    <h2>Token usage</h2>
+    <p class="tel-meta">window <span class="tel-mono" id="tel-window">—</span></p>
+    <div class="tel-pane" id="tel-tokens" aria-live="polite"></div>
+    <p class="tel-note" id="tel-tokens-note"></p>
+  </section>
+
+  <section class="panel" aria-label="Session metrics">
+    <h2>Session metrics</h2>
+    <div class="tel-pane" id="tel-metrics" aria-live="polite"></div>
+    <p class="tel-note" id="tel-metrics-note"></p>
+  </section>
 </section>
 </main>
 

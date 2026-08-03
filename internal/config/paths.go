@@ -19,6 +19,8 @@ func MessagingConfigPath(root string) string { return filepath.Join(root, dotDir
 func DispatchConfigPath(root string) string  { return filepath.Join(root, dotDir, "dispatch.json") }
 func StartupConfigPath(root string) string   { return filepath.Join(root, dotDir, "startup.json") }
 func ModelsConfigPath(root string) string    { return filepath.Join(root, dotDir, "models.json") }
+func TelemetryConfigPath(root string) string { return filepath.Join(root, dotDir, "telemetry.json") }
+func TelemetryDir(root string) string        { return filepath.Join(root, dotDir, "telemetry") }
 func HooksDir(root string) string            { return filepath.Join(root, dotDir, "hooks") }
 
 // GitHooksDir is the af-managed git hooks directory (issue #371). It is
@@ -30,6 +32,15 @@ func StoreDir(root string) string            { return filepath.Join(root, dotDir
 func FormulasDir(root string) string         { return filepath.Join(StoreDir(root), "formulas") }
 func BuildHostConfigPath(root string) string { return filepath.Join(root, dotDir, "build-host.json") }
 func AgentsMdPath(root string) string        { return filepath.Join(root, dotDir, "AGENTS.md") }
+
+// FormulaStorePath is the absolute path of a single store formula. It exists so the
+// production sites that must agree on one artifact compose it once rather than
+// independently (issue #563 was a divergence between two spellings of this path).
+// Test code deliberately keeps composing it by hand: a test that derived its expectation
+// from this constructor could not detect a fault inside it.
+func FormulaStorePath(root, name string) string {
+	return filepath.Join(FormulasDir(root), name+".formula.toml")
+}
 
 // DetectAgentFromCwd determines the agent name from the working directory
 // relative to the factory root. It expects cwd to be under

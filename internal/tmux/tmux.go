@@ -291,6 +291,20 @@ func (t *Tmux) ListSessions() ([]string, error) {
 	return strings.Split(out, "\n"), nil
 }
 
+// CurrentSessionName returns the name of the tmux session the caller is running
+// inside — tmux's own `#S` — or "" when the caller is not inside a session. It is the
+// self-identity read the authority classifier needs (security.md SEC-A2 signal 2):
+// unlike the env-only "$TMUX is set" probe it yields the session NAME, not a bare
+// boolean. Read-only, so it mirrors ListSessions' benign-probe guard and returns a
+// zero value without shelling out under the default (guarded) test build; it must NOT
+// use guardOp, which panics on a production identity.
+func (t *Tmux) CurrentSessionName() (string, error) {
+	if t.guard {
+		return "", nil // read-only probe: benign zero-value, no real exec
+	}
+	return t.run("display-message", "-p", "#S")
+}
+
 // AttachSession attaches to an existing session with stdio wired directly.
 // This replaces the current terminal with the tmux session.
 func (t *Tmux) AttachSession(name string) error {

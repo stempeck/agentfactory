@@ -171,28 +171,28 @@ func TestGenJob_SecondStartWhileRunning_Refused(t *testing.T) {
 	}
 }
 
-// 4. Guard-5/Guard-6 substrings become badges; a bare af-up `warning:` does NOT (no child spawned).
+// 4. Only the Guard-6 substring becomes a badge; the removed Guard-5 WARN and a bare af-up `warning:`
+// do NOT (no child spawned). PR 544 C1/BODY-2: install.go's #541 change replaced the Guard-5 WARN
+// ("...live agent session...") with the K6 refusal, so no production code emits that substring anymore;
+// scanBadges must not badge it.
 func TestGenJob_ScanBadges_SpecificSubstringsOnly(t *testing.T) {
-	guard5 := "warning: running inside a live agent session — agent-gen-all.sh runs `af down --all`, which will SIGKILL all agents including this session"
+	deadGuard5 := "warning: running inside a live agent session — agent-gen-all.sh runs `af down --all`, which will SIGKILL all agents including this session"
 	guard6 := `warning: shipped formula "web-design" has local edits that agent-gen-all.sh will overwrite; make durable edits in internal/cmd/install_formulas/ and re-sync (ADR-015)`
 	afUp := "warning: startup set of 5 agents exceeds max_worktrees=3; raise max_worktrees or reduce the agents list"
 
-	transcript := []byte(guard5 + "\n" + afUp + "\n" + guard6 + "\n")
+	transcript := []byte(deadGuard5 + "\n" + afUp + "\n" + guard6 + "\n")
 	badges := scanBadges(transcript)
-	if len(badges) != 2 {
-		t.Fatalf("want exactly 2 badges (Guard 5 + Guard 6), got %d: %+v", len(badges), badges)
+	if len(badges) != 1 {
+		t.Fatalf("want exactly 1 badge (Guard 6 only; Guard-5's WARN emitter was removed in #541), got %d: %+v", len(badges), badges)
 	}
-	var has5, has6 bool
+	if badges[0].Guard != 6 {
+		t.Fatalf("the sole badge must be Guard 6, got Guard %d: %+v", badges[0].Guard, badges)
+	}
+	// The removed Guard-5 substring must NOT badge — its production emitter is gone (dead since #541).
 	for _, b := range badges {
-		switch b.Guard {
-		case 5:
-			has5 = true
-		case 6:
-			has6 = true
+		if b.Guard == 5 {
+			t.Fatalf("scanBadges must not badge the removed Guard-5 'live agent session' substring: %+v", b)
 		}
-	}
-	if !has5 || !has6 {
-		t.Fatalf("expected one Guard 5 and one Guard 6 badge, got %+v", badges)
 	}
 	// The bare af-up cap warning must never be badged.
 	for _, b := range badges {

@@ -100,4 +100,19 @@
   /* ---- #502 preview canvas: replaces the raw #fff at main.css:538 (the sandboxed prototype iframe
      paints a white page). Tokenized so the editor CSS carries no raw hex. ---- */
   --viewer-bg:#fff;
+
+  /* ---- #580 telemetry panel. The banner stack renders one line per degraded axis, so its colours
+     are a severity scale rather than a single alert tone: --tel-dark for a MEASURED failure,
+     --tel-unknown for a state that was NOT measured (never the same thing), --tel-ok for a positive
+     all-green verdict. --tel-unknown-text is what an explicit unknown reads as in a table cell,
+     deliberately distinct from --muted so "we did not measure this" never looks like "empty", and
+     --tel-pending-text for a value whose measurement has not returned yet, which is distinct again
+     from an unknown that HAS been measured. ---- */
+  --tel-dark:var(--danger);
+  --tel-unknown:var(--signage-amber);
+  --tel-ok:var(--neon-cyan);
+  --tel-unknown-text:var(--signage-amber);
+  --tel-pending-text:var(--muted);
+  --tel-line-bg:var(--panel-2);
+  --tel-head:var(--muted);
 }

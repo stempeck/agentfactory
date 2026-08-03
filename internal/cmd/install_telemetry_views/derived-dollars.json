@@ -1,0 +1,91 @@
+{
+  "_comment": "Dollars per agent and model profile. The event's own cost is primary; the editable price list is a cross-check and a fallback for gateway events that carry no cost.",
+  "name": "cost-per-agent",
+  "title": "Cost per agent and model",
+  "description": "What each agent spent, in dollars. The figure reported by the request itself is used whenever it is present; otherwise the price list mirrored from pricing.json is applied to the token counts and the result is labelled derived. A profile that appears in neither shows an empty cost, never a zero - a zero would read as 'this model is free' when the truth is 'nobody knows what this cost'.",
+  "af_view_schema": 1,
+  "af_decision_o4": "O-4 (view delivery) is hybrid: files on disk plus a best-effort dashboard push. See README.md.",
+  "af_assumptions": [
+    "COLUMN SPELLINGS AND JOIN VERIFIED AGAINST A LIVE BACKEND, THIS QUERY NOT EXECUTED: during review of PR #567 OpenObserve v0.91.3 was stood up from the pinned artifact and the per-step token view's query was run verbatim, confirming the ingest naming this view also relies on. This view's own query was NOT among those executed. This view computes max(af_step_seq) inside its step_windows CTE but never orders on it or emits it, so it is deliberately left uncast. A dashboard already published under this title is never replaced by a re-run of quickstart.sh, so an existing factory keeps the query it first received — re-import this file by hand to pick up changes. CI has no backend, so none of this is re-verified automatically.",
+    "The native claude_code.api_request shape (input_tokens, output_tokens, cost_usd) is the synthetic fixture's hypothesis, not a recorded capture - see internal/telemetry/testdata/synthetic/api_request_events.json, which P6b replaces. Whether these arrive as OTel logs or metrics is also an inference; if it is metrics, the stream name and column prefix both change.",
+    "Attribute names are rewritten on ingest. Trace resource attributes are prefixed with 'service_' and every dot becomes an underscore, so af.formula_instance is queryable only as service_af_formula_instance. OTLP logs do NOT get the prefix, so the same attribute is af_formula_instance on the native-event side of the join. _timestamp is microseconds while start_time/end_time are nanoseconds and duration is microseconds.",
+    "The model dimension on both sides is the models.json PROFILE name, not a model id: resolveRecordModel returns cfg.Agents[agent] or cfg.Default, and af.model carries the same value. pricing.json is therefore keyed by profile name, and a profile with no priced row renders NULL.",
+    "cost_usd_micros is named in the design but does not appear in the recorded fixture, so no query depends on it."
+  ],
+  "af_join": {
+    "overhead": "exclude",
+    "window": "not-applicable",
+    "start_rule": "not-applicable",
+    "end_rule": "not-applicable",
+    "tail": "not-applicable",
+    "instance_scoped": true,
+    "buckets": []
+  },
+  "dashboard": {
+    "version": 8,
+    "title": "Cost per agent and model",
+    "description": "Dollars per agent, reported first and derived only as a fallback.",
+    "role": "",
+    "owner": "agentfactory",
+    "tabs": [
+      {
+        "tabId": "default",
+        "name": "Cost",
+        "panels": [
+          {
+            "id": "panel-1",
+            "type": "table",
+            "title": "Cost per agent and model",
+            "description": "",
+            "config": {
+              "show_legends": false
+            },
+            "queryType": "sql",
+            "queries": [
+              {
+                "query": "WITH published_prices AS (\n    -- Mirrors pricing.json in this directory, which is the copy the operator edits; a test keeps\n    -- the two identical. Keys are models.json PROFILE names, because that is what the telemetry\n    -- carries - there is no model id anywhere in the signal. A profile absent from this list is\n    -- absent on purpose: the LEFT JOIN below then misses and the dollar renders NULL. That is the\n    -- whole point - an unknown model must read as \"we do not know\", never as \"this model is free\",\n    -- which is what a zero default would say.\n    SELECT * FROM (VALUES\n        ('default', 15.00, 75.00),\n        ('opus-4-8', 15.00, 75.00),\n        ('sonnet-5', 3.00, 15.00),\n        ('gpt-4o', 2.50, 10.00)\n    ) AS t(model_profile, input_per_mtok_usd, output_per_mtok_usd)\n),\nspend AS (\n    SELECT af_formula_instance AS formula_run,\n           af_agent            AS agent,\n           af_model_profile    AS model_profile,\n           count(*)            AS requests,\n           sum(input_tokens)   AS input_tokens,\n           sum(output_tokens)  AS output_tokens,\n           -- The event's own cost is the primary source. It is summed separately from the\n           -- derivation so the two can be compared rather than silently blended.\n           sum(cost_usd)       AS cost_usd_reported,\n           count(cost_usd)     AS requests_carrying_cost\n    FROM \"logs\".\"default\"\n    WHERE af_overhead IS NULL OR af_overhead = ''\n    GROUP BY af_formula_instance, af_agent, af_model_profile\n)\nSELECT s.formula_run,\n       s.agent,\n       s.model_profile,\n       s.requests,\n       s.input_tokens,\n       s.output_tokens,\n       s.cost_usd_reported,\n       CASE\n           WHEN p.model_profile IS NULL THEN NULL\n           ELSE (s.input_tokens  / 1000000.0) * p.input_per_mtok_usd\n              + (s.output_tokens / 1000000.0) * p.output_per_mtok_usd\n       END AS cost_usd_derived,\n       -- Event first, table second. There is no zero-defaulting anywhere in this expression: when\n       -- neither source knows the price the answer is NULL and the basis column says why.\n       CASE\n           WHEN s.requests_carrying_cost > 0 THEN s.cost_usd_reported\n           WHEN p.model_profile IS NULL THEN NULL\n           ELSE (s.input_tokens  / 1000000.0) * p.input_per_mtok_usd\n              + (s.output_tokens / 1000000.0) * p.output_per_mtok_usd\n       END AS cost_usd,\n       CASE\n           WHEN s.requests_carrying_cost = s.requests THEN 'reported'\n           WHEN s.requests_carrying_cost > 0          THEN 'reported (partial)'\n           WHEN p.model_profile IS NULL               THEN 'unpriced profile - dollars NULL, not zero'\n           ELSE 'derived'\n       END AS cost_basis\nFROM spend s\nLEFT JOIN published_prices p ON p.model_profile = s.model_profile\nORDER BY s.formula_run, s.agent",
+                "vrlFunctionQuery": "",
+                "customQuery": true,
+                "fields": {
+                  "stream": "default",
+                  "stream_type": "logs",
+                  "x": [
+                    {
+                      "label": "Agent",
+                      "alias": "agent",
+                      "column": "agent"
+                    }
+                  ],
+                  "y": [
+                    {
+                      "label": "Cost (USD)",
+                      "alias": "cost_usd",
+                      "column": "cost_usd",
+                      "aggregationFunction": "sum"
+                    }
+                  ],
+                  "z": [],
+                  "filter": {
+                    "filterType": "group",
+                    "logicalOperator": "AND",
+                    "conditions": []
+                  }
+                },
+                "config": {
+                  "promql_legend": ""
+                }
+              }
+            ],
+            "layout": {
+              "x": 0,
+              "y": 0,
+              "w": 48,
+              "h": 14,
+              "i": 1
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

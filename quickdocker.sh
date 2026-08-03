@@ -601,8 +601,8 @@ docker exec "$CONTAINER_NAME" chmod +x "${PROJECTS_DIR}/${AF_DIR}/quickstart.sh"
 step_done
 
 # ─── Step 7: Configure shell defaults ─────────────────────────────────────
-# Must run BEFORE quickstart.sh because quickstart.sh ends with `exec bash`
-# which sources .bashrc — if we wrote this after, it would never execute.
+# Kept before quickstart.sh (the ordering was load-bearing when quickstart.sh
+# ended with `exec bash`; that exec is gone — order preserved as-is).
 
 step 7 "Configuring shell defaults..."
 
@@ -644,7 +644,7 @@ step_done
 
 step 8 "Running quickstart.sh (this may take a few minutes)..."
 
-docker exec -it -u dev -w "${PROJECTS_DIR}/${AF_DIR}" -e AF_QUICKDOCKER_DRIVEN=1 "$CONTAINER_NAME" \
+docker exec -it -u dev -w "${PROJECTS_DIR}/${AF_DIR}" "$CONTAINER_NAME" \
     ./quickstart.sh
 
 step_done

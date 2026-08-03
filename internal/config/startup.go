@@ -16,6 +16,7 @@ type StartupConfig struct {
 	Quality        string   `json:"quality"`
 	Fidelity       string   `json:"fidelity"`
 	Improvement    string   `json:"improvement"`
+	Telemetry      string   `json:"telemetry"`
 	StartDispatch  bool     `json:"start_dispatch"`
 	WatchdogAgents []string `json:"watchdog_agents"`
 }
@@ -25,8 +26,8 @@ func defaultStartupConfig() *StartupConfig {
 	// watchdog refuses to start / af up skips it (never "ALL") — issue #408 inverted
 	// that sentinel at the cmd layer. gates default ⇒ no-op. The absent-file load
 	// path returns this struct WITHOUT running validateStartupConfig, so Improvement
-	// must be seeded here too (backward-compat).
-	return &StartupConfig{Quality: "default", Fidelity: "default", Improvement: "default"}
+	// and Telemetry must be seeded here too (backward-compat).
+	return &StartupConfig{Quality: "default", Fidelity: "default", Improvement: "default", Telemetry: "default"}
 }
 
 // LoadStartupConfig loads and validates .agentfactory/startup.json. An absent
@@ -78,7 +79,13 @@ func validateStartupConfig(cfg *StartupConfig) error {
 	if cfg.Improvement == "" {
 		cfg.Improvement = "default"
 	}
-	for _, g := range []struct{ name, val string }{{"quality", cfg.Quality}, {"fidelity", cfg.Fidelity}, {"improvement", cfg.Improvement}} {
+	// Load-bearing: every startup.json written before telemetry existed omits the key,
+	// so it unmarshals to "" and the enum loop below would reject it. Without this fill
+	// every pre-existing file stops loading.
+	if cfg.Telemetry == "" {
+		cfg.Telemetry = "default"
+	}
+	for _, g := range []struct{ name, val string }{{"quality", cfg.Quality}, {"fidelity", cfg.Fidelity}, {"improvement", cfg.Improvement}, {"telemetry", cfg.Telemetry}} {
 		switch g.val {
 		case "on", "off", "default":
 		default:

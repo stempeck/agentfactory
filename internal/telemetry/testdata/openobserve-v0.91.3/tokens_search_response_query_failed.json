@@ -1,0 +1,6 @@
+{
+  "code": 20004,
+  "message": "Search field not found: Schema error: No field named af_overhead. Valid fields are logs.default._timestamp, logs.default.af_agent, logs.default.af_formula_instance, logs.default.service_name.",
+  "error_detail": "",
+  "trace_id": "00000000000000000000000000000000"
+}

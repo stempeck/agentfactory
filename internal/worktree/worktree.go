@@ -546,6 +546,13 @@ func Create(factoryRoot, agentName string, opts CreateOpts) (string, *Meta, erro
 // SetupAgent creates an agent workspace inside an existing worktree.
 // Renders CLAUDE.md via templates and generates settings.json from embedded template.
 func SetupAgent(factoryRoot, worktreePath, agentName string, isOwner bool) (string, error) {
+	// Shared-resource links are established here, not only in Create, because every Reattached
+	// exit from ResolveOrCreate returns without creating them and unlinkBeforeRemove strips them
+	// ahead of a `git worktree remove` that can still fail. Agents reference factory resources
+	// through their own local root, so a worktree reached by those paths would otherwise be
+	// missing the specialist catalog entirely (issue #575 AC-4). Idempotent for the Created case.
+	EnsureWorktreeLinks(factoryRoot, worktreePath)
+
 	// Load agent config from factory root
 	agents, err := config.LoadAgentConfig(config.AgentsConfigPath(factoryRoot))
 	if err != nil {

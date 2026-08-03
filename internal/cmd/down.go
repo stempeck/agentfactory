@@ -21,8 +21,14 @@ var downReset bool
 var downCmd = &cobra.Command{
 	Use:   "down [agent...]",
 	Short: "Stop agent sessions",
-	Long:  "Stop agent tmux sessions. No args = stop all agents from agents.json.",
-	RunE:  runDown,
+	Long: `Stop agent tmux sessions. No args = stop all agents from agents.json.
+
+AUTHORITY: Factory-wide teardown is an operator action. Inside an af-managed
+agent session this command refuses and explains why — run it from a host shell.
+An agent may still stop itself or a specialist it dispatched; those stay allowed.
+An interactive manager may also stop an autonomous specialist it did not dispatch;
+factory-wide teardown stays operator-only.`,
+	RunE: runDown,
 }
 
 func init() {
@@ -47,6 +53,31 @@ func runDown(cmd *cobra.Command, args []string) error {
 	agentsCfg, err := config.LoadAgentConfig(agentsPath)
 	if err != nil {
 		return err
+	}
+
+	// K5 + K11 (#541): foreclose agent-initiated factory-wide teardown. In agent
+	// context af down would SIGKILL this session, every sibling agent, and the
+	// interactive manager, so it is refused UNLESS it stays within the self /
+	// own-dispatched-specialist carve-out. The gate sits above every teardown side
+	// effect (preResetScan, the roster loop, the watchdog/dispatcher kills) so a
+	// refusal is zero-op. requireOperatorTeardown returns nil for an operator, so
+	// that path falls through byte-for-byte.
+	if callerAuthority() == AuthorityAgent {
+		tiers, ok := downSelfScoped(args, agentsCfg.Agents)
+		if !ok {
+			surface := "af down"
+			if downReset {
+				surface = "af down --reset"
+			}
+			return requireOperatorTeardown(surface)
+		}
+		// Allow path (#548 P2 / C-5): the agent-context stop was granted. Record one forensic
+		// breadcrumb per granted target — the counterpart to the K4 refusal artifact — reusing the
+		// tier downSelfScoped already computed, so the label costs no second scopedStopAllowed
+		// (dispatch_owner) read.
+		for _, name := range args {
+			writeTeardownGrantedArtifact(tiers[name], name)
+		}
 	}
 
 	// Resolve agent list
@@ -78,8 +109,16 @@ func runDown(cmd *cobra.Command, args []string) error {
 				if downReset {
 					resetAgent(ctx, cmd, root, name)
 				} else {
+					// Capture the worktree path BEFORE cleanupAgentWorktree may remove it, so the
+					// scoped-stop provenance datum (#548 P3) can be cleared at BOTH the main-root
+					// and worktree agent dirs — sling writes it to whichever dir the dispatch used.
+					_, wtPath := resolveWorktreeMeta(root, name)
 					cleanupAgentWorktree(cmd, root, name)
 					os.Remove(filepath.Join(config.AgentDir(root, name), ".runtime", "dispatched"))
+					os.Remove(filepath.Join(config.AgentDir(root, name), ".runtime", "dispatch_owner"))
+					if wtPath != "" {
+						os.Remove(filepath.Join(config.AgentDir(wtPath, name), ".runtime", "dispatch_owner"))
+					}
 				}
 				continue
 			}
@@ -91,8 +130,15 @@ func runDown(cmd *cobra.Command, args []string) error {
 		if downReset {
 			resetAgent(ctx, cmd, root, name)
 		} else {
+			// Capture the worktree path BEFORE cleanupAgentWorktree may remove it (see the
+			// not-running branch above) so dispatch_owner is cleared at BOTH roots (#548 P3).
+			_, wtPath := resolveWorktreeMeta(root, name)
 			cleanupAgentWorktree(cmd, root, name)
 			os.Remove(filepath.Join(config.AgentDir(root, name), ".runtime", "dispatched"))
+			os.Remove(filepath.Join(config.AgentDir(root, name), ".runtime", "dispatch_owner"))
+			if wtPath != "" {
+				os.Remove(filepath.Join(config.AgentDir(wtPath, name), ".runtime", "dispatch_owner"))
+			}
 		}
 	}
 
@@ -129,6 +175,36 @@ func runDown(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("some agents failed to stop")
 	}
 	return nil
+}
+
+// downSelfScoped reports whether an agent-context `af down` stays inside the tiered scoped-stop
+// carve-out (#548): no --all, at least one explicit target, and every target is granted by
+// scopedStopAllowed — the caller's own session (self), a formula-backed specialist the caller
+// dispatched (dispatcher), or, for an interactive manager, an autonomous specialist it did not
+// dispatch (manager). A granted tier covers --reset on its targets too: the identical stop +
+// state-reclamation authority is already tier-granted via `af sling --agent <target> --reset`
+// (sling.go), so refusing it here would only force that awkward spelling. Anything else — bare,
+// --all, a no-target --reset, the interactive manager as a target, a supervisor, or a
+// non-dispatched sibling from a non-manager caller — is a factory-wide teardown reserved for the
+// operator. The --all/no-args disqualifiers are evaluated BEFORE the per-target tier logic, so
+// the manager tier structurally cannot leak into a factory-wide shape.
+//
+// On success it also returns the per-target granting tier (name→tier), so the allow-path caller can
+// record the teardown_granted breadcrumb without a second scopedStopAllowed (dispatch_owner) read
+// (#548 N-1). The tiers map is nil when ok is false.
+func downSelfScoped(args []string, agents map[string]config.AgentEntry) (tiers map[string]string, ok bool) {
+	if downAll || len(args) == 0 {
+		return nil, false
+	}
+	tiers = make(map[string]string, len(args))
+	for _, name := range args {
+		tier, granted := scopedStopAllowed(name, agents)
+		if !granted {
+			return nil, false
+		}
+		tiers[name] = tier
+	}
+	return tiers, true
 }
 
 // cleanupAgentWorktree removes a worktree owned by the named agent.
@@ -224,18 +300,30 @@ func closeAgentBeads(ctx context.Context, store issuestore.Store, agentName, rea
 	return closed
 }
 
-func killOrphanedClaudeProcesses() {
-	// All af-managed agents are now launched with --dangerously-skip-permissions,
-	// so this pattern matches all agentfactory Claude processes regardless of type.
-	pattern := "claude.*--dangerously-skip-permissions"
-
-	// Check if any orphaned processes exist
-	check := exec.Command("pgrep", "-f", pattern)
-	if err := check.Run(); err != nil {
-		return // No orphaned processes
+// runPkill is the K10 (#541 Phase 4) ADR-009 package-var seam over the orphan-sweep
+// pgrep/pkill execs, mirroring runAgentGenScript. It exists so the default suite can override
+// it and assert zero real host-process execs (AC-7 recording point): unlike production tmux
+// (unconstructable under the ADR-018 build guard), a raw exec.Command("pkill", ...) WOULD shell
+// out against the operator's real Claude processes in a default-suite test, so the seam is the
+// guard. It returns nil when pgrep finds no orphans.
+var runPkill = func(pattern string) error {
+	if err := exec.Command("pgrep", "-f", pattern).Run(); err != nil {
+		return nil // no orphaned processes
 	}
+	return exec.Command("pkill", "-9", "-f", pattern).Run()
+}
 
-	// Kill them with SIGKILL
-	kill := exec.Command("pkill", "-9", "-f", pattern)
-	_ = kill.Run()
+func killOrphanedClaudeProcesses() {
+	// K10 backstop (#541): an agent context never sweeps host processes. K5 already refuses the
+	// `af down --all` that reaches this call; this redundant interlock makes that gate's omission
+	// non-fatal and is the recording point proving zero real pkill in the default suite.
+	if callerAuthority() == AuthorityAgent {
+		return
+	}
+	// All af-managed agents are launched with --dangerously-skip-permissions, so this pattern
+	// matches all agentfactory Claude processes regardless of type. Kept as a `pattern :=`
+	// binding so TestKillScopeDrift can assert it stays in lockstep with the session.go launch
+	// command (six_sigma_gaps.md Gap 8).
+	pattern := "claude.*--dangerously-skip-permissions"
+	_ = runPkill(pattern)
 }

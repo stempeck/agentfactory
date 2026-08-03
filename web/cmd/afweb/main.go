@@ -29,6 +29,7 @@ import (
 	"github.com/stempeck/agentfactory-web/internal/readmodel"
 	"github.com/stempeck/agentfactory-web/internal/rendezvous"
 	"github.com/stempeck/agentfactory-web/internal/server"
+	"github.com/stempeck/agentfactory-web/internal/telemetryview"
 	web "github.com/stempeck/agentfactory-web/internal/web"
 )
 
@@ -52,6 +53,7 @@ func main() {
 	capture := readmodel.NewTmuxCapture() // #500: per-agent read-only session-snapshot reader (probe-first)
 	forms := formschema.New(wrapper)
 	disp := dispatch.New(wrapper)
+	telemetryv := telemetryview.New(wrapper) // #580: read projection of `af telemetry status|report|usage --json`
 	settings := config.New(root, wrapper)
 	protos := proto.New(root)                // serve on-disk prototypes under <root>/.designs/
 	feedbackWriter := feedback.New(root, rm) // gate-verify via the read-model (no new exec)
@@ -71,6 +73,7 @@ func main() {
 		server.WithFormulaStore(formulaStore), // #502: GET/PUT /api/formulas[/{name}]
 		server.WithGenerator(genJob),          // #502: POST/GET /api/factory/generate
 		server.WithValidator(wrapper),         // #502: PUT-time `af formula validate` gate (reuses the exec wrapper)
+		server.WithTelemetry(telemetryv),      // #580: GET /api/telemetry[/report|/usage]
 	}
 	if bind := os.Getenv("AF_BIND"); bind != "" {
 		opts = append(opts, server.WithBind(bind))

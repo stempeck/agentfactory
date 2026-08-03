@@ -32,7 +32,10 @@ notify_grader_unavailable() {
 }
 
 # Find prompt file via af root
-FACTORY_ROOT=${AF_ROOT:-$(af root 2>/dev/null)}
+FACTORY_ROOT="${AF_ROOT}"
+if [ -z "$FACTORY_ROOT" ]; then
+    FACTORY_ROOT=$(af root 2>/dev/null)
+fi
 if [ -z "$FACTORY_ROOT" ]; then
     [ -d "$AGENT_RUNTIME" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT1: no_factory_root" >> "$AGENT_RUNTIME/fidelity_debug.log" 2>/dev/null
     echo '{"ok": true}'
@@ -200,8 +203,20 @@ Tool calls executed in this turn (from transcript):
 $TOOL_CONTEXT"
 fi
 
-# Run evaluation via haiku
-VERDICT=$(env -i HOME="$HOME" PATH="$PATH" claude -p --model haiku --max-turns 1 \
+# Run evaluation via haiku. Forward the OTel telemetry family through the env -i
+# allowlist using conditional expansion — nothing is added when a var is unset, so
+# with telemetry off this line stays equivalent to the scrubbed form — and tag the
+# forwarded resource attributes as grader overhead so per-turn grader spend is
+# attributed instead of invisible (issue #329 P4b).
+VERDICT=$(env -i HOME="$HOME" PATH="$PATH" \
+    ${CLAUDE_CODE_ENABLE_TELEMETRY:+CLAUDE_CODE_ENABLE_TELEMETRY="$CLAUDE_CODE_ENABLE_TELEMETRY"} \
+    ${OTEL_METRICS_EXPORTER:+OTEL_METRICS_EXPORTER="$OTEL_METRICS_EXPORTER"} \
+    ${OTEL_LOGS_EXPORTER:+OTEL_LOGS_EXPORTER="$OTEL_LOGS_EXPORTER"} \
+    ${OTEL_EXPORTER_OTLP_PROTOCOL:+OTEL_EXPORTER_OTLP_PROTOCOL="$OTEL_EXPORTER_OTLP_PROTOCOL"} \
+    ${OTEL_EXPORTER_OTLP_ENDPOINT:+OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT"} \
+    ${OTEL_EXPORTER_OTLP_HEADERS:+OTEL_EXPORTER_OTLP_HEADERS="$OTEL_EXPORTER_OTLP_HEADERS"} \
+    ${OTEL_RESOURCE_ATTRIBUTES:+OTEL_RESOURCE_ATTRIBUTES="$OTEL_RESOURCE_ATTRIBUTES,af.overhead=grader"} \
+    claude -p --model haiku --max-turns 1 \
     --system-prompt "You are a JSON-only fidelity gate. You receive an assistant's response, the current formula step's contract, and the tool calls executed this turn. Evaluate adherence to the step contract considering BOTH the text AND the tool evidence. Respond with ONLY valid JSON, nothing else. $(cat "$PROMPT_FILE")" \
     "$EVAL_INPUT" 2>/dev/null)
 

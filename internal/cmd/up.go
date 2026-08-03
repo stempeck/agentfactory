@@ -227,9 +227,15 @@ func runUp(cmd *cobra.Command, args []string) error {
 			}
 		}
 		wireGitIdentity(mgr, root, wtPath)
+		// Relaunch clears the dispatched marker AND the scoped-stop provenance datum (#548 P3,
+		// L-3) at both the main-root and worktree agent dirs: a fresh session must not inherit
+		// the previous dispatch's stop-rights, and this bounds the stale-owner window after an
+		// abnormal session death.
 		os.Remove(filepath.Join(config.AgentDir(root, name), ".runtime", "dispatched"))
+		os.Remove(filepath.Join(config.AgentDir(root, name), ".runtime", "dispatch_owner"))
 		if wtPath != "" {
 			os.Remove(filepath.Join(config.AgentDir(wtPath, name), ".runtime", "dispatched"))
+			os.Remove(filepath.Join(config.AgentDir(wtPath, name), ".runtime", "dispatch_owner"))
 		}
 		// K4 (issue #392): if the in-worktree .runtime/hooked_formula pointer was
 		// lost (worktree relocated/removed), rebind it from the durable
@@ -264,6 +270,11 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 		if len(modelEnv) > 0 {
 			mgr.SetModelEnv(modelEnv)
+		}
+		// Telemetry env (issue #329): symmetric with af sling — gate-checked, built from the
+		// resolved model name. Gate off ⇒ nil ⇒ the session carries zero OTel vars.
+		if env := telemetryLaunchEnv(root, agentDir, name, modelName, cmd.ErrOrStderr()); env != nil {
+			mgr.SetTelemetryEnv(env)
 		}
 		if err := mgr.Start(); err != nil {
 			if errors.Is(err, session.ErrAlreadyRunning) {
@@ -371,6 +382,20 @@ func runUp(cmd *cobra.Command, args []string) error {
 		} else if startupCfg.Improvement != "" && startupCfg.Improvement != "default" {
 			fmt.Fprintf(cmd.OutOrStdout(), "improvement hook: %s\n", startupCfg.Improvement)
 		}
+		if gErr := applyGate(root, root, "telemetry", startupCfg.Telemetry); gErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: telemetry gate: %v\n", gErr)
+			allOK = false
+		} else if startupCfg.Telemetry != "" && startupCfg.Telemetry != "default" {
+			fmt.Fprintf(cmd.OutOrStdout(), "telemetry gate: %s\n", startupCfg.Telemetry)
+		}
+		// fable-implement Step 1 (Root Cause A, issue #584): the gate above is
+		// durable state re-asserted on every af up, but the backend it points every
+		// session at is a single-shot process with no other autonomous relaunch
+		// trigger. Called synchronously (not `go`) — af up is a one-shot CLI verb,
+		// and a backgrounded goroutine risks the process exiting before a relaunch
+		// attempt completes, silently discarding the cold-start attempt
+		// (decisions.md D4). Best-effort by contract: never fails the verb.
+		ensureTelemetryBackendFn(cmd.Context(), cmd, root)
 
 		// AC-5: start the dispatcher when configured (friendly-skips internally when
 		// dispatch.json is absent/unconfigured, warns on real config errors; an

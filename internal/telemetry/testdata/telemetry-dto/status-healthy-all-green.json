@@ -1,0 +1,37 @@
+{
+  "v": 1,
+  "state": "ok",
+  "installed": {
+    "present": true,
+    "valid": true,
+    "endpoint": "http://127.0.0.1:5080/api/default",
+    "header_count": 1
+  },
+  "recording": {
+    "enabled": true
+  },
+  "backend": {
+    "probed": true,
+    "signals": [
+      {
+        "label": "step timings",
+        "ok": true,
+        "status": 200,
+        "summary": "step timings: reachable (HTTP 200)"
+      },
+      {
+        "label": "token usage",
+        "ok": true,
+        "status": 200,
+        "summary": "token usage: reachable (HTTP 200)"
+      },
+      {
+        "label": "session metrics",
+        "ok": true,
+        "status": 200,
+        "summary": "session metrics: reachable (HTTP 200)"
+      }
+    ]
+  },
+  "unprobed_cause": ""
+}

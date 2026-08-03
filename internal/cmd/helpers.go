@@ -15,8 +15,30 @@ import (
 	"github.com/stempeck/agentfactory/internal/issuestore/mcpstore"
 	"github.com/stempeck/agentfactory/internal/issuestore/memstore"
 	"github.com/stempeck/agentfactory/internal/session"
+	"github.com/stempeck/agentfactory/internal/telemetry"
 	"github.com/stempeck/agentfactory/internal/tmux"
 )
+
+// telemetryLaunchEnv builds the OTel launch-env family for a session when the factory
+// telemetry gate is on, or returns nil when it is off — so the caller injects nothing and the
+// launched session carries zero OTel vars (the Manager's hygiene passes still clear any stale
+// telemetry family). It is the single producer for all three launch entry points (af sling,
+// af up, respawn), so the gate read, telemetry.json load, and correlation-key derivation stay
+// identical across them and cannot drift from the identity a session's records carry (the keys
+// come from telemetryIdentity, the same single derivation lifecycle recording uses — K5↔K4).
+// An invalid telemetry.json is warned and treated as off: observability never blocks a launch.
+func telemetryLaunchEnv(root, agentDir, agentName, cliModel string, warn io.Writer) []config.EnvVar {
+	if !telemetryFactoryEnabled(root) {
+		return nil
+	}
+	cfg, err := config.LoadTelemetryConfig(root)
+	if err != nil {
+		fmt.Fprintf(warn, "warning: ignoring telemetry.json (%v); launching %s without telemetry env\n", err, agentName)
+		return nil
+	}
+	keys, _ := telemetryIdentity(root, agentDir, agentName, "", cliModel)
+	return telemetry.LaunchEnv(*cfg, keys)
+}
 
 // loadModelsConfigForCrossCheck loads models.json for a NON-selecting cross-check
 // caller (`af dispatch`, `af config dispatch set`). Neither path launches from a
@@ -40,11 +62,13 @@ type respawnTmux interface {
 }
 
 // cmdTmux is the full union of *tmux.Tmux methods the cmd layer drives across
-// up.go, down.go, done.go, and dispatch.go. The last three (GetPaneCommand,
-// IsAgentRunning, SetEnvironment) are not called yet — they are declared up
-// front because Phase 4's watchdog health-gate + AF_ROOT export will need them,
-// so the seam surface is fixed once (Round-2 HIGH-1). It exists so those command
-// paths can be driven with a fake in tests.
+// up.go, down.go, done.go, and dispatch.go. GetPaneCommand, IsAgentRunning, and
+// SetEnvironment are not called yet — they are declared up front because Phase 4's
+// watchdog health-gate + AF_ROOT export will need them, so the seam surface is fixed
+// once (Round-2 HIGH-1). CurrentSessionName (K2) is likewise declared ahead of use:
+// Phase 2's authority classifier reads the caller's own session name through it
+// (security.md SEC-A2 signal 2). It exists so those command paths can be driven with
+// a fake in tests.
 type cmdTmux interface {
 	IsAvailable() bool
 	HasSession(name string) (bool, error)
@@ -56,15 +80,41 @@ type cmdTmux interface {
 	IsAgentRunning(session string, expectedPaneCommands ...string) bool
 	SetEnvironment(session, key, value string) error
 	GetEnvironment(session, key string) (string, error)
+	CurrentSessionName() (string, error)
 }
 
 // Compile-time check: the real *tmux.Tmux must satisfy cmdTmux (R-4 discipline).
 var _ cmdTmux = (*tmux.Tmux)(nil)
 
-// newCmdTmux is the seam tests override to inject a fake tmux client into the
-// cmd-layer watchdog/dispatch/terminate paths. Production default returns the
-// real *tmux.Tmux.
-var newCmdTmux = func() cmdTmux { return tmux.NewTmux() }
+// authKillGuard is the K8 (#541 Phase 4) convergence-primitive backstop wrapping every
+// cmd-layer tmux client. It embeds cmdTmux so all methods forward transparently — crucially
+// CurrentSessionName, which callerAuthority() itself drives through newCmdTmux()
+// (authority.go:80/:185); altering it would break signal-2 detection — and overrides ONLY
+// KillSession. This makes a missing Phase-3 command gate non-fatal (design constraint C-1): a
+// non-self KillSession reached in agent context is refused here even if its surface gate is
+// bypassed. It is a runtime agent-vs-operator interlock, distinct from tmux's ADR-018 build
+// guard (conflicts.md E2); it must NOT route through guardOp.
+type authKillGuard struct{ cmdTmux }
+
+// KillSession refuses a factory-scope kill in agent context, permitting only the caller's own
+// session (the af done self-terminate, incl. its raw .runtime/session_id fallback — Ledger D9).
+// It emits the AC-6 refusal directly rather than via requireOperatorTeardown, which would
+// double-write the K4 forensic breadcrumb. No recursion: callerAuthority short-circuits on
+// AF_ROLE, else its CurrentSessionName query delegates straight through the embed.
+func (g authKillGuard) KillSession(name string) error {
+	if callerAuthority() == AuthorityAgent && !isSelfSession(name) && !isSelfSessionID(name) {
+		return errors.New(teardownRefusal("KillSession " + name))
+	}
+	return g.cmdTmux.KillSession(name)
+}
+
+// newCmdTmux is the seam tests override to inject a fake tmux client into the cmd-layer
+// watchdog/dispatch/terminate paths. Production default returns the real *tmux.Tmux wrapped in
+// the K8 authKillGuard, so one wrap covers every cmd-layer KillSession consumer.
+var newCmdTmux = func() cmdTmux { return authKillGuard{tmux.NewTmux()} }
+
+// Compile-time check: the K8 decorator still satisfies cmdTmux (the embed forwards all methods).
+var _ cmdTmux = authKillGuard{}
 
 type RespawnOptions struct {
 	FactoryRoot  string
@@ -104,6 +154,14 @@ func respawnSession(opts RespawnOptions) error {
 	// set, so no second emission path is added here (handoff_test transitivity guard).
 	if _, env, _ := resolveLaunchModelEnv(opts.FactoryRoot, opts.AgentName, respawnAgentDir(opts), "", opts.AgentEntry.Model, false, os.Stderr); len(env) > 0 {
 		mgr.SetModelEnv(env)
+	}
+
+	// Telemetry env across respawns (issue #329): watchdog / handoff / compact-handoff all
+	// route through here and NEVER call Start(), so this is the only place they gain the OTel
+	// family — and, when the gate is off, the inline KEY='' hygiene the rebuilt command emits
+	// is the only clear a telemetry-off relaunch gets. Gate off ⇒ nil ⇒ inject nothing.
+	if env := telemetryLaunchEnv(opts.FactoryRoot, respawnAgentDir(opts), opts.AgentName, opts.AgentEntry.Model, os.Stderr); env != nil {
+		mgr.SetTelemetryEnv(env)
 	}
 
 	respawnCmd := opts.CmdPrefix + mgr.BuildStartupCommand()

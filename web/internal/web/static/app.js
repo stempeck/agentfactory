@@ -325,7 +325,7 @@
 
   // ---- view toggles (exactly one #view-* section visible at a time) ----
   var VIEW_IDS = ['view-floor', 'view-sling', 'view-dispatch', 'view-settings', 'view-prototypes', 'view-agent',
-    'view-formulas'];
+    'view-formulas', 'view-telemetry'];
   function showView(id) {
     VIEW_IDS.forEach(function (v) { var s = byId(v); if (s) s.hidden = (v !== id); });
   }
@@ -335,6 +335,7 @@
   function showSettings() { showView('view-settings'); }
   function showPrototypes() { showView('view-prototypes'); }
   function showFormulas() { showView('view-formulas'); }
+  function showTelemetry() { showView('view-telemetry'); }
 
   // ---- sling view: idle-agent list ----
   function renderIdleList() {
@@ -1074,6 +1075,633 @@
   }
 
   // =========================================================================
+  // TelemetryViewModel — the eighth view (route "telemetry", #580 W5).
+  //
+  // Registers NO timer. Decision 9: on-demand plus an explicit Refresh, no auto-poll and no
+  // auto-retry against a rendered dark state — this panel makes the heaviest requests against a
+  // routinely-dead upstream, and every fetch is a process spawn.
+  //
+  // All three reads are dispatched CONCURRENTLY. The obvious reading — "status first, it is the
+  // fast local one" — is backwards: the status handler's budget is 35s because the CLI probes three
+  // signals sequentially at a 10s ceiling each, while report is 5s and usage 15s. Status is the
+  // SLOWEST read, and it is slowest precisely when the backend is dead, which is the case this
+  // panel exists to serve. Chaining would blank the view for half a minute.
+  // =========================================================================
+  var TelemetryViewModel = {
+    seq: 0,            // monotonic request token; a response from an older seq is dropped
+    status: null,      // last successful StateDTO
+    report: null,      // last successful ReportDTO
+    usage: null,       // last successful UsageDTO
+    statusFail: '',    // relay/transport failure text, per pane — never blanks the pane
+    reportFail: '',
+    usageFail: '',
+    filterFail: '',    // a 400 from the filter validators
+    receivedAt: 0,     // Date.now() at the most recent successful receipt
+    agent: '',
+    instance: '',
+    options: null,     // option sets frozen at the last UNFILTERED response
+
+    activate: function () {
+      showTelemetry();
+      renderTelemetry();                       // paint the shell synchronously, before any fetch
+      return this.refresh();
+    },
+
+    refresh: function () {
+      var self = this;
+      this.seq += 1;
+      var mine = this.seq;
+      var q = '';
+      if (this.agent) { q += (q ? '&' : '?') + 'agent=' + encodeURIComponent(this.agent); }
+      if (this.instance) { q += (q ? '&' : '?') + 'instance=' + encodeURIComponent(this.instance); }
+
+      var fresh = function (env, kind) {
+        if (self.seq !== mine) { return null; }   // a newer refresh won; drop this response
+        if (!env || env.ok !== true) {
+          if (env && env._status === 400) { self.filterFail = env.message || 'the filter was rejected'; }
+          self[kind] = env && env.message ? env.message : 'the telemetry command could not be read; see the console log';
+          return null;
+        }
+        self[kind] = '';
+        self.receivedAt = Date.now();
+        return env.data || null;
+      };
+
+      this.filterFail = '';
+      var s = API.get('/api/telemetry').then(function (env) {
+        var d = fresh(env, 'statusFail'); if (d) { self.status = d; }
+        renderTelemetry();
+      }, function () { if (self.seq === mine) { self.statusFail = 'the console could not reach its own telemetry route'; renderTelemetry(); } });
+
+      var r = API.get('/api/telemetry/report' + q).then(function (env) {
+        var d = fresh(env, 'reportFail'); if (d) { self.report = d; self.freezeOptions(d); }
+        renderTelemetry();
+      }, function () { if (self.seq === mine) { self.reportFail = 'the console could not reach its own telemetry route'; renderTelemetry(); } });
+
+      var u = API.get('/api/telemetry/usage' + q).then(function (env) {
+        var d = fresh(env, 'usageFail'); if (d) { self.usage = d; }
+        renderTelemetry();
+      }, function () { if (self.seq === mine) { self.usageFail = 'the console could not reach its own telemetry route'; renderTelemetry(); } });
+
+      return Promise.all([s, r, u]);
+    },
+
+    // The option sets are frozen at the last UNFILTERED response. Once a filter is applied the
+    // response only contains that filter's values, so deriving options from it would collapse the
+    // list to the single selected entry.
+    freezeOptions: function (rep) {
+      if (this.agent || this.instance) { return; }
+      var agents = [], runs = [];
+      (rep.rows || []).forEach(function (row) {
+        if (row.agent && agents.indexOf(row.agent) < 0) { agents.push(row.agent); }
+        if (row.instance_id && runs.indexOf(row.instance_id) < 0) { runs.push(row.instance_id); }
+      });
+      this.options = { agents: agents.sort(), runs: runs.sort() };
+    },
+
+    setFilter: function (agent, instance) {
+      this.agent = agent;
+      this.instance = instance;
+      return this.refresh();
+    }
+  };
+
+  // sev distinguishes a MEASURED failure from a state that was never measured and from a positive
+  // verdict. Collapsing the three would put "we looked and it is broken" and "we never looked" in
+  // the same visual bucket, which is the whole distinction this panel exists to preserve.
+  function telLine(host, text, next, sev) {
+    var wrap = el('div', 'tel-line' + (sev ? ' tel-sev-' + sev : ''));
+    wrap.appendChild(el('p', 'tel-line-what', text));
+    if (next) { wrap.appendChild(el('p', 'tel-line-next', next)); }
+    host.appendChild(wrap);
+  }
+
+  // renderTelemetryBanner emits the banner STACK: one line per degraded axis, in the fixed order
+  // installed -> recording -> backend. n degraded axes produce n lines, so all eight combinations of
+  // the axis space render distinctly with no combinatorial UI.
+  function renderTelemetryBanner(vm) {
+    var host = byId('tel-banner'); if (!host) return;
+    host.innerHTML = '';
+    var status = vm.status;
+
+    if (vm.statusFail) {
+      telLine(host, "The console could not read this factory's telemetry status: " + vm.statusFail,
+        'Nothing was measured, so no state below is a verdict. Check the console log.', 'unknown');
+      return;
+    }
+    if (!status) { telLine(host, 'Reading telemetry status…', 'The status probe can take up to 35 seconds when the backend is unreachable.', 'unknown'); return; }
+
+    // The error envelope is a different key set entirely — {v, state, error} with no axes at all.
+    // Reading installed/recording/backend off it would silently render "not installed".
+    if (status.state === 'error') {
+      telLine(host, "The console could not read this factory's telemetry: " + (status.error || 'the factory could not be resolved'),
+        'Run the console from inside an agentfactory workspace.', 'unknown');
+      return;
+    }
+
+    var inst = status.installed || {};
+    var degradedInstalled = !inst.present || !inst.valid || inst.endpoint === '';
+    if (degradedInstalled) {
+      if (!inst.present) {
+        // The CLI's clause is a conditional future ("will be recorded"), and it is emitted only from
+        // the `af telemetry on` branch. Restating it in the present tense here would assert local
+        // recording in the default state, one line above the "Recording is off" line that
+        // contradicts it.
+        telLine(host, 'Telemetry is not configured: no telemetry.json found — step timing is recorded locally only while recording is on.',
+          'Next: run quickstart.sh with telemetry or create .agentfactory/telemetry.json to export.');
+      } else if (!inst.valid) {
+        telLine(host, 'The telemetry configuration could not be read.',
+          'Next: run quickstart.sh with telemetry or create .agentfactory/telemetry.json to export.');
+      } else {
+        telLine(host, 'No endpoint is configured in .agentfactory/telemetry.json — there is nothing to query.',
+          'Next: run quickstart.sh with telemetry or create .agentfactory/telemetry.json to export.');
+      }
+    }
+
+    var recording = status.recording || {};
+    if (recording.enabled === false) {
+      telLine(host, 'Recording is off — this is the current recording state, and existing records remain readable below.',
+        'Turn it back on with: af telemetry on');
+    }
+
+    // Is the configured address one this factory can actually supervise? ensureTelemetryBackend
+    // declines any non-loopback endpoint outright (internal/cmd/telemetry_backend.go:29-33), so
+    // this predicate decides which recoveries the panel may honestly offer below. Computed here,
+    // above the backend axis, because the axis needs it; the external-endpoint leaf further down
+    // reads the same two values rather than deriving them a second time.
+    //
+    // The host test is anchored so a name that merely CONTAINS a loopback spelling —
+    // //localhost.evil.com — is not read as loopback, which would restore exactly the false
+    // promise this gate exists to remove. It stays narrower than Go's IsLoopbackEndpoint in the
+    // other direction (127.0.0.2 is loopback to Go, not to this test): erring toward withholding
+    // a promise is the safe direction, erring toward making one is not.
+    var ep = inst.endpoint || '';
+    var loopback = (function () {
+      // Read the AUTHORITY and compare the whole host. Anything looser is a substring match on
+      // a URL, and a URL has many places a loopback spelling can appear without being the host:
+      // //localhost.evil.com is a different site, and /api?redir=//localhost is a query value.
+      // Both would otherwise be told a local backend will be relaunched for them.
+      var at = ep.indexOf('//');
+      if (at < 0) { return false; }
+      var rest = ep.slice(at + 2);
+      var end = rest.length;
+      ['/', '?', '#'].forEach(function (c) {
+        var i = rest.indexOf(c);
+        if (i >= 0 && i < end) { end = i; }
+      });
+      var host = rest.slice(0, end);
+      var creds = host.lastIndexOf('@');
+      if (creds >= 0) { host = host.slice(creds + 1); }
+      if (host.charAt(0) === '[') {
+        var close = host.indexOf(']');
+        if (close >= 0) { host = host.slice(0, close + 1); }
+      } else {
+        var port = host.indexOf(':');
+        if (port >= 0) { host = host.slice(0, port); }
+      }
+      // The whole 127/8 block, not just 127.0.0.1: config.IsLoopbackEndpoint defers to Go's
+      // net.IP.IsLoopback (internal/config/endpoint.go:23-35), so the guard DOES supervise
+      // 127.0.0.2. Reading that as remote would make the other arm's sentence — "this factory
+      // does not start or supervise a backend at the address you configured" — positively
+      // false, which is worse than the withheld promise it replaced.
+      if (host === 'localhost' || host === '[::1]' || host === '127.0.0.1') { return true; }
+      var v4 = host.split('.');
+      return v4.length === 4 && v4[0] === '127' && v4.every(function (part) {
+        return part !== '' && String(Number(part)) === part && Number(part) >= 0 && Number(part) <= 255;
+      });
+    })();
+
+    // Backend axis, three-valued. probed:false means no measurement was taken — rendering that as
+    // healthy would assert a measurement that never happened.
+    var backend = status.backend || {};
+    if (backend.probed === true) {
+      // The recovery on offer depends on whether anything in this factory owns this address.
+      // Promising an automatic relaunch for a company collector would tell the operator to wait
+      // ~30s for an attempt the guard returns from on every af up and every watchdog tick,
+      // forever — and the bash -l fallback would start a LOCAL backend that is not the endpoint
+      // they configured. The loopback arm still cannot promise the relaunch script EXISTS (a
+      // --no-telemetry install never wrote one, and no field in the status payload carries that
+      // fact), so it states its condition rather than asserting the outcome.
+      var backendDownNext = loopback
+        ? 'Next: af up (or the next watchdog tick, within ~30s) relaunches it automatically, '
+          + 'provided the recording gate is on and this factory installed the bundled backend. '
+          + 'If it is still down after that, start a login shell (bash -l) as a manual fallback '
+          + '— the same guard runs there too. If the session is alive but unresponsive, '
+          + 'tmux attach -t telemetry, but only if tmux has-session -t telemetry succeeds.'
+        : 'Next: this factory does not start or supervise a backend at the address you '
+          + 'configured — af up and the watchdog only tend the bundled one on this machine, and '
+          + 'bash -l would start that local backend instead of reaching yours. Check that the '
+          + 'configured address is up and reachable from here.';
+      // Correlated-failure dedup (contributing gap #7): connection-refused on every signal is ONE
+      // upstream fact (the backend is down), not three independent ones — collapsing it to one line
+      // is the banner's half of the same fix the steps table's rowSpan stamp is the other half of.
+      // Per-signal lines stay for any MIXED combination, which is the case the per-signal design
+      // was built for and the only shape where each line still carries distinct information.
+      var allRefused = (backend.signals || []).length > 0
+        && (backend.signals || []).every(function (sig) { return sig.status === 0; });
+      if (allRefused) {
+        // One remedy instead of N — but the CAUSES stay. status === 0 is what probeOne leaves
+        // whenever the request never completed, which covers DNS failure, i/o timeout and TLS
+        // rejection as well as connection refused; naming any one of them here would assert a
+        // cause the panel never measured. Each Summary() already says what actually happened,
+        // and the count and labels come from the payload — Probe returns one entry per address
+        // (1 + len(nativeSignalPaths)), so a fourth would make a hardcoded "three" a lie.
+        telLine(host, 'The backend is unreachable — every address failed: '
+          + (backend.signals || [])
+            .map(function (sig) { return sig.summary; })
+            // The payload always carries a summary (Summary() is never empty and the DTO has
+            // no omitempty), so this only guards the degenerate case — but a dangling "; ; "
+            // in the middle of the one line an operator gets is worse than a shorter list.
+            .filter(function (summary) { return summary; })
+            .join('; ') + '.',
+          backendDownNext);
+      } else {
+        (backend.signals || []).forEach(function (sig) {
+          if (sig.ok) { return; }
+          var next;
+          if (sig.status === 401 || sig.status === 403) {
+            next = 'Check .agentfactory/secrets/telemetry.root, or re-run the quickstart credential step.';
+          } else if (sig.status === 404) {
+            next = 'Check that the configured endpoint ends in /api/default.';
+          } else if (sig.status === 0) {
+            next = backendDownNext;
+          } else {
+            next = 'The backend refused the data; read the backend\'s own log.';
+          }
+          telLine(host, sig.summary, next);
+        });
+      }
+    } else if (status.unprobed_cause) {
+      telLine(host, 'The backend was not probed: ' + status.unprobed_cause,
+        'Check .agentfactory/secrets/telemetry.root, or re-run the quickstart credential step.', 'unknown');
+    }
+
+    // External endpoint: non-loopback AND the usage query failed. The AND is load-bearing — a
+    // working remote backend must render as healthy, not as unsupported. The test is on the ADDRESS
+    // only, which is all the panel knows; it makes no claim about what is running there. The port is
+    // not compared (the seed's port is a variable) and no path is required (an external OTLP stack
+    // legitimately uses a different one). Nothing here fingerprints the backend.
+    var usage = vm.usage;
+    var usageBroken = usage && usage.state !== 'ok' && usage.state !== 'not_installed';
+    if (ep !== '' && !loopback && usageBroken) {
+      telLine(host, "The console's telemetry views expect the bundled backend; your endpoint is external, which may be why this query failed.",
+        "Next: use that backend's own UI for token usage and session metrics.", 'unknown');
+    }
+
+    // Healthy-empty is a banner-level verdict, and "healthy" means NO axis emitted a line — not
+    // merely that a probe ran. Reading it off backend.probed would print "everything is wired"
+    // directly beneath a 404. Counting what the axes above actually emitted is the only reading that
+    // cannot drift from them.
+    var axisLines = host.children.length;
+    var rep = vm.report;
+    var st = (rep && rep.stats) || {};
+    // DroppedUnexported is a SUBSET of Dropped (internal/telemetry/store.go:56-64), so testing it
+    // separately would be redundant; it is carried in the sentence, not in the predicate.
+    var lossy = st.malformed > 0 || st.dropped > 0;
+    var filtered = vm.agent !== '' || vm.instance !== '';
+    if (axisLines === 0 && rep && (rep.rows || []).length === 0 && !lossy && !filtered) {
+      telLine(host, "No step records yet. Enable telemetry with 'af telemetry on' and run a formula.",
+        'Everything is wired — this factory simply has not recorded a step yet.', 'ok');
+    }
+    if (lossy) {
+      // The integers, never a stand-in. A fabricated "some" here would contradict the exact counts
+      // the steps pane prints from the same payload, on the same screen.
+      telLine(host, st.malformed + ' unreadable lines skipped; ' + st.dropped + ' records dropped (' + st.dropped_unexported + ' never reached a backend).',
+        'Records exist that could not be read — this is not an empty factory.');
+    }
+
+    if (!host.firstChild) {
+      telLine(host, 'Telemetry is installed, recording, and every backend signal answered.',
+        'Nothing to act on.', 'ok');
+    }
+  }
+
+  // renderTelemetrySteps renders the step-timing rows and each row's token verdict.
+  //
+  // The join is RUN-LEVEL, on instance_id <-> formula_run plus agent, and that is not a shortcut.
+  // The report row's `step` is the step TITLE when the step has one, falling back to its id; the
+  // usage row's `step_bucket` is always the step ID, optionally suffixed "-tail". The report payload
+  // carries no step id at all, so comparing the two fields marks every titled step as having no
+  // token data — firing the honesty copy universally and falsely. What the run-level key does prove
+  // is one-directional and sufficient: the backend view builds every token row by joining on
+  // (formula_run, agent), so no rows for that pair means no rows for any step of it.
+  function renderTelemetrySteps(vm) {
+    var host = byId('tel-steps'); if (!host) return;
+    var note = byId('tel-steps-note');
+    host.innerHTML = '';
+    if (note) { note.textContent = ''; }
+
+    if (vm.reportFail) {
+      host.appendChild(el('p', 'tel-empty', 'The console could not read the step timings: ' + vm.reportFail));
+      if (note) { note.textContent = 'The last reading, if any, is unchanged. Nothing was re-measured.'; }
+      return;
+    }
+    var rep = vm.report;
+    if (!rep) { host.appendChild(el('p', 'tel-empty', 'Step timings still loading…')); return; }
+    if (rep.state === 'error') {
+      host.appendChild(el('p', 'tel-empty', 'The console could not read this factory\'s telemetry: ' + (rep.error || 'the factory could not be resolved')));
+      return;
+    }
+
+    var rows = rep.rows || [];
+    var rst = rep.stats || {};
+    // Loss is reported BEFORE the empty check, never after it — a log whose every line is corrupt
+    // renders no rows, and "no records yet" is exactly the wrong thing to tell an operator whose
+    // records exist and cannot be read. DroppedUnexported is a SUBSET of Dropped
+    // (internal/telemetry/store.go:56-64), so it is reported in the sentence, not tested separately.
+    var lost = rst.malformed > 0 || rst.dropped > 0;
+    if (lost) {
+      host.appendChild(el('p', 'tel-empty', rst.malformed + ' unreadable lines skipped; ' + rst.dropped + ' records dropped (' + rst.dropped_unexported + ' never reached a backend).'));
+    }
+    if (rows.length === 0) {
+      if (lost) {
+        host.appendChild(el('p', 'tel-empty', 'No readable step records — this is not an empty factory. The records above could not be read.'));
+      } else if (vm.agent || vm.instance) {
+        host.appendChild(el('p', 'tel-empty', 'No step records match the filter you applied (agent "' + (vm.agent || 'any') + '", run "' + (vm.instance || 'any') + '").'));
+      } else {
+        host.appendChild(el('p', 'tel-empty', "No step records yet. Enable telemetry with 'af telemetry on' and run a formula."));
+      }
+      return;
+    }
+
+    // "Not measured yet" is not "measured, and empty". The three reads are concurrent with very
+    // different budgets (report 5s, usage 15s, status 35s), so the report reliably lands first;
+    // treating an absent usage payload as an empty one would assert "no token data arrived for this
+    // step" against every row before the token query has even returned — an explicit unknown stated
+    // before the measurement exists, which is the same defect class as a zero.
+    var usageKnown = vm.usage !== null && vm.usageFail === '';
+    // usageKnown is a TRANSPORT predicate, and transport is not measurement. The relay carries
+    // degradation as data — every dark state arrives at HTTP 200 with ok:true, and ok:false is
+    // reserved for a relay failure where nothing was measured at all — so usageKnown is true for
+    // not_installed, backend_down, credential_rejected and query_failed alike, with rows [] in
+    // every one of them. Deciding the column from transport alone therefore reports a measured
+    // negative about a query that never ran: on a default local-recording factory the Tokens pane
+    // says nothing was queried while this column asserts data was expected and did not arrive.
+    // The payload states its own verdict; read that, exactly as the Tokens and Metrics panes do.
+    //
+    // The TOKENS half is the right axis, not the top-level state: that one is the worst of the two
+    // halves, so a dark metrics half would suppress token rows that did arrive.
+    var tok = (usageKnown && vm.usage.tokens) || {};
+    var usageUsable = usageKnown && vm.usage.state !== 'error' && tok.state === 'ok';
+    var tokenRows = usageUsable ? (tok.rows || []) : [];
+    var table = el('table', 'tel-table');
+    var head = el('tr');
+    ['Agent', 'Step', 'Status', 'Duration', 'Model', 'Token data'].forEach(function (h) { head.appendChild(el('th', '', h)); });
+    table.appendChild(head);
+
+    // Dark-state — nothing was measured for ANY step, because nothing was measured at all. This
+    // is a fact about the whole query, not about any one row, so it is decided ONCE here rather
+    // than re-derived per row: one upstream fact stamped N times is the same correlated-failure
+    // repetition contributing gap #7 names for the banner, one column over. usageKnown is checked
+    // first (state check before the joinless arm — the same ordering checkJoinlessRenderer pins),
+    // and only the usageUsable half gets the shared sentence: telUsageStateText is the generator
+    // the Tokens and Metrics panes already use for the same five states, so the three panes on
+    // screen keep agreeing instead of offering three accounts of one fact.
+    var stepsDark = !usageKnown || !usageUsable;
+    var stepsDarkClass = !usageKnown ? 'tel-pending' : 'tel-unknown';
+    var stepsDarkText = !usageKnown
+      ? (vm.usageFail !== '' ? 'token usage could not be read' : 'token usage still loading')
+      : telUsageStateText(tok.state, vm.usage.cause || tok.detail);
+    var darkStamped = false;
+
+    rows.forEach(function (r) {
+      var tr = el('tr');
+      tr.appendChild(el('td', '', r.agent));
+      tr.appendChild(el('td', '', r.step));
+      tr.appendChild(el('td', '', r.status));
+      tr.appendChild(el('td', '', r.status === 'open' ? formatMs(r.duration_ms) + ' so far' : formatMs(r.duration_ms)));
+      tr.appendChild(el('td', '', r.model === '' ? '—' : r.model));
+
+      if (stepsDark) {
+        if (!darkStamped) {
+          var dark = el('td', stepsDarkClass, stepsDarkText);
+          dark.rowSpan = rows.length;
+          tr.appendChild(dark);
+          darkStamped = true;
+        }
+        // Every row after the first spans under the stamp above — appending a cell here would
+        // widen the table by one column past what rowSpan already covers.
+        table.appendChild(tr);
+        return;
+      }
+
+      // An empty key on either side is not a match. Two un-hooked records both carrying "" would
+      // otherwise join one session's steps to another's tokens.
+      var runMatch = [];
+      tokenRows.forEach(function (t) {
+        if (t.formula_run !== '' && r.instance_id !== '' && t.formula_run === r.instance_id && t.agent === r.agent) { runMatch.push(t); }
+      });
+
+      if (runMatch.length === 0) {
+        tr.appendChild(el('td', 'tel-unknown', 'no token data arrived for this step'));
+      } else {
+        tr.appendChild(el('td', 'tel-unknown', 'recorded for this run, not attributable to a step'));
+      }
+      table.appendChild(tr);
+    });
+    host.appendChild(table);
+
+    if (note) {
+      note.textContent = 'Token counts are attributed per run, not per step: the timing records carry a step title while the backend buckets tokens by step id, so no per-step figure can be derived honestly. Token data for a run may also exist unattributed — attributes are stamped at launch, so a formula hooked mid-session reports under a stale or empty instance until the agent respawns.';
+    }
+  }
+
+  function renderTelemetryTokens(vm) {
+    var host = byId('tel-tokens'); if (!host) return;
+    var note = byId('tel-tokens-note');
+    var win = byId('tel-window');
+    host.innerHTML = '';
+    if (note) { note.textContent = ''; }
+
+    if (vm.usageFail) {
+      host.appendChild(el('p', 'tel-empty', 'The console could not read token usage: ' + vm.usageFail));
+      return;
+    }
+    var u = vm.usage;
+    if (!u) { host.appendChild(el('p', 'tel-empty', 'Token usage still loading…')); return; }
+    if (win) { win.textContent = (u.window && u.window.limit > 0) ? ('rows capped at ' + u.window.limit) : 'no query window — nothing was queried'; }
+
+    if (u.state === 'error') {
+      host.appendChild(el('p', 'tel-empty', "The console could not read this factory's telemetry: " + (u.error || 'the factory could not be resolved')));
+      return;
+    }
+    var tok = u.tokens || {};
+    var rows = tok.rows || [];
+    if (tok.state !== 'ok') {
+      host.appendChild(el('p', 'tel-empty', telUsageStateText(tok.state, u.cause || tok.detail)));
+      return;
+    }
+    if (rows.length === 0) {
+      host.appendChild(el('p', 'tel-empty', (u.filters && (u.filters.agent || u.filters.instance))
+        ? 'No token rows for agent "' + (u.filters.agent || 'any') + '", run "' + (u.filters.instance || 'any') + '".'
+        : 'No token rows in this window.'));
+      return;
+    }
+
+    var table = el('table', 'tel-table');
+    var head = el('tr');
+    ['Run', 'Agent', 'Model', 'Step bucket', 'Requests', 'Input', 'Output', 'Total'].forEach(function (h) { head.appendChild(el('th', '', h)); });
+    table.appendChild(head);
+    rows.forEach(function (t) {
+      var tr = el('tr');
+      tr.appendChild(el('td', '', t.formula_run === '' ? '(unattributed)' : t.formula_run));
+      tr.appendChild(el('td', '', t.agent));
+      tr.appendChild(el('td', '', t.model));
+      // The "-tail" split is the product, not an artifact: it is the work a step's closing turn
+      // finished after the step formally ended. Merging it would hide real cost.
+      var bucket = String(t.step_bucket);
+      if (bucket.length > 5 && bucket.slice(-5) === '-tail') {
+        tr.appendChild(el('td', '', bucket.slice(0, -5) + ' (tail — work that continued after the step closed)'));
+      } else {
+        tr.appendChild(el('td', '', bucket));
+      }
+      tr.appendChild(el('td', '', String(t.requests)));
+      tr.appendChild(el('td', '', String(t.input_tokens)));
+      tr.appendChild(el('td', '', String(t.output_tokens)));
+      tr.appendChild(el('td', '', String(t.total_tokens)));
+      table.appendChild(tr);
+    });
+    host.appendChild(table);
+
+    if (note && tok.truncated === true) {
+      note.textContent = 'Showing ' + rows.length + ' of ' + tok.total + ' rows (capped at ' + ((u.window && u.window.limit) || 'the configured limit') + '). This list is not the total.';
+    }
+  }
+
+  function renderTelemetryMetrics(vm) {
+    var host = byId('tel-metrics'); if (!host) return;
+    var note = byId('tel-metrics-note');
+    host.innerHTML = '';
+    if (note) { note.textContent = ''; }
+
+    if (vm.usageFail) { host.appendChild(el('p', 'tel-empty', 'The console could not read session metrics: ' + vm.usageFail)); return; }
+    var u = vm.usage;
+    if (!u) { host.appendChild(el('p', 'tel-empty', 'Session metrics still loading…')); return; }
+
+    if (u.state === 'error') {
+      host.appendChild(el('p', 'tel-empty', "The console could not read this factory's telemetry: " + (u.error || 'the factory could not be resolved')));
+      return;
+    }
+    var m = u.metrics || {};
+    if (m.state !== 'ok') { host.appendChild(el('p', 'tel-empty', telUsageStateText(m.state, u.cause || m.detail))); return; }
+    var rows = m.rows || [];
+    if (rows.length === 0) {
+      // Every metric was queried and every one succeeded — the rows are absent, not unmeasured.
+      // Saying "no session metrics" here would report an idle factory, when the same shape is what
+      // a renamed metric produces: the names this factory asks for no longer match the ones being
+      // recorded, with recording on and the backend healthy.
+      //
+      // The condition is derived here rather than taken on trust: the CLI appends one state per
+      // metric QUERIED, so state 'ok' with no rows means every query succeeded and none returned a
+      // series. Deriving it keeps this honest when an older console fronts a newer af — which the
+      // rendezvous no-op makes routine — and m.detail names which metrics went silent when it is
+      // there. It is appended, never used as the condition, so a payload without it still gets the
+      // truthful sentence rather than falling back to the misleading one.
+      var quiet = 'No session metric returned a value, though every one was queried. This factory may simply be idle, or the metric names it asks for may no longer match the ones being recorded — the two look identical from here.';
+      host.appendChild(el('p', 'tel-empty', m.detail ? quiet + ' (' + m.detail + ')' : quiet));
+      return;
+    }
+
+    var table = el('table', 'tel-table');
+    var head = el('tr');
+    ['Metric', 'Agent', 'Instance', 'Value'].forEach(function (h) { head.appendChild(el('th', '', h)); });
+    table.appendChild(head);
+    rows.forEach(function (row) {
+      var tr = el('tr');
+      tr.appendChild(el('td', '', row.metric));
+      tr.appendChild(el('td', '', row.agent === '' ? '—' : row.agent));
+      tr.appendChild(el('td', '', row.instance === '' ? '—' : row.instance));
+      tr.appendChild(el('td', '', row.value));       // a STRING on the wire; never coerced
+      table.appendChild(tr);
+    });
+    host.appendChild(table);
+    if (note) {
+      note.textContent = 'Session metrics are an instant reading and do not honour the window above.';
+    }
+  }
+
+  // The usage enum is closed at five values and carries only conditions that actually prevented or
+  // degraded a query. Recording-off is deliberately absent: the gate never short-circuits the query,
+  // so historical backend data stays readable after `af telemetry off`.
+  function telUsageStateText(state, detail) {
+    var tail = detail ? ' (' + detail + ')' : '';
+    if (state === 'not_installed') { return 'No telemetry endpoint is configured, so nothing was queried' + tail + '.'; }
+    if (state === 'backend_down') { return 'The backend did not answer the query' + tail + '.'; }
+    if (state === 'credential_rejected') { return 'The backend was reachable but the credential was rejected' + tail + '.'; }
+    if (state === 'query_failed') { return 'The query reached the backend and failed' + tail + '.'; }
+    return 'The query did not complete' + tail + '.';
+  }
+
+  function formatMs(ms) {
+    if (typeof ms !== 'number') { return 'unknown'; }
+    if (ms < 1000) { return ms + 'ms'; }
+    return (ms / 1000).toFixed(1) + 's';
+  }
+
+  function renderTelemetryChrome(vm) {
+    var fresh = byId('tel-fresh');
+    if (fresh) {
+      // An ABSOLUTE stamp. A relative one ("12s ago") would need a timer to stay true, and this
+      // panel registers none — it would freeze at its first value and quietly lie from then on.
+      fresh.textContent = vm.receivedAt ? ('updated at ' + new Date(vm.receivedAt).toLocaleTimeString()) : 'not loaded yet';
+    }
+    var ep = byId('tel-endpoint');
+    if (ep) {
+      var inst = (vm.status && vm.status.installed) || null;
+      ep.textContent = inst && inst.endpoint ? inst.endpoint : 'none configured';
+    }
+    var gate = byId('tel-gate');
+    if (gate) {
+      var rec = vm.status && vm.status.recording;
+      var state = !rec ? 'not read yet' : (rec.enabled ? 'on' : 'off');
+      gate.textContent = 'Current recording state (the gate): ' + state
+        + '. The startup default is a separate artifact — the telemetry key in startup.json — and the two can legitimately differ.';
+    }
+    var err = byId('tel-filter-err');
+    if (err) {
+      err.textContent = vm.filterFail;
+      err.hidden = !vm.filterFail;
+    }
+    telSyncOptions(vm);
+  }
+
+  function telSyncOptions(vm) {
+    var opts = vm.options;
+    if (!opts) { return; }
+    telFillSelect(byId('tel-agent'), opts.agents, vm.agent, 'All agents');
+    telFillSelect(byId('tel-instance'), opts.runs, vm.instance, 'All runs');
+  }
+
+  function telFillSelect(sel, values, current, allLabel) {
+    if (!sel) { return; }
+    sel.innerHTML = '';
+    sel.appendChild(el('option', '', allLabel));
+    sel.firstChild.value = '';
+    var seen = false;
+    values.forEach(function (v) {
+      var o = el('option', '', v);
+      o.value = v;
+      if (v === current) { o.selected = true; seen = true; }
+      sel.appendChild(o);
+    });
+    if (current && !seen) {
+      var o = el('option', '', current + ' (unknown)');
+      o.value = current;
+      o.selected = true;
+      sel.appendChild(o);
+    }
+  }
+
+  function renderTelemetry() {
+    var vm = TelemetryViewModel;
+    renderTelemetryChrome(vm);
+    renderTelemetryBanner(vm);
+    renderTelemetrySteps(vm);
+    renderTelemetryTokens(vm);
+    renderTelemetryMetrics(vm);
+  }
+
+  // =========================================================================
   // AppViewModel — shell / nav / staleness.
   // =========================================================================
   var AppViewModel = {
@@ -1129,6 +1757,9 @@
       if (route === 'dispatch') { DispatchViewModel.activate(); return; }
       if (route === 'settings') { SettingsViewModel.activate(); return; }
       if (route === 'prototypes') { PrototypesViewModel.activate(); return; }
+      // #580: below syncNav(route) deliberately. Above it the highlight would never move; below
+      // goHome() the branch would still run, but after the route had been reset to Floor.
+      if (route === 'telemetry') { TelemetryViewModel.activate(); return; }
       if (route === 'floor') { showFloor(); return; }
       this.goHome();                                                // unknown route → home, silently
     },
@@ -1352,6 +1983,13 @@
     var pf = byId('proto-fb-form'); if (pf) pf.addEventListener('submit', function (e) { e.preventDefault(); PrototypesViewModel.send(); });
     var amf = byId('agent-mail-form'); if (amf) amf.addEventListener('submit', function (e) { e.preventDefault(); AgentDetailViewModel.send(); });
     var aback = byId('agent-back'); if (aback) aback.addEventListener('click', function () { AppViewModel.goHome(); });
+
+    // #580: the telemetry section owns its refresh and filters. The shared chrome strip is not
+    // route-aware — its #refresh is hardcoded to the Floor — so reusing it here would refresh the
+    // wrong view.
+    var tr = byId('tel-refresh'); if (tr) tr.addEventListener('click', function () { TelemetryViewModel.refresh().then(function () { toast('Telemetry refreshed'); }); });
+    var ta = byId('tel-agent'); if (ta) ta.addEventListener('change', function () { TelemetryViewModel.setFilter(ta.value, TelemetryViewModel.instance); });
+    var ti = byId('tel-instance'); if (ti) ti.addEventListener('change', function () { TelemetryViewModel.setFilter(TelemetryViewModel.agent, ti.value); });
     document.querySelectorAll('.seg button').forEach(function (b) {
       b.addEventListener('click', function () { FloorViewModel.filterByStatus(b.getAttribute('data-filter')); });
     });
@@ -1395,4 +2033,5 @@
   window.SettingsViewModel = SettingsViewModel;
   window.PrototypesViewModel = PrototypesViewModel;
   window.AgentDetailViewModel = AgentDetailViewModel;
+  window.TelemetryViewModel = TelemetryViewModel;
 })();
