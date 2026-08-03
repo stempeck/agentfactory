@@ -3,9 +3,9 @@
 Notable changes to agentfactory. The project began 2026-05-01; snapshot tags `V001`–`V012`
 mark pre-release checkpoints. `v0.1.0` is the first formal release.
 
-## [Unreleased]
+## v0.2.0 — 2026-08-03
 
-Development since v0.1.0.
+Observability and multi-provider agents.
 
 ### Observability
 

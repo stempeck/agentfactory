@@ -136,3 +136,33 @@ Verified cycle outputs against the approved runbook (the standing contract).
 No deviations.
 
 SELF-VERIFY VERDICT: PASS
+
+## PHASE-6 — Verify every published page
+
+Two published URLs (Medium, LinkedIn). Medium: full-content fetch + screenshot (got past the
+Cloudflare challenge on retry). LinkedIn: public fetch (its dynamic/gated render defeats headless
+screenshot — degraded mode noted; the source was plain text, so the raw-markdown failure class
+does not apply the same way).
+
+Per-URL checklist:
+
+**Medium** — https://medium.com/@glennstempeck/i-run-a-factory-of-ai-agents-heres-the-window-into-it-ad0321bfce9f
+1. Literal `##`/`**`/backticks/raw `[text](url)`? **none** — `quickdocker.sh <your-repo> --web`
+   renders as inline code; em-dashes and prose render cleanly.
+2. Missing/duplicated/placeholder images, stray alt-text? **none** — both screenshots (Floor,
+   Telemetry) render; 2 content images confirmed by fetch + screenshot.
+3. Subtitle as body paragraph / stray leading `# `? **none (after fix)** — FINDING on first pass:
+   the subtitle sentence was sitting as the first body paragraph (deck field empty). Exact fix
+   posted to #96; operator applied it. Re-screenshot confirms the subtitle now renders as the grey
+   deck directly under the title (above the byline) and is no longer duplicated in the body; the
+   body starts with the question hook. (Operator also reworded the opening at publish — his
+   canonical edit.)
+4. Repo checks: `gh repo view --json homepageUrl` = the article URL; topics include claude-code,
+   ai-agents, multi-agent-systems, agentic-ai; `topic:claude-code` search lists stempeck/agentfactory.
+   **all pass.**
+
+**LinkedIn** — https://www.linkedin.com/posts/glenn-stempeck_...-7490182070434951168-Jwbi/
+1-3. Public post readable; plain text, no literal markdown; no images-broken/subtitle concerns
+   (short-form plain-text post). Degraded verification (public fetch only) noted. **none.**
+
+PHASE-6 VERDICT: PASS
