@@ -443,7 +443,7 @@ func TestValidateAgentName(t *testing.T) {
 			t.Errorf("ValidateAgentName(%q) = %v, want nil", v, err)
 		}
 	}
-	invalid := []string{"", "agent;rm", "../../etc", "agent name", "123start", "dispatch", "operator"}
+	invalid := []string{"", "agent;rm", "../../etc", "agent name", "123start", "dispatch", "operator", "watchdog"}
 	for _, v := range invalid {
 		if err := ValidateAgentName(v); err == nil {
 			t.Errorf("ValidateAgentName(%q) = nil, want error", v)
@@ -617,7 +617,7 @@ func TestRun_AllVerbs_CarryCmdDir(t *testing.T) {
 	factoryRoot := t.TempDir()
 	// The exact allowlist from validate.go (allowedVerbs). A new verb added there without being added
 	// here is itself a prompt to re-confirm this invariant.
-	verbs := []string{"up", "down", "sling", "agents", "formula", "dispatch", "step", "config", "mail", "install"}
+	verbs := []string{"up", "down", "sling", "agents", "formula", "dispatch", "step", "config", "mail", "install", "telemetry"}
 	for _, verb := range verbs {
 		t.Run(verb, func(t *testing.T) {
 			er := NewExecRunner(factoryRoot)
@@ -853,4 +853,274 @@ func TestValidateMailBody(t *testing.T) {
 			t.Errorf("validateMailBody(%q) = nil, want error", b)
 		}
 	}
+}
+
+// ---- #580 Phase 3: the telemetry read surface (status | report | usage) ----
+
+// TestValidateTelemetryInstance mirrors the root-side rule authored in Phase 2
+// (internal/cmd/telemetry_where.go): shape, length bound, empty rejection — and, load-bearing for a
+// value that reaches a browser, that the rejected input is never quoted back.
+func TestValidateTelemetryInstance(t *testing.T) {
+	valid := []string{
+		"af-1234abcd", // the real formula-instance shape: the hyphen is why validVarKey is unusable
+		"wt-dff0c4",
+		"a",
+		"Agent_9",
+		strings.Repeat("a", 64), // exactly at the bound
+	}
+	for _, id := range valid {
+		if err := ValidateTelemetryInstance(id); err != nil {
+			t.Errorf("ValidateTelemetryInstance(%q) = %v, want nil", id, err)
+		}
+	}
+
+	invalid := []string{
+		"",                      // empty
+		strings.Repeat("a", 65), // one past the bound
+		"1leading-digit",
+		"-leading-hyphen",
+		"has space",
+		"has;semicolon",
+		"has'quote",
+		"has\"doublequote",
+		"has/slash",
+		"has.dot",
+		"has\nnewline",
+		"has\x00null",
+	}
+	for _, id := range invalid {
+		if err := ValidateTelemetryInstance(id); err == nil {
+			t.Errorf("ValidateTelemetryInstance(%q) = nil, want error", id)
+		}
+	}
+
+	// The root rule's reason applies here with more force: this text becomes a field of a JSON
+	// payload delivered to a browser, so echoing a hostile value would give an injection attempt a
+	// second delivery route.
+	hostile := "<script>alert(1)</script>"
+	err := ValidateTelemetryInstance(hostile)
+	if err == nil {
+		t.Fatalf("ValidateTelemetryInstance(%q) = nil, want error", hostile)
+	}
+	if strings.Contains(err.Error(), hostile) || strings.Contains(err.Error(), "script") {
+		t.Errorf("error echoes the rejected value: %q", err.Error())
+	}
+}
+
+// TestWrapper_TelemetryArgvExact byte-pins the argv of all three read methods. The subcommand is a
+// bare literal in each, so no caller input can displace it; filters ride as two-element flag pairs
+// and travel as single literal argv elements (argv-array exec, no shell).
+func TestWrapper_TelemetryArgvExact(t *testing.T) {
+	cases := []struct {
+		name string
+		call func(*Wrapper) error
+		want []string
+	}{
+		{
+			name: "status takes no filters",
+			call: func(w *Wrapper) error { _, err := w.TelemetryStatus(context.Background()); return err },
+			want: []string{"status", "--json"},
+		},
+		{
+			name: "report unfiltered",
+			call: func(w *Wrapper) error { _, err := w.TelemetryReport(context.Background(), "", ""); return err },
+			want: []string{"report", "--json"},
+		},
+		{
+			name: "report agent only",
+			call: func(w *Wrapper) error { _, err := w.TelemetryReport(context.Background(), "solver", ""); return err },
+			want: []string{"report", "--json", "--agent", "solver"},
+		},
+		{
+			name: "report instance only",
+			call: func(w *Wrapper) error {
+				_, err := w.TelemetryReport(context.Background(), "", "af-1234abcd")
+				return err
+			},
+			want: []string{"report", "--json", "--instance", "af-1234abcd"},
+		},
+		{
+			name: "report both filters",
+			call: func(w *Wrapper) error {
+				_, err := w.TelemetryReport(context.Background(), "solver", "af-1234abcd")
+				return err
+			},
+			want: []string{"report", "--json", "--agent", "solver", "--instance", "af-1234abcd"},
+		},
+		{
+			name: "usage unfiltered",
+			call: func(w *Wrapper) error { _, err := w.TelemetryUsage(context.Background(), "", ""); return err },
+			want: []string{"usage", "--json"},
+		},
+		{
+			name: "usage both filters",
+			call: func(w *Wrapper) error {
+				_, err := w.TelemetryUsage(context.Background(), "solver", "af-1234abcd")
+				return err
+			},
+			want: []string{"usage", "--json", "--agent", "solver", "--instance", "af-1234abcd"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fr := newFakeRunner()
+			w := NewWrapper(fr, "")
+			if err := c.call(w); err != nil {
+				t.Fatalf("call: %v", err)
+			}
+			got := fr.lastCall()
+			if got.Verb != "telemetry" {
+				t.Fatalf("verb = %q, want telemetry", got.Verb)
+			}
+			if len(got.Args) != len(c.want) {
+				t.Fatalf("argv = %v, want %v", got.Args, c.want)
+			}
+			for i := range c.want {
+				if got.Args[i] != c.want[i] {
+					t.Fatalf("argv[%d] = %q, want %q (full=%v)", i, got.Args[i], c.want[i], got.Args)
+				}
+			}
+		})
+	}
+}
+
+// TestWrapper_TelemetryCannotConstructOnOff proves a NEGATIVE mechanically rather than by
+// inspection: every telemetry method is driven with inputs chosen to smuggle a gate verb or the
+// backlog-drain flag through a filter, and NO recorded argv element may be one of them.
+//
+// The gate file stays operator/CLI-owned, and --export is included for the same reason: it is a flag
+// on the same command, and the root's own JSON path refuses it because draining the backlog prints
+// prose that no parser accepts.
+func TestWrapper_TelemetryCannotConstructOnOff(t *testing.T) {
+	forbidden := map[string]bool{"on": true, "off": true, "--export": true, "export": true}
+
+	// Values a caller might use to try to reach a forbidden argv element.
+	hostile := []string{
+		"on", "off", "--export",
+		"-on", "--on", "on ", " on",
+		"x --export", "a;on", "a\non",
+		"", "solver",
+	}
+
+	fr := newFakeRunner()
+	w := NewWrapper(fr, "")
+
+	// Status takes no caller input at all — the strongest form of containment.
+	if _, err := w.TelemetryStatus(context.Background()); err != nil {
+		t.Fatalf("TelemetryStatus: %v", err)
+	}
+
+	for _, h := range hostile {
+		// Errors are expected and irrelevant here: a rejected call records nothing, and a recorded
+		// call is what this test inspects. Both outcomes are safe; neither may produce a forbidden
+		// argv element.
+		_, _ = w.TelemetryReport(context.Background(), h, "")
+		_, _ = w.TelemetryReport(context.Background(), "", h)
+		_, _ = w.TelemetryUsage(context.Background(), h, "")
+		_, _ = w.TelemetryUsage(context.Background(), "", h)
+	}
+
+	if fr.callCount() == 0 {
+		t.Fatal("no calls recorded — the test would pass vacuously")
+	}
+	for i, c := range fr.calls {
+		if c.Verb != "telemetry" {
+			t.Errorf("call %d: verb = %q, want telemetry", i, c.Verb)
+		}
+		if len(c.Args) == 0 {
+			t.Errorf("call %d: empty argv", i)
+			continue
+		}
+
+		// The property that actually matters. `af telemetry` takes its verb as a POSITIONAL
+		// (Args: cobra.MaximumNArgs(1)) and everything else as flags, so a gate verb can only be
+		// reached by occupying the positional slot. argv[0] is that slot, and it is a literal in
+		// every wrapper method.
+		//
+		// Note this is deliberately NOT "the string `on` appears nowhere in argv": `--agent on`
+		// is a harmless, well-formed filter whose value happens to spell a verb, and rejecting it
+		// would be theatre. The argv-array exec (no shell, no re-splitting) is what guarantees a
+		// flag VALUE can never be re-read as a positional.
+		switch c.Args[0] {
+		case "status", "report", "usage":
+		default:
+			t.Errorf("call %d: subcommand = %q, want one of status|report|usage (full=%v)", i, c.Args[0], c.Args)
+		}
+
+		// Beyond the subcommand, every element is either a known read-only flag or the value bound
+		// to the one before it. A BARE positional here is the vulnerability: it is the only shape
+		// cobra could read as a second verb. This walk proves none exists.
+		for j := 1; j < len(c.Args); j++ {
+			a := c.Args[j]
+			switch a {
+			case "--json":
+			case "--agent", "--instance":
+				if j+1 >= len(c.Args) {
+					t.Errorf("call %d: flag %q has no value (full=%v)", i, a, c.Args)
+					continue
+				}
+				j++ // consume the value; it is data, not a verb
+			default:
+				t.Errorf("call %d argv[%d] = %q is a bare positional — only the subcommand may be one (full=%v)", i, j, a, c.Args)
+			}
+		}
+
+		// --export is a flag on this same command, and the root's own JSON path refuses it because
+		// draining the backlog prints prose no parser accepts. No wrapper method may emit it.
+		for j, a := range c.Args {
+			if forbidden[a] && j == 0 {
+				t.Errorf("call %d: subcommand = %q — a gate verb is constructible from web code", i, a)
+			}
+			if a == "--export" || a == "-e" {
+				t.Errorf("call %d argv[%d] = %q — the backlog-drain flag is constructible from web code (full=%v)", i, j, a, c.Args)
+			}
+		}
+	}
+}
+
+// TestWrapper_TelemetryFilterValidation pins that filters are validated BEFORE exec, that an empty
+// filter is a legal "no filter" rather than a rejection, and that no rejection message echoes the
+// value it rejected.
+func TestWrapper_TelemetryFilterValidation(t *testing.T) {
+	t.Run("empty filters are legal and reach the runner unfiltered", func(t *testing.T) {
+		fr := newFakeRunner()
+		w := NewWrapper(fr, "")
+		if _, err := w.TelemetryReport(context.Background(), "", ""); err != nil {
+			t.Fatalf("empty filters must not be an error, got %v", err)
+		}
+		if got := fr.lastArgs(); len(got) != 2 {
+			t.Fatalf("argv = %v, want exactly [report --json]", got)
+		}
+	})
+
+	t.Run("invalid filters are refused before exec", func(t *testing.T) {
+		bad := []struct{ agent, instance string }{
+			{agent: "has space"},
+			{agent: "-leading-dash"},
+			{agent: "a;rm -rf /"},
+			{instance: "has space"},
+			{instance: "1leading-digit"},
+			{instance: "a'quote"},
+		}
+		for _, b := range bad {
+			fr := newFakeRunner()
+			w := NewWrapper(fr, "")
+			_, err := w.TelemetryReport(context.Background(), b.agent, b.instance)
+			if err == nil {
+				t.Errorf("TelemetryReport(%q,%q) = nil, want error", b.agent, b.instance)
+				continue
+			}
+			if fr.callCount() != 0 {
+				t.Errorf("TelemetryReport(%q,%q): reached the runner despite invalid input", b.agent, b.instance)
+			}
+			needle := b.agent
+			if needle == "" {
+				needle = b.instance
+			}
+			if strings.Contains(err.Error(), needle) {
+				t.Errorf("error echoes the rejected value %q: %q", needle, err.Error())
+			}
+		}
+	})
 }

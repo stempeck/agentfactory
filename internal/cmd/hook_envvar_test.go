@@ -34,22 +34,23 @@ func TestHookScripts_UseEnvVarFallback(t *testing.T) {
 		}
 		content := string(data)
 
-		// ROLE must use AF_ROLE env var with fallback
+		// ROLE must use AF_ROLE env var with fallback (untouched by the Phase 4b L-2 hardening)
 		if !strings.Contains(content, "AF_ROLE:-") {
 			t.Errorf("%s: ROLE assignment must use ${AF_ROLE:-...} env var fallback", s.name)
 		}
 
-		// FACTORY_ROOT must use AF_ROOT env var with fallback
-		if !strings.Contains(content, "AF_ROOT:-") {
-			t.Errorf("%s: FACTORY_ROOT assignment must use ${AF_ROOT:-...} env var fallback", s.name)
+		// FACTORY_ROOT resolves ${AF_ROOT} directly, then falls back to `af root` via an
+		// explicit empty-guard (Phase 4b L-2 hardening). The old inline ${AF_ROOT:-...}
+		// default is replaced, so the literal AF_ROOT:- substring must be gone while the
+		// hardened assignment is present.
+		if !strings.Contains(content, `FACTORY_ROOT="${AF_ROOT}"`) {
+			t.Errorf("%s: FACTORY_ROOT must resolve ${AF_ROOT} directly (hardened empty-guard shape)", s.name)
+		}
+		if strings.Contains(content, "AF_ROOT:-") {
+			t.Errorf("%s: inline ${AF_ROOT:-...} default must be replaced by the explicit empty-guard", s.name)
 		}
 
-		// FACTORY_ROOT must NOT have bare $(af root) without env var wrapper
-		if strings.Contains(content, "FACTORY_ROOT=$(af root") {
-			t.Errorf("%s: FACTORY_ROOT must not use bare $(af root) — wrap with ${AF_ROOT:-...}", s.name)
-		}
-
-		// af root must still appear as fallback inside the ${AF_ROOT:-...} pattern
+		// af root must still appear as the explicit empty-guard fallback for non-tmux contexts
 		if !strings.Contains(content, "af root") {
 			t.Errorf("%s: must retain 'af root' as fallback for non-tmux contexts", s.name)
 		}

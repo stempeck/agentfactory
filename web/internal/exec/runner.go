@@ -429,3 +429,77 @@ func (w *Wrapper) MailSend(ctx context.Context, name, subject, body string) (Res
 	}
 	return w.runner.Run(ctx, "mail", "send", name, "--subject="+subject, "--message="+body+mailFooter, "--from=operator")
 }
+
+// ---- #580 Phase 3: the telemetry read surface ----
+//
+// Three reads over one allow-listed verb. Each fixes its subcommand as a bare literal, so no caller
+// input can displace it — the MailSend precedent above — which is what keeps the gate verbs and the
+// backlog-drain flag unreachable from web code even though they live on the same af command.
+//
+// Like the other reads, `af telemetry` always exits 0 and encodes failure as data in its JSON
+// payload; callers branch on that .state shape, not on the process exit code. The verb is
+// allow-listed in validate.go.
+
+// telemetryArgs appends the validated filter flags to a telemetry subcommand's argv.
+//
+// An EMPTY filter means "no filter" and is neither validated nor appended. That is not a relaxation:
+// a browser's query string cannot distinguish an absent parameter from a present-but-empty one, and
+// both shape rules reject the empty string — so validating unconditionally would refuse the ordinary
+// unfiltered request, which is the most common one the console makes.
+func telemetryArgs(base []string, agent, instance string) ([]string, error) {
+	if agent != "" {
+		if err := ValidateTelemetryAgent(agent); err != nil {
+			return nil, err
+		}
+		base = append(base, "--agent", agent)
+	}
+	if instance != "" {
+		if err := ValidateTelemetryInstance(instance); err != nil {
+			return nil, err
+		}
+		base = append(base, "--instance", instance)
+	}
+	return base, nil
+}
+
+// TelemetryStatus returns the raw stdout of `af telemetry status --json`: the three-axis install /
+// recording / backend state, with a header COUNT and never a header identity. It takes no caller
+// input at all, which is the strongest form of the containment the other two achieve by validation.
+func (w *Wrapper) TelemetryStatus(ctx context.Context) (string, error) {
+	res, err := w.runner.Run(ctx, "telemetry", "status", "--json")
+	if err != nil {
+		return "", err
+	}
+	return res.Stdout, nil
+}
+
+// TelemetryReport returns the raw stdout of `af telemetry report --json [--agent N] [--instance I]`:
+// per-step timing rows read from local records, plus the malformed/dropped counts that keep
+// corruption from being rendered as "no records yet".
+func (w *Wrapper) TelemetryReport(ctx context.Context, agent, instance string) (string, error) {
+	args, err := telemetryArgs([]string{"report", "--json"}, agent, instance)
+	if err != nil {
+		return "", err
+	}
+	res, err := w.runner.Run(ctx, "telemetry", args...)
+	if err != nil {
+		return "", err
+	}
+	return res.Stdout, nil
+}
+
+// TelemetryUsage returns the raw stdout of `af telemetry usage --json [--agent N] [--instance I]`:
+// token usage and session metrics queried from the backend. This is the one read that needs a
+// reachable endpoint, so it is also the one whose degraded states carry the most information — all
+// of it in the payload, with the process still exiting 0.
+func (w *Wrapper) TelemetryUsage(ctx context.Context, agent, instance string) (string, error) {
+	args, err := telemetryArgs([]string{"usage", "--json"}, agent, instance)
+	if err != nil {
+		return "", err
+	}
+	res, err := w.runner.Run(ctx, "telemetry", args...)
+	if err != nil {
+		return "", err
+	}
+	return res.Stdout, nil
+}

@@ -1,0 +1,89 @@
+{
+  "v": 1,
+  "state": "ok",
+  "endpoint": "http://127.0.0.1:5080/api/default",
+  "window": {
+    "start_us": 1,
+    "end_us": 1785000000000000,
+    "limit": 1000
+  },
+  "filters": {
+    "agent": "",
+    "instance": ""
+  },
+  "tokens": {
+    "state": "ok",
+    "rows": [
+      {
+        "formula_run": "af-4e894132",
+        "agent": "solver",
+        "model": "claude-fable-5",
+        "step_bucket": "s-implement",
+        "step_order": 3,
+        "requests": 12,
+        "input_tokens": 48210,
+        "output_tokens": 6104,
+        "total_tokens": 54314
+      }
+    ],
+    "total": 1,
+    "truncated": false,
+    "detail": ""
+  },
+  "metrics": {
+    "state": "ok",
+    "rows": [
+      {
+        "metric": "claude_code_token_usage",
+        "agent": "solver",
+        "instance": "af-4e894132",
+        "labels": {
+          "type": "input",
+          "model": "claude-fable-5",
+          "af_worktree_id": "wt-4e8941",
+          "af_model_profile": "default"
+        },
+        "value": "48210"
+      },
+      {
+        "metric": "claude_code_cost_usage",
+        "agent": "solver",
+        "instance": "af-4e894132",
+        "labels": {
+          "type": "input",
+          "model": "claude-fable-5",
+          "af_worktree_id": "wt-4e8941",
+          "af_model_profile": "default"
+        },
+        "value": "0.42"
+      },
+      {
+        "metric": "claude_code_session_count",
+        "agent": "solver",
+        "instance": "af-4e894132",
+        "labels": {
+          "type": "input",
+          "model": "claude-fable-5",
+          "af_worktree_id": "wt-4e8941",
+          "af_model_profile": "default"
+        },
+        "value": "3"
+      },
+      {
+        "metric": "claude_code_active_time_total",
+        "agent": "solver",
+        "instance": "af-4e894132",
+        "labels": {
+          "type": "input",
+          "model": "claude-fable-5",
+          "af_worktree_id": "wt-4e8941",
+          "af_model_profile": "default"
+        },
+        "value": "1897"
+      }
+    ],
+    "at_us": 1785000000000000,
+    "detail": ""
+  },
+  "cause": ""
+}

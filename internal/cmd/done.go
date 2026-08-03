@@ -21,6 +21,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/lock"
 	"github.com/stempeck/agentfactory/internal/session"
+	"github.com/stempeck/agentfactory/internal/telemetry"
 	"github.com/stempeck/agentfactory/internal/tmux"
 	"github.com/stempeck/agentfactory/internal/worktree"
 )
@@ -62,6 +63,8 @@ func runDone(cmd *cobra.Command, args []string) error {
 
 // runDoneCore contains the core logic for af done, separated from cobra for testability.
 func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate string) error {
+	start := time.Now()
+
 	// 1. Context discovery
 	factoryRoot, err := resolveInvokerRoot(cwd)
 	if err != nil {
@@ -73,6 +76,25 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 	instanceID := readHookedFormulaID(cwd)
 	if instanceID == "" {
 		return fmt.Errorf("no active formula (missing .runtime/hooked_formula)")
+	}
+
+	// 1a. Telemetry setup, behind one gate read. This verb never resolves an agent name on its
+	// own account, but the record store refuses a record it cannot attribute, so the name is
+	// resolved here and emission is skipped entirely when it cannot be. The export is deferred
+	// rather than placed beside a recording site: a defer runs after every one of the return
+	// paths below, so it sees everything this invocation recorded and still runs exactly once.
+	// af done is the only verb that exports — af prime is a session-start hook and must not
+	// put a network round trip in front of a session.
+	if telemetryFactoryEnabled(factoryRoot) {
+		agentName, agentErr := detectAgentName(cwd, factoryRoot)
+		if agentErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not resolve the agent name to record step timing: %v\n", agentErr)
+		} else {
+			ctx = withVerbTelemetry(ctx, verbTelemetry{
+				verb: "done", agent: agentName, start: start, enabled: true,
+			})
+			defer drainTelemetryBounded(factoryRoot, agentName)
+		}
 	}
 
 	actor := os.Getenv("AF_ACTOR")
@@ -106,7 +128,8 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 	step := result.Steps[0]
 
 	// 2a. Write last_closed_step identity BEFORE closing (for fidelity gate hook)
-	if err := writeLastClosedStep(ctx, cwd, step, instanceID, store); err != nil {
+	closed, err := writeLastClosedStep(ctx, cwd, step, instanceID, store)
+	if err != nil {
 		return fmt.Errorf("writing last closed step: %w", err)
 	}
 
@@ -130,6 +153,27 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 
 	// 3a. Record close timestamp for velocity tracking
 	_ = recordDoneTimestamp(cwd, step.ID, true, "full_output")
+
+	// 3b. The step is genuinely over: recorded here, beside the success marker, and not
+	// alongside the last_closed_step write above. That write is a gate-hook input and is
+	// deliberately made before closing; two guards run between it and the close, either of
+	// which can reject this af done. A completion record for a step that was then rejected and
+	// never closed is worse than no record at all, because nothing downstream could tell the
+	// difference. Placed before the gate branch below so that a --phase-complete invocation
+	// missing its --gate argument still records the close it really performed.
+	if vt := verbTelemetryFrom(ctx); vt.enabled {
+		ev := telemetryRecordFor(ctx, factoryRoot, cwd, vt.agent, instanceID, "")
+		ev.Event = telemetry.EventStepEnd
+		ev.Formula = telemetryFormulaName(closed.Formula)
+		ev.StepID = step.ID
+		ev.StepTitle = step.Title
+		ev.Status = telemetry.StatusClosed
+		if phaseComplete {
+			ev.Status = telemetry.StatusGateWaiting
+		}
+		ev.StepSeq, ev.DurationMS = telemetryStepSpan(factoryRoot, vt.agent, instanceID, step.ID, ev.TS)
+		appendTelemetryRecord(factoryRoot, ev)
+	}
 
 	// 4. Gate handling
 	if phaseComplete {
@@ -155,6 +199,7 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 			fmt.Fprintf(os.Stderr, "warning: could not query next step: %v\n", nextErr)
 		} else if len(nextResult.Steps) > 0 {
 			fmt.Printf("Next step: %s\n", nextResult.Steps[0].Title)
+			fmt.Println("Run `af prime` NOW to load it. Do not end your turn — continue until all steps are done or a step is blocked.")
 		} else {
 			fmt.Println("Remaining steps are blocked. Waiting for dependencies.")
 		}
@@ -223,6 +268,17 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 	// the formula-instance epic (af-<hex>), distinct from the GitHub work issue.
 	if err := store.Close(ctx, instanceID, config.CloseReasonFormulaComplete); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not close formula-instance epic %s: %v\n", instanceID, err)
+	}
+
+	// K5a: the formula instance is over. Recorded here rather than on entry to this function,
+	// because the completion-velocity guard above returns an error WITHOUT closing anything —
+	// a run it rejects has not finished, and a record saying otherwise would make a blocked
+	// formula indistinguishable from a completed one.
+	if vt := verbTelemetryFrom(ctx); vt.enabled {
+		ev := telemetryRecordFor(ctx, factoryRoot, cwd, vt.agent, instanceID, "")
+		ev.Event = telemetry.EventInstanceEnd
+		ev.Formula = telemetryFormulaName(formulaName)
+		appendTelemetryRecord(factoryRoot, ev)
 	}
 
 	// K6 (issue #321): legacy in-flight rescue. A formula instance dispatched
@@ -327,6 +383,10 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 // sendWorkDoneAndCleanup's tail so the improvement-completion verb can
 // replay the exact same sequence instead of forking it.
 func finishDispatchedSession(cwd, factoryRoot string) {
+	// Session-end delete of the scoped-stop provenance datum (#548 P3). It survived formula
+	// completion (cleanupRuntimeArtifacts leaves it untouched — Gap A's repair); its lifetime
+	// is the dispatched SESSION, so it is destroyed here as the session tears itself down.
+	os.Remove(filepath.Join(cwd, ".runtime", "dispatch_owner"))
 	if wtID := readWorktreeID(cwd); wtID != "" {
 		agentName := os.Getenv("AF_ROLE")
 		if agentName == "" {
@@ -354,6 +414,18 @@ func finishDispatchedSession(cwd, factoryRoot string) {
 // readFormulaCaller reads the dispatcher address from .runtime/formula_caller.
 func readFormulaCaller(workDir string) string {
 	path := filepath.Join(workDir, ".runtime", "formula_caller")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// readDispatchOwner reads the dispatcher identity from .runtime/dispatch_owner — the
+// session-scoped scoped-stop provenance datum (#548 P3) that, unlike formula_caller, survives
+// formula completion. Best-effort: a missing/unreadable file yields "" (fail-closed).
+func readDispatchOwner(workDir string) string {
+	path := filepath.Join(workDir, ".runtime", "dispatch_owner")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
@@ -665,10 +737,14 @@ type lastClosedStepRecord struct {
 	Formula     string `json:"formula"`
 }
 
-func writeLastClosedStep(ctx context.Context, workDir string, step issuestore.Issue, instanceID string, store issuestore.Store) error {
+// writeLastClosedStep writes the fidelity gate hook's input and returns the record it built.
+// It is the one place on this path that already resolves both the step description and the
+// formula-instance title, so returning the record spares the caller a second store round trip
+// on the lifecycle hot path.
+func writeLastClosedStep(ctx context.Context, workDir string, step issuestore.Issue, instanceID string, store issuestore.Store) (lastClosedStepRecord, error) {
 	runtimeDir := filepath.Join(workDir, ".runtime")
 	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
-		return err
+		return lastClosedStepRecord{}, err
 	}
 
 	var description string
@@ -691,10 +767,10 @@ func writeLastClosedStep(ctx context.Context, workDir string, step issuestore.Is
 
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshaling last closed step: %w", err)
+		return lastClosedStepRecord{}, fmt.Errorf("marshaling last closed step: %w", err)
 	}
 	data = append(data, '\n')
-	return os.WriteFile(filepath.Join(runtimeDir, "last_closed_step"), data, 0o644)
+	return record, os.WriteFile(filepath.Join(runtimeDir, "last_closed_step"), data, 0o644)
 }
 
 func checkStepPrimed(ctx context.Context, workDir string, stepID string, store issuestore.Store) error {

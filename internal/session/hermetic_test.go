@@ -26,6 +26,9 @@ type fakeTmux struct {
 	paneCommand   map[string]string
 	running       map[string]bool
 	claudeRunning map[string]bool
+	// currentSession mirrors the cmd twin's spoofable self-session field (K2
+	// CurrentSessionName); unused by the session seam, kept for byte-mirror fidelity.
+	currentSession string
 	// optionVals records the value of each set option (key: sess+"\x00"+name) so
 	// ShowOption can read it back, modelling a successful apply by default.
 	optionVals map[string]string
@@ -144,6 +147,14 @@ func (f *fakeTmux) GetPaneCommand(sess string) (string, error) {
 func (f *fakeTmux) IsAgentRunning(sess string, expectedPaneCommands ...string) bool {
 	f.record("IsAgentRunning " + sess)
 	return f.running[sess]
+}
+
+// CurrentSessionName mirrors the cmd twin's #541 K2 method to keep the two fakes a
+// byte-mirror. The session tmuxClient seam does not require it in Phase 1; it is kept
+// here only so the documented duplication stays in lockstep.
+func (f *fakeTmux) CurrentSessionName() (string, error) {
+	f.record("CurrentSessionName")
+	return f.currentSession, nil
 }
 
 // Compile-time proof: the session-side fake satisfies the session tmuxClient seam.

@@ -14,7 +14,7 @@ var templateFS embed.FS
 type RoleData struct {
 	Role        string // "manager", "supervisor", etc.
 	Description string // From agents.json
-	RootDir     string // Agent system root directory
+	RootDir     string // Agent system root directory (local root -- worktree root for worktree agents)
 	WorkDir     string // Current working directory
 }
 

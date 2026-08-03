@@ -51,6 +51,12 @@ const (
 	// unexported symbol, so the launch chokepoint recognizes the prefix locally
 	// rather than importing it.
 	secretRefPrefix = "file:"
+
+	// envOTelHeaders is the telemetry channel's secret-bearing key (issue #329). Its
+	// value is a header list (Name=value,…) whose value may be a file: ref, so it takes
+	// the same inline-deref twin asymmetry ANTHROPIC_AUTH_TOKEN uses — the deref lives
+	// ONLY in the inline startup command, never in the tmux twin.
+	envOTelHeaders = "OTEL_EXPORTER_OTLP_HEADERS"
 )
 
 // redirectFamilyVars enumerates the endpoint/model redirect env the launch chokepoint
@@ -75,6 +81,25 @@ var redirectFamilyVars = []string{
 	"ANTHROPIC_DEFAULT_SONNET_MODEL",
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL",
 	"CLAUDE_CODE_SUBAGENT_MODEL",
+}
+
+// telemetryFamilyVars enumerates the exact seven OTel launch-env vars this chokepoint owns
+// (issue #329) — the fixed set telemetry.LaunchEnv builds. Like redirectFamilyVars they are
+// iterated by EXCLUSION in both hygiene passes (Start()'s unset loop and the inline KEY=''
+// loop): any of these NOT emitted by this launch is cleared, so a telemetry-off relaunch of a
+// reused/respawned session leaves no stale OTel var behind. This family is kept SEPARATE from
+// redirectFamilyVars and from the model-env `effective` bookkeeping so the two orthogonal
+// channels never clear each other's vars. There is deliberately no content-capture gate here:
+// the five content-capture log switches are never in this set and must never be added (the
+// design's Privacy Posture; AC greps this file for their name-prefix and requires zero hits).
+var telemetryFamilyVars = []string{
+	"CLAUDE_CODE_ENABLE_TELEMETRY",
+	"OTEL_METRICS_EXPORTER",
+	"OTEL_LOGS_EXPORTER",
+	"OTEL_EXPORTER_OTLP_PROTOCOL",
+	"OTEL_EXPORTER_OTLP_ENDPOINT",
+	envOTelHeaders,
+	"OTEL_RESOURCE_ATTRIBUTES",
 }
 
 var checkAvailableMemoryFunc = checkAvailableMemory
@@ -181,6 +206,19 @@ var _ tmuxClient = (*tmux.Tmux)(nil)
 // NewManager. Production default returns the real *tmux.Tmux.
 var newManagerTmux = func() tmuxClient { return tmux.NewTmux() }
 
+// ambientCallerRole yields the AF_ROLE of the process invoking a lifecycle op — the
+// caller's own agent identity, used by the K9 Manager.Stop interlock (#541). It is a seam,
+// not an inline os.Getenv, because internal/session is a library package that must not read
+// named env directly (env_hermetic_test.go, issue #98): ambient state enters at the cmd
+// boundary and is injected here via SetAmbientCallerRole. The default returns "" — a pure
+// library/test process carries no agent context, so the interlock treats it as operator/self
+// and passes through.
+var ambientCallerRole = func() string { return "" }
+
+// SetAmbientCallerRole lets the cmd boundary inject the ambient AF_ROLE reader for the K9
+// interlock (#541), keeping the named-env read in internal/cmd where it is permitted.
+func SetAmbientCallerRole(fn func() string) { ambientCallerRole = fn }
+
 // Manager handles agent session lifecycle operations.
 type Manager struct {
 	factoryRoot   string
@@ -197,6 +235,15 @@ type Manager struct {
 	// AuthToken fields (presence-gate); empty values are kept so a profile can
 	// clear an ambient var (e.g. ANTHROPIC_API_KEY=''). Set via SetModelEnv.
 	modelEnv []config.EnvVar
+
+	// Telemetry OTel launch-env set (issue #329). A SEPARATE channel from modelEnv —
+	// emitted independent of the model-env presence gate because telemetry on/off is
+	// orthogonal to whether an agent has a model profile. It must NEVER be merged into
+	// modelEnv: `len(modelEnv) > 0` elides the legacy Model/BaseURL/AuthToken emission,
+	// so a telemetry-only modelEnv would silently drop a no-profile agent's endpoint.
+	// Empty ⇒ nothing emitted; the hygiene passes still clear the telemetry family so a
+	// telemetry-off relaunch leaves no stale OTel var. Set via SetTelemetryEnv.
+	telemetryEnv []config.EnvVar
 
 	// Git identity to export when no ambient identity resolves (issue #371 AC-2).
 	// Empty ⇒ not exported (presence-gate / C-4); set via SetGitIdentity.
@@ -271,6 +318,16 @@ func (m *Manager) SetBuildHost(cfg *config.BuildHostConfig) {
 // launch sites and supersedes the legacy fields.
 func (m *Manager) SetModelEnv(env []config.EnvVar) {
 	m.modelEnv = env
+}
+
+// SetTelemetryEnv configures the telemetry OTel launch-env set (issue #329). The cmd
+// layer builds it via telemetry.LaunchEnv only when the factory telemetry gate is on and
+// hands it in after NewManager; a nil/empty set (gate off) emits no OTel var, while the
+// hygiene passes still clear the telemetry family so a reused/respawned session carries
+// none of a prior telemetry-on run's vars. It is a channel wholly separate from
+// SetModelEnv and never shares modelEnv's presence gate (see the telemetryEnv field).
+func (m *Manager) SetTelemetryEnv(env []config.EnvVar) {
+	m.telemetryEnv = env
 }
 
 // modelFromModelEnv returns the ANTHROPIC_MODEL value carried in the resolved set,
@@ -463,6 +520,25 @@ func (m *Manager) Start() error {
 			_ = m.tmux.UnsetEnvironment(sessionID, key)
 		}
 	}
+	// Telemetry env (issue #329): a SEPARATE channel from the model-env block above,
+	// emitted whether or not a model profile resolved. When the gate is off the cmd layer
+	// calls neither LaunchEnv nor SetTelemetryEnv, so this loop is a no-op and the hygiene
+	// pass below clears any telemetry var a prior telemetry-on launch left on the reused
+	// session. telemEffective is keyed ONLY on the telemetry family so it never interferes
+	// with the model-env `effective` map. Deliberate twin asymmetry: a file: header ref is
+	// carried VERBATIM here (tmux set-environment does no shell evaluation, and a resolved
+	// secret would be readable via `tmux show-environment`) — the $(cat …) deref lives ONLY
+	// in buildStartupCommand's inline loop.
+	telemEffective := map[string]bool{}
+	for _, ev := range m.telemetryEnv {
+		_ = m.tmux.SetEnvironment(sessionID, ev.Key, ev.Value)
+		telemEffective[ev.Key] = true
+	}
+	for _, key := range telemetryFamilyVars {
+		if !telemEffective[key] {
+			_ = m.tmux.UnsetEnvironment(sessionID, key)
+		}
+	}
 	// Git identity fallback (best-effort; presence-gated — issue #371 AC-2/C-4).
 	if m.gitAuthorName != "" && m.gitAuthorEmail != "" {
 		_ = m.tmux.SetEnvironment(sessionID, envGitAuthorName, m.gitAuthorName)
@@ -569,11 +645,7 @@ func (m *Manager) buildStartupCommand() string {
 			// disable the command substitution. A relative path resolves against the
 			// factory root so $(cat …) reads the right file whatever the pane's cwd.
 			if ev.Key == envAuthToken && strings.HasPrefix(ev.Value, secretRefPrefix) {
-				path := strings.TrimPrefix(ev.Value, secretRefPrefix)
-				if !filepath.IsAbs(path) {
-					path = filepath.Join(m.factoryRoot, path)
-				}
-				exports += fmt.Sprintf(" %s=\"$(cat %s)\"", ev.Key, shellQuote(path))
+				exports += " " + m.derefFileRefInline(ev.Key, "", strings.TrimPrefix(ev.Value, secretRefPrefix))
 			} else {
 				exports += fmt.Sprintf(" %s=%s", ev.Key, shellQuote(ev.Value))
 			}
@@ -612,6 +684,30 @@ func (m *Manager) buildStartupCommand() string {
 		}
 		if m.agentEntry.AuthToken != "" {
 			exports += fmt.Sprintf(" %s=%s", envAuthToken, shellQuote(m.agentEntry.AuthToken))
+		}
+	}
+	// Telemetry env inline twin (issue #329), independent of the model-env gate above.
+	// A file: ref inside OTEL_EXPORTER_OTLP_HEADERS (shape Name=file:<path>) is dereferenced
+	// to `Name='"$(cat '<abs>')"` so the pane shell reads the secret at exec time — the raw
+	// ref stays in the tmux twin (Start), never the resolved secret. telemEffective is keyed
+	// only on the telemetry family. The KEY='' hygiene loop below is the ONLY clear a respawn
+	// emits (respawn never calls Start), so it must cover the whole telemetry family — that is
+	// what makes a telemetry-off relaunch drop a prior run's OTel vars.
+	telemEffective := map[string]bool{}
+	for _, ev := range m.telemetryEnv {
+		if ev.Key == envOTelHeaders {
+			if i := strings.Index(ev.Value, secretRefPrefix); i >= 0 {
+				exports += " " + m.derefFileRefInline(ev.Key, ev.Value[:i], ev.Value[i+len(secretRefPrefix):])
+				telemEffective[ev.Key] = true
+				continue
+			}
+		}
+		exports += fmt.Sprintf(" %s=%s", ev.Key, shellQuote(ev.Value))
+		telemEffective[ev.Key] = true
+	}
+	for _, key := range telemetryFamilyVars {
+		if !telemEffective[key] {
+			exports += fmt.Sprintf(" %s=''", key)
 		}
 	}
 	// Git identity fallback (presence-gated — only when no ambient identity resolved).
@@ -666,6 +762,25 @@ func (m *Manager) buildStartupCommand() string {
 	return fmt.Sprintf("%s && %s", exports, claude)
 }
 
+// derefFileRefInline renders one inline `KEY=<deref>` export for a file: secret reference:
+// the pane shell reads the secret via $(cat …) at exec time, so it never lands on the launch
+// line or in scrollback (issue #508). A relative path resolves against the factory root so the
+// read is correct whatever the pane's cwd. prefix is the literal text preserved ahead of the
+// deref: empty for a whole-value ref (ANTHROPIC_AUTH_TOKEN → `file:<path>`), or a `Name=` header
+// segment for OTEL_EXPORTER_OTLP_HEADERS → `Name=file:<path>` (issue #329). Only the path passes
+// through shellQuote; the surrounding double-quotes and $(cat …) are literal, because
+// single-quoting the whole token would disable the command substitution. Adjacent shell quoting
+// (`'Name='"$(cat '<abs>')"`) concatenates the preserved prefix and the secret at exec time.
+func (m *Manager) derefFileRefInline(key, prefix, path string) string {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(m.factoryRoot, path)
+	}
+	if prefix == "" {
+		return fmt.Sprintf("%s=\"$(cat %s)\"", key, shellQuote(path))
+	}
+	return fmt.Sprintf("%s=%s\"$(cat %s)\"", key, shellQuote(prefix), shellQuote(path))
+}
+
 // shellQuote wraps a string in POSIX single quotes, escaping embedded
 // single quotes with the '\'' idiom.
 func shellQuote(s string) string {
@@ -682,6 +797,24 @@ func (m *Manager) Stop() error {
 	}
 	if !running {
 		return ErrNotRunning
+	}
+
+	// K9 interlock (#541): in agent context, refuse to stop a NON-SELF interactive-type
+	// target (the control plane, e.g. the manager) before any disruptive action, so an
+	// agent cannot kill the interactive manager. It uses ONLY the primitive AF_ROLE signal
+	// (via the ambientCallerRole seam) and agentEntry.Type — NOT cmd's callerAuthority
+	// classifier — because internal/session must not import internal/cmd (cmd imports
+	// session; the reverse would cycle — conflicts.md E3). It is a primitive-level backstop
+	// for a future ungated caller, not primary enforcement (that is the Phase 3 command
+	// gates); self-stop and specialist/autonomous redispatch pass through untouched.
+	//
+	// The AF_ROLE read is deliberately NOT an inline os.Getenv here: internal/session is a
+	// library package that must not read named env directly (env_hermetic_test.go, issue
+	// #98). Per that invariant the ambient value enters at the cmd boundary and is injected
+	// via SetAmbientCallerRole; the default returns "" so a pure library/test process
+	// classifies as operator/self and passes through unchanged.
+	if role := ambientCallerRole(); role != "" && role != m.agentName && m.agentEntry.Type == "interactive" {
+		return fmt.Errorf("refusing to stop interactive agent %q from agent context %q: factory control-plane teardown is an operator action", m.agentName, role)
 	}
 
 	// Graceful: send Ctrl-C first

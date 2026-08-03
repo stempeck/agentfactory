@@ -1,0 +1,93 @@
+{
+  "_comment": "Tokens per agent x model x step. This view is where the design's per-step correctness actually lives, so all three binding join rules are encoded in the SQL rather than described in prose.",
+  "name": "tokens-per-step",
+  "title": "Tokens per agent, model and step",
+  "description": "Token usage attributed to the step that spent it, broken down by agent and model. A step's own row excludes anything a quality gate spent inside it; that spend is shown in Spend outside steps instead. Rows ending in '-tail' are the work a step's closing turn finished after the step formally ended, which belongs to the step that caused it.",
+  "af_view_schema": 1,
+  "af_decision_o4": "O-4 (view delivery) is hybrid: files on disk plus a best-effort dashboard push. See README.md.",
+  "af_assumptions": [
+    "VERIFIED AGAINST A LIVE BACKEND, AND ONLY IN PART — read this with entry 1. During review of PR #567 OpenObserve v0.91.3 was stood up from the pinned artifact, both planes were ingested, and THIS view's query was run verbatim — it reproduced the token totals derived by hand from the acceptance criteria, column spelling for column spelling. install_telemetry_views/README.md states, in the same paragraph as that verification, that 'the native event shape remains the synthetic fixture's hypothesis until a real capture replaces it'. It does not say in so many words what was ingested on the native side; that it was the synthetic fixture (internal/telemetry/testdata/synthetic/api_request_events.json) is an INFERENCE from that sentence, and it is the only reading that explains how a run against a real backend could have confirmed the column spellings while leaving the shape hypothetical. So that run confirms the TRACES-side spellings and the join rules against a real backend, and confirms nothing about the native event shape beyond the hypothesis it was given. GOVERNS: PR #567 governs the traces-side spellings and the three join rules. The capture in internal/telemetry/testdata/openobserve-v0.91.3/ governs the native event shape, and it disagrees: tokens_search_response_query_failed.json records this query returning HTTP 400 code 20004, 'No field named af_overhead', with the logs stream admitting only _timestamp, af_agent, af_formula_instance and service_name — while 2,192 records for one agent sit in that same stream (tokens_search_response_ok.json) and the metrics plane carries claude_code_token_usage for the same runs (metrics_promql_response.json). The native plane reached that host; the token-bearing COLUMNS this query reads did not. UNRESOLVED: why those columns are absent for Claude Code 2.1.220 on that host is not established here, and this view is not re-authored on the strength of one capture. The metrics plane is not the answer to it either: its label set carries no step attribute of any kind, so reading token totals from there would silently turn a per-step table into per-run totals. Until a recorded-real native capture defines the columns, treat the per-step token table as unverified against real Claude Code output and read the whole-run figures from the metrics plane instead. CI still has no backend, so none of this is re-verified automatically. That live run observed af_step_seq as a string; the ordering key is now cast to an integer here, and the encoder emits it as an integer, so ordering is correct under either ingest typing. A dashboard already published under this title is never replaced by a re-run of quickstart.sh, so an existing factory keeps the query it first received — re-import this file by hand to pick up changes.",
+    "The native claude_code.api_request shape (input_tokens, output_tokens, cost_usd) is the synthetic fixture's hypothesis, not a recorded capture - see internal/telemetry/testdata/synthetic/api_request_events.json, which P6b replaces. Whether these arrive as OTel logs or metrics is also an inference; if it is metrics, the stream name and column prefix both change. The capture in internal/telemetry/testdata/openobserve-v0.91.3/ is the first real observation of this plane and it does NOT confirm the hypothesis: see entry 0 for which observation governs which half.",
+    "Attribute names are rewritten on ingest. Trace resource attributes are prefixed with 'service_' and every dot becomes an underscore, so af.formula_instance is queryable only as service_af_formula_instance. OTLP logs do NOT get the prefix, so the same attribute is af_formula_instance on the native-event side of the join. _timestamp is microseconds while start_time/end_time are nanoseconds and duration is microseconds.",
+    "Native events carry no per-request id, so an event is identified for de-duplication by (formula run, agent, timestamp). Two requests from one agent in the same microsecond would collapse."
+  ],
+  "af_join": {
+    "overhead": "exclude",
+    "window": "half-open",
+    "start_rule": "earliest",
+    "end_rule": "latest",
+    "tail": "preceding-step",
+    "instance_scoped": true,
+    "buckets": [
+      "<step_id>",
+      "<step_id>-tail"
+    ]
+  },
+  "dashboard": {
+    "version": 8,
+    "title": "Tokens per agent, model and step",
+    "description": "Token usage attributed to the step that spent it.",
+    "role": "",
+    "owner": "agentfactory",
+    "tabs": [
+      {
+        "tabId": "default",
+        "name": "Tokens",
+        "panels": [
+          {
+            "id": "panel-1",
+            "type": "table",
+            "title": "Tokens per agent, model and step",
+            "description": "",
+            "config": {
+              "show_legends": false
+            },
+            "queryType": "sql",
+            "queries": [
+              {
+                "query": "WITH step_windows AS (\n    -- Rule 2, earliest start wins. The af side has already applied earliest-wins when it computed\n    -- each step's duration, and only closed steps are exported, so in practice this aggregates one\n    -- row per step. MIN/MAX are kept because the rule must survive a second span for the same step\n    -- arriving later - a wide window is visible in the reconciliation view, a narrow one is not.\n    SELECT service_af_formula_instance AS formula_run,\n           af_step_id                  AS step,\n           service_af_agent            AS agent,\n           max(CAST(af_step_seq AS BIGINT)) AS step_order,\n           max(af_model)               AS model,\n           min(start_time)             AS window_start_ns,\n           max(end_time)               AS window_end_ns\n    FROM \"traces\".\"default\"\n    WHERE service_name = 'agentfactory'\n      AND af_step_id <> ''\n    GROUP BY service_af_formula_instance, af_step_id, service_af_agent\n),\nbillable_requests AS (\n    -- Rule 1, overhead exclusion: an event carrying af.overhead belongs to its overhead bucket and\n    -- to NO step, even when it fired mid-step. Without this a quality gate running inside a step is\n    -- counted into that step's \"exact\" cost and the reconciliation view still balances, so the only\n    -- symptom is a step that looks more expensive than the work it did. An EMPTY marker is not a\n    -- marker, matching AttributeEvent, which requires a non-empty bucket name.\n    SELECT af_formula_instance AS formula_run,\n           af_agent            AS agent,\n           _timestamp * 1000   AS at_ns,\n           input_tokens,\n           output_tokens\n    FROM \"logs\".\"default\"\n    WHERE af_overhead IS NULL OR af_overhead = ''\n),\nranked AS (\n    SELECT e.formula_run,\n           e.agent,\n           w.step,\n           w.step_order,\n           w.model,\n           e.input_tokens,\n           e.output_tokens,\n           CASE WHEN e.at_ns < w.window_end_ns THEN 0 ELSE 1 END AS is_tail,\n           row_number() OVER (\n               PARTITION BY e.formula_run, e.agent, e.at_ns\n               -- A window that contains the event wins outright. Among containing windows the\n               -- earliest start wins, matching AttributeEvent, which returns the first container in\n               -- start order. Otherwise the tail goes to the window with the greatest end at or\n               -- before the event, which is also what AttributeEvent does.\n               ORDER BY CASE WHEN e.at_ns < w.window_end_ns THEN 0 ELSE 1 END,\n                        CASE WHEN e.at_ns < w.window_end_ns THEN w.window_start_ns END ASC,\n                        w.window_end_ns DESC\n           ) AS pick\n    FROM billable_requests e\n    JOIN step_windows w\n      -- Instance AND agent scoping are explicit. AttributeEvent omits both because its caller\n      -- supplies one agent's records at a time; SQL over a shared stream has no such caller, and\n      -- without these predicates one agent's events attribute to another agent's steps.\n      ON w.formula_run = e.formula_run\n     AND w.agent       = e.agent\n     -- Rule 3a, half-open window: the start instant belongs to the step.\n     AND e.at_ns >= w.window_start_ns\n)\nSELECT formula_run,\n       agent,\n       model,\n       -- Rule 3b, directional boundary: spend after step_end and before the next step_start is\n       -- attributed BACKWARDS to the step that caused it, as a distinguishable '-tail' component.\n       -- The closing turn keeps working after af done returns, so this tail is predictable rather\n       -- than symmetric noise, and folding it forwards would show phantom cost between steps.\n       CASE WHEN is_tail = 1 THEN step || '-tail' ELSE step END AS step_bucket,\n       min(step_order)                   AS step_order,\n       count(*)                          AS requests,\n       sum(input_tokens)                 AS input_tokens,\n       sum(output_tokens)                AS output_tokens,\n       sum(input_tokens + output_tokens) AS total_tokens\nFROM ranked\nWHERE pick = 1\nGROUP BY formula_run, agent, model,\n         CASE WHEN is_tail = 1 THEN step || '-tail' ELSE step END\nORDER BY formula_run, step_order, step_bucket",
+                "vrlFunctionQuery": "",
+                "customQuery": true,
+                "fields": {
+                  "stream": "default",
+                  "stream_type": "logs",
+                  "x": [
+                    {
+                      "label": "Step",
+                      "alias": "step_bucket",
+                      "column": "step_bucket"
+                    }
+                  ],
+                  "y": [
+                    {
+                      "label": "Tokens",
+                      "alias": "total_tokens",
+                      "column": "total_tokens",
+                      "aggregationFunction": "sum"
+                    }
+                  ],
+                  "z": [],
+                  "filter": {
+                    "filterType": "group",
+                    "logicalOperator": "AND",
+                    "conditions": []
+                  }
+                },
+                "config": {
+                  "promql_legend": ""
+                }
+              }
+            ],
+            "layout": {
+              "x": 0,
+              "y": 0,
+              "w": 48,
+              "h": 14,
+              "i": 1
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

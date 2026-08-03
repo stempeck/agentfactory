@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/stempeck/agentfactory/internal/config"
+	"github.com/stempeck/agentfactory/internal/templates"
 )
 
 // initGitRepo initializes a real git repo with an initial commit in dir.
@@ -3381,5 +3382,227 @@ func TestReadMeta_LegacyMetaZeroValuesFactoryRoot(t *testing.T) {
 	}
 	if got.FactoryRoot != "" {
 		t.Errorf("legacy FactoryRoot: got %q, want empty (migration-safe)", got.FactoryRoot)
+	}
+}
+
+// TestManagerCatalogInstruction_ReadableThroughWorktreeLink closes the seam between the two halves
+// of the manager's catalog access: the template anchors the reference to the agent's own local
+// root, and EnsureWorktreeLinks is what makes that root actually contain the shared catalog. Each
+// half is tested in its own package, so only a test here -- where both are reachable -- can prove
+// they compose. It renders the real manager template, then EXECUTES the rendered instruction from
+// the agent's working directory and requires the shared catalog's content back.
+//
+// It lives in this package because internal/templates cannot import internal/worktree (this
+// package already imports templates, so the reverse direction is an import cycle).
+func TestManagerCatalogInstruction_ReadableThroughWorktreeLink(t *testing.T) {
+	factoryRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(factoryRoot, ".agentfactory"), 0o755); err != nil {
+		t.Fatalf("mkdir factory .agentfactory: %v", err)
+	}
+	sentinel := "## BEGIN AgentFactory Agents\n| `seamcheck` | autonomous | Proves the seam |\n"
+	if err := os.WriteFile(filepath.Join(factoryRoot, ".agentfactory", "AGENTS.md"), []byte(sentinel), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	worktreePath := filepath.Join(factoryRoot, ".agentfactory", "worktrees", "wt-seam")
+	agentDir := filepath.Join(worktreePath, ".agentfactory", "agents", "manager")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("mkdir agent dir: %v", err)
+	}
+	if err := EnsureWorktreeLinks(factoryRoot, worktreePath); err != nil {
+		t.Fatalf("EnsureWorktreeLinks: %v", err)
+	}
+
+	// The catalog must be reached through a LINK, not a copy: a copy would silently go stale as
+	// the roster is regenerated at the factory root.
+	catalogInWorktree := filepath.Join(worktreePath, ".agentfactory", "AGENTS.md")
+	fi, err := os.Lstat(catalogInWorktree)
+	if err != nil {
+		t.Fatalf("lstat worktree catalog: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s should be a symlink to the shared catalog, got mode %v", catalogInWorktree, fi.Mode())
+	}
+
+	// RootDir is the worktree's own root here -- what config.FindLocalRoot yields for a worktree
+	// agent, and what primeAgent feeds the template.
+	output, err := templates.New().RenderRole("manager", templates.RoleData{
+		Role:        "manager",
+		Description: "Factory coordinator",
+		RootDir:     worktreePath,
+		WorkDir:     agentDir,
+	})
+	if err != nil {
+		t.Fatalf("RenderRole: %v", err)
+	}
+
+	var cmdLine string
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "cat ") && strings.Contains(trimmed, "AGENTS.md") {
+			cmdLine = trimmed
+			break
+		}
+	}
+	if cmdLine == "" {
+		t.Fatalf("rendered manager template contains no catalog-read 'cat ... AGENTS.md' instruction:\n%s", output)
+	}
+
+	cmd := exec.Command("sh", "-c", cmdLine)
+	cmd.Dir = agentDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("catalog-read instruction %q failed from the agent's working directory: %v\noutput: %s", cmdLine, err, out)
+	}
+	if !strings.Contains(string(out), "seamcheck") {
+		t.Errorf("catalog-read instruction %q did not return the shared catalog through the worktree link, got: %s", cmdLine, out)
+	}
+}
+
+// TestSetupAgent_EstablishesWorktreeLinksOnReattach pins issue #575's AC-4: a reattached worktree
+// must have the same catalog access as a freshly created one.
+//
+// EnsureWorktreeLinks runs inside Create, but every Reattached exit from ResolveOrCreate
+// (creator-inherit, creator lookup, self-adopt, git-registry rediscover) returns before it, and
+// unlinkBeforeRemove can strip a live worktree's links ahead of a `git worktree remove` that then
+// fails. Since the manager's catalog reference is anchored to the agent's own local root, a
+// worktree reached by any of those paths would otherwise have no catalog at all. SetupAgent is the
+// hook every caller already invokes after ResolveOrCreate for BOTH outcomes, so establishing links
+// here covers all of them at once.
+func TestSetupAgent_EstablishesWorktreeLinksOnReattach(t *testing.T) {
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	setupFactoryRoot(t, realDir)
+	sentinel := "## BEGIN AgentFactory Agents\n| `reattachcheck` | autonomous | Proves AC-4 |\n"
+	if err := os.WriteFile(filepath.Join(realDir, ".agentfactory", "AGENTS.md"), []byte(sentinel), 0o644); err != nil {
+		t.Fatalf("write factory AGENTS.md: %v", err)
+	}
+
+	// A worktree that exists but was never linked -- the state every Reattached exit leaves, and
+	// the state unlinkBeforeRemove leaves behind after a failed removal.
+	worktreePath := filepath.Join(WorktreesDir(realDir), "wt-reattach")
+	if err := os.MkdirAll(filepath.Join(worktreePath, ".agentfactory"), 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	catalogLink := filepath.Join(worktreePath, ".agentfactory", "AGENTS.md")
+	if _, err := os.Lstat(catalogLink); err == nil {
+		t.Fatal("test setup bug: the simulated reattached worktree already has a catalog link")
+	}
+
+	if _, err := SetupAgent(realDir, worktreePath, "solver", false); err != nil {
+		t.Fatalf("SetupAgent: %v", err)
+	}
+
+	fi, err := os.Lstat(catalogLink)
+	if err != nil {
+		t.Fatalf("SetupAgent must establish the worktree catalog link on a reattached worktree (issue #575 AC-4), but %s does not exist: %v", catalogLink, err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("%s should be a symlink to the shared catalog, got mode %v", catalogLink, fi.Mode())
+	}
+	got, err := os.ReadFile(catalogLink)
+	if err != nil {
+		t.Fatalf("read catalog through the worktree link: %v", err)
+	}
+	if !strings.Contains(string(got), "reattachcheck") {
+		t.Errorf("catalog read through the worktree link did not return the shared roster, got: %s", got)
+	}
+}
+
+// TestSetupAgent_LinkEstablishmentIsIdempotent proves the AC-4 repair is safe on the Created path,
+// where Create has already linked the worktree: SetupAgent must leave the existing link pointing at
+// the same target rather than replacing or breaking it.
+func TestSetupAgent_LinkEstablishmentIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	setupFactoryRoot(t, realDir)
+	if err := os.WriteFile(filepath.Join(realDir, ".agentfactory", "AGENTS.md"), []byte("# Agents\n"), 0o644); err != nil {
+		t.Fatalf("write factory AGENTS.md: %v", err)
+	}
+	worktreePath := filepath.Join(WorktreesDir(realDir), "wt-idem")
+	if err := os.MkdirAll(filepath.Join(worktreePath, ".agentfactory"), 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	if err := EnsureWorktreeLinks(realDir, worktreePath); err != nil {
+		t.Fatalf("EnsureWorktreeLinks: %v", err)
+	}
+	catalogLink := filepath.Join(worktreePath, ".agentfactory", "AGENTS.md")
+	before, err := os.Readlink(catalogLink)
+	if err != nil {
+		t.Fatalf("readlink before: %v", err)
+	}
+
+	if _, err := SetupAgent(realDir, worktreePath, "solver", true); err != nil {
+		t.Fatalf("SetupAgent: %v", err)
+	}
+
+	after, err := os.Readlink(catalogLink)
+	if err != nil {
+		t.Fatalf("catalog link must survive SetupAgent on an already-linked worktree: %v", err)
+	}
+	if before != after {
+		t.Errorf("catalog link target changed: before %q, after %q", before, after)
+	}
+}
+
+// TestSetupAgent_LinkEstablishmentPreservesWorktreeSkills pins the blast radius of establishing
+// links from SetupAgent. Because .claude/skills is git-tracked in some checkouts, a worktree can
+// carry it as a real directory rather than a symlink, in which case EnsureWorktreeLinks merges
+// factory skills into it instead of linking. Running that merge on every agent setup must never
+// clobber a skill the worktree's own branch modified -- mergeSkillsDir only fills in names that
+// are absent.
+func TestSetupAgent_LinkEstablishmentPreservesWorktreeSkills(t *testing.T) {
+	dir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	setupFactoryRoot(t, realDir)
+
+	factorySkills := filepath.Join(realDir, ".claude", "skills")
+	if err := os.MkdirAll(filepath.Join(factorySkills, "shared-skill"), 0o755); err != nil {
+		t.Fatalf("mkdir factory skills: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(factorySkills, "shared-skill", "SKILL.md"), []byte("factory version\n"), 0o644); err != nil {
+		t.Fatalf("write factory skill: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(factorySkills, "factory-only"), 0o755); err != nil {
+		t.Fatalf("mkdir factory-only skill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(factorySkills, "factory-only", "SKILL.md"), []byte("factory only\n"), 0o644); err != nil {
+		t.Fatalf("write factory-only skill: %v", err)
+	}
+
+	// A worktree whose .claude/skills is a REAL directory holding a branch-modified copy of a
+	// skill that also exists at the factory root.
+	worktreePath := filepath.Join(WorktreesDir(realDir), "wt-skills")
+	wtSkills := filepath.Join(worktreePath, ".claude", "skills")
+	if err := os.MkdirAll(filepath.Join(wtSkills, "shared-skill"), 0o755); err != nil {
+		t.Fatalf("mkdir worktree skills: %v", err)
+	}
+	branchContent := []byte("branch version -- must survive\n")
+	if err := os.WriteFile(filepath.Join(wtSkills, "shared-skill", "SKILL.md"), branchContent, 0o644); err != nil {
+		t.Fatalf("write worktree skill: %v", err)
+	}
+
+	if _, err := SetupAgent(realDir, worktreePath, "solver", false); err != nil {
+		t.Fatalf("SetupAgent: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(wtSkills, "shared-skill", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read worktree skill after SetupAgent: %v", err)
+	}
+	if string(got) != string(branchContent) {
+		t.Errorf("SetupAgent overwrote a branch-modified skill: got %q, want %q", got, branchContent)
+	}
+	if _, err := os.Stat(filepath.Join(wtSkills, "factory-only", "SKILL.md")); err != nil {
+		t.Errorf("a factory skill absent from the worktree should be filled in, but factory-only is missing: %v", err)
 	}
 }

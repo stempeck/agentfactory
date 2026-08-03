@@ -1,0 +1,38 @@
+{
+  "v": 1,
+  "state": "query_failed",
+  "endpoint": "http://127.0.0.1:5080/api/default",
+  "window": {
+    "start_us": 1,
+    "end_us": 1785128415094918,
+    "limit": 1000
+  },
+  "filters": {
+    "agent": "",
+    "instance": ""
+  },
+  "tokens": {
+    "state": "query_failed",
+    "rows": [],
+    "total": 0,
+    "truncated": false,
+    "detail": "400 Bad Request: the backend rejected the query"
+  },
+  "metrics": {
+    "state": "ok",
+    "rows": [
+      {
+        "metric": "claude_code_session_count",
+        "agent": "solver",
+        "instance": "af-1234abcd",
+        "labels": {
+          "terminal_type": "tmux"
+        },
+        "value": "3"
+      }
+    ],
+    "at_us": 1785128415094918,
+    "detail": ""
+  },
+  "cause": ""
+}

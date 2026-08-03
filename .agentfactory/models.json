@@ -3,8 +3,10 @@
   "models": {
     "default": { "ANTHROPIC_MODEL": "claude-opus-4-8", "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5" },
     "lmstudio": { "ANTHROPIC_BASE_URL": "http://localhost:1234", "ANTHROPIC_AUTH_TOKEN": "lm-studio", "ANTHROPIC_MODEL": "qwen2.5-coder-32b", "ANTHROPIC_API_KEY": "" },
+    "codex": { "ANTHROPIC_BASE_URL": "http://localhost:4000", "ANTHROPIC_AUTH_TOKEN": "file:.agentfactory/secrets/litellm.key", "ANTHROPIC_MODEL": "gpt-5.6-terra", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.6-luna", "ANTHROPIC_API_KEY": "" },
     "sonnet-5": { "ANTHROPIC_MODEL": "claude-sonnet-5" },
     "opus-4-8": { "ANTHROPIC_MODEL": "claude-opus-4-8" },
+    "opus-5": { "ANTHROPIC_MODEL": "claude-opus-5" },
     "fable-5": { "ANTHROPIC_MODEL": "claude-fable-5" }
   },
   "agents": {
@@ -23,9 +25,11 @@
     "fable-increment": "opus-4-8",
     "rapid-soldesign-plan": "opus-4-8",
     "rootcause-all": "opus-4-8",
+    "gpt-rootcause-all": "codex",
     "supervisor": "opus-4-8",
     "ultra-review": "opus-4-8",
     "fable-review": "opus-4-8",
+    "gpt-fable-review": "codex",
     "web-design": "opus-4-8"
   }
 }

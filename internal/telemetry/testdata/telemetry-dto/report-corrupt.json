@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "state": "degraded",
+  "rows": [],
+  "stats": {
+    "malformed": 2,
+    "dropped": 7,
+    "dropped_unexported": 3
+  }
+}

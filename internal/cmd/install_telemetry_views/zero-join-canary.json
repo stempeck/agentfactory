@@ -1,0 +1,90 @@
+{
+  "_comment": "Detection for the failure where everything looks healthy and nothing is attributed. Separates 'no events arriving' from 'events arriving but not matching'.",
+  "name": "missing-usage-alert",
+  "title": "Steps that recorded no usage",
+  "description": "Flags runs where steps finished but no usage was attributed to them. This is the failure that otherwise goes unnoticed: the switch is on, the backend is healthy, and the numbers are simply empty. Arrivals and attributions are counted separately so the message can tell usage never arriving from usage arriving in a shape that no longer matches, because those have different fixes.",
+  "af_view_schema": 1,
+  "af_decision_o4": "O-4 (view delivery) is hybrid: files on disk plus a best-effort dashboard push. See README.md.",
+  "af_assumptions": [
+    "COLUMN SPELLINGS AND JOIN VERIFIED AGAINST A LIVE BACKEND, THIS QUERY NOT EXECUTED: during review of PR #567 OpenObserve v0.91.3 was stood up from the pinned artifact and the per-step token view's query was run verbatim, confirming the ingest naming this view also relies on. This view's own query was NOT among those executed. This view computes max(af_step_seq) inside its step_windows CTE but never orders on it or emits it, so it is deliberately left uncast. A dashboard already published under this title is never replaced by a re-run of quickstart.sh, so an existing factory keeps the query it first received — re-import this file by hand to pick up changes. CI has no backend, so none of this is re-verified automatically.",
+    "The native claude_code.api_request shape (input_tokens, output_tokens, cost_usd) is the synthetic fixture's hypothesis, not a recorded capture - see internal/telemetry/testdata/synthetic/api_request_events.json, which P6b replaces. Whether these arrive as OTel logs or metrics is also an inference; if it is metrics, the stream name and column prefix both change.",
+    "Attribute names are rewritten on ingest. Trace resource attributes are prefixed with 'service_' and every dot becomes an underscore, so af.formula_instance is queryable only as service_af_formula_instance. OTLP logs do NOT get the prefix, so the same attribute is af_formula_instance on the native-event side of the join. _timestamp is microseconds while start_time/end_time are nanoseconds and duration is microseconds.",
+    "af.schema is carried on every exported step span and is the drift discriminator: a changed value alongside a firing canary points at the af-side record shape rather than upstream."
+  ],
+  "af_join": {
+    "overhead": "exclude",
+    "window": "half-open",
+    "start_rule": "earliest",
+    "end_rule": "latest",
+    "tail": "preceding-step",
+    "instance_scoped": true,
+    "buckets": []
+  },
+  "dashboard": {
+    "version": 8,
+    "title": "Steps that recorded no usage",
+    "description": "Runs where steps finished but nothing was attributed to them.",
+    "role": "",
+    "owner": "agentfactory",
+    "tabs": [
+      {
+        "tabId": "default",
+        "name": "Alerts",
+        "panels": [
+          {
+            "id": "panel-1",
+            "type": "table",
+            "title": "Steps that recorded no usage",
+            "description": "",
+            "config": {
+              "show_legends": false
+            },
+            "queryType": "sql",
+            "queries": [
+              {
+                "query": "WITH step_windows AS (\n    -- Rule 2, earliest start wins. The af side has already applied earliest-wins when it computed\n    -- each step's duration, and only closed steps are exported, so in practice this aggregates one\n    -- row per step. MIN/MAX are kept because the rule must survive a second span for the same step\n    -- arriving later - a wide window is visible in the reconciliation view, a narrow one is not.\n    SELECT service_af_formula_instance AS formula_run,\n           af_step_id                  AS step,\n           service_af_agent            AS agent,\n           max(af_step_seq)            AS step_order,\n           max(af_model)               AS model,\n           min(start_time)             AS window_start_ns,\n           max(end_time)               AS window_end_ns\n    FROM \"traces\".\"default\"\n    WHERE service_name = 'agentfactory'\n      AND af_step_id <> ''\n    GROUP BY service_af_formula_instance, af_step_id, service_af_agent\n),\nbillable_requests AS (\n    -- Rule 1, overhead exclusion: an event carrying af.overhead belongs to its overhead bucket and\n    -- to NO step, even when it fired mid-step. Without this a quality gate running inside a step is\n    -- counted into that step's \"exact\" cost and the reconciliation view still balances, so the only\n    -- symptom is a step that looks more expensive than the work it did. An EMPTY marker is not a\n    -- marker, matching AttributeEvent, which requires a non-empty bucket name.\n    SELECT af_formula_instance AS formula_run,\n           af_agent            AS agent,\n           _timestamp * 1000   AS at_ns,\n           input_tokens,\n           output_tokens\n    FROM \"logs\".\"default\"\n    WHERE af_overhead IS NULL OR af_overhead = ''\n),\nranked AS (\n    SELECT e.formula_run,\n           e.agent,\n           w.step,\n           w.step_order,\n           w.model,\n           e.input_tokens,\n           e.output_tokens,\n           CASE WHEN e.at_ns < w.window_end_ns THEN 0 ELSE 1 END AS is_tail,\n           row_number() OVER (\n               PARTITION BY e.formula_run, e.agent, e.at_ns\n               -- A window that contains the event wins outright. Among containing windows the\n               -- earliest start wins, matching AttributeEvent, which returns the first container in\n               -- start order. Otherwise the tail goes to the window with the greatest end at or\n               -- before the event, which is also what AttributeEvent does.\n               ORDER BY CASE WHEN e.at_ns < w.window_end_ns THEN 0 ELSE 1 END,\n                        CASE WHEN e.at_ns < w.window_end_ns THEN w.window_start_ns END ASC,\n                        w.window_end_ns DESC\n           ) AS pick\n    FROM billable_requests e\n    JOIN step_windows w\n      -- Instance AND agent scoping are explicit. AttributeEvent omits both because its caller\n      -- supplies one agent's records at a time; SQL over a shared stream has no such caller, and\n      -- without these predicates one agent's events attribute to another agent's steps.\n      ON w.formula_run = e.formula_run\n     AND w.agent       = e.agent\n     -- Rule 3a, half-open window: the start instant belongs to the step.\n     AND e.at_ns >= w.window_start_ns\n),\nclosed_steps AS (\n    SELECT service_af_formula_instance AS formula_run,\n           count(*)                    AS steps_closed,\n           max(af_schema)              AS record_schema_seen\n    FROM \"traces\".\"default\"\n    WHERE service_name = 'agentfactory'\n      AND af_status = 'closed'\n    GROUP BY service_af_formula_instance\n),\narrived AS (\n    SELECT formula_run, count(*) AS events_arrived\n    FROM billable_requests\n    GROUP BY formula_run\n),\nattributed AS (\n    -- Counted through the real join, not by counting arrivals. The two numbers differing is the\n    -- whole signal: events can arrive perfectly well and still match no window.\n    SELECT formula_run, count(*) AS events_attributed\n    FROM ranked\n    WHERE pick = 1\n    GROUP BY formula_run\n)\nSELECT c.formula_run,\n       c.steps_closed,\n       c.record_schema_seen,\n       COALESCE(a.events_arrived, 0)    AS events_arrived,\n       COALESCE(t.events_attributed, 0) AS events_attributed,\n       CASE\n           -- Distinguishing these two is the point. They look identical from a dashboard that only\n           -- shows totals - both render empty - but they have completely different fixes.\n           WHEN COALESCE(a.events_arrived, 0) = 0\n               THEN 'ALERT: steps closed but NO usage events arrived at all. Nothing is reaching the backend - check the endpoint path and that agents were relaunched after telemetry was switched on.'\n           WHEN COALESCE(t.events_attributed, 0) = 0\n               THEN 'ALERT: usage events arrived but NONE attributed to a step. The attribute names or event shape have drifted - compare a recent event against the recorded fixture.'\n           ELSE 'ok'\n       END AS canary\nFROM closed_steps c\nLEFT JOIN arrived    a ON a.formula_run = c.formula_run\nLEFT JOIN attributed t ON t.formula_run = c.formula_run\n-- Healthy runs are listed last so a firing canary is never below the fold.\nORDER BY CASE WHEN COALESCE(a.events_arrived, 0) = 0\n                OR COALESCE(t.events_attributed, 0) = 0 THEN 0 ELSE 1 END,\n         c.steps_closed DESC",
+                "vrlFunctionQuery": "",
+                "customQuery": true,
+                "fields": {
+                  "stream": "default",
+                  "stream_type": "traces",
+                  "x": [
+                    {
+                      "label": "Formula run",
+                      "alias": "formula_run",
+                      "column": "formula_run"
+                    }
+                  ],
+                  "y": [
+                    {
+                      "label": "Steps closed",
+                      "alias": "steps_closed",
+                      "column": "steps_closed",
+                      "aggregationFunction": "sum"
+                    }
+                  ],
+                  "z": [],
+                  "filter": {
+                    "filterType": "group",
+                    "logicalOperator": "AND",
+                    "conditions": []
+                  }
+                },
+                "config": {
+                  "promql_legend": ""
+                }
+              }
+            ],
+            "layout": {
+              "x": 0,
+              "y": 0,
+              "w": 48,
+              "h": 14,
+              "i": 1
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

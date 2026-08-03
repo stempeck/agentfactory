@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -553,5 +556,173 @@ func TestWatchdog_ReapImprovement_OutOfScopeSkipped(t *testing.T) {
 
 	if len(*reaped) != 0 {
 		t.Fatalf("an out-of-scope agent's marker must not be reaped, got %v", *reaped)
+	}
+}
+
+// --- fable-implement Step 1 (Root Cause A, R4): telemetry-backend liveness at the
+// watchdog's periodic tick ---
+
+// stubTelemetryBackendGuard substitutes ensureTelemetryBackendFn with a call
+// recorder, restoring the original (the real ensureTelemetryBackend) on cleanup.
+func stubTelemetryBackendGuard(t *testing.T, body func()) *int32 {
+	t.Helper()
+	var calls int32
+	orig := ensureTelemetryBackendFn
+	ensureTelemetryBackendFn = func(ctx context.Context, cmd *cobra.Command, root string) {
+		atomic.AddInt32(&calls, 1)
+		if body != nil {
+			body()
+		}
+	}
+	t.Cleanup(func() { ensureTelemetryBackendFn = orig })
+	return &calls
+}
+
+func TestWatchdog_TelemetryGuardFiresBesidePollAgents(t *testing.T) {
+	root := t.TempDir()
+	writeTestAgentsConfig(t, root, `{"agents":{"worker":{"type":"autonomous","description":"test worker"}}}`)
+
+	oldTmux := newWatchdogTmux
+	newWatchdogTmux = func() watchdogTmux { return &fakeWatchdogTmux{output: "working"} }
+	defer func() { newWatchdogTmux = oldTmux }()
+	oldNudge := watchdogNudgeFn
+	watchdogNudgeFn = func(sessionID string) error { return nil }
+	defer func() { watchdogNudgeFn = oldNudge }()
+
+	calls := stubTelemetryBackendGuard(t, nil)
+	scope := buildWatchdogScope([]string{"worker"}, "")
+
+	watchdogTick(&cobra.Command{}, root, scope, map[string]*watchdogAgentState{}, map[string]int{}, 2)
+
+	// The in-flight goroutine's completion is not synchronized with the tick
+	// returning by design (async, per DO-NOT-CHANGE latency bound) — wait briefly
+	// for it rather than asserting immediately after a non-blocking dispatch.
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(calls) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Errorf("telemetry backend guard fired %d times on one tick, want exactly 1", got)
+	}
+}
+
+func TestEnsureTelemetryBackend_WatchdogNeverOverlapsInFlightAttempts(t *testing.T) {
+	root := t.TempDir()
+	writeTestAgentsConfig(t, root, `{"agents":{"worker":{"type":"autonomous","description":"test worker"}}}`)
+
+	oldTmux := newWatchdogTmux
+	newWatchdogTmux = func() watchdogTmux { return &fakeWatchdogTmux{output: "working"} }
+	defer func() { newWatchdogTmux = oldTmux }()
+	oldNudge := watchdogNudgeFn
+	watchdogNudgeFn = func(sessionID string) error { return nil }
+	defer func() { watchdogNudgeFn = oldNudge }()
+
+	release := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1) // exactly one attempt ever enters — CompareAndSwap skips the other two ticks
+	var inFlight int32
+	var maxConcurrent int32
+	orig := ensureTelemetryBackendFn
+	ensureTelemetryBackendFn = func(ctx context.Context, cmd *cobra.Command, root string) {
+		defer wg.Done()
+		n := atomic.AddInt32(&inFlight, 1)
+		for {
+			old := atomic.LoadInt32(&maxConcurrent)
+			if n <= old || atomic.CompareAndSwapInt32(&maxConcurrent, old, n) {
+				break
+			}
+		}
+		<-release
+		atomic.AddInt32(&inFlight, -1)
+	}
+	defer func() {
+		close(release)
+		wg.Wait() // the entered goroutine's read of ensureTelemetryBackendFn must fully finish
+		// before this restores the var, or the restore races with that read (found by -race)
+		ensureTelemetryBackendFn = orig
+	}()
+
+	scope := buildWatchdogScope([]string{"worker"}, "")
+	agentStates := map[string]*watchdogAgentState{}
+	failures := map[string]int{}
+
+	// Three ticks fired back-to-back while the first attempt is still "running"
+	// (blocked on release) — none should be allowed to overlap it.
+	for i := 0; i < 3; i++ {
+		watchdogTick(&cobra.Command{}, root, scope, agentStates, failures, 2)
+	}
+	time.Sleep(100 * time.Millisecond) // let the first goroutine's CAS actually land before reading maxConcurrent
+
+	if got := atomic.LoadInt32(&maxConcurrent); got > 1 {
+		t.Errorf("max concurrent telemetry-backend-guard attempts = %d, want at most 1 — a second tick must skip, never stack, while one is in flight", got)
+	}
+}
+
+func TestWatchdog_TelemetryGuardDoesNotBlockPollAgents(t *testing.T) {
+	root := t.TempDir()
+	writeTestAgentsConfig(t, root, `{"agents":{"worker":{"type":"autonomous","description":"test worker"}}}`)
+
+	oldTmux := newWatchdogTmux
+	newWatchdogTmux = func() watchdogTmux { return &fakeWatchdogTmux{output: "working"} }
+	defer func() { newWatchdogTmux = oldTmux }()
+	oldNudge := watchdogNudgeFn
+	watchdogNudgeFn = func(sessionID string) error { return nil }
+	defer func() { watchdogNudgeFn = oldNudge }()
+
+	blocked := make(chan struct{})
+	done := make(chan struct{})
+	orig := ensureTelemetryBackendFn
+	ensureTelemetryBackendFn = func(ctx context.Context, cmd *cobra.Command, root string) {
+		<-blocked // held until the test's own assertions have run — simulates the ~12s worst case
+		close(done)
+	}
+	defer func() {
+		close(blocked)
+		<-done // wait for the leaked goroutine to finish reading the stub before restoring the
+		// var — restoring first races the read with this defer's write (found by -race)
+		ensureTelemetryBackendFn = orig
+	}()
+
+	scope := buildWatchdogScope([]string{"worker"}, "")
+	start := time.Now()
+	watchdogTick(&cobra.Command{}, root, scope, map[string]*watchdogAgentState{}, map[string]int{}, 2)
+	if elapsed := time.Since(start); elapsed > 1*time.Second {
+		t.Errorf("watchdogTick took %s with the telemetry guard permanently blocked, want it to return promptly (pollAgents must not wait on it)", elapsed)
+	}
+}
+
+// TestWatchdog_PollAgentsFunctionBodyNeverReferencesTelemetryGuard is a protective,
+// source-text scan (DO-NOT-CHANGE): the behavioral tests above call pollAgents
+// directly and would stay green even if a future edit mistakenly folded the
+// telemetry guard INSIDE pollAgents's per-agent loop instead of beside it in
+// watchdogTick — they assert only on nudge/reap counts, never on whether a
+// telemetry-guard call occurred inside that function. This closes that blind spot
+// mechanically.
+func TestWatchdog_PollAgentsFunctionBodyNeverReferencesTelemetryGuard(t *testing.T) {
+	src, err := os.ReadFile("watchdog.go")
+	if err != nil {
+		t.Fatalf("read watchdog.go: %v", err)
+	}
+	body := string(src)
+
+	start := strings.Index(body, "func pollAgents(")
+	if start < 0 {
+		t.Fatal("could not locate func pollAgents( in watchdog.go")
+	}
+	rest := body[start+len("func pollAgents("):]
+	fnBody := rest
+	if next := strings.Index(rest, "\nfunc "); next >= 0 {
+		// pollAgents is not necessarily the last function in the file — bound the
+		// scan to its own body when a later top-level func exists; otherwise (as
+		// today) pollAgents runs to end-of-file and the whole remainder is its body.
+		fnBody = rest[:next]
+	}
+
+	for _, needle := range []string{"ensureTelemetryBackend", "triggerTelemetryBackendGuard"} {
+		if strings.Contains(fnBody, needle) {
+			t.Errorf("pollAgents's function body references %q — the telemetry-backend guard must sit "+
+				"BESIDE pollAgents in watchdogTick, never inside it (it would otherwise fire once per "+
+				"agent in the fleet instead of once per tick)", needle)
+		}
 	}
 }

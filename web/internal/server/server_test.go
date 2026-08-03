@@ -1386,6 +1386,9 @@ func TestRouteTableTokenTierEnumeration(t *testing.T) {
 		{http.MethodGet, "/api/settings", "", false},
 		{http.MethodPost, "/api/factory/up", "", false},
 		{http.MethodPost, "/api/factory/down", `{}`, false},
+		{http.MethodGet, "/api/telemetry", "", false},
+		{http.MethodGet, "/api/telemetry/report", "", false},
+		{http.MethodGet, "/api/telemetry/usage", "", false},
 	}
 
 	for _, rt := range routes {

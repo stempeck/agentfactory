@@ -795,6 +795,16 @@ func TestValidateAgentName_ReservedOperator(t *testing.T) {
 	}
 }
 
+func TestValidateAgentName_ReservedWatchdog(t *testing.T) {
+	err := ValidateAgentName("watchdog")
+	if err == nil {
+		t.Fatal("expected error for reserved name \"watchdog\"")
+	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Errorf("error = %q, want it to contain 'reserved'", err.Error())
+	}
+}
+
 // --- RemoveAgentEntry tests ---
 
 func TestRemoveAgentEntry_FormulaAgent(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -1441,7 +1442,7 @@ func TestInstallAgentsDispatchesToSeam(t *testing.T) {
 			agentGenAFSrc, agentGenDir = afSrc, projectDir
 			return nil
 		}
-		runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string) error {
+		runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error {
 			events = append(events, "quickstart")
 			quickstartAFSrc, quickstartDir = afSrc, projectDir
 			return nil
@@ -1496,7 +1497,7 @@ func TestInstallAgentsDispatchesToSeam(t *testing.T) {
 		runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error {
 			return fmt.Errorf("agent-gen boom")
 		}
-		runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string) error {
+		runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error {
 			quickstartCalled = true
 			return nil
 		}
@@ -1516,6 +1517,219 @@ func TestInstallAgentsDispatchesToSeam(t *testing.T) {
 		// (f) abort: quickstart must NOT run after an agent-gen failure.
 		if quickstartCalled {
 			t.Error("quickstart was called despite agent-gen failure — must abort before quickstart")
+		}
+	})
+}
+
+// TestInstallAgentsForwardsQuickstartFlags pins the mirror-flag contract:
+// --litellm/--no-telemetry forward verbatim to the quickstart seam ONLY (never
+// agent-gen, which has no such flags), a default run forwards nothing, and
+// either flag without --agents is rejected before any seam runs — af's cobra
+// layer is the typo gate, because quickstart's unknown-option arm only warns.
+// It also pins --litellm's up-front key acquisition: secret file > env > prompt
+// (the seamed stand-in for the TTY prompt), with refusal BEFORE any seam when
+// no source is available.
+func TestInstallAgentsForwardsQuickstartFlags(t *testing.T) {
+	// flag-state hygiene: same persistent-package-var reset idiom as
+	// TestInstallAgentsDispatchesToSeam, extended to the two mirror flags.
+	resetFlags := func() {
+		installAgentsFlag = false
+		installNoBuildFlag = false
+		installLitellmFlag = false
+		installNoTelemetryFlag = false
+	}
+	resetFlags()
+	t.Cleanup(resetFlags)
+
+	origAgentGen := runAgentGenScript
+	origQuickstart := runQuickstartScript
+	origPrompt := promptOpenAIKey
+	t.Cleanup(func() {
+		runAgentGenScript = origAgentGen
+		runQuickstartScript = origQuickstart
+		promptOpenAIKey = origPrompt
+	})
+
+	origAFSrcFlag := agentGenAFSrc
+	origCompiled := compiledSourceRoot
+	agentGenAFSrc = ""
+	compiledSourceRoot = ""
+	t.Cleanup(func() { agentGenAFSrc = origAFSrcFlag; compiledSourceRoot = origCompiled })
+
+	var gotQuickstartArgs []string
+	var gotKeyEnvAtSeam string
+	var agentGenCalled, quickstartCalled, promptCalled bool
+	resetSpies := func() {
+		resetFlags()
+		gotQuickstartArgs = nil
+		gotKeyEnvAtSeam = ""
+		agentGenCalled = false
+		quickstartCalled = false
+		promptCalled = false
+	}
+	runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error {
+		agentGenCalled = true
+		return nil
+	}
+	runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error {
+		quickstartCalled = true
+		gotQuickstartArgs = append([]string{}, extraArgs...)
+		gotKeyEnvAtSeam = os.Getenv("OPENAI_API_KEY")
+		return nil
+	}
+	// non-TTY default, matching the real seam's behavior under `go test`; the
+	// prompt-path subtest swaps in a key-returning stub.
+	promptOpenAIKey = func(errW io.Writer, keyFile string) (string, error) {
+		promptCalled = true
+		return "", fmt.Errorf("stdin is not a terminal, cannot prompt")
+	}
+
+	afSrc := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"}, nil)
+	t.Setenv("AF_SOURCE_ROOT", afSrc)
+
+	t.Run("forwards_both_flags", func(t *testing.T) {
+		resetSpies()
+		t.Setenv("OPENAI_API_KEY", "sk-test-env")
+		dir := setupFactoryDir(t)
+		out, err := runInstallInDir(t, dir, "--agents", "--litellm", "--no-telemetry")
+		if err != nil {
+			t.Fatalf("install --agents --litellm --no-telemetry failed: %v\noutput: %s", err, out)
+		}
+		if got := strings.Join(gotQuickstartArgs, " "); got != "--litellm --no-telemetry" {
+			t.Errorf("quickstart args = %q, want %q", got, "--litellm --no-telemetry")
+		}
+		if promptCalled {
+			t.Error("prompt ran despite OPENAI_API_KEY being set")
+		}
+	})
+
+	t.Run("litellm_no_key_no_tty_rejected_before_any_seam", func(t *testing.T) {
+		resetSpies()
+		t.Setenv("OPENAI_API_KEY", "")
+		dir := setupFactoryDir(t)
+		_, err := runInstallInDir(t, dir, "--agents", "--litellm")
+		if err == nil || !strings.Contains(err.Error(), "OPENAI_API_KEY") {
+			t.Fatalf("expected missing-key refusal, got: %v", err)
+		}
+		if agentGenCalled || quickstartCalled {
+			t.Errorf("seam ran despite missing key: agentgen=%v quickstart=%v", agentGenCalled, quickstartCalled)
+		}
+	})
+
+	t.Run("litellm_prompted_key_reaches_quickstart_env", func(t *testing.T) {
+		resetSpies()
+		t.Setenv("OPENAI_API_KEY", "")
+		origStub := promptOpenAIKey
+		promptOpenAIKey = func(errW io.Writer, keyFile string) (string, error) {
+			promptCalled = true
+			return "sk-test-prompted", nil
+		}
+		t.Cleanup(func() { promptOpenAIKey = origStub })
+		dir := setupFactoryDir(t)
+		out, err := runInstallInDir(t, dir, "--agents", "--litellm")
+		if err != nil {
+			t.Fatalf("install failed despite prompted key: %v\noutput: %s", err, out)
+		}
+		if !promptCalled {
+			t.Error("prompt seam was never invoked")
+		}
+		if gotKeyEnvAtSeam != "sk-test-prompted" {
+			t.Errorf("OPENAI_API_KEY at quickstart seam = %q, want the prompted key", gotKeyEnvAtSeam)
+		}
+	})
+
+	t.Run("litellm_persisted_secret_file_proceeds_without_prompt", func(t *testing.T) {
+		resetSpies()
+		t.Setenv("OPENAI_API_KEY", "")
+		dir := setupFactoryDir(t)
+		secretsDir := filepath.Join(config.ConfigDir(dir), "secrets")
+		if err := os.MkdirAll(secretsDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(secretsDir, "openai.key"), []byte("sk-test-file"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := runInstallInDir(t, dir, "--agents", "--litellm")
+		if err != nil {
+			t.Fatalf("install failed despite persisted key file: %v\noutput: %s", err, out)
+		}
+		if promptCalled {
+			t.Error("prompt ran despite persisted secret file")
+		}
+		if got := strings.Join(gotQuickstartArgs, " "); got != "--litellm" {
+			t.Errorf("quickstart args = %q, want %q", got, "--litellm")
+		}
+	})
+
+	t.Run("default_forwards_nothing", func(t *testing.T) {
+		resetSpies()
+		dir := setupFactoryDir(t)
+		out, err := runInstallInDir(t, dir, "--agents")
+		if err != nil {
+			t.Fatalf("install --agents failed: %v\noutput: %s", err, out)
+		}
+		if len(gotQuickstartArgs) != 0 {
+			t.Errorf("quickstart args = %v, want none", gotQuickstartArgs)
+		}
+	})
+
+	t.Run("default_drives_telemetry_gate_on_overwriting_manual_off", func(t *testing.T) {
+		resetSpies()
+		dir := setupFactoryDir(t)
+		gate := filepath.Join(dir, ".agentfactory", ".telemetry-gate")
+		if err := os.WriteFile(gate, []byte("off\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		out, err := runInstallInDir(t, dir, "--agents")
+		if err != nil {
+			t.Fatalf("install --agents failed: %v\noutput: %s", err, out)
+		}
+		if data, err := os.ReadFile(gate); err != nil || string(data) != "on\n" {
+			t.Errorf("gate = %q (err=%v), want %q", data, err, "on\n")
+		}
+	})
+
+	t.Run("no_telemetry_drives_gate_off", func(t *testing.T) {
+		resetSpies()
+		dir := setupFactoryDir(t)
+		out, err := runInstallInDir(t, dir, "--agents", "--no-telemetry")
+		if err != nil {
+			t.Fatalf("install --agents --no-telemetry failed: %v\noutput: %s", err, out)
+		}
+		gate := filepath.Join(dir, ".agentfactory", ".telemetry-gate")
+		if data, err := os.ReadFile(gate); err != nil || string(data) != "off\n" {
+			t.Errorf("gate = %q (err=%v), want %q", data, err, "off\n")
+		}
+	})
+
+	t.Run("failed_bootstrap_leaves_gate_untouched", func(t *testing.T) {
+		resetSpies()
+		origStub := runQuickstartScript
+		runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error {
+			quickstartCalled = true
+			return fmt.Errorf("quickstart boom")
+		}
+		t.Cleanup(func() { runQuickstartScript = origStub })
+		dir := setupFactoryDir(t)
+		_, err := runInstallInDir(t, dir, "--agents")
+		if err == nil {
+			t.Fatal("expected bootstrap failure to propagate")
+		}
+		gate := filepath.Join(dir, ".agentfactory", ".telemetry-gate")
+		if _, err := os.Stat(gate); !os.IsNotExist(err) {
+			t.Errorf("gate file exists after failed bootstrap (stat err=%v); must stay untouched", err)
+		}
+	})
+
+	t.Run("litellm_without_agents_rejected_before_any_seam", func(t *testing.T) {
+		resetSpies()
+		dir := setupFactoryDir(t)
+		_, err := runInstallInDir(t, dir, "--litellm")
+		if err == nil || !strings.Contains(err.Error(), "require --agents") {
+			t.Fatalf("expected 'require --agents' error, got: %v", err)
+		}
+		if agentGenCalled || quickstartCalled {
+			t.Errorf("seam ran despite rejected flag: agentgen=%v quickstart=%v", agentGenCalled, quickstartCalled)
 		}
 	})
 }
@@ -1588,7 +1802,7 @@ func TestInstallAgentsRefusesWorktree(t *testing.T) {
 		agentGenCalled = true
 		return nil
 	}
-	runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string) error {
+	runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error {
 		quickstartCalled = true
 		return nil
 	}
@@ -1639,7 +1853,7 @@ func TestInstallAgentsRefusesSourceFallback(t *testing.T) {
 		agentGenCalled = true
 		return nil
 	}
-	runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string) error {
+	runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error {
 		quickstartCalled = true
 		return nil
 	}
@@ -1682,7 +1896,7 @@ func TestInstallAgentsWarnsShippedFormulaEdit(t *testing.T) {
 		agentGenCalled = true
 		return nil
 	}
-	runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string) error {
+	runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error {
 		quickstartCalled = true
 		return nil
 	}

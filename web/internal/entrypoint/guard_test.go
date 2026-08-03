@@ -106,12 +106,57 @@ func TestEntrypoint_WebuiAbsent_NoOp(t *testing.T) {
 	}
 }
 
+// execBitHonored reports whether bash's `[ -x ]` sees a 0755 file under dir as executable.
+// On a noexec mount this is FALSE even with the mode bit set: `[ -x ]` is faccessat(X_OK),
+// not a pure mode-bit test, and the kernel refuses X_OK on noexec filesystems.
+func execBitHonored(t *testing.T, dir string) bool {
+	t.Helper()
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not available: %v", err)
+	}
+	probe := filepath.Join(dir, "x-probe")
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return exec.Command("bash", "-c", `[ -x "$1" ]`, "bash", probe).Run() == nil
+}
+
+// execCapableTempDir returns a temp dir on a filesystem that honors the executable bit.
+// t.TempDir() lives under $TMPDIR (usually /tmp), which the quickdocker dev containers mount
+// noexec — there the guard's launch branch can never be exercised. Fall back to
+// ~/.cache/af-test, the same exec-capable root the repo Makefile uses for TMPDIR.
+func execCapableTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if execBitHonored(t, dir) {
+		return dir
+	}
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Skipf("TMPDIR is noexec and no user cache dir to fall back to: %v", err)
+	}
+	root := filepath.Join(cache, "af-test")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir, err = os.MkdirTemp(root, "entrypoint-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	if !execBitHonored(t, dir) {
+		t.Skipf("no exec-capable temp filesystem available (TMPDIR and %s are both noexec)", root)
+	}
+	return dir
+}
+
 // TestEntrypoint_WebuiPresent_TakesLaunchBranch is the non-vacuity counterpart (mirrors
 // lint_test.go's SelfNegative): it proves the guard actually DISCRIMINATES on the executable bit.
 // With an executable webui present, the if-branch is taken ("Web UI started") and the skip message
-// is NOT printed. `[ -x ]` tests the mode bit only, so this holds even where the FS would refuse to
-// exec the (throwaway) file — the backgrounded `nohup … &` returns 0 regardless. Still a no-op vs
-// the live tree (temp HOME; the only external write is a throwaway /tmp/webui.log).
+// is NOT printed. The fake webui never needs to RUN — the backgrounded `nohup … &` returns 0
+// regardless — but `[ -x ]` does need a filesystem that honors the mode bit (see execBitHonored),
+// hence execCapableTempDir for the HOME. Still a no-op vs the live tree (temp HOME; the only
+// external write is a throwaway /tmp/webui.log).
 func TestEntrypoint_WebuiPresent_TakesLaunchBranch(t *testing.T) {
 	root := repoRoot(t)
 	src, err := os.ReadFile(filepath.Join(root, "quickstart.sh"))
@@ -120,7 +165,7 @@ func TestEntrypoint_WebuiPresent_TakesLaunchBranch(t *testing.T) {
 	}
 	guard := extractGuard(t, string(src))
 
-	home := t.TempDir()
+	home := execCapableTempDir(t)
 	bin := filepath.Join(home, ".local", "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)

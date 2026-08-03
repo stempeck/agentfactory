@@ -1,0 +1,87 @@
+{
+  "_comment": "SYNTHETIC — hand-authored, NOT captured from a running backend. These stand in for the native Claude Code api_request events that the af-side step windows are joined against, so the three binding join rules can be exercised offline. Phase 6b replaces this file with the first recorded-real capture; until then every consumer must treat these shapes as a design hypothesis, not as evidence of what the backend actually emits. Marked synthetic per the design's Phase 2 deliverable 3.",
+  "provenance": "synthetic",
+  "replaced_by": "the first recorded-real capture in Phase 6b",
+  "join_rules_exercised": [
+    "overhead exclusion — an event carrying af.overhead is owned by the overhead bucket and MUST NOT enter any step sum",
+    "earliest start wins — the EARLIEST step_start per (instance_id, step_id) defines the window; a later re-prime must not shrink it",
+    "directional boundary — an event after step_end of step N and before the next step_start in the same instance attributes to the PRECEDING step as a labelled tail component"
+  ],
+  "instance_id": "syn-instance-0001",
+  "events": [
+    {
+      "_case": "inside step-one window — attributes to step-one",
+      "ts": "2026-07-22T18:31:05.000Z",
+      "attributes": {
+        "af.formula_instance": "syn-instance-0001",
+        "af.agent": "design-v7"
+      },
+      "input_tokens": 1200,
+      "output_tokens": 340,
+      "cost_usd": 0.0141,
+      "expect_attributed_to": "step-one"
+    },
+    {
+      "_case": "overhead-marked, fired INSIDE step-one window — must be EXCLUDED from step-one",
+      "ts": "2026-07-22T18:31:06.500Z",
+      "attributes": {
+        "af.formula_instance": "syn-instance-0001",
+        "af.agent": "design-v7",
+        "af.overhead": "grader"
+      },
+      "input_tokens": 800,
+      "output_tokens": 90,
+      "cost_usd": 0.0021,
+      "expect_attributed_to": "grader-overhead"
+    },
+    {
+      "_case": "inside the window a re-prime would have shrunk — earliest start wins keeps it in step-one",
+      "ts": "2026-07-22T18:31:07.250Z",
+      "attributes": {
+        "af.formula_instance": "syn-instance-0001",
+        "af.agent": "design-v7"
+      },
+      "input_tokens": 640,
+      "output_tokens": 120,
+      "cost_usd": 0.0068,
+      "expect_attributed_to": "step-one"
+    },
+    {
+      "_case": "trailing tail — after step-one's step_end, before step-two's step_start; attributes BACK to step-one",
+      "ts": "2026-07-22T18:31:11.400Z",
+      "attributes": {
+        "af.formula_instance": "syn-instance-0001",
+        "af.agent": "design-v7"
+      },
+      "input_tokens": 300,
+      "output_tokens": 900,
+      "cost_usd": 0.0135,
+      "expect_attributed_to": "step-one-tail"
+    },
+    {
+      "_case": "inside step-two window",
+      "ts": "2026-07-22T18:31:20.000Z",
+      "attributes": {
+        "af.formula_instance": "syn-instance-0001",
+        "af.agent": "design-v7"
+      },
+      "input_tokens": 2100,
+      "output_tokens": 700,
+      "cost_usd": 0.0294,
+      "expect_attributed_to": "step-two"
+    }
+  ],
+  "af_side_records": [
+    {"v": 1, "event": "instance_start", "ts": "2026-07-22T18:31:00.000Z", "agent": "design-v7", "worktree_id": "wt-syn001", "formula": "design-v7", "instance_id": "syn-instance-0001", "step_id": "", "step_seq": 0, "step_title": "", "session_id": "syn-session-a", "model": "fable-5", "model_source": "models_json", "verb": "sling", "verb_ms": 61},
+    {"v": 1, "event": "step_start", "ts": "2026-07-22T18:31:04.112Z", "agent": "design-v7", "worktree_id": "wt-syn001", "formula": "design-v7", "instance_id": "syn-instance-0001", "step_id": "step-one", "step_seq": 1, "step_title": "Phase 1: analysis", "session_id": "syn-session-a", "model": "fable-5", "model_source": "models_json", "verb": "prime", "verb_ms": 42},
+    {"v": 1, "event": "step_start", "ts": "2026-07-22T18:31:08.900Z", "agent": "design-v7", "worktree_id": "wt-syn001", "formula": "design-v7", "instance_id": "syn-instance-0001", "step_id": "step-one", "step_seq": 1, "step_title": "Phase 1: analysis", "session_id": "syn-session-b", "model": "fable-5", "model_source": "models_json", "verb": "prime", "verb_ms": 38},
+    {"v": 1, "event": "step_end", "ts": "2026-07-22T18:31:10.500Z", "agent": "design-v7", "worktree_id": "wt-syn001", "formula": "design-v7", "instance_id": "syn-instance-0001", "step_id": "step-one", "step_seq": 1, "step_title": "Phase 1: analysis", "session_id": "syn-session-b", "model": "fable-5", "model_source": "models_json", "verb": "done", "verb_ms": 77, "duration_ms": 6388, "status": "closed"},
+    {"v": 1, "event": "step_start", "ts": "2026-07-22T18:31:15.000Z", "agent": "design-v7", "worktree_id": "wt-syn001", "formula": "design-v7", "instance_id": "syn-instance-0001", "step_id": "step-two", "step_seq": 2, "step_title": "Phase 2: synthesis", "session_id": "syn-session-b", "model": "fable-5", "model_source": "models_json", "verb": "prime", "verb_ms": 40},
+    {"v": 1, "event": "step_end", "ts": "2026-07-22T18:31:25.000Z", "agent": "design-v7", "worktree_id": "wt-syn001", "formula": "design-v7", "instance_id": "syn-instance-0001", "step_id": "step-two", "step_seq": 2, "step_title": "Phase 2: synthesis", "session_id": "syn-session-b", "model": "fable-5", "model_source": "models_json", "verb": "done", "verb_ms": 81, "duration_ms": 10000, "status": "closed"},
+    {"v": 1, "event": "instance_end", "ts": "2026-07-22T18:31:25.100Z", "agent": "design-v7", "worktree_id": "wt-syn001", "formula": "design-v7", "instance_id": "syn-instance-0001", "step_id": "", "step_seq": 0, "step_title": "", "session_id": "syn-session-b", "model": "fable-5", "model_source": "models_json", "verb": "done", "verb_ms": 84}
+  ],
+  "expected_windows": [
+    {"step_id": "step-one", "start": "2026-07-22T18:31:04.112Z", "end": "2026-07-22T18:31:10.500Z", "_note": "start is the EARLIEST of the two step_start records, not the re-prime at 18:31:08.900Z"},
+    {"step_id": "step-two", "start": "2026-07-22T18:31:15.000Z", "end": "2026-07-22T18:31:25.000Z"}
+  ]
+}

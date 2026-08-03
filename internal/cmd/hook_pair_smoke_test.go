@@ -63,17 +63,30 @@ func gateHookFiles(repoRoot string) []string {
 	}
 }
 
-// graderLine returns the single line of a gate script that invokes the haiku
-// grader (the line containing `claude -p --model haiku`). The env construction
-// under test lives entirely on this line.
-func graderLine(t *testing.T, content, file string) string {
+// graderEnvBlock returns the grader's env-construction block: the lines from the
+// `env -i` allowlist opener through the line that invokes `claude -p --model
+// haiku`. Phase 4b spreads the allowlist across several ${VAR:+...} OTel-forwarding
+// continuation lines, so prefix and decoy-var assertions must scan this whole
+// block rather than the single line that names claude.
+func graderEnvBlock(t *testing.T, content, file string) string {
 	t.Helper()
-	for _, line := range strings.Split(content, "\n") {
-		if strings.Contains(line, "claude -p --model haiku") {
-			return line
+	lines := strings.Split(content, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.Contains(line, "env -i HOME=") {
+			start = i
+			break
 		}
 	}
-	t.Fatalf("%s: no grader line (`claude -p --model haiku`) found", file)
+	if start == -1 {
+		t.Fatalf("%s: no grader env block (`env -i HOME=`) found", file)
+	}
+	for i := start; i < len(lines); i++ {
+		if strings.Contains(lines[i], "claude -p --model haiku") {
+			return strings.Join(lines[start:i+1], "\n")
+		}
+	}
+	t.Fatalf("%s: grader env block opened but no `claude -p --model haiku` terminator found", file)
 	return ""
 }
 
@@ -90,7 +103,12 @@ func graderLine(t *testing.T, content, file string) string {
 func TestHookGrader_UsesAllowlistNotDenylist(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 
-	const graderAllowlist = `env -i HOME="$HOME" PATH="$PATH" claude -p --model haiku`
+	// The allowlist base — env -i carrying ONLY HOME and PATH — opens the grader
+	// invocation. Phase 4b inserts ${VAR:+...} OTel-forwarding tokens between this
+	// base and `claude`, so the base and the grader command are asserted separately
+	// rather than as one contiguous substring (which the inserted tokens destroy).
+	const allowlistBase = `env -i HOME="$HOME" PATH="$PATH"`
+	const graderCmd = `claude -p --model haiku`
 
 	for _, f := range gateHookFiles(repoRoot) {
 		data, err := os.ReadFile(f)
@@ -99,8 +117,11 @@ func TestHookGrader_UsesAllowlistNotDenylist(t *testing.T) {
 		}
 		content := string(data)
 
-		if !strings.Contains(content, graderAllowlist) {
-			t.Errorf("%s: grader is not allowlist-constructed; expected to contain:\n  %s", f, graderAllowlist)
+		if !strings.Contains(content, allowlistBase) {
+			t.Errorf("%s: grader is not allowlist-constructed; expected the env -i HOME/PATH allowlist base:\n  %s", f, allowlistBase)
+		}
+		if !strings.Contains(content, graderCmd) {
+			t.Errorf("%s: grader invocation %q not found", f, graderCmd)
 		}
 
 		// The env -u denylist must be gone entirely (it is drift-prone: it omits at
@@ -143,18 +164,22 @@ func TestHookGrader_DecoyVarsNeutralizedByAllowlist(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
 		}
-		line := graderLine(t, string(data), f)
+		block := graderEnvBlock(t, string(data), f)
 
-		// The grader's env is constructed from an allowlist that carries ONLY HOME and PATH.
-		if !strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "VERDICT=$(")), `env -i HOME="$HOME" PATH="$PATH" claude`) {
-			t.Errorf("%s: grader line is not the exact env -i HOME/PATH allowlist form:\n  %s", f, line)
+		// The grader's env opens with an allowlist carrying ONLY HOME and PATH; Phase 4b
+		// appends ${VAR:+...} OTel-forwarding tokens after this base, so the assertion
+		// pins the opener rather than a whole-line prefix through `claude`.
+		if !strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(block), "VERDICT=$(")), `env -i HOME="$HOME" PATH="$PATH"`) {
+			t.Errorf("%s: grader env does not open with the env -i HOME/PATH allowlist base:\n  %s", f, block)
 		}
 
-		// No decoy var name may appear on the grader line — under env -i the allowlist
-		// cannot enumerate any of them, so a decoy profile setting all of them is inert.
+		// No decoy var name may appear anywhere in the constructed env block — under
+		// env -i the allowlist cannot enumerate any of them, so a decoy profile setting
+		// all of them is inert. Scanning the whole block (not just the line naming
+		// claude) is a strictly stronger guarantee than the pre-Phase-4b check.
 		for _, v := range decoyVars {
-			if strings.Contains(line, v) {
-				t.Errorf("%s: decoy var %q appears on the grader line — it could reach the grader env:\n  %s", f, v, line)
+			if strings.Contains(block, v) {
+				t.Errorf("%s: decoy var %q appears in the grader env block — it could reach the grader env:\n  %s", f, v, block)
 			}
 		}
 	}

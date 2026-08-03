@@ -78,9 +78,19 @@ func TestImprovementHook_SessionSurvivesThenCompletes(t *testing.T) {
 
 	// The /improve-agent instruction is on the af done stdout (the always-emitted
 	// anchor of the delivery trio). Assert em-dash-free fragments only.
+	//
+	// The edit target is asserted ANCHORED on the "formula at " prefix the template emits
+	// (improvement.go:192-193) and against the marker's absolute path, not against the bare
+	// ".agentfactory/store/formulas/..." fragment: the absolute path ends with that fragment,
+	// so an unanchored Contains passes both before and after the #563 fix and pins nothing —
+	// this real-binary tier had no pin on the property the fix exists to establish (PR #565
+	// review, F-5). The IsAbs check below is what makes the anchored assertion meaningful.
+	if !filepath.IsAbs(m.FormulaPath) {
+		t.Fatalf("marker formula_path must be absolute so the instruction cannot resolve against a worktree cwd (issue #563); got %q", m.FormulaPath)
+	}
 	for _, frag := range []string{
 		"use the Skill tool to load /improve-agent",
-		".agentfactory/store/formulas/test-terminate.formula.toml",
+		"formula at " + m.FormulaPath,
 		"af formula show test-terminate --json",
 		"af improvement complete",
 	} {

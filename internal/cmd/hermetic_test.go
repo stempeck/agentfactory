@@ -15,10 +15,11 @@ import (
 // fakeTmux is the single hermetic tmux double for issue #309 Phase 2. It
 // satisfies BOTH the internal/session tmuxClient (14 methods, incl. the #412
 // Phase-4 ShowOption read-back and the #508 UnsetEnvironment) and the internal/cmd
-// cmdTmux (9 methods) seam interfaces — the 18-method distinct union — recording
-// every would-be op in order and returning benign values. It
-// performs NO real I/O, never sleeps, and never shells out; a default-suite test
-// that installs it via setupHermeticSessions cannot reach the real tmux server.
+// cmdTmux (11 methods, incl. the #541 K2 CurrentSessionName) seam interfaces — the
+// 20-method distinct union — recording every would-be op in order and returning
+// benign values. It performs NO real I/O, never sleeps, and never shells out; a
+// default-suite test that installs it via setupHermeticSessions cannot reach the
+// real tmux server.
 //
 // Per-session liveness is configurable so later phases can drive both the
 // healthy (skip) and dead (kill+relaunch) watchdog branches:
@@ -26,18 +27,23 @@ import (
 //   - paneCommand    drives GetPaneCommand  (default: "" -> ("", nil))
 //   - running        drives IsAgentRunning  (default: false)
 //   - claudeRunning  drives IsClaudeRunning (default: false)
+//   - currentSession drives CurrentSessionName (default: "" -> ("", nil)); Phase 5's
+//     signal matrix sets it to an af-identity vs a non-af session name (K2)
 type fakeTmux struct {
-	ops           []string
-	present       map[string]bool
-	paneCommand   map[string]string
-	running       map[string]bool
-	claudeRunning map[string]bool
-	env           map[string]map[string]string // session -> key -> value (K9b GetEnvironment)
+	ops            []string
+	present        map[string]bool
+	hasSessionErr  map[string]error // session -> error HasSession returns (drives the fail-closed probe-fault path)
+	paneCommand    map[string]string
+	running        map[string]bool
+	claudeRunning  map[string]bool
+	env            map[string]map[string]string // session -> key -> value (K9b GetEnvironment)
+	currentSession string                       // spoofed self-session name (K2 CurrentSessionName)
 }
 
 func newFakeTmux() *fakeTmux {
 	return &fakeTmux{
 		present:       map[string]bool{},
+		hasSessionErr: map[string]error{},
 		paneCommand:   map[string]string{},
 		running:       map[string]bool{},
 		claudeRunning: map[string]bool{},
@@ -51,6 +57,9 @@ func (f *fakeTmux) record(op string) { f.ops = append(f.ops, op) }
 
 func (f *fakeTmux) HasSession(name string) (bool, error) {
 	f.record("HasSession " + name)
+	if err := f.hasSessionErr[name]; err != nil {
+		return false, err
+	}
 	return f.present[name], nil
 }
 
@@ -149,6 +158,11 @@ func (f *fakeTmux) GetPaneCommand(sess string) (string, error) {
 func (f *fakeTmux) IsAgentRunning(sess string, expectedPaneCommands ...string) bool {
 	f.record("IsAgentRunning " + sess)
 	return f.running[sess]
+}
+
+func (f *fakeTmux) CurrentSessionName() (string, error) {
+	f.record("CurrentSessionName")
+	return f.currentSession, nil
 }
 
 // Compile-time proofs: the SINGLE fake satisfies BOTH seam surfaces. The session

@@ -1,0 +1,28 @@
+{
+  "v": 1,
+  "state": "not_installed",
+  "endpoint": "",
+  "window": {
+    "start_us": 0,
+    "end_us": 0,
+    "limit": 0
+  },
+  "filters": {
+    "agent": "",
+    "instance": ""
+  },
+  "tokens": {
+    "state": "not_installed",
+    "rows": [],
+    "total": 0,
+    "truncated": false,
+    "detail": ""
+  },
+  "metrics": {
+    "state": "not_installed",
+    "rows": [],
+    "at_us": 0,
+    "detail": ""
+  },
+  "cause": "telemetry is not configured for this factory"
+}

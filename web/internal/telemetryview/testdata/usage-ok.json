@@ -1,0 +1,66 @@
+{
+  "v": 1,
+  "state": "ok",
+  "endpoint": "http://127.0.0.1:5080/api/default",
+  "window": {
+    "start_us": 1,
+    "end_us": 1785128415094918,
+    "limit": 1000
+  },
+  "filters": {
+    "agent": "solver",
+    "instance": "af-1234abcd"
+  },
+  "tokens": {
+    "state": "ok",
+    "rows": [
+      {
+        "formula_run": "af-1234abcd",
+        "agent": "solver",
+        "model": "claude-opus-5",
+        "step_bucket": "implement",
+        "step_order": 1,
+        "requests": 12,
+        "input_tokens": 48213,
+        "output_tokens": 6104,
+        "total_tokens": 54317
+      },
+      {
+        "formula_run": "af-1234abcd",
+        "agent": "solver",
+        "model": "claude-opus-5",
+        "step_bucket": "review",
+        "step_order": 2,
+        "requests": 3,
+        "input_tokens": 9002,
+        "output_tokens": 1188,
+        "total_tokens": 10190
+      }
+    ],
+    "total": 2,
+    "truncated": false,
+    "detail": ""
+  },
+  "metrics": {
+    "state": "ok",
+    "rows": [
+      {
+        "metric": "claude_code_token_usage",
+        "agent": "solver",
+        "instance": "af-1234abcd",
+        "labels": {
+          "af_model_profile": "opus-5",
+          "af_worktree_id": "wt-1234ab",
+          "model": "claude-opus-5",
+          "query_source": "main",
+          "terminal_type": "tmux",
+          "type": "input"
+        },
+        "value": "48213"
+      }
+    ],
+    "at_us": 1785128415094918,
+    "detail": ""
+  },
+  "cause": ""
+}

@@ -64,9 +64,15 @@ var validAgentName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
 // "operator" is reserved because the web console's mail sender uses it as a
 // synthetic identity (--from operator); a real agent with that name would be
 // indistinguishable from the console's mail, defeating the sender boundary.
+// "watchdog" is reserved because session.SessionName("watchdog") produces the
+// af-watchdog control-plane session; a roster agent of that name would alias it,
+// and #548's manager tier would make that formula-backed autonomous entry stoppable
+// with zero provenance — so the reservation converts AC-5's untargetability from a
+// naming convention into a load-time interlock (#548 H-2).
 var reservedNames = map[string]bool{
 	"dispatch": true,
 	"operator": true,
+	"watchdog": true,
 }
 
 // MessagingConfig holds the contents of messaging.json

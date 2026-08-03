@@ -154,6 +154,11 @@ var skipIsolationSelfFiles = map[string]bool{
 	// and fail-closed (refuses to exec unless the Phase 2b redirect is active),
 	// exactly like interlock_test.go.
 	"session_survival_test.go": true,
+	// #541 Phase 6 K13 scanner: this file embeds the `pkill`/`KillSession(` literals
+	// it scans production code for (its regex + the class-tagged allowlist comments).
+	// It never execs pkill/tmux — it reads files as text — so it is self-exempt from
+	// the #309 raw-destructive scan, exactly as this enforcement file exempts itself.
+	"teardown_scanner_enforce_test.go": true,
 }
 
 func TestNoRawDestructiveTmuxInUntaggedTests(t *testing.T) {

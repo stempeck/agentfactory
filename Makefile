@@ -65,6 +65,7 @@ test:
 # python3.12 (tomllib) on PATH; it is a plain Node script, no build step.
 conformance:
 	node web/conformance/test-engine.js .agentfactory/store/formulas
+	node web/conformance/test-telemetry-banner.js
 
 # The venv is rebuilt only when py/requirements.txt changes (marker file
 # guards re-install on every test run). Fails fast with a clear message if

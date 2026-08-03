@@ -44,6 +44,21 @@ var afIdentityKeys = map[string]bool{
 	"AF_WORKTREE_ID": true,
 }
 
+// afTelemetryKeys are the OTel launch-env family session.Manager owns as the single writer
+// (issue #329 K5). A profile that named one could inject telemetry env at the launch chokepoint
+// and race that writer — spoofing attribution or overriding the endpoint. They are denylisted
+// from every profile's export keys exactly as afIdentityKeys are, so telemetry env has one
+// writer. This must stay byte-identical to session.telemetryFamilyVars (the seven-var set).
+var afTelemetryKeys = map[string]bool{
+	"CLAUDE_CODE_ENABLE_TELEMETRY": true,
+	"OTEL_METRICS_EXPORTER":        true,
+	"OTEL_LOGS_EXPORTER":           true,
+	"OTEL_EXPORTER_OTLP_PROTOCOL":  true,
+	"OTEL_EXPORTER_OTLP_ENDPOINT":  true,
+	"OTEL_EXPORTER_OTLP_HEADERS":   true,
+	"OTEL_RESOURCE_ATTRIBUTES":     true,
+}
+
 // LoadModelsConfig loads and validates .agentfactory/models.json. An absent file
 // returns an empty config + nil error (NOT a not-found error), mirroring
 // LoadStartupConfig.
@@ -108,6 +123,9 @@ func validateModelProfile(name string, profile map[string]string) error {
 	for key, val := range profile {
 		if afIdentityKeys[key] {
 			return fmt.Errorf("%w: model %q sets identity var %q reserved for the session manager", ErrInvalidType, name, key)
+		}
+		if afTelemetryKeys[key] {
+			return fmt.Errorf("%w: model %q sets telemetry var %q reserved for the session manager (telemetry env has one writer)", ErrInvalidType, name, key)
 		}
 		if key == envAPIKey && val != "" {
 			return fmt.Errorf("%w: model %q sets a non-empty %s; a real key must not appear in a launch line (use \"\" to clear)", ErrInvalidType, name, envAPIKey)

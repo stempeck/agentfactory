@@ -745,22 +745,18 @@ func TestWebBridgeHostListenerToolGuard(t *testing.T) {
 //  1. the completion-path web reveal `if ! ( _web_bridge "$CONTAINER_NAME" … )` runs AFTER
 //     the `Setup complete!` banner and BEFORE the final `docker exec … bash`, so the URL is
 //     revealed before the user's single landing shell (quickdocker.sh:702 → :705);
-//  2. Step-8's `docker exec` exports `-e AF_QUICKDOCKER_DRIVEN=1` (quickdocker.sh:641); and
-//  3. quickstart.sh's redundant `exec bash` is guarded by `-z "${AF_QUICKDOCKER_DRIVEN:-}"`
-//     (quickstart.sh:719 → :721), so the driven install lands ONE shell, not two.
-//
-// (2) and (3) are the two halves of a single coordinated edit (K6): dropping EITHER reopens
-// the double-shell hop, so BOTH are asserted (peer review's single enforcement gap).
+//  2. the driven install lands ONE shell, not two. Originally this was the K6 coordinated
+//     pair (Step-8 exporting AF_QUICKDOCKER_DRIVEN=1, quickstart.sh gating its terminal
+//     `exec bash` on it); the exec has since been deleted outright, so the invariant is
+//     now ABSENCE — quickstart.sh must not contain `exec bash` at all. Reintroducing it
+//     re-nests a shell on every manual rerun and re-hangs any non-interactive caller that
+//     does not starve its stdin (see install.go's runQuickstartScript).
 //
 // These are true mutation guards, not presence checks — the ordering subtests use
 // strings.Index ORDER comparisons so moving/dropping any edit goes RED (AC#3). The search is
 // anchored from `Setup complete!` because both `_web_bridge "$CONTAINER_NAME"` (the --web arm
 // at :381) and `docker exec -it -u dev "$CONTAINER_NAME" bash` (the --shell arm at :375)
 // appear a SECOND time before the banner; a whole-file Index would bind to the wrong lines.
-// The export is asserted with a whole-file Contains, not a `[^\n]*…quickstart.sh` regex —
-// Step-8 spans two physical lines (the `\` continuation on :641, `./quickstart.sh` on :642),
-// so `[^\n]*` cannot cross the newline and that regex would be a false-green.
-//
 // The isolation subtests run a docker-free bash harness (the structure mirrors the relay
 // wrapper, with `_web_bridge` stubbed) to pin the central safety property: the mandatory
 // subshell `( … )` confines `_web_bridge`'s `exit 1` under `set -euo pipefail`, so the shell
@@ -800,25 +796,13 @@ func TestQuickdockerWebRevealAtCompletion(t *testing.T) {
 		}
 	})
 
-	// ── K6 export half: Step-8 must carry the coordination var (whole-file; occurs once) ──
-	t.Run("step8_exports_driven_var", func(t *testing.T) {
-		if !strings.Contains(read("quickdocker.sh"), "-e AF_QUICKDOCKER_DRIVEN=1") {
-			t.Error("K6/AC#3: Step-8 `docker exec` must export `-e AF_QUICKDOCKER_DRIVEN=1` so quickstart " +
-				"can suppress its redundant in-container `exec bash` (dropping it reopens the double-shell hop)")
-		}
-	})
-
-	// ── K6 guard half (REQUIRED — peer review's single enforcement gap): quickstart's
-	//    `exec bash` must be gated by the var, ordered guard-before-exec so dropping the
-	//    guard alone goes RED even if the export half is still present. ──
-	t.Run("quickstart_exec_bash_guarded", func(t *testing.T) {
-		qs := read("quickstart.sh")
-		idxGuard := strings.Index(qs, `-z "${AF_QUICKDOCKER_DRIVEN:-}"`)
-		idxExec := strings.Index(qs, "exec bash")
-		if idxGuard < 0 || idxExec < 0 || idxGuard >= idxExec {
-			t.Errorf(`K6/AC#3: quickstart.sh `+"`exec bash`"+` (idx=%d) must be guarded by `+
-				"`-z \"${AF_QUICKDOCKER_DRIVEN:-}\"`"+` (idx=%d) — ship both halves of K6 or neither`,
-				idxExec, idxGuard)
+	// ── Single-shell invariant (supersedes the K6 guarded-exec pair): quickstart.sh must
+	//    not contain `exec bash` at all. Reintroducing it re-nests a shell on every manual
+	//    rerun and re-hangs any non-interactive caller that doesn't starve its stdin. ──
+	t.Run("quickstart_no_exec_bash", func(t *testing.T) {
+		if idx := strings.Index(read("quickstart.sh"), "exec bash"); idx >= 0 {
+			t.Errorf("quickstart.sh contains `exec bash` at idx=%d; the terminal shell restart was "+
+				"deleted deliberately (single-shell invariant) — do not reintroduce it", idx)
 		}
 	})
 

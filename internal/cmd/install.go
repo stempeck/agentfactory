@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"embed"
 	"fmt"
@@ -34,6 +35,8 @@ var skillsFS embed.FS
 var installInitFlag bool
 var installAgentsFlag bool
 var installNoBuildFlag bool
+var installLitellmFlag bool
+var installNoTelemetryFlag bool
 
 var installCmd = &cobra.Command{
 	Use:   "install [role]",
@@ -49,10 +52,14 @@ the role template, and writes Claude Code settings.json with hooks.
 Redeploy all formula-derived agents (--agents) regenerates every specialist
 template and reinstalls the factory in one command, resolving the AF source
 tree and project directory for you. It runs agent-gen-all.sh (regenerate
-templates + rebuild) first, then quickstart.sh (full bootstrap), the latter
-non-interactively so its terminal 'exec bash' exits on its own. Add --no-build
+templates + rebuild) first, then quickstart.sh (full bootstrap)
+non-interactively. Add --no-build
 to skip agent-gen-all.sh's duplicate rebuild (quickstart.sh always rebuilds the
-binary). It stops all agents (the wrapped 'af down --all' never restarts them),
+binary). Add --litellm to also set up the gateway for running agents on OpenAI
+models; it asks for your OpenAI API key the first time and reuses the stored
+key on later runs. Add --no-telemetry to skip the telemetry backend and turn
+recording off — without it, a successful redeploy turns recording on, resetting
+any manual af telemetry toggle from before. It stops all agents (the wrapped 'af down --all' never restarts them),
 so run 'af up' afterward. It requires an already-initialized factory:
 agent-gen-all.sh runs first and aborts if .agentfactory/store/formulas/ is
 absent, before quickstart.sh could bootstrap a cold factory; for a first-time or
@@ -60,7 +67,11 @@ cold-start setup run quickdocker.sh/quickstart.sh first. Residual risk: the
 command is not transactional, so a mid-run failure can leave agents down and the
 factory half-regenerated -- check the streamed exit code and end-state. A green
 unit test confirms dispatch, not factory health; behavioral success requires the
-e2e cold-start, 'af up', 'af sling', PR check.`,
+e2e cold-start, 'af up', 'af sling', PR check.
+
+AUTHORITY: --agents wraps 'af down --all', a factory-wide teardown and therefore
+an operator action. Inside an af-managed agent session 'af install --agents'
+refuses — run it from a host shell.`,
 	RunE: runInstall,
 }
 
@@ -70,6 +81,10 @@ func init() {
 		"Regenerate and reinstall all formula-derived agents (runs agent-gen-all.sh then quickstart.sh)")
 	installCmd.Flags().BoolVar(&installNoBuildFlag, "no-build", false,
 		"With --agents: skip ONLY agent-gen-all.sh's duplicate rebuild — quickstart.sh always rebuilds the binary, so the embedded identity is never left stale")
+	installCmd.Flags().BoolVar(&installLitellmFlag, "litellm", false,
+		"With --agents: also set up the gateway for running agents on OpenAI models (asks for your OpenAI API key the first time; see USING_LITELLM.md)")
+	installCmd.Flags().BoolVar(&installNoTelemetryFlag, "no-telemetry", false,
+		"With --agents: skip the telemetry backend and turn recording off (without it, a successful redeploy turns recording on)")
 	rootCmd.AddCommand(installCmd)
 }
 
@@ -84,6 +99,9 @@ func runInstall(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--agents takes no role argument (usage: af install --agents)")
 		}
 		return runInstallAgents(cmd)
+	}
+	if installLitellmFlag || installNoTelemetryFlag {
+		return fmt.Errorf("--litellm and --no-telemetry require --agents")
 	}
 	if installInitFlag {
 		return runInstallInit(cmd)
@@ -165,7 +183,7 @@ func runInstallInit(cmd *cobra.Command) error {
 		"startup.json": `{"agents":["manager"],"quality":"default","fidelity":"default","start_dispatch":true,"watchdog_agents":["manager","supervisor"]}`,
 		// Per-agent model registry (issue #480); the default model tracks quickstart.sh
 		// (see TestInstallScaffold_DefaultModel_MatchesQuickstart).
-		"models.json": `{"default":"default","models":{"default":{"ANTHROPIC_MODEL":"claude-opus-4-8","ANTHROPIC_DEFAULT_OPUS_MODEL":"claude-opus-4-8","ANTHROPIC_DEFAULT_SONNET_MODEL":"claude-sonnet-5"},"lmstudio":{"ANTHROPIC_BASE_URL":"http://localhost:1234","ANTHROPIC_AUTH_TOKEN":"lm-studio","ANTHROPIC_MODEL":"qwen2.5-coder-32b","ANTHROPIC_API_KEY":""},"sonnet-5":{"ANTHROPIC_MODEL":"claude-sonnet-5"},"opus-4-8":{"ANTHROPIC_MODEL":"claude-opus-4-8"},"fable-5":{"ANTHROPIC_MODEL":"claude-fable-5"}},"agents":{"design":"opus-4-8","design-plan-impl":"opus-4-8","design-v3":"opus-4-8","design-v7":"opus-4-8","factoryworker":"sonnet-5","gherkin-breakdown":"opus-4-8","investigate":"opus-4-8","mergepatrol":"opus-4-8","minimalworker":"opus-4-8","rapid-implement":"sonnet-5","fable-implement":"sonnet-5","rapid-increment":"opus-4-8","fable-increment":"opus-4-8","rapid-soldesign-plan":"opus-4-8","rootcause-all":"opus-4-8","supervisor":"opus-4-8","ultra-review":"opus-4-8","fable-review":"opus-4-8","web-design":"opus-4-8"}}`,
+		"models.json": `{"default":"default","models":{"default":{"ANTHROPIC_MODEL":"claude-opus-5","ANTHROPIC_DEFAULT_OPUS_MODEL":"claude-opus-5","ANTHROPIC_DEFAULT_SONNET_MODEL":"claude-sonnet-5"},"lmstudio":{"ANTHROPIC_BASE_URL":"http://localhost:1234","ANTHROPIC_AUTH_TOKEN":"lm-studio","ANTHROPIC_MODEL":"qwen2.5-coder-32b","ANTHROPIC_API_KEY":""},"sonnet-5":{"ANTHROPIC_MODEL":"claude-sonnet-5"},"opus-4-8":{"ANTHROPIC_MODEL":"claude-opus-4-8"},"opus-5":{"ANTHROPIC_MODEL":"claude-opus-5"},"fable-5":{"ANTHROPIC_MODEL":"claude-fable-5"}},"agents":{"design":"opus-5","design-plan-impl":"opus-5","design-v3":"opus-5","design-v7":"opus-5","factoryworker":"sonnet-5","gherkin-breakdown":"opus-5","investigate":"opus-5","mergepatrol":"opus-5","minimalworker":"opus-5","rapid-implement":"sonnet-5","fable-implement":"sonnet-5","rapid-increment":"opus-5","fable-increment":"opus-5","rapid-soldesign-plan":"opus-5","rootcause-all":"opus-5","supervisor":"opus-5","ultra-review":"opus-5","fable-review":"opus-5","web-design":"opus-5"}}`,
 	}
 
 	for name, content := range starterConfigs {
@@ -686,12 +704,32 @@ func runInstallAgents(cmd *cobra.Command) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), "warning: running from the agentfactory source repo — agent-gen-all.sh will remove local formulas/templates that have no source counterpart (destructive orphan removal)")
 	}
 
-	// Guard 5 (R1/G3) — WARN when the caller is itself a live agent session: the
-	// impending `af down --all` (agent-gen-all.sh:57) SIGKILLs every agent,
-	// including this one. Transparent self-survival is infeasible (C-1) — surface
-	// it, then proceed.
-	if inAgentSession() {
-		fmt.Fprintln(cmd.ErrOrStderr(), "warning: running inside a live agent session — agent-gen-all.sh runs `af down --all`, which will SIGKILL all agents including this session")
+	// K6 (#541) — REFUSE in agent context, replacing Guard 5's WARN. This fires
+	// BEFORE the runAgentGenScript seam (below), whose agent-gen-all.sh runs
+	// `af down --all` and would SIGKILL every agent including this one. Gating in
+	// runInstallAgents (the shared pipeline) means a future `af plugin install`
+	// (#538) inherits the guard on rebase. Operator context returns nil and falls
+	// through to the byte-for-byte regeneration (AC-7 regen safety).
+	if err := requireOperatorTeardown("af install --agents"); err != nil {
+		return err
+	}
+
+	// --litellm key acquisition, UP FRONT. setup_litellm runs LAST in the
+	// bootstrap and its stdin is /dev/null through af (ADR-014), so the script's
+	// own TTY prompt is unreachable — without this block a cold factory would
+	// burn the full non-transactional bootstrap (agents down) and fail only at
+	// the very end. Same source precedence as setup_litellm (secret file > env >
+	// prompt); a prompted key is exported so quickstart's env branch receives and
+	// persists it exactly as a directly-typed one.
+	if installLitellmFlag && os.Getenv("OPENAI_API_KEY") == "" {
+		keyFile := filepath.Join(config.ConfigDir(factoryRoot), "secrets", "openai.key")
+		if fi, err := os.Stat(keyFile); err != nil || fi.Size() == 0 {
+			key, err := promptOpenAIKey(cmd.ErrOrStderr(), keyFile)
+			if err != nil {
+				return fmt.Errorf("cannot run af install --agents --litellm without an OpenAI API key: export OPENAI_API_KEY or create %s (%v)", keyFile, err)
+			}
+			os.Setenv("OPENAI_API_KEY", key)
+		}
 	}
 
 	// Guard 6 (R9/H1) — WARN when a locally-edited shipped formula would be
@@ -714,14 +752,34 @@ func runInstallAgents(cmd *cobra.Command) error {
 	if err := runAgentGenScript(cmd, afSrc, cwd, installNoBuildFlag); err != nil {
 		return err // abort before quickstart on non-zero (no half-bootstrap)
 	}
-	return runQuickstartScript(cmd, afSrc, cwd) // stdin←/dev/null (exec-bash mitigation)
-}
+	var quickstartArgs []string
+	if installLitellmFlag {
+		quickstartArgs = append(quickstartArgs, "--litellm")
+	}
+	if installNoTelemetryFlag {
+		quickstartArgs = append(quickstartArgs, "--no-telemetry")
+	}
+	if err := runQuickstartScript(cmd, afSrc, cwd, quickstartArgs); err != nil { // stdin←/dev/null (exec-bash mitigation)
+		return err
+	}
 
-// inAgentSession reports whether this process is running inside a live agent
-// session, detected via the AF_ROLE env var the session manager sets
-// (session.go:288-294). There is no central helper today — the package reads
-// AF_ROLE directly in done.go/containment.go/helpers.go; this mirrors them.
-func inAgentSession() bool { return os.Getenv("AF_ROLE") != "" }
+	// The redeploy drives the telemetry gate: --no-telemetry means the operator
+	// chose no measurement, its absence means they chose measurement (the backend
+	// was just provisioned). The flag is the source of truth on EVERY run —
+	// deliberately overwriting a manual `af telemetry on|off` from before — and
+	// only after a successful bootstrap, from the operator-only context the
+	// console can never reach (telemetry.go's on/off restriction); quickstart
+	// itself never touches the gate by contract (setup_telemetry header).
+	gate := "on"
+	if installNoTelemetryFlag {
+		gate = "off"
+	}
+	if err := os.WriteFile(telemetryGateFile(factoryRoot), []byte(gate+"\n"), 0644); err != nil {
+		return fmt.Errorf("setting telemetry %s: %w", gate, err)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "telemetry: %s\n", gate)
+	return nil
+}
 
 // warnShippedFormulaClobber prints Guard 6's warning for each project formula
 // under config.FormulasDir(cwd) that also exists under the ON-DISK
@@ -774,14 +832,50 @@ var runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBui
 	return c.Run() // propagate exit code as error
 }
 
+// promptOpenAIKey is the ADR-009 seam for the --litellm key prompt. af prompts
+// here, before either bootstrap script runs, precisely because ADR-014 makes
+// quickstart's own prompt unreachable through af. Echo is disabled via stty — a
+// system binary through os/exec, exempt from ADR-013's go.mod freeze (x/term
+// would be a new direct require). If stty fails the key echoes on the
+// operator's own terminal; proceeding beats refusing there, since the
+// documented alternative (export OPENAI_API_KEY) exposes strictly more.
+var promptOpenAIKey = func(errW io.Writer, keyFile string) (string, error) {
+	fi, err := os.Stdin.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return "", fmt.Errorf("stdin is not a terminal, cannot prompt")
+	}
+	fmt.Fprintf(errW, "OpenAI API key (stored at %s): ", keyFile)
+	echoOff := exec.Command("stty", "-echo")
+	echoOff.Stdin = os.Stdin
+	sttyWorked := echoOff.Run() == nil
+	line, readErr := bufio.NewReader(os.Stdin).ReadString('\n')
+	if sttyWorked {
+		echoOn := exec.Command("stty", "echo")
+		echoOn.Stdin = os.Stdin
+		echoOn.Run()
+	}
+	fmt.Fprintln(errW)
+	key := strings.TrimSpace(line)
+	if key == "" {
+		if readErr != nil {
+			return "", fmt.Errorf("could not read key: %v", readErr)
+		}
+		return "", fmt.Errorf("no key provided")
+	}
+	return key, nil
+}
+
 // runQuickstartScript is the ADR-009 seam for quickstart.sh. Stdin is /dev/null
-// so the script's terminal `exec bash` (quickstart.sh:625) reads EOF and exits
-// instead of hanging or hijacking the session (ADR-014 mitigation).
-var runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string) error {
-	c := exec.Command(filepath.Join(afSrc, "quickstart.sh")) // argv form; no --no-build
+// so the bootstrap can never block on interactive input (ADR-014; originally the
+// mitigation for a terminal `exec bash` the script no longer has).
+var runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error {
+	// extraArgs carries only af-defined mirror flags (--litellm/--no-telemetry),
+	// never operator-typed passthrough — quickstart's unknown-option arm only
+	// warns, so an unvetted arg would be silently ignored mid-bootstrap.
+	c := exec.Command(filepath.Join(afSrc, "quickstart.sh"), extraArgs...) // argv form, never a shell invocation (security.md SEC-1)
 	c.Dir = projectDir
 	c.Env = append(os.Environ(), "AF_SRC="+afSrc)
-	c.Stdin = nil // nil ⇒ /dev/null in os/exec → exec bash gets EOF
+	c.Stdin = nil // nil ⇒ /dev/null in os/exec → any interactive read gets EOF
 	c.Stdout = cmd.OutOrStdout()
 	c.Stderr = cmd.ErrOrStderr()
 	return c.Run()

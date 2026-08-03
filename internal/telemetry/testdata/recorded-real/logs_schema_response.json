@@ -1,0 +1,333 @@
+{
+    "name": "default",
+    "storage_type": "disk",
+    "stream_type": "logs",
+    "stats": {
+        "created_at": 1785075479112000,
+        "doc_time_min": 1785075479112000,
+        "doc_time_max": 1785243408699000,
+        "doc_num": 11112,
+        "file_num": 102,
+        "storage_size": 12.29454231262207,
+        "compressed_size": 1.777003288269043,
+        "index_size": 0.6123628616333008
+    },
+    "schema": [
+        {
+            "name": "_timestamp",
+            "type": "Int64"
+        },
+        {
+            "name": "af_agent",
+            "type": "Utf8"
+        },
+        {
+            "name": "af_factory_id",
+            "type": "Utf8"
+        },
+        {
+            "name": "af_formula_instance",
+            "type": "Utf8"
+        },
+        {
+            "name": "af_model_profile",
+            "type": "Utf8"
+        },
+        {
+            "name": "af_worktree_id",
+            "type": "Utf8"
+        },
+        {
+            "name": "agent_path_count",
+            "type": "Int64"
+        },
+        {
+            "name": "appearance_id",
+            "type": "Utf8"
+        },
+        {
+            "name": "body",
+            "type": "Utf8"
+        },
+        {
+            "name": "command_name",
+            "type": "Utf8"
+        },
+        {
+            "name": "command_path_count",
+            "type": "Int64"
+        },
+        {
+            "name": "command_source",
+            "type": "Utf8"
+        },
+        {
+            "name": "decision",
+            "type": "Utf8"
+        },
+        {
+            "name": "decision_source",
+            "type": "Utf8"
+        },
+        {
+            "name": "decision_type",
+            "type": "Utf8"
+        },
+        {
+            "name": "dropped_attributes_count",
+            "type": "Int64"
+        },
+        {
+            "name": "duration_ms",
+            "type": "Utf8"
+        },
+        {
+            "name": "enabled_via",
+            "type": "Utf8"
+        },
+        {
+            "name": "enabled_via_override",
+            "type": "Boolean"
+        },
+        {
+            "name": "event_name",
+            "type": "Utf8"
+        },
+        {
+            "name": "event_sequence",
+            "type": "Int64"
+        },
+        {
+            "name": "event_timestamp",
+            "type": "Utf8"
+        },
+        {
+            "name": "event_type",
+            "type": "Utf8"
+        },
+        {
+            "name": "has_hooks",
+            "type": "Boolean"
+        },
+        {
+            "name": "has_mcp",
+            "type": "Boolean"
+        },
+        {
+            "name": "hook_event",
+            "type": "Utf8"
+        },
+        {
+            "name": "hook_name",
+            "type": "Utf8"
+        },
+        {
+            "name": "hook_source",
+            "type": "Utf8"
+        },
+        {
+            "name": "hook_type",
+            "type": "Utf8"
+        },
+        {
+            "name": "host_arch",
+            "type": "Utf8"
+        },
+        {
+            "name": "host_owned_mcp",
+            "type": "Boolean"
+        },
+        {
+            "name": "instrumentation_library_name",
+            "type": "Utf8"
+        },
+        {
+            "name": "instrumentation_library_version",
+            "type": "Utf8"
+        },
+        {
+            "name": "is_plugin",
+            "type": "Boolean"
+        },
+        {
+            "name": "managed_only",
+            "type": "Utf8"
+        },
+        {
+            "name": "marketplace_name",
+            "type": "Utf8"
+        },
+        {
+            "name": "message_uuid",
+            "type": "Utf8"
+        },
+        {
+            "name": "num_blocking",
+            "type": "Utf8"
+        },
+        {
+            "name": "num_cancelled",
+            "type": "Utf8"
+        },
+        {
+            "name": "num_hooks",
+            "type": "Utf8"
+        },
+        {
+            "name": "num_non_blocking_error",
+            "type": "Utf8"
+        },
+        {
+            "name": "num_success",
+            "type": "Utf8"
+        },
+        {
+            "name": "organization_id",
+            "type": "Utf8"
+        },
+        {
+            "name": "os_type",
+            "type": "Utf8"
+        },
+        {
+            "name": "os_version",
+            "type": "Utf8"
+        },
+        {
+            "name": "plugin_id_hash",
+            "type": "Utf8"
+        },
+        {
+            "name": "plugin_name",
+            "type": "Utf8"
+        },
+        {
+            "name": "plugin_scope",
+            "type": "Utf8"
+        },
+        {
+            "name": "prompt",
+            "type": "Utf8"
+        },
+        {
+            "name": "prompt_id",
+            "type": "Utf8"
+        },
+        {
+            "name": "prompt_length",
+            "type": "Utf8"
+        },
+        {
+            "name": "safe_mode",
+            "type": "Utf8"
+        },
+        {
+            "name": "server_scope",
+            "type": "Utf8"
+        },
+        {
+            "name": "service_name",
+            "type": "Utf8"
+        },
+        {
+            "name": "service_version",
+            "type": "Utf8"
+        },
+        {
+            "name": "session_id",
+            "type": "Utf8"
+        },
+        {
+            "name": "severity",
+            "type": "Int64"
+        },
+        {
+            "name": "skill_path_count",
+            "type": "Int64"
+        },
+        {
+            "name": "source",
+            "type": "Utf8"
+        },
+        {
+            "name": "status",
+            "type": "Utf8"
+        },
+        {
+            "name": "success",
+            "type": "Utf8"
+        },
+        {
+            "name": "survey_type",
+            "type": "Utf8"
+        },
+        {
+            "name": "terminal_type",
+            "type": "Utf8"
+        },
+        {
+            "name": "tool_input_size_bytes",
+            "type": "Utf8"
+        },
+        {
+            "name": "tool_name",
+            "type": "Utf8"
+        },
+        {
+            "name": "tool_result_size_bytes",
+            "type": "Utf8"
+        },
+        {
+            "name": "tool_source",
+            "type": "Utf8"
+        },
+        {
+            "name": "tool_use_id",
+            "type": "Utf8"
+        },
+        {
+            "name": "total_duration_ms",
+            "type": "Utf8"
+        },
+        {
+            "name": "transport_type",
+            "type": "Utf8"
+        },
+        {
+            "name": "user_account_id",
+            "type": "Utf8"
+        },
+        {
+            "name": "user_account_uuid",
+            "type": "Utf8"
+        },
+        {
+            "name": "user_email",
+            "type": "Utf8"
+        },
+        {
+            "name": "user_id",
+            "type": "Utf8"
+        }
+    ],
+    "settings": {
+        "partition_keys": {},
+        "full_text_search_keys": [],
+        "index_fields": [],
+        "bloom_filter_fields": [],
+        "distinct_value_fields": [],
+        "data_retention": 0,
+        "max_query_range": 0,
+        "store_original_data": false,
+        "approx_partition": false,
+        "index_updated_at": 0,
+        "extended_retention_days": [],
+        "index_original_data": false,
+        "index_all_values": false,
+        "enable_distinct_fields": true,
+        "enable_log_patterns_extraction": false,
+        "is_llm_stream": false,
+        "storage_type": "normal"
+    },
+    "total_fields": 74
+}

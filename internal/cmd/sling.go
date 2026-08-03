@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/checkpoint"
@@ -17,6 +18,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/mail"
 	"github.com/stempeck/agentfactory/internal/session"
+	"github.com/stempeck/agentfactory/internal/telemetry"
 	"github.com/stempeck/agentfactory/internal/templates"
 	"github.com/stempeck/agentfactory/internal/tmux"
 	"github.com/stempeck/agentfactory/internal/worktree"
@@ -52,6 +54,11 @@ type InstantiateParams struct {
 	WorkDir         string
 	TaskDescription string
 	CallerIdentity  string
+
+	// Model is this launch's --model selection. It is carried here rather than read from the
+	// package global because the marker on disk is not written until session launch, i.e.
+	// after instantiation records what model the run began with.
+	Model string
 }
 
 var slingCmd = &cobra.Command{
@@ -93,6 +100,8 @@ func init() {
 }
 
 func runSling(cmd *cobra.Command, args []string) error {
+	start := time.Now()
+
 	if err := validateSlingArgs(slingFormulaName, slingAgent, args); err != nil {
 		return err
 	}
@@ -106,6 +115,15 @@ func runSling(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// Both paths below already carry cmd.Context() into the frame that records, so replacing
+	// the command's context here reaches the recording site without changing a single
+	// signature — and the pipeline those signatures front carries dozens of test call sites.
+	cmd.SetContext(withVerbTelemetry(cmd.Context(), verbTelemetry{
+		verb:    "sling",
+		start:   start,
+		enabled: telemetryFactoryEnabled(root),
+	}))
 
 	fmt.Fprintf(cmd.OutOrStdout(), "factory: %s\n", root)
 
@@ -149,6 +167,38 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 	// Pre-flight: check if agent is already running BEFORE creating beads
 	mgr := session.NewManager(root, agentName, entry)
 	if slingReset {
+		// #548 P5: gate the reset stop through the same tiered authority model as `af down`. The
+		// operator path short-circuits to a byte-identical no-op BEFORE any probe (the web console
+		// spawns this as an Operator; parity gap 1). In agent context, refuse (reusing the K1
+		// refusal verbatim) only when the target is RUNNING, the stop is not tier-granted by
+		// scopedStopAllowed, and the caller is not the dispatch daemon — the daemon re-slings
+		// specialists it did not dispatch and is admitted by its own session identity
+		// (CurrentSessionName() == DispatchSessionName()). The not-running carve-out keeps
+		// first-dispatch and redispatch-after-crash working.
+		if callerAuthority() == AuthorityAgent {
+			agentsCfg, err := config.LoadAgentConfig(config.AgentsConfigPath(root))
+			if err != nil {
+				return err
+			}
+			tx := newCmdTmux()
+			running, err := tx.HasSession(session.SessionName(agentName))
+			if err != nil {
+				// Fail closed: an unreadable running-state must not let an unauthorized
+				// agent-context caller fall through to mgr.Stop() + resetAgentState (a
+				// destructive reset). Treat the target as running so the refusal below can
+				// fire; the scoped/daemon carve-outs still admit legitimate callers.
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: cannot determine if %s is running (%v); treating as running and requiring operator authority\n", agentName, err)
+				running = true
+			}
+			_, scoped := scopedStopAllowed(agentName, agentsCfg.Agents)
+			isDaemon := false
+			if cur, curErr := tx.CurrentSessionName(); curErr == nil {
+				isDaemon = cur == session.DispatchSessionName()
+			}
+			if running && !scoped && !isDaemon {
+				return requireOperatorTeardown("af sling --reset")
+			}
+		}
 		if err := mgr.Stop(); err != nil && err != session.ErrNotRunning {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to stop %s: %v\n", agentName, err)
 		}
@@ -210,6 +260,7 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 	// persistFormulaCaller has no-overwrite semantics.
 	os.Remove(filepath.Join(agentDir, ".runtime", "formula_caller"))
 	os.Remove(filepath.Join(agentDir, ".runtime", "hooked_formula"))
+	os.Remove(filepath.Join(agentDir, ".runtime", "dispatch_owner"))
 	var callerIdentity string
 	if slingCaller != "" {
 		callerIdentity = slingCaller
@@ -217,6 +268,11 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 	} else {
 		callerIdentity = ensureCallerIdentity(callerWd, root, agentDir, cmd.ErrOrStderr())
 	}
+	// Provenance for scoped-stop authorization (#548 P3). Written on the DISPATCH path only —
+	// never by instantiateFormulaWorkflow (a self-slung formula must not mint stop-rights) —
+	// and paired with the stale-remove above rather than persistFormulaCaller's no-overwrite
+	// idiom, so a --persistent re-dispatch replaces the previous owner instead of inheriting it.
+	writeDispatchOwner(agentDir, callerIdentity)
 	if !slingPersistent {
 		writeDispatchedMarker(agentDir, callerIdentity)
 	}
@@ -235,6 +291,7 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 		WorkDir:         agentDir,
 		TaskDescription: task,
 		CallerIdentity:  callerIdentity,
+		Model:           slingModel,
 	}
 
 	if _, _, _, err := instantiateFormulaWorkflow(params, cmd.OutOrStdout()); err != nil {
@@ -320,6 +377,7 @@ func runFormulaInstantiation(cmd *cobra.Command, root, wd string, args []string)
 		AgentName:   slingAgent,
 		Root:        root,
 		WorkDir:     wd,
+		Model:       slingModel,
 	}
 
 	_, _, agentName, err := instantiateFormulaWorkflow(params, cmd.OutOrStdout())
@@ -540,6 +598,18 @@ func instantiateFormulaWorkflow(params InstantiateParams, w io.Writer) (string, 
 	instanceID, stepIDs, err := instantiateFormula(ctx, store, f, sortedIDs, agentName, params.Root)
 	if err != nil {
 		return "", nil, agentName, err
+	}
+
+	// 6.0. A formula instance now exists. Recorded at the call site rather than inside
+	// instantiateFormula because only this frame knows the working directory the correlation
+	// markers live in. The worktree id is legitimately empty on the interactive path — the
+	// worktree is resolved after this function returns — and an empty field is the honest
+	// answer, not a reason to reorder a launch sequence around a record.
+	if vt := verbTelemetryFrom(ctx); vt.enabled {
+		ev := telemetryRecordFor(ctx, params.Root, params.WorkDir, agentName, instanceID, params.Model)
+		ev.Event = telemetry.EventInstanceStart
+		ev.Formula = telemetryFormulaName(f.Name)
+		appendTelemetryRecord(params.Root, ev)
 	}
 
 	// 6.1. Persist the resolved variables on a dedicated metadata child bead so
@@ -808,6 +878,17 @@ func persistFormulaCaller(agentDir, caller string) {
 	os.WriteFile(callerPath, []byte(caller), 0o644)
 }
 
+// writeDispatchOwner records the dispatcher identity for scoped-stop provenance (#548 P3) in
+// <agentDir>/.runtime/dispatch_owner. Unlike persistFormulaCaller it has NO no-overwrite
+// guard: the dispatch site always pairs it with a stale-remove, so a re-dispatch replaces the
+// previous owner rather than inheriting a stale one. Best-effort — authorization fails closed
+// on an absent datum, so a write error is not fatal.
+func writeDispatchOwner(agentDir, owner string) {
+	runtimeDir := filepath.Join(agentDir, ".runtime")
+	os.MkdirAll(runtimeDir, 0o755)
+	os.WriteFile(filepath.Join(runtimeDir, "dispatch_owner"), []byte(owner), 0o644)
+}
+
 // detectAgentName tries to detect the current agent name from the working directory.
 // Delegates to resolveAgentName (helpers.go) for three-tier resolution.
 func detectAgentName(wd, root string) (string, error) {
@@ -868,6 +949,12 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 	// durable agents-map/agents.json default writes no marker (it resolves durably).
 	if cliModel != "" && modelName != "" {
 		writeModelOverride(agentDir, modelName)
+	}
+
+	// Telemetry env (issue #329): gate-checked at the cmd layer, built from the resolved
+	// model name so the launch keys match the record keys. Gate off ⇒ nil ⇒ zero OTel vars.
+	if env := telemetryLaunchEnv(root, agentDir, agentName, modelName, cmd.ErrOrStderr()); env != nil {
+		mgr.SetTelemetryEnv(env)
 	}
 
 	if err := mgr.Start(); err != nil {

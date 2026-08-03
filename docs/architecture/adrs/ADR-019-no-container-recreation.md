@@ -6,7 +6,7 @@
 ## Context
 
 A factory runs inside a long-lived Docker container, created by the
-`docker run -dit … bash --login` at `quickdocker.sh:486-493`. Customers operate
+`docker run -dit … bash --login` at `quickdocker.sh:540-547`. Customers operate
 **hundreds of factories across dozens of containers each**, and they routinely
 build those containers with their **own proprietary `quickdocker.sh`-like scripts**
 to satisfy their own security and environment requirements — not only with the
@@ -16,7 +16,7 @@ helpers (`internal/cmd/up.go:181-193`), in-progress worktrees, and the customer'
 environment. Destroying the container destroys all of it.
 
 Docker fixes several container properties **at creation time only** — most
-notably published ports: `quickdocker.sh:486-493` runs `docker run -dit … "$BASE_IMAGE" bash --login`
+notably published ports: `quickdocker.sh:540-547` runs `docker run -dit … "$BASE_IMAGE" bash --login`
 with **no `-p`/`--publish`**, and a published port cannot be added to an
 already-running container. The only way to "add a port" is `docker rm -f` +
 re-`docker run`, which is exactly the destructive recreate the existing prompt
@@ -25,7 +25,7 @@ guards behind explicit operator consent (`quickdocker.sh:459-470`,
 
 This tension produced a concrete near-miss (issue #428). The `--web` web-console
 add-on reaches a running container's loopback `webui` through a host-side
-`docker exec` relay (`_web_bridge`, `quickdocker.sh:107-281`), invoked from an
+`docker exec` relay (`_web_bridge`, `quickdocker.sh:110-326`), invoked from an
 early short-circuit that acts on an **already-running** container and `exit 0`s
 **before** any create/recreate logic (`quickdocker.sh:325-337`). When that relay
 broke on macOS, a root-cause analysis recommended replacing it with a
@@ -51,17 +51,17 @@ to the container itself.
 **No af change — architecture, feature, fix, or otherwise — may require recreating
 or destroying an existing factory container, or depend on properties that can only
 be set at container-creation time (published ports via `docker run -p` at
-`quickdocker.sh:486-493`, baked-in `-e` env, network mode, mounts).** Any
+`quickdocker.sh:540-547`, baked-in `-e` env, network mode, mounts).** Any
 capability added for an existing factory must work against an **already-running**
 container, through runtime channels only (`docker exec`, host-side relays such as
-`_web_bridge` at `quickdocker.sh:107-281`, files under the factory root), and must
+`_web_bridge` at `quickdocker.sh:110-326`, files under the factory root), and must
 not assume the container was built by our `quickdocker.sh` rather than a customer's
 own script.
 
 The embodying precedent is the `--web`/`--shell` early short-circuit
 (`quickdocker.sh:325-337`), which deliberately resolves and acts on the running
 container and exits before the create/recreate path; and the Rev-2 `_web_bridge`
-relay (`quickdocker.sh:107-281`), which reaches `webui` from **inside** the
+relay (`quickdocker.sh:110-326`), which reaches `webui` from **inside** the
 container so it needs **no** create-time flag, **no** `-p`, and **no** `server.go`
 change. A fix that can only be realized by `docker rm -f` + `docker run` is, by
 this ADR, the wrong altitude — the policy belongs at a runtime boundary, not the
@@ -83,7 +83,7 @@ container is created with at first `docker run`.
 **Accepted costs:**
 - Some fixes are harder. Reaching an already-running container's loopback service
   requires a runtime relay (host listener tool + in-container `docker exec`
-  relay, `quickdocker.sh:107-281`) instead of a one-line `-p` publish — more code
+  relay, `quickdocker.sh:110-326`) instead of a one-line `-p` publish — more code
   and more failure surface (the macOS host-tool bug, issue #428).
 - Capabilities cannot rely on create-time guarantees; they must rediscover state
   at runtime (e.g. polling `.runtime/webui_server.json` for `webui`'s address,
@@ -115,9 +115,9 @@ container is created with at first `docker run`.
 
 ## Corpus links
 
-- `quickdocker.sh:486-493` — container creation `docker run` with no `-p` (the create-time boundary this ADR refuses to depend on)
+- `quickdocker.sh:540-547` — container creation `docker run` with no `-p` (the create-time boundary this ADR refuses to depend on)
 - `quickdocker.sh:325-337` — the `--web`/`--shell` short-circuit that acts on a running container and exits before create/recreate (the embodying precedent)
-- `quickdocker.sh:107-281` — `_web_bridge` runtime relay reaching `webui` from inside the container (needs no create-time flag)
+- `quickdocker.sh:110-326` — `_web_bridge` runtime relay reaching `webui` from inside the container (needs no create-time flag)
 - `quickdocker.sh:459-470` — operator-consented recreate prompt (the permitted, explicit exception)
 - `.designs/425/implementation-plan/implementation_plan_outline.md:9-15` — Rev-2 rejection of the `-p`/recreate plan (plan of record); original in commit `0a908ad`
 - `todos/rootcause_analysis.md` — issue #428 RCA whose elevation verdict was reversed by this constraint

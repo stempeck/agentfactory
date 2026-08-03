@@ -91,6 +91,45 @@ func TestRunUp_NoStartupConfig_AllStart_WatchdogSkipped(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, ".agentfactory", ".fidelity-gate")); !os.IsNotExist(err) {
 		t.Errorf(".fidelity-gate must be untouched (C-4); stat err=%v", err)
 	}
+	if _, err := os.Stat(filepath.Join(root, ".agentfactory", ".telemetry-gate")); !os.IsNotExist(err) {
+		t.Errorf(".telemetry-gate must be untouched (C-4); stat err=%v", err)
+	}
+}
+
+// The telemetry gate reaches the filesystem only if startup.json's "telemetry" key is
+// carried all the way through: a StartupConfig field, applyGate's case, AND an af up
+// call site. A grep for the string in up.go passes even when the call sits outside the
+// blanket branch, so this is the assertion that proves the wiring is live.
+func TestRunUp_TelemetryGate_Applies(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
+	writeAFFile(t, root, "agents.json", `{"agents":{"manager":{"type":"autonomous","description":"m"}}}`)
+	writeAFFile(t, root, "startup.json", `{"agents":["manager"],"telemetry":"on"}`)
+
+	t.Setenv("AF_WORKTREE", "")
+	t.Setenv("AF_WORKTREE_ID", "")
+	t.Chdir(root)
+
+	setupHermeticSessions(t)
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	_ = runUp(cmd, nil)
+
+	gate, err := os.ReadFile(filepath.Join(root, ".agentfactory", ".telemetry-gate"))
+	if err != nil {
+		t.Fatalf("telemetry:on in startup.json must write .telemetry-gate: %v", err)
+	}
+	if string(gate) != "on\n" {
+		t.Errorf(".telemetry-gate = %q, want %q", string(gate), "on\n")
+	}
+	if out := buf.String(); !strings.Contains(out, "telemetry gate: on") {
+		t.Errorf("af up must echo the applied telemetry state; out=%q", out)
+	}
 }
 
 // SC7 core: a configured subset + quality gate + dispatch + watchdog scope all apply

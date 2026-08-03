@@ -325,16 +325,17 @@ func (j *Job) isRunningLocked() bool {
 	return isActivePhase(st.Phase) && processAlive(st.PID)
 }
 
-// scanBadges extracts Guard-5 / Guard-6 warning badges from the child transcript. It matches the
-// SPECIFIC Guard substrings, never the bare `warning:` prefix — the up phase runs `af up`, whose own
+// scanBadges extracts Guard-6 warning badges from the child transcript. It matches the SPECIFIC
+// Guard-6 substring, never the bare `warning:` prefix — the up phase runs `af up`, whose own
 // `warning:` lines (up.go:124-126, et al.) land in the same log and must NOT be mis-badged.
+// Guard-5's WARN emitter was removed in #541 (install.go now REFUSES in agent context via K6 rather
+// than warning-and-proceeding), so no production code emits its "live agent session" substring; its
+// dead badge case + fixture were removed (PR 544 C1).
 func scanBadges(transcript []byte) []Badge {
 	var badges []Badge
 	for _, raw := range strings.Split(string(transcript), "\n") {
 		line := strings.TrimRight(raw, "\r")
 		switch {
-		case strings.Contains(line, "live agent session"):
-			badges = append(badges, Badge{Guard: 5, Message: line})
 		case strings.Contains(line, "has local edits that agent-gen-all"):
 			badges = append(badges, Badge{Guard: 6, Message: line})
 		}

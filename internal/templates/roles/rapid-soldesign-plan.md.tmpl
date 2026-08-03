@@ -123,6 +123,95 @@ The orchestrator never busy-waits. When an action says "wait for signal X":
    re-run the check. Unprocessed completion mails accumulate in the inbox, so on each
    wake you can tell exactly which signals have arrived.
 
+## Working Directory Discipline (applies to EVERY step that runs `cd`)
+`af done`, `af prime`, and `af mail` resolve formula state from the CURRENT WORKING
+DIRECTORY. Several actions below `cd "${AF_WORKTREE:-$AF_ROOT}"` to run git/gh commands.
+Run `af done` from there and it fails with:
+
+    Error: no active formula (missing .runtime/hooked_formula)
+
+even though the file exists — the two root-resolution paths disagree inside a worktree.
+Observed previously at the commit-and-pr step. Therefore: **after any action that
+`cd`s to the worktree root, return to your agent directory before running `af done`:**
+
+```bash
+cd "${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}"
+```
+
+Prefer `git -C "${AF_WORKTREE:-$AF_ROOT}" …` over `cd` where practical, so the working
+directory never moves in the first place.
+
+## Deferred Variable Substitution (applies to EVERY step whose bash uses {{ "{{" }}design_dir{{ "}}" }} etc.)
+CLI inputs render at prime time; **deferred vars do NOT**. `{{ "{{" }}issue_uri{{ "}}" }}`,
+`{{ "{{" }}analyst_name{{ "}}" }}`, `{{ "{{" }}designer_name{{ "}}" }}`, and `{{ "{{" }}impl_name{{ "}}" }}` arrive substituted.
+`{{ "{{" }}design_dir{{ "}}" }}`, `{{ "{{" }}issue_id{{ "}}" }}`, `{{ "{{" }}issue_title{{ "}}" }}`, `{{ "{{" }}pr_url{{ "}}" }}`, and `{{ "{{" }}gate_bead{{ "}}" }}`
+arrive as those exact literal characters — there is no `af` command that sets a deferred
+var, so nothing ever fills them in. Observed on every prime of a full run.
+
+Running such bash verbatim does not fail loudly; it fails MISLEADINGLY:
+
+    [ ! -f ".../{{ "{{" }}design_dir{{ "}}" }}design-doc.md" ]   → false VERIFICATION FAILED → exit 1,
+                                                   aborting the formula while the file
+                                                   is present on disk
+    grep -E '^{{ "{{" }}design_dir{{ "}}" }}.*outline[.]md$'     → matches nothing → false WARNING and a
+                                                   spurious manager escalation
+    git add {{ "{{" }}design_dir{{ "}}" }}                       → stages nothing, silently
+
+Therefore, **before running any bash in a step that mentions a deferred var, derive the
+shell equivalents first and use the shell variables in the commands:**
+
+```bash
+ISSUE_ID=$(basename "{{ "{{" }}issue_uri{{ "}}" }}")     # {{ "{{" }}issue_uri{{ "}}" }} DOES render; basename → 568
+DESIGN_DIR=".designs/$ISSUE_ID/"
+ANALYSIS_DIR=".analysis/$ISSUE_ID/"
+```
+
+Derivation is deterministic, idempotent, and safe to repeat in every step — re-derive
+rather than assuming a prior step's shell state survived (it does not; each step runs in
+a fresh shell, and sessions reset mid-run).
+
+For deferred values that CANNOT be derived from an input — `{{ "{{" }}pr_url{{ "}}" }}`, `{{ "{{" }}gate_bead{{ "}}" }}`,
+and the bead IDs — record them when first created and read them back later:
+
+```bash
+VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+mkdir -p "$(dirname "$VARS")"
+grep -q "^gate_bead=" "$VARS" 2>/dev/null || printf 'gate_bead="%s"
+' "$GATE_BEAD" >> "$VARS"
+[ -f "$VARS" ] && . "$VARS"
+```
+
+`.work/` sits inside the agent workspace, which is excluded from the design PR, so this
+ledger never pollutes the commit.
+
+## Progress File Durability (applies to EVERY step that edits design-refinement-progress.md)
+`{{ "{{" }}design_dir{{ "}}" }}design-refinement-progress.md` lives in the SHARED worktree that every
+sub-agent also works in. Sub-agents run their own formulas with their own
+cleanup/checkout steps, and those steps discard uncommitted working-tree changes
+indiscriminately — including yours.
+
+An edit you do not commit is therefore not durable. Observed on a full run: dispatch-impl
+recorded "implementation-plan agent dispatched" in the working tree, {{ "{{" }}impl_name{{ "}}" }} later
+ran its cleanup step, and by finalize the row had silently reverted to `Pending | -` and
+had to be re-derived by hand. Nothing failed loudly; the file simply went backwards.
+
+**Therefore: every action that edits the progress file commits it in the same action.**
+
+```bash
+ROOT="${AF_WORKTREE:-$AF_ROOT}"
+ISSUE_ID=$(basename "{{ "{{" }}issue_uri{{ "}}" }}")
+DESIGN_DIR=".designs/$ISSUE_ID/"
+git -C "$ROOT" add "${DESIGN_DIR}design-refinement-progress.md"
+git -C "$ROOT" reset HEAD -- .agentfactory/ 2>/dev/null || true
+git -C "$ROOT" diff --cached --quiet || git -C "$ROOT" commit -q -m "chore($ISSUE_ID): progress — <stage>"
+```
+
+Commit LOCALLY only at these intermediate sites; do not push. commit-and-pr and finalize
+already push, and pushing on every progress edit races the sub-agents pushing to the same
+branch. `git -C` keeps the working directory from moving (see Working Directory
+Discipline), the staged-diff guard makes the commit a no-op when nothing changed, and the
+`.agentfactory/` reset keeps agent workspace files out of the design PR.
+
 ## !IMPORTANT - MANDATORY Exact Step Execution
 Execute each formula step EXACTLY as written, in order, with no modifications.
 Every step produces a file artifact at a known path. `af done` is forbidden
@@ -139,6 +228,17 @@ unresponsive or dead, ESCALATE to the orchestrator - do not invent workarounds.
 Using the Agent tool to perform work that should be done by a dispatched factory
 agent is a CRITICAL violation regardless of whether the output artifacts are correct.
 Process fidelity is non-negotiable.
+
+Scope of `af down` for agents: scoped stops come in tiers. You may `af down`
+yourself, or a specialist you dispatched (dispatcher-scoped) — those stops are
+sanctioned. The interactive manager may additionally stop an autonomous worker it
+did not dispatch (manager-scoped). A granted tier covers `af down <agent> --reset`
+too — the same authority `af sling --agent <agent> --reset` carries. Factory-wide
+teardown (`af down` with no target — bare, `--all`, or `--reset` — plus
+`af install --agents` and `af dispatch stop`) is an operator action and is refused
+inside an agent session.
+Do NOT retry it or seek another way to stop agents; if a factory teardown is
+genuinely required, tell your operator (af mail send manager) and move on.
 
 ## Authority Hierarchy
 Formula contract > manager directives > agent initiative.

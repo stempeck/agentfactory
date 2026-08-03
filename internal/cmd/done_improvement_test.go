@@ -162,8 +162,9 @@ func TestDone_ImprovementHook_FinalOnOn_Fires(t *testing.T) {
 	if m.Formula != "widget" {
 		t.Errorf("marker.formula = %q, want %q (prefix stripped)", m.Formula, "widget")
 	}
-	if m.FormulaPath != ".agentfactory/store/formulas/widget.formula.toml" {
-		t.Errorf("marker.formula_path = %q, want the stripped relative path", m.FormulaPath)
+	wantFormulaPath := filepath.Join(config.FormulasDir(root), "widget.formula.toml")
+	if m.FormulaPath != wantFormulaPath {
+		t.Errorf("marker.formula_path = %q, want the absolute factory-root path %q (issue #563: a relative path resolves against the worktree cwd on a dispatched agent, diverging from the artifact every other surface operates on)", m.FormulaPath, wantFormulaPath)
 	}
 	if strings.Contains(m.FormulaPath, "Formula: ") {
 		t.Errorf("marker.formula_path still carries the 'Formula: ' prefix: %q", m.FormulaPath)
@@ -183,8 +184,13 @@ func TestDone_ImprovementHook_FinalOnOn_Fires(t *testing.T) {
 	}
 
 	// Stdout instruction block: STRIPPED path + the completion command; NOT the raw title.
-	if !strings.Contains(stdout, ".agentfactory/store/formulas/widget.formula.toml") {
-		t.Errorf("stdout missing the stripped formula path:\n%s", stdout)
+	// Anchored on the "formula at " prefix the template emits (improvement.go:192-193), not
+	// on the bare path fragment: the absolute path ENDS WITH that fragment, so an unanchored
+	// Contains succeeds both before and after the #563 fix and pins nothing (PR #565 review,
+	// F-5). Anchoring makes the assertion fail against a worktree-relative instruction, which
+	// is the property this test exists to hold.
+	if !strings.Contains(stdout, "formula at "+wantFormulaPath) {
+		t.Errorf("stdout must name the absolute factory-root formula path %q after %q:\n%s", wantFormulaPath, "formula at ", stdout)
 	}
 	if !strings.Contains(stdout, "af improvement complete") {
 		t.Errorf("stdout missing the completion command:\n%s", stdout)

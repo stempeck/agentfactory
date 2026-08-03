@@ -4,8 +4,21 @@
   ],
   "quality": "default",
   "fidelity": "default",
+  "improvement": "default",
+  "telemetry": "default",
   "start_dispatch": true,
   "watchdog_agents": [
-    "mergepatrol"
+    "mergepatrol",
+    "design-plan-impl",
+    "rootcause-all",
+    "investigate",
+    "rapid-soldesign-plan",
+    "design-v7",
+    "fable-implement",
+    "fable-increment",
+    "fable-review",
+    "rapid-implement",
+    "rapid-increment",
+    "ultra-review"
   ]
 }

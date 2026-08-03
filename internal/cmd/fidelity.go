@@ -123,6 +123,10 @@ func applyGate(root, formulaDir, gate, state string) error {
 		// No active-formula guard: the improvement hook is advisory/fail-open, so
 		// disabling it never needs to block on .runtime/hooked_formula (unlike fidelity).
 		return os.WriteFile(improvementHookFile(root), []byte(state+"\n"), 0644)
+	case "telemetry":
+		// No active-formula guard either: disabling telemetry mid-formula loses
+		// visibility, not correctness, so it never needs to block on an active formula.
+		return os.WriteFile(telemetryGateFile(root), []byte(state+"\n"), 0644)
 	}
 	return nil
 }

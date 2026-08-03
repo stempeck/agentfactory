@@ -581,6 +581,35 @@ body.app{
    snapshot alone so Settings' .readonly-block stays small. Replaces the old cramped 240px/12px sizing. */
 .app .snapshot-block{ background:var(--panel-2); border:1px solid var(--line); border-radius:var(--r-sm); padding:var(--space-5); font-size:13px; line-height:1.5; color:var(--text); white-space:pre-wrap; word-break:break-word; width:100%; min-height:60vh; max-height:70vh; overflow:auto; margin:0; }
 
+/* ============================ TELEMETRY ============================ */
+/* #580 W5. Every colour is a token from variables.css — no raw hex, matching the file's idiom. */
+.app .tel-banner{ display:flex; flex-direction:column; gap:var(--space-3); margin-bottom:var(--space-5); }
+.app .tel-line{ background:var(--tel-line-bg); border:1px solid var(--line); border-left:3px solid var(--tel-dark); border-radius:var(--r-sm); padding:var(--space-4) var(--space-5); }
+/* The stack's left rule is a severity scale, not one alert tone: a measured failure, a state that
+   was never measured, and a positive verdict are three different facts and must not look alike. */
+.app .tel-line.tel-sev-unknown{ border-left-color:var(--tel-unknown); }
+.app .tel-line.tel-sev-ok{ border-left-color:var(--tel-ok); }
+.app .tel-line-what{ color:var(--text); font-size:14px; margin:0; }
+/* The next step is never optional chrome — it is what makes a dark state actionable. */
+.app .tel-line-next{ color:var(--muted); font-size:13px; margin:var(--space-2) 0 0; }
+
+.app .tel-controls{ display:flex; gap:var(--space-4); align-items:flex-end; flex-wrap:wrap; }
+.app .tel-field{ display:flex; flex-direction:column; gap:var(--space-2); }
+.app .tel-field label{ color:var(--tel-head); font-size:12px; text-transform:uppercase; letter-spacing:.06em; }
+.app .tel-meta{ color:var(--muted); font-size:13px; margin:var(--space-3) 0 0; }
+.app .tel-mono{ font-family:var(--font-mono); color:var(--text); }
+.app .tel-note{ color:var(--muted); font-size:13px; margin:var(--space-3) 0 0; max-width:80ch; }
+
+.app .tel-pane{ overflow-x:auto; }
+.app .tel-table{ width:100%; border-collapse:collapse; font-size:13px; }
+.app .tel-table th{ color:var(--tel-head); text-align:left; font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.06em; padding:var(--space-3); border-bottom:1px solid var(--line); white-space:nowrap; }
+.app .tel-table td{ color:var(--text); padding:var(--space-3); border-bottom:1px solid var(--line-soft); vertical-align:top; }
+/* An explicit unknown must not read as an empty cell — that is the whole point of rendering it. */
+.app .tel-unknown{ color:var(--tel-unknown-text); font-style:italic; }
+/* A measurement still in flight is not an unknown that came back empty. */
+.app .tel-pending{ color:var(--tel-pending-text); font-style:italic; }
+.app .tel-empty{ color:var(--muted); font-size:13px; margin:0; padding:var(--space-4) 0; }
+
 /* ============================ RESPONSIVE ============================ */
 @media (max-width:860px){
   .app .cols, .app .cols.even, .app .proto-cols{ grid-template-columns:1fr; }

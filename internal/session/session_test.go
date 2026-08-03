@@ -188,11 +188,21 @@ func TestBuildStartupCommand_WithoutInitialPrompt_Unchanged(t *testing.T) {
 
 	cmd := mgr.BuildStartupCommand()
 
-	expected := "export AF_ROOT='/tmp/factory' AF_ROLE='ultraimplement' AF_ACTOR='ultraimplement' && claude --dangerously-skip-permissions"
+	// The baseline now includes the telemetry-off hygiene clears (issue #329): the inline
+	// KEY='' loop is the only hygiene a respawn emits, so it runs on every launch and clears
+	// the whole OTel family when telemetry is off — carrying no telemetry data, only empties.
+	expected := "export AF_ROOT='/tmp/factory' AF_ROLE='ultraimplement' AF_ACTOR='ultraimplement'" +
+		telemetryOffClears + " && claude --dangerously-skip-permissions"
 	if cmd != expected {
 		t.Errorf("command without prompt should be unchanged.\ngot:  %s\nwant: %s", cmd, expected)
 	}
 }
+
+// telemetryOffClears is the exact inline suffix the telemetry-off hygiene appends to every
+// launch command (issue #329): an empty structural clear for each of the seven OTel family
+// vars, in telemetryFamilyVars order. Pinned here so both "unchanged"-baseline tests assert
+// the same string.
+const telemetryOffClears = " CLAUDE_CODE_ENABLE_TELEMETRY='' OTEL_METRICS_EXPORTER='' OTEL_LOGS_EXPORTER='' OTEL_EXPORTER_OTLP_PROTOCOL='' OTEL_EXPORTER_OTLP_ENDPOINT='' OTEL_EXPORTER_OTLP_HEADERS='' OTEL_RESOURCE_ATTRIBUTES=''"
 
 func TestBuildStartupCommand_PromptWithQuotes(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
@@ -615,7 +625,9 @@ func TestBuildStartupCommand_WithoutEndpoint_Unchanged(t *testing.T) {
 
 	cmd := mgr.BuildStartupCommand()
 
-	expected := "export AF_ROOT='/tmp/factory' AF_ROLE='ultraimplement' AF_ACTOR='ultraimplement' && claude --dangerously-skip-permissions"
+	// Baseline includes the telemetry-off hygiene clears (issue #329) — see telemetryOffClears.
+	expected := "export AF_ROOT='/tmp/factory' AF_ROLE='ultraimplement' AF_ACTOR='ultraimplement'" +
+		telemetryOffClears + " && claude --dangerously-skip-permissions"
 	if cmd != expected {
 		t.Errorf("command without endpoint should be unchanged.\ngot:  %s\nwant: %s", cmd, expected)
 	}
@@ -800,7 +812,7 @@ func TestEndpointConstants_NoDuplicateStrings(t *testing.T) {
 
 // TestBuildStartupCommand_ClearsAPIKey is the deliberate inverse of
 // TestBuildStartupCommand_NoAPIKey: when a profile sets ANTHROPIC_API_KEY:"" the
-// command MUST emit ANTHROPIC_API_KEY='' to clear an ambient cloud key.
+// command MUST emit ANTHROPIC_API_KEY=” to clear an ambient cloud key.
 func TestBuildStartupCommand_ClearsAPIKey(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
 	mgr := NewManager("/tmp/factory", "testagent", entry)
@@ -993,8 +1005,8 @@ func TestBuildStartupCommand_FileRefDerefsSecret(t *testing.T) {
 }
 
 // TestBuildStartupCommand_NoEndpoint_EmitsStructuralClears proves the structural clear
-// (AC-4): a no-endpoint / no-legacy resolved set emits explicit ANTHROPIC_BASE_URL=''
-// and ANTHROPIC_AUTH_TOKEN='' so a stale redirect var inherited on a reused session is
+// (AC-4): a no-endpoint / no-legacy resolved set emits explicit ANTHROPIC_BASE_URL=”
+// and ANTHROPIC_AUTH_TOKEN=” so a stale redirect var inherited on a reused session is
 // overwritten. The set carries a model + a default var but no ANTHROPIC_BASE_URL.
 func TestBuildStartupCommand_NoEndpoint_EmitsStructuralClears(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
@@ -1104,7 +1116,7 @@ func isRedirectFamilyEnvOp(op string) bool {
 // so the isolation guarantee is:
 //   - A's session carries A's real ANTHROPIC_BASE_URL + the raw file: token placeholder
 //     (the tmux twin verbatim, never a resolved secret);
-//   - B's session emits the explicit ANTHROPIC_BASE_URL='' / ANTHROPIC_AUTH_TOKEN=''
+//   - B's session emits the explicit ANTHROPIC_BASE_URL=” / ANTHROPIC_AUTH_TOKEN=”
 //     structural clears and unsets its stale redirect var (the hygiene pass);
 //   - NO op tagged with B's session ever carries A's endpoint URL or token (A cannot
 //     leak into B), and NO op tagged with A's session is the empty clear (B starting

@@ -62,7 +62,7 @@ web/                 Optional web console — SEPARATE Go module (web/go.mod)
 - `af mail send|inbox|read|delete|check|reply` — inter-agent messaging via beads
 - `af install --init` / `af install <role>` — factory and agent workspace setup
 - `af up [agents...]` — start agent tmux sessions (all or specified)
-- `af down [agents...] [--all]` — stop agent tmux sessions
+- `af down [agents...] [--all]` — stop agent tmux sessions (factory-wide teardown is operator-only)
 - `af attach <agent>` — attach to a running agent's tmux session
 - `af done` — close current formula step, advance workflow
 - `af formula agent-gen <file>` — generate agent shell from formula TOML
@@ -73,6 +73,7 @@ web/                 Optional web console — SEPARATE Go module (web/go.mod)
 - `af dispatch status --json` — show dispatcher status and dispatch history as JSON (always exits 0; branch on `.state`)
 - `af config dispatch set` / `af config startup set` — replace dispatch.json / startup.json from a JSON document on stdin
 - `af improvement [on|off] [--agent <name>] | complete` — toggle/show the continuous-improvement hook (AND-gated, default off); `complete` finishes a pending improvement session
+- `af telemetry [on|off|status|report|usage]` — toggle run measurement (default off; takes effect at the next session launch), show where data is going, print the local per-step timing table, or query the backend for token usage and session metrics (`usage` always exits 0; branch on `.state`)
 
 ## Architecture
 

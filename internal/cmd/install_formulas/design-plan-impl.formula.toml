@@ -613,12 +613,107 @@ Run this verification:
 test -f "{design_dir}/implementation-plan/implementation_plan_outline.md" && echo "PASS" || echo "FAIL"
 ```
 
+**2. ACCEPTANCE-CRITERIA DECIDABILITY — run 2a through 2e, in that order.**
+
+Why this exists: on a previous PR run this gate PASSED, and the peer review two
+steps later found that 7 acceptance criteria exited 0 on an untouched tree,
+7 more invoked flags the CLI does not have, and 3 executed live commands that
+destroy agent state. All three classes satisfied "Acceptance Criteria are bash
+commands" — shape was checked, decidability was not.
+
+```bash
+OUTLINE="{design_dir}/implementation-plan/implementation_plan_outline.md"
+sed -n '/^```bash$/,/^```$/p' "$OUTLINE" > /tmp/ac-lines.txt
+
+# 2a. BAN factory-mutating commands inside acceptance criteria. Run this FIRST,
+#     because 2b executes the blocks.
+grep -nE '(af (sling|up|down|install|handoff)|make (install|check-regen)|gh pr (close|edit|merge))' /tmp/ac-lines.txt
+# Expected: NO OUTPUT (exit 1).
+#   `af sling --agent <agent>` deletes that agent's formula_caller /
+#   hooked_formula / dispatch_owner; `af sling --formula ... --reset` closes its
+#   beads and RemoveAll's .runtime; `make check-regen` runs `af down --all`
+#   (operator-only). An acceptance criterion must never mutate the live factory.
+#   If a phase genuinely needs a live run, scope it to a disposable root
+#   (mkdir -p /tmp/probe && cd /tmp/probe && af install --init) and say so inline.
+
+# 2b. BASELINE-RED. Extract each acceptance block to its own script, add
+#     `set -euo pipefail`, run it against the CURRENT tree, record the exit code.
+# Expected: EVERY block exits NON-ZERO.
+#   An acceptance criterion that passes before its phase is implemented is not an
+#   acceptance criterion. A block may contain baseline assertions that are true
+#   today (`# Expected: 12` for a pre-state count) — that is fine, because the
+#   block also contains post-implementation assertions and must fail as a whole.
+#   Any block exiting 0 is vacuous: rewrite it until it fails, then keep it.
+
+# 2c. `go test -run` PAIRING — and note the remedy that does NOT work.
+#   go test ./pkg/ -run TestDoesNotExist          -> ok ... [no tests to run], exit 0
+#   go test ./pkg/ -run TestDoesNotExist -v | grep -q PASS  -> ALSO exit 0
+#   (the test binary prints a bare `PASS` even when nothing ran — verified in
+#   this repo; do not propagate the `grep -q PASS` pairing, it is broken).
+# The only working pair is an existence assertion plus a per-test PASS line:
+#   grep -rn "func TestX" internal/<pkg>/         # Expected: exactly 1
+#   go test ./internal/<pkg>/ -run 'TestX' -v | grep -q '^--- PASS: TestX'
+# Expected: every `go test -run <name>` in the outline is paired this way.
+
+# 2d. COMMANDS AND FLAGS EXIST. Every `af`/`make`/shell verb an AC invokes must
+#     be real — flags are the common miss (`af install --root`, `af up --dry-run`
+#     and `af config models show --json` do not exist).
+# For each distinct command in /tmp/ac-lines.txt: run `<cmd> --help` (or grep the
+# cobra registration) and confirm every flag used is registered.
+# Expected: no unknown flag / unknown command.
+
+# 2e. GREEN-ABLE (satisfiability). 2b proves each block fails TODAY. It CANNOT
+#     distinguish "fails because the work is undone" from "fails because the
+#     pattern can never match" — both exit non-zero. 2d does not catch it either:
+#     it validates the VERB (grep exists, its flags are legal) and never the
+#     OPERAND. A criterion that can never go green blocks its phase forever.
+#
+#     Why this exists: on the run that added this check, Phase 7 shipped three
+#     greps whose patterns contained shell-expansion syntax. GNU grep's BRE engine
+#     does not match `${`. On a line containing  REL_PATH="${PWD#$AF_ROOT}"
+#         grep -c '${PWD'  -> 0          grep -c '{PWD#'  -> 1
+#     So `-eq 0` assertions passed vacuously forever and the one `-eq 1` assertion
+#     failed forever — verified by pasting the CORRECTED line into a scratch file
+#     and re-running it: still 0. That phase could never have been signed off.
+
+# 2e-i. Any grep whose PATTERN contains shell-expansion syntax MUST use -F.
+grep -n 'grep' /tmp/ac-lines.txt | grep -F '${' | grep -vE 'grep -[a-z]*F'
+# Expected: NO OUTPUT. Every hit is a pattern the regex engine cannot match as
+# written. Rewrite as `grep -cF 'literal'` and re-run 2b.
+
+# 2e-ii. SATISFIABILITY PROBE — the general case, for every assertion expecting a
+#        literal the phase INTRODUCES (`-eq 1` / `-ge 1` on a post-change string).
+#        Write the exact line the phase's Required Changes says will exist, then
+#        re-run that AC's own grep against it:
+#   echo '<the exact line Required Changes says will exist after this phase>' > /tmp/ac-probe
+#   <the AC's grep, retargeted at /tmp/ac-probe>
+# Expected: the count the AC demands (usually 1). A 0 means the criterion can
+# never go green no matter how correct the implementation is. Fix the pattern,
+# then re-run 2b to confirm it still fails against the REAL tree — a pattern that
+# now matches the probe must still not match the un-implemented tree.
+
+# 2e-iii. Every "Today: N" baseline annotation must be TRUE right now.
+grep -n 'Today:' /tmp/ac-lines.txt
+# For each hit, run the adjacent command against the tree and compare to N.
+# Expected: every N matches. Three of 21 were wrong on the run that produced this
+# check, and a wrong baseline sends the implementer hunting a pre-state that does
+# not exist (or, worse, reads a vacuous pass as proof the phase is already done).
+```
+
 Then verify each item:
 - [ ] Every phase from design-doc.md is represented (possibly reordered or split)
 - [ ] Every phase section has ALL 8 subsections (Objective, Prerequisites, Recommended Skill, Design References, Current State, Required Changes, Acceptance Criteria, Gotchas)
 - [ ] Design References include line numbers, not just document names
 - [ ] Current State reflects actual codebase (from sub-agent investigation), not design assumptions
 - [ ] Acceptance Criteria are bash commands, not prose descriptions
+- [ ] No acceptance criterion mutates factory state (check 2a returns nothing)
+- [ ] EVERY acceptance block fails on the current tree (check 2b) — a block that passes today is vacuous, not verified
+- [ ] Every `go test -run` is paired with a `func Test<name>` existence assertion (check 2c)
+- [ ] Every command and flag an acceptance criterion invokes actually exists (check 2d)
+- [ ] No grep pattern containing `${` is missing `-F` (check 2e-i) — such a pattern matches nothing, forever
+- [ ] Every assertion expecting a post-change literal was probed against that literal and returned the demanded count (check 2e-ii) — red today is only half the proof; it must also be able to go green
+- [ ] Every `Today: N` baseline annotation was executed and is accurate (check 2e-iii)
+- [ ] Each `# Expected:` line states a machine-comparable value (a count, `no output`, `exit=0`, an exact list) — a prose description of what the output should look like is a judgement call, not a criterion
 - [ ] Gotchas section is non-empty for every phase that modifies existing code
 - [ ] Phase dependency chain is a valid DAG (no cycles)
 - [ ] Every deployment target in the repo is covered by at least one phase
@@ -751,6 +846,41 @@ Re-read the original design-doc.md and verify:
 - [ ] Acceptance criteria in the outline are mechanically verifiable
 - [ ] No design-doc requirements were dropped or silently ignored
 
+**Presence is not coverage — run these three.** On a previous PR run this gate
+recorded "AC-1..AC-10 10/10 present" while three tests the design named as its
+own verification were owned by no phase, the elevation verdict's required lifts
+appeared in zero phases, and the phase diagram contradicted the phases' own
+Prerequisites.
+
+```bash
+OUTLINE="{design_dir}/implementation-plan/implementation_plan_outline.md"
+DESIGN="{design_dir}/design-doc.md"
+
+# A. VERIFICATION COVERAGE — every test the design names must be owned by a phase.
+grep -ohE 'Test[A-Za-z0-9_]+' "$DESIGN" | sort -u > /tmp/design-tests.txt
+while read -r t; do grep -q "$t" "$OUTLINE" || echo "UNOWNED: $t"; done < /tmp/design-tests.txt
+# Expected: no output. Any UNOWNED line is an acceptance criterion the design
+# specified and the plan silently dropped.
+
+# B. ELEVATION LIFTS CARRIED. If the design records an architecture-elevation
+#    verdict, its REQUIRED lifts are invariants every phase must preserve —
+#    grep the outline for each lift's own words.
+grep -n 'Frame-lift required' "$DESIGN" {design_dir}/elevation_assessment.md
+# For each required lift named there, grep the outline for its defining phrase.
+# Expected: at least one phase states the invariant AND names the test that
+# enforces it. A lift adopted by the design but absent from every phase is
+# unenforced: an implementer can violate it and no acceptance criterion notices.
+
+# C. DEPENDENCY GRAPH IS SELF-CONSISTENT. Every edge drawn in the phase-chain
+#    diagram must appear in the child phase's own Prerequisites, and every
+#    Prerequisite must appear as an edge. The stated critical path must be a
+#    real path through those edges.
+grep -A2 '^### Prerequisites' "$OUTLINE"
+# Expected: diagram, critical path and Prerequisites agree. Where they disagree,
+# Prerequisites win (Mode B extracts one phase at a time from them) — so a phase
+# whose acceptance criteria consume another phase's output MUST list it.
+```
+
 For each requirement from the design contract:
 - Document the evidence (which outline section)
 - If any requirement is NOT addressed: go back and fix before proceeding
@@ -831,13 +961,32 @@ Should be empty. If not:
 - Remove if temporary: `rm <file>`
 - Commit if needed
 
-**3. Check stash:**
+`.agent-checkpoint.json` at the worktree root is the expected case: `af` writes
+it as crash-recovery state, it is not git-ignored, and it is not a work product.
+Remove it (`rm -f .agent-checkpoint.json`) — `af` rewrites it at the next
+checkpoint, and the durable record of where you were lives in your agent-dir
+notes, which are git-ignored by design and are not meant to be committed.
+
+**3. Check stash — YOURS ONLY.**
 ```bash
 git stash list
 ```
-Should be empty. If not:
-- Pop and commit: `git stash pop && git add -A && git commit`
-- Or drop if garbage: `git stash drop`
+This is a SHARED factory: the stash list carries entries from every other
+worktree, branch and formula run (a previous PR run saw 40, of which one was its
+own). **Never `git stash pop`, `drop` or `clear` an entry you did not create** —
+that destroys another run's parked work, irreversibly.
+
+Identify yours by the message your own branch-setup step wrote (it names this
+formula, this issue and this worktree id):
+```bash
+git stash list | grep -nE "<this-formula>.*<issue-or-worktree-id>"
+```
+- If you created a stash and its contents belong in this PR: pop and commit it.
+- If you created it to PARK unrelated churn (the usual case — branch-setup parks
+  the recurring generated-`CLAUDE.md` truncation), **leave it parked**: popping
+  it pulls exactly the churn it was parked to keep out of your PR. Record in your
+  cleanup notes that it is deliberate.
+- Entries from other branches/worktrees: leave them alone and say so.
 
 **4. Push your branch (mode-aware):**
 - **MODE=pr** — push to the PR's branch with an explicit refspec (your local
@@ -856,7 +1005,7 @@ git push -u origin $(git branch --show-current)
 **5. Verify nothing left behind:**
 ```bash
 git status                  # Clean
-git stash list              # Empty
+git stash list              # Only entries you did not create (see step 3)
 git log origin/{{default_branch}}..HEAD   # Your commits
 git diff origin/{{default_branch}}...HEAD # Your changes (expected)
 ```
