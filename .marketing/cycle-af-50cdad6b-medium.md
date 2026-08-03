@@ -90,6 +90,8 @@ Learn it, Live it, Share it!
      - "Your agents are working. Can you see what they're doing - and what they cost?" -->
 
 ## Operator Decision
-- Decision: ______
+- Decision: READY
   (READY to approve for publishing; EDITED — I changed the text, re-check mechanics only;
    SKIP to drop this piece this cycle.)
+- Resolution: Operator (stempeck) approved the Medium article as written via issue #94 on
+  2026-08-03 ("I'm good with the Medium Article: APPROVE"). No text changes requested.
