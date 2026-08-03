@@ -90,7 +90,7 @@ make build
 make install    # installs af to ~/.local/bin
 ```
 
-Verify: `af version`
+Verify: `af --version`
 
 #### Using Docker
 
@@ -233,23 +233,33 @@ See `USING_AGENTFACTORY.md` for preconditions, data-safety, and `--no-build` not
 
 ## Included Formulas
 
-Nineteen formulas ship with the factory (see [docs/formulas.md](docs/formulas.md) for the format):
+Twenty-four formulas ship with the factory (see [docs/formulas.md](docs/formulas.md) for the format):
 
 | Family | Formulas | Purpose |
 |---------|----------|---------|
 | Implementation | `rapid-implement`, `rapid-increment`, `fable-implement`, `fable-increment` | Structured feature implementation with quality gates |
-| Design | `design`, `design-v3`, `design-v7`, `design-plan-impl`, `rapid-soldesign-plan`, `web-design` | Design exploration with constraint verification |
-| Review | `mergepatrol`, `ultra-review`, `fable-review` | PR review, merge workflow, deep multi-pass review |
+| Design | `design`, `design-v3`, `design-v7`, `design-plan-impl`, `rapid-soldesign-plan`, `web-design`, `multi-agent` | Design exploration with constraint verification; `multi-agent` coordinates persistent analysts for deep architecture questions |
+| Review | `mergepatrol`, `ultra-review`, `fable-review`, `fable-secure` | PR review, merge workflow, deep multi-pass review, and security-program review |
 | Root cause | `rootcause-all`, `investigate` | Failure investigation and verified root-cause analysis |
-| Utility | `factoryworker`, `minimalworker`, `gherkin-breakdown`, `github-issue` | General workers, scenario breakdown, issue authoring |
+| Multi-provider | `gpt-fable-review`, `gpt-rootcause-all` | Review and root-cause variants that run on OpenAI models via the gateway (see `af config models`) |
+| Utility | `factoryworker`, `minimalworker`, `gherkin-breakdown`, `github-issue`, `marketing-cycle` | General workers, scenario breakdown, issue authoring, and a self-marketing cycle for the repo the factory serves |
 
 ## Included Skills
 
+Ten skills are embedded and written to `.claude/skills/` during `af install`:
+
 | Skill | Purpose |
 |-------|---------|
-| `/formula-create` | Create a formula TOML from a SKILL.md |
-| `/github-issue` | Create well-documented GitHub issues from current (or specified) context |
-| `/documentation-update` | Audit and update a documentation file (.md) against the codebase |
+| `/formula-create` | Create a formula TOML from a description or a SKILL.md |
+| `/github-issue` | Create well-documented GitHub issues from the current (or specified) context |
+| `/documentation-update` | Audit and update a documentation file (.md) against the codebase, citing source lines |
+| `/architecture-docs` | Generate or refresh the `/docs/architecture/` corpus, grounded in code and git history |
+| `/architecture-elevation` | Validate the architectural altitude of a root cause or proposed fix before review |
+| `/rapid-implement` | Lean, complexity-scaled implementation using sub-agents and checkpoints |
+| `/rootcause-review` | Scientific peer review of a root-cause analysis, verifying every claim independently |
+| `/six-sigma-challenge` | Stress-test a completed review for what would reach six-sigma quality |
+| `/agentic-skill-eval` | Evaluate a skill library to find which SKILL.md files would make valuable agents |
+| `/improve-agent` | Improve an agent's formula TOML from post-execution learnings |
 
 ## Web Console (optional)
 
@@ -308,6 +318,24 @@ When the bind is ever non-loopback (not the default), the console additionally r
 session token (printed at startup) as defense-in-depth — but that is **not** a license to publish
 the port; the socket stays loopback whether you reach it via the `--web` bridge or the SSH forward.
 
+## Observability
+
+Long-running agents are expensive and opaque — you can't improve what you can't measure.
+agentfactory records **per-step latency and token usage** for every agent and formula
+instance. It is **off by default**; switch it on factory-wide when you want the numbers:
+
+```bash
+af telemetry on                     # start recording (takes effect at the next session launch)
+af telemetry status                 # gate state, config, and export posture
+af telemetry report                 # per-step latency table for every agent
+af telemetry report --agent NAME    # or scope to one agent / --instance ID
+af telemetry usage                  # token usage and session metrics from the backend
+```
+
+`report` reads local records; `usage` queries the backend (it always exits 0 — branch on
+`.state`). Both accept `--json` for machine-readable output. Nothing is recorded unless you
+turn telemetry on.
+
 ## Key directories
 
 ```
@@ -353,6 +381,16 @@ af formula agent-gen <name>                               # generate your own sp
 af sling --formula <name> --var key=val --agent <agent>   # instantiate formula (uncommon/complex use)
 af prime                                                  # inject identity, get next step instruction (used by agents)
 af done                                                   # complete and advance to next step (used by agents)
+```
+
+### Observability & configuration
+
+```bash
+af telemetry on|off|status                    # toggle/inspect run measurement (off by default)
+af telemetry report [--agent N|--instance I]  # per-step latency table (local records)
+af telemetry usage [--json]                   # token usage + session metrics (backend)
+af improvement on|off [--agent <name>]        # continuous-improvement hook (AND-gated, off by default)
+af config models show                         # model registry for multi-provider agents (secrets redacted)
 ```
 
 ## Roadmap

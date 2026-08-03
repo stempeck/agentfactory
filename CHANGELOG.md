@@ -3,6 +3,38 @@
 Notable changes to agentfactory. The project began 2026-05-01; snapshot tags `V001`–`V012`
 mark pre-release checkpoints. `v0.1.0` is the first formal release.
 
+## [Unreleased]
+
+Development since v0.1.0.
+
+### Observability
+
+- Run telemetry: `af telemetry on|off|status|report|usage` records per-step latency and
+  token usage for every agent and formula instance — a local timing table plus a backend
+  usage query. Off by default; opt-in factory-wide, taking effect at the next session
+  launch (#92)
+
+### Multi-provider agents
+
+- Agents can run on non-Claude models: `af config models` (show/set/check/attest) over a
+  `models.json` registry; `af install --agents --litellm` sets up an OpenAI gateway;
+  `af sling --model` overrides the model per launch; a fitness-attestation gate guards
+  non-loopback profiles; `gpt-fable-review` and `gpt-rootcause-all` run review and
+  root-cause formulas on OpenAI models (#92)
+
+### Reliability & safety
+
+- Operator-only factory teardown: factory-wide `af down` is now gated so an agent cannot
+  tear down the whole floor (#92)
+- Reliable improvement self-edits: the AND-gated continuous-improvement hook
+  (`af improvement`) hardened so agents apply post-run formula edits reliably (#92)
+
+### Formula & agent library
+
+- New shipped formulas: `fable-secure` (security-program review), `multi-agent`
+  (multi-perspective architecture consultation), and `marketing-cycle` (a self-marketing
+  cycle for the repository the factory serves) (#92)
+
 ## v0.1.0 — 2026-07-11
 
 First formal release, consolidating ten weeks of development.
