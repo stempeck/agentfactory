@@ -42,6 +42,12 @@
       "directive": "Run af prime to load formula context.",
       "formula": "fable-review"
     },
+    "fable-secure": {
+      "type": "autonomous",
+      "description": "Fixed-checklist security-program coordinator built on the aviation premise that safety comes from a checklist nobody is allowed to skip, not from hoping every engineer thinks like the best security engineer.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "fable-secure"
+    },
     "factoryworker": {
       "type": "autonomous",
       "description": "## Overview\nFull agent work lifecycle from assignment through PR submission.",
@@ -59,6 +65,18 @@
       "description": "## Overview\nInvestigates a reported problem and produces a well-formed GitHub issue (or a\ncomment on an existing one) that gives an implementer everything they need to find\nand understand the problem — without prescribing the fix.",
       "directive": "Run af prime to load formula context.",
       "formula": "github-issue"
+    },
+    "gpt-fable-review": {
+      "type": "autonomous",
+      "description": "Deep residence-powered code review of a pull request built on the refined aviation premise that the checklist doesn't fly the plane — the reviewer stays the pilot, and gates verify artifacts of execution, never opinions about opinions.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "gpt-fable-review"
+    },
+    "gpt-rootcause-all": {
+      "type": "autonomous",
+      "description": "## Overview\nSystematic root cause analysis on problems using 5-whys, fishbone diagrams,\nand hypothesis testing.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "gpt-rootcause-all"
     },
     "investigate": {
       "type": "autonomous",
@@ -88,6 +106,12 @@
       "description": "Minimal directive executor with no competing identity or lifecycle opinions.",
       "directive": "Run af prime to load formula context.",
       "formula": "minimalworker"
+    },
+    "multi-agent": {
+      "type": "autonomous",
+      "description": "Interactive multi-perspective consultation orchestrator that answers deep architecture questions by coordinating two persistent analyst agents on different models and synthesizing their independent findings with its own research.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "multi-agent"
     },
     "rapid-implement": {
       "type": "autonomous",
