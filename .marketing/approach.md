@@ -191,6 +191,13 @@ parenthetical asides, and-chained sentences, question hooks, Q&A rhythm, "Happy 
 "Learn it, Live it, Share it!". Calibration sources: cycle-1-linkedin.md top block,
 the live Medium article.
 
+Cycle-2 calibration update (2026-08-03): the operator EDITED the cycle-2 LinkedIn draft to
+be markedly SHORTER — his note: "too long ... keep it short and concise or no one will read it
+or everyone will suspect its AI written." LinkedIn posts should be tight (his cycle-2 final is
+~140 words, three short paragraphs + a two-link footer "Read more: <article> | Get it: <repo>"),
+not the 180-200 word range. New calibration sources: cycle-af-50cdad6b-linkedin.md (his edited
+version, short-form) and cycle-af-50cdad6b-medium.md (approved as written, long-form).
+
 ## Claim Verification Map
 Commands/flags: grep `internal/cmd/`. Shipped formulas: count `internal/cmd/install_formulas/`.
 Skills: `.claude/skills/`. Test command: `make test` (never `make test-integration` locally).
