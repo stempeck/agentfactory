@@ -162,6 +162,12 @@ type = "string"
 required = false
 default = "false"
 
+[inputs.antares_scan]
+description = "Opt-in ('true' to enable): in Stage 2, run the local antares-1b vulnerability-localization model (served via LM Studio on the host, reached at host.docker.internal) as a CANDIDATE-GENERATION pre-pass that feeds the manual attack-surface sweep. Default 'false'. Its output is UNVERIFIED candidate signal, never a finding, and a 'clean' result is never proof (see 'Green means secure' and 'Detection is a failing grade'). If the model is not loaded or the driver is not installed, the stage records 'tool absent' and proceeds on the manual sweep — the third-party model is strictly optional."
+type = "string"
+required = false
+default = "false"
+
 [vars]
 [vars.security_dir]
 description = "Factory-root private workspace for all program artifacts — gitignored, never committed, readable cross-agent by absolute path. Rooted at the factory/container root, NOT the worktree, so it survives worktree teardown and persists across runs."
@@ -324,12 +330,41 @@ needs = ["s1-ground-truth"]
 description = """
 **Entry criteria:** Current-state ledger exists.
 
+**Automated candidate pre-pass (optional — feeds action 1, never replaces it):** Run this block
+exactly; it ALWAYS writes `{{security_dir}}/02-candidates-antares.md` (recording a null result
+when disabled or the tool is absent, so the gate below is always satisfiable and no absence is
+silent):
+```bash
+CAND="{{security_dir}}/02-candidates-antares.md"
+if [ "{{antares_scan}}" = "true" ]; then
+  DRIVER="$(af root)/.agentfactory/hooks/antares-scan.py"
+  if [ -x "$DRIVER" ]; then
+    "$DRIVER" \
+      --repo "$(git -C "$(af root)" rev-parse --show-toplevel 2>/dev/null || af root)" \
+      --cwe-hint "broad: injection (CWE-89/78/79), authz/access-control, secrets exposure, unsafe deserialization, path traversal, SSRF" \
+      --out "$CAND" || true   # the driver writes CAND on every exit path, incl. tool-absent
+  else
+    printf '# Stage 2 — antares candidate pre-pass\n\nStatus: **tool absent** — driver not installed at %s.\nManual lens sweep proceeds in full.\n' "$DRIVER" > "$CAND"
+  fi
+else
+  printf '# Stage 2 — antares candidate pre-pass\n\nStatus: **disabled** — antares_scan=false.\nManual lens sweep proceeds in full.\n' > "$CAND"
+fi
+```
+Treat any output as UNVERIFIED CANDIDATE SIGNAL ONLY: every flagged file is a LEAD to inspect in
+action 1, never a finding, and a "clean"/empty result is NOT evidence of safety (corollaries
+"Green means secure" and "Detection is a failing grade" — a 1B detector's silence proves
+nothing). Disabled and tool-absent are both recorded null results, never silent skips (the
+third-party model is optional and may be absent under a limited-downloads policy). The manual
+lens sweep below is MANDATORY and unchanged in every case; never treat this pre-pass as coverage.
+
 **Actions:**
 1. Enumerate the attack surface systematically through fixed lenses so no category is missed:
    (a) untrusted input paths — every place external data enters and reaches a privileged
    actor; (b) credentials/secrets — where they live, how issued, what they reach;
    (c) isolation — what the actor can do that it should not need to; (d) the artifact the
    system produces (the FOR side); (e) audit/attribution — can you tell who did what after.
+   Fold any antares candidate files from the pre-pass in as LEADS to confirm with your own
+   file:line evidence — a candidate you cannot re-derive is dropped, never carried as a finding.
 2. For each threat write: ID (T1..Tn), vector, asset at risk, and the CURRENT mitigation
    (from s1), even when that is "none". Tag each OF vs FOR.
 3. Map trust boundaries; name any "lethal trifecta" crossing (untrusted input + secrets
@@ -340,6 +375,10 @@ description = """
 **Exit criteria (GATE):**
 - `{{security_dir}}/02-threat-model.md` exists: a T1..Tn table, each row traceable to an s1
    surface, each tagged OF/FOR.
+- `{{security_dir}}/02-candidates-antares.md` exists recording the pre-pass outcome — candidate
+   files (each marked UNVERIFIED), a clean result, or the explicit null result ("disabled" /
+   "tool absent"). Its presence is never a substitute for the manual T1..Tn enumeration, and no
+   antares candidate appears in the threat table unless re-derived with file:line evidence.
 """
 
 [[steps]]

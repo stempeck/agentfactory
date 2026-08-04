@@ -266,6 +266,19 @@ func runInstallInit(cmd *cobra.Command) error {
 		return fmt.Errorf("writing fidelity-gate-prompt.txt: %w", err)
 	}
 
+	// Write antares-scan.py — the native driver the fable-secure formula invokes
+	// as an optional candidate-vulnerability localizer against a local model. Not
+	// a Claude/git hook; it ships here because .agentfactory/hooks/ is the only
+	// factory-root dir install populates in every fresh factory. Executable (0755).
+	asScript, err := hooksFS.ReadFile("install_hooks/antares-scan.py")
+	if err != nil {
+		return fmt.Errorf("reading embedded antares-scan.py: %w", err)
+	}
+	asPath := filepath.Join(hooksDir, "antares-scan.py")
+	if err := os.WriteFile(asPath, asScript, 0755); err != nil {
+		return fmt.Errorf("writing antares-scan.py: %w", err)
+	}
+
 	// 6b. Render the af-managed git hooks (issue #371): the centralized
 	// Co-authored-by trailer + a delegating pre-commit. They live in a dir
 	// distinct from the Claude gate hooks and are activated per session via
