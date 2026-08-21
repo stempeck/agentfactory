@@ -10,15 +10,6 @@ import (
 // --litellm` seeds (quickstart.sh:893-903) and the shape USING_AGENTFACTORY.md documents. It
 // declares a main model and a small one, and nothing else — which is precisely why a
 // /gpt-fable-review sub-agent spawn died with `Invalid model name passed in model=claude-fable-5`.
-func docEnvValue(env []EnvVar, key string) (string, bool) {
-	for _, e := range env {
-		if e.Key == key {
-			return e.Value, true
-		}
-	}
-	return "", false
-}
-
 func incident598Profile() map[string]string {
 	return map[string]string{
 		"ANTHROPIC_BASE_URL":            "http://localhost:4000",
@@ -182,4 +173,13 @@ func TestIncident598_C11_FableAndOpusPathsDifferFromPreDesignGolden(t *testing.T
 			t.Errorf("%s derived to %q, want %q", key, after[key], want)
 		}
 	}
+}
+
+func docEnvValue(env []EnvVar, key string) (string, bool) {
+	for _, e := range env {
+		if e.Key == key {
+			return e.Value, true
+		}
+	}
+	return "", false
 }

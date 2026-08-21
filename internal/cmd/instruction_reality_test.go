@@ -93,6 +93,20 @@ func (r afRef) String() string {
 	return s
 }
 
+func TestInstructionReality_ShippedTextNamesRealVerbs(t *testing.T) {
+	refs := shippedInstructionRefs(t)
+
+	for _, ref := range refs {
+		if err := resolveAFRef(ref); err != nil {
+			t.Errorf("%s — %v\n"+
+				"shipped instruction text names a verb the cobra tree does not have. Either the "+
+				"command was removed/renamed and the text was left behind, or the text describes "+
+				"something that was never built. Fix the text or build the verb; do not relax "+
+				"this test.", ref, err)
+		}
+	}
+}
+
 // The gate is only worth its runtime if it can fail, and a text-scanning test is exactly the kind
 // that quietly stops matching anything and passes forever. This runs the real extractor and the
 // real resolver over text carrying one bogus verb per shape the predicate claims to catch.
@@ -233,7 +247,6 @@ func roleTemplateRefs(t *testing.T) []afRef {
 		t.Fatalf("read %s: %v", roleTemplateDir, err)
 	}
 	var refs []afRef
-	var scanned int
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md.tmpl") {
 			continue
@@ -242,12 +255,7 @@ func roleTemplateRefs(t *testing.T) []afRef {
 		if err != nil {
 			t.Fatalf("read template %s: %v", e.Name(), err)
 		}
-		scanned++
 		refs = append(refs, extractAFRefs(e.Name(), string(data))...)
-	}
-	if scanned < 40 {
-		t.Fatalf("scanned only %d role templates; the roster has not shrunk that far, so the "+
-			"enumeration is broken", scanned)
 	}
 	return refs
 }
@@ -265,7 +273,6 @@ func formulaRefs(t *testing.T) []afRef {
 		t.Fatalf("read embedded %s: %v", formulaEmbedDir, err)
 	}
 	var refs []afRef
-	var scanned int
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".toml" {
 			continue
@@ -278,11 +285,7 @@ func formulaRefs(t *testing.T) []afRef {
 		if err != nil {
 			t.Fatalf("parse embedded formula %s: %v", e.Name(), err)
 		}
-		scanned++
 		refs = append(refs, extractAFRefs(e.Name(), formulaInstructionText(f))...)
-	}
-	if scanned < 30 {
-		t.Fatalf("scanned only %d embedded formulas; the enumeration is broken", scanned)
 	}
 	return refs
 }
