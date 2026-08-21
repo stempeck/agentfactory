@@ -211,11 +211,16 @@ func appendTelemetryRecord(factoryRoot string, ev telemetry.StepEvent) {
 // rotation cap, and narrowed to one instance by the filter, but a parse nonetheless. It is paid
 // deliberately: the alternative is a second derivation of step_seq that could disagree with af
 // prime's, and two numbers that disagree are worse than one number that costs a file read.
-func telemetryStepSpan(factoryRoot, agent, instanceID, stepID, endTS string) (seq, durationMS int) {
+//
+// #622 C4 added the context figures to the answer rather than a second read. The record this
+// function already locates and parses is the same one that carries the step's opening occupancy,
+// so returning two ints and discarding it would have made the capture cost a second pass over the
+// whole log on every close.
+func telemetryStepSpan(factoryRoot, agent, instanceID, stepID, endTS string) stepSpan {
 	records, _, err := telemetry.ReadEvents(config.TelemetryDir(factoryRoot),
 		telemetry.Filter{Agent: agent, InstanceID: instanceID})
 	if err != nil {
-		return 0, 0
+		return stepSpan{}
 	}
 
 	var start *telemetry.StepEvent
@@ -231,15 +236,43 @@ func telemetryStepSpan(factoryRoot, agent, instanceID, stepID, endTS string) (se
 		}
 	}
 	if start == nil {
-		return 0, 0
+		return stepSpan{}
+	}
+
+	span := stepSpan{
+		seq:            start.StepSeq,
+		ctxTokensStart: start.CtxTokensUsed,
+		cumTokens:      start.CumTokens,
+		sessionID:      start.SessionID,
 	}
 
 	began, beganErr := time.Parse(telemetry.TimestampLayout, start.TS)
 	ended, endedErr := time.Parse(telemetry.TimestampLayout, endTS)
 	if beganErr != nil || endedErr != nil || ended.Before(began) {
-		return start.StepSeq, 0
+		// An unparseable or inverted clock costs only the duration. The context figures are
+		// independent of it and are still the truth about the step's opening.
+		return span
 	}
-	return start.StepSeq, int(ended.Sub(began) / time.Millisecond)
+	span.durationMS = int(ended.Sub(began) / time.Millisecond)
+	return span
+}
+
+// stepSpan is everything a closing record learns from the step_start it is closing, gathered on
+// ONE pass over the log. Its zero value is the honest answer for a step whose start was never
+// recorded — telemetry switched on mid-formula, say — because every consumer of the pointer fields
+// already distinguishes absent from zero on its own.
+type stepSpan struct {
+	seq        int
+	durationMS int
+	// ctxTokensStart and cumTokens are the step's opening figures, carried forward so the closing
+	// record can state consumption without a second read. Pointers, because absent must stay
+	// distinguishable from zero all the way through.
+	ctxTokensStart *int64
+	cumTokens      *int64
+	// sessionID gates the cum_tokens delta (cross-review HIGH-3). cum_tokens counts one session's
+	// lifetime, so subtracting across a recycle yields a number with no meaning — typically large
+	// and negative — in the figure the improvement loop leans on hardest.
+	sessionID string
 }
 
 // drainTelemetryBounded exports what it can within one af done and never lets the outcome reach

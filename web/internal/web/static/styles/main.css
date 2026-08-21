@@ -259,6 +259,21 @@ body.app{
   box-shadow:0 0 12px rgba(255,194,75,.5); }
 .app .badge.gate .pip{ background:var(--signage-amber); box-shadow:0 0 6px var(--signage-amber); }
 
+/* occupancy + recovery badges (#596 K10-web). These declare their hue from an explicit token
+   instead of inheriting --lit: --lit is set per CARD by .sign.s-*, so a --lit badge would glow
+   magenta on a Working card — reinforcing the "everything's fine" reading this exists to remove —
+   and would render colorless entirely in the agent-detail badge host, which sits outside .sign. */
+.app .badge.halt{ border-color:var(--danger); color:var(--danger);
+  box-shadow:0 0 12px color-mix(in srgb, var(--danger) 45%, transparent); }
+.app .badge.halt .pip{ background:var(--danger); box-shadow:0 0 6px var(--danger); }
+/* --neon-violet is also s-wait's --lit, so a warn badge on a "Waiting on dependencies" card shares
+   its hue. That overlap is accepted: it never touches s-working, which is the card H-4 is about,
+   and the two remain separate labelled pills. Every other declared accent was worse — amber is
+   Gate's (and pulses), magenta is Working's, danger is the halt badge's, cyan reads as data. */
+.app .badge.warn{ border-color:var(--neon-violet); color:var(--neon-violet);
+  box-shadow:0 0 10px color-mix(in srgb, var(--neon-violet) 40%, transparent); }
+.app .badge.warn .pip{ background:var(--neon-violet); box-shadow:0 0 6px var(--neon-violet); }
+
 /* GATE PROMINENCE (polish): the gate badge pulses gently to surface
    "your input is needed here." Respects prefers-reduced-motion via the floor. */
 .app .badge.gate{ animation:gatePulse 1.8s ease-in-out infinite; }
@@ -511,9 +526,17 @@ body.app{
 .app .pill-new{ font-family:var(--font-display); font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--neon-magenta); border:1px solid var(--neon-magenta); border-radius:999px; padding:2px 8px; margin-inline-start:auto; }   /* the "new" pill */
 
 /* ============================ PROTOTYPES ============================ */
-/* Ported from the operator-APPROVED prototype (Direction A · Neon Bazaar) —
-   the binding visual reference for this view. */
-.app .proto-cols{ display:grid; gap:var(--space-7); grid-template-columns:minmax(0,300px) minmax(0,1fr) minmax(0,300px); align-items:start; }
+/* Ported from the operator-APPROVED prototype (Direction A · Neon Bazaar) — the binding visual
+   reference for this view, EXCEPT the pane layout below. #629 found the approved 3-track template
+   spent 644px of the 1224px content cap on two fixed rails, capping the sandboxed preview at 47.4%
+   of the width. .designs/web/final still carries the approved 3-track version and was deliberately
+   NOT retro-edited: it is the record of what was approved, not a mirror of what ships. */
+.app .proto-cols{ display:grid; gap:var(--space-7); grid-template-columns:minmax(0,300px) minmax(0,1fr); align-items:start; }
+/* Placement, not DOM order: the feedback pane stacks under the list while index.html keeps the
+   source order list -> viewer -> feedback, which is what narrow screens and screen readers follow. */
+.app .proto-cols > .proto-pane-list{     grid-column:1; grid-row:1; }
+.app .proto-cols > .proto-pane-viewer{   grid-column:2; grid-row:1 / span 2; }
+.app .proto-cols > .proto-pane-feedback{ grid-column:1; grid-row:2; }
 .app .proto-list{ display:flex; flex-direction:column; gap:var(--space-3); }
 .app .proto-list button{
   text-align:left; border:1px solid var(--line); border-radius:var(--r-sm);
@@ -547,12 +570,23 @@ body.app{
 .app .contract-note code{ color:var(--neon-cyan); }
 
 /* ============================ SETTINGS ============================ */
-.app .map-row{ display:grid; grid-template-columns:1fr auto 1fr auto; gap:var(--space-4); align-items:center; margin-bottom:var(--space-4); }
+/* Five columns since #620 Phase 3: labels · arrow · agent · model pin · remove. The model column is
+   what lets a route carry a per-row model without the editor having to rebuild the row to save it. */
+.app .map-row{ display:grid; grid-template-columns:1fr auto 1fr 1fr auto; gap:var(--space-4); align-items:center; margin-bottom:var(--space-4); }
 .app .map-row .ar{ color:var(--neon-violet); font-family:var(--font-mono); }
 .app .rm{ color:var(--danger); border:1px solid var(--line); border-radius:var(--r-xs); width:34px; height:34px; display:grid; place-items:center; font-size:18px; line-height:1; background:transparent; cursor:pointer; }
 .app .rm:hover{ border-color:var(--danger); background:rgba(255,86,48,.1); }
 .app .add-row{ font-family:var(--font-display); text-transform:uppercase; letter-spacing:.04em; font-size:12px; font-weight:600; color:var(--neon-cyan); border:1px dashed var(--line); border-radius:var(--r-sm); padding:9px 13px; margin-top:var(--space-1); background:transparent; cursor:pointer; }
 .app .add-row:hover{ border-color:var(--neon-cyan); }
+/* The pre-save diff. It is the ONLY place a panel says what a save will change, and it is rendered
+   from the very object about to be PUT — so it cannot describe a document the console will not send. */
+.app .set-diff{ margin:var(--space-4) 0 0; }
+.app .set-diff-keys{ font-family:var(--font-mono); font-size:12px; color:var(--neon-cyan); margin:0; word-break:break-word; }
+/* The stated exclusions read as a list of decisions, so each row carries its own rule. */
+.app .set-unmanaged{ display:flex; flex-direction:column; gap:var(--space-4); }
+.app .set-unmanaged-item{ border-top:1px solid var(--line-soft); padding-top:var(--space-4); }
+.app .set-unmanaged-item:first-child{ border-top:0; padding-top:0; }
+.app .set-file{ font-family:var(--font-mono); font-size:13px; color:var(--neon-cyan); margin:0 0 var(--space-2); }
 .app .toggle-row{ display:flex; align-items:center; gap:var(--space-4); padding:12px 0; border-top:1px solid var(--line-soft); }
 .app .toggle-row:first-child{ border-top:0; }
 .app .toggle-row .tlabel{ flex:1; }
@@ -613,6 +647,12 @@ body.app{
 /* ============================ RESPONSIVE ============================ */
 @media (max-width:860px){
   .app .cols, .app .cols.even, .app .proto-cols{ grid-template-columns:1fr; }
+  /* Without this the single-column collapse above is defeated: the explicit desktop placements
+     survive the breakpoint and resurrect a second implicit column, squeezing the viewer to ~340px.
+     Measured — the 1fr template alone LOOKS like it still works. */
+  .app .proto-cols > .proto-pane-list,
+  .app .proto-cols > .proto-pane-viewer,
+  .app .proto-cols > .proto-pane-feedback{ grid-column:auto; grid-row:auto; }
   .app .map-row{ grid-template-columns:1fr; }
   .app .map-row .ar{ display:none; }
   .app .filterbar{ top:0; }

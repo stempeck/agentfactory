@@ -1,0 +1,12 @@
+{
+  "endpoint": "https://canary.invalid",
+  "otlp_http_path_traces": "CANARY-otlp_http_path_traces",
+  "headers": {
+    "CANARY-headers.key": "CANARY-headers{}"
+  },
+  "protocol": "http/json",
+  "export_timeout_ms": 750,
+  "resource_attributes_extra": {
+    "CANARY-resource_attributes_extra.key": "CANARY-resource_attributes_extra{}"
+  }
+}

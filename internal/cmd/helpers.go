@@ -97,12 +97,15 @@ var _ cmdTmux = (*tmux.Tmux)(nil)
 type authKillGuard struct{ cmdTmux }
 
 // KillSession refuses a factory-scope kill in agent context, permitting only the caller's own
-// session (the af done self-terminate, incl. its raw .runtime/session_id fallback — Ledger D9).
+// session, recognised three ways: by AF_ROLE name (isSelfSession), by the tmux session the caller
+// is running in (isSelfTmuxSession — the AF_ROLE-less af done fallback, #622 G10), and by the raw
+// .runtime/session_id value (isSelfSessionID — Ledger D9, now without a production caller).
 // It emits the AC-6 refusal directly rather than via requireOperatorTeardown, which would
 // double-write the K4 forensic breadcrumb. No recursion: callerAuthority short-circuits on
 // AF_ROLE, else its CurrentSessionName query delegates straight through the embed.
 func (g authKillGuard) KillSession(name string) error {
-	if callerAuthority() == AuthorityAgent && !isSelfSession(name) && !isSelfSessionID(name) {
+	if callerAuthority() == AuthorityAgent &&
+		!isSelfSession(name) && !isSelfTmuxSession(name) && !isSelfSessionID(name) {
 		return errors.New(teardownRefusal("KillSession " + name))
 	}
 	return g.cmdTmux.KillSession(name)
@@ -131,6 +134,20 @@ type RespawnOptions struct {
 	// agent dir here to make the respawn marker-read match the launch marker-write.
 	AgentWorkDir string
 	Tx           respawnTmux
+	// Trigger names which class of recycle this is — one of the eight trigger constants in
+	// recovery.go. No existing field can carry it: FactoryRoot/AgentName/PaneID identify WHO is
+	// being recycled, never WHY, and the four call sites reach the funnel from causes that share
+	// no other distinguishing state (a crash and an agent-invoked handoff differ in nothing else
+	// the funnel can see). All four set it; an unset value is recorded as triggerUnknown rather
+	// than "" so a future recycle path that forgets to name itself is visibly unclassified instead
+	// of looking like a decoder fault.
+	Trigger string
+	// TriggerDetail carries the occupancy-specific K6 fields only this layer's own executor knows.
+	// Its zero value is correct for every class the funnel logs without help — crash,
+	// error_pattern, compact_handoff and self_handoff have no occupancy story to tell.
+	// step_boundary_handoff is the exception among the agent-initiated classes: it decided on an
+	// occupancy reading, so it populates this rather than logging as an occupancy-less recycle.
+	TriggerDetail recycleDetail
 }
 
 func respawnSession(opts RespawnOptions) error {
@@ -152,9 +169,16 @@ func respawnSession(opts RespawnOptions) error {
 	// ""), so a broken models.json warns + falls through to the global default
 	// rather than failing. Emission is structural: BuildStartupCommand() re-emits the
 	// set, so no second emission path is added here (handoff_test transitivity guard).
-	if _, env, _ := resolveLaunchModelEnv(opts.FactoryRoot, opts.AgentName, respawnAgentDir(opts), "", opts.AgentEntry.Model, false, os.Stderr); len(env) > 0 {
+	if _, env, _ := resolveRespawnModelEnv(opts.FactoryRoot, opts.AgentName, respawnAgentDir(opts), opts.AgentEntry.Model, os.Stderr); len(env) > 0 {
 		mgr.SetModelEnv(env)
 	}
+
+	// Profile-key universe across respawns (issue #602), wired UNCONDITIONALLY — NOT inside
+	// the guard above. A respawn is the path that reuses the tmux session, so it is where a
+	// key a prior profile set survives; gating this on a resolved profile would leave the
+	// switch-to-no-profile case carrying the stale value forever. BuildStartupCommand below is
+	// the only emitter a respawn reaches, so this is the only clear it will ever get.
+	mgr.SetModelKeyUniverse(launchModelKeyUniverse(opts.FactoryRoot))
 
 	// Telemetry env across respawns (issue #329): watchdog / handoff / compact-handoff all
 	// route through here and NEVER call Start(), so this is the only place they gain the OTel
@@ -169,8 +193,21 @@ func respawnSession(opts RespawnOptions) error {
 	if tx == nil {
 		tx = tmux.NewTmux()
 	}
+	// The C-1 anchor (#596). Every recycle class reaches the pane through this one function, so
+	// the audit trail is anchored HERE rather than in the occupancy executor: crash, error_pattern,
+	// compact_handoff, self_handoff and step_boundary_handoff never touch that executor, and
+	// logging there would have left every one of them unrecorded and unfenced while appearing to
+	// satisfy AC-6's "every factory-initiated recovery". Both helpers live in recovery.go so this
+	// file needs no new import: teardown_scanner_enforce_test.go pins helpers.go:76/:106/:111 by
+	// line number, and one added import would fail that unrelated conformance test.
+	provisionRecycleSettings(opts)
 	_ = tx.ClearHistory(opts.PaneID)
-	return tx.RespawnPane(opts.PaneID, respawnCmd)
+	// The respawn error is captured, recorded, then returned UNCHANGED. Letting the log write
+	// decide the return value would both mask a real respawn failure and break this function's
+	// existing error contract.
+	err := tx.RespawnPane(opts.PaneID, respawnCmd)
+	recordRecycle(opts, err)
+	return err
 }
 
 // respawnAgentDir derives the agent working dir holding the .runtime/model_override
@@ -360,11 +397,11 @@ func (e *enclosingRootError) Error() string {
 // clone-born session whose AF_ROOT cross-check passes still learns, on every
 // state-writing verb, that its factory is nested inside another. A no-op when the
 // resolved root is not enclosed.
-func warnEnclosingRoot(resolved, enclosing string) {
+func warnEnclosingRoot(warn io.Writer, resolved, enclosing string) {
 	if enclosing == "" {
 		return
 	}
-	fmt.Fprintf(os.Stderr,
+	fmt.Fprintf(warn,
 		"warning: factory %s is nested inside enclosing factory %s; "+
 			"proceeding on the nested root (set AF_ROOT to affirm or cd back to override)\n",
 		resolved, enclosing)
@@ -378,6 +415,18 @@ func warnEnclosingRoot(resolved, enclosing string) {
 // AF_ROOT-first resolver, or the containment AF_ROOT-shunning resolver — T-INT-4
 // encodes the carve-outs.
 func resolveInvokerRoot(wd string) (string, error) {
+	return resolveInvokerRootWarn(wd, os.Stderr)
+}
+
+// resolveInvokerRootWarn is resolveInvokerRoot with the warning destination injected. Every
+// diagnostic verb calls resolveInvokerRoot (warn == os.Stderr); the statusline RENDER hot path,
+// which is contractually silent on every failure (C-5: no error text reaches the pane), calls
+// this directly with io.Discard so the in-session AF_ROOT/enclosing warnings emitted on the two
+// NIL-error success paths below (stale-AF_ROOT and nested-factory) cannot leak into the pane —
+// silentRootDowngrade covers only the error-RETURNING branches, so those two writes needed the
+// writer hatch (PR #595 T9). This is THE invoker seam that owns config.FindFactoryRoot (T-INT-4
+// allowlists it under this name); resolveInvokerRoot is its os.Stderr-bound public face.
+func resolveInvokerRootWarn(wd string, warn io.Writer) (string, error) {
 	resolved, err := config.FindFactoryRoot(wd)
 	if err != nil {
 		return "", err // propagate the verbatim not-found string (root.go:36)
@@ -399,12 +448,12 @@ func resolveInvokerRoot(wd string) (string, error) {
 	// redirect (afweb rationale, web/internal/config/root.go:65-68).
 	envRoot, envErr := config.FindFactoryRoot(afRoot)
 	if envErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: AF_ROOT=%q does not resolve to a factory; using cwd-resolved root %s\n", afRoot, resolved)
-		warnEnclosingRoot(resolved, enclosing)
+		fmt.Fprintf(warn, "warning: AF_ROOT=%q does not resolve to a factory; using cwd-resolved root %s\n", afRoot, resolved)
+		warnEnclosingRoot(warn, resolved, enclosing)
 		return resolved, nil // warn-and-proceed (watchdog fall-through posture)
 	}
 	if config.SameResolvedRoot(resolved, envRoot) {
-		warnEnclosingRoot(resolved, enclosing) // gen-0 in-session signal (H3)
+		warnEnclosingRoot(warn, resolved, enclosing) // gen-0 in-session signal (H3)
 		return resolved, nil
 	}
 	return "", &rootMismatchError{resolved: resolved, envRoot: envRoot}

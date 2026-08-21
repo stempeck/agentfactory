@@ -208,6 +208,18 @@ malicious one.
     did not dispatch and is admitted by its own session identity
     (`CurrentSessionName() == DispatchSessionName()`), whose same-uid spoofability is
     Gap 4's ceiling, no worse than the tier signals.
+  - **`af memory status --nag` hygiene pass (RS-3b, #515 Phase 5).** The second site to
+    trust the daemon's session identity, and the reason it needs one is the same: the
+    pass is operator-tier, the dispatch loop invokes it once per cycle
+    (`internal/cmd/dispatch.go` `buildDispatchLoopCmd`), and the daemon classifies
+    `AuthorityAgent` by signal 2, so without the carve-out the only caller it was built
+    for would be refused into `.runtime/dispatch.log` forever. Scope is deliberately
+    narrower than RS-3: `callerIsDispatchDaemon` (`internal/cmd/memory_nag.go`) is
+    reachable from the `--nag` branch of one verb, gates a curation surface rather than
+    a teardown one, adds the `$TMUX` precondition `callerAuthority` documents as
+    load-bearing, and does not touch the classifier — a third `Authority` value stays
+    rejected for the reason recorded above. This ADR remains the enumerated inventory of
+    where this signal is trusted; a third site needs another entry here.
   - **Runtime roster edits (Gap 13).** A same-uid edit of `agents.json` between load
     and check is ungoverned by the CI type-pin. The **watchdog-aliasing half** of this
     class is **CLOSED**, not a residual: `"watchdog"` is a reserved name
@@ -249,6 +261,8 @@ malicious one.
 - `internal/cmd/authority.go:292-316` — `writeTeardownGrantedArtifact` (granted-stop audit)
 - `internal/cmd/down.go` — K5 `runDown` gate + K11 carve-out; K10 `runPkill` seam (:269-294)
 - `internal/cmd/sling.go:160-175,249` — `sling --reset` gate + `dispatch_owner` write
+- `internal/cmd/sling.go:194-197` — RS-3 dispatch-daemon carve-out (the shape RS-3b copies)
+- `internal/cmd/memory_nag.go` — `callerIsDispatchDaemon`, the RS-3b carve-out; gated at `internal/cmd/memory.go` `runMemoryStatus`
 - `internal/cmd/done.go:333,574` — `dispatch_owner` session-end delete; `formula_caller` completion delete (unchanged)
 - `internal/cmd/up.go:235,238` — relaunch-clear of `dispatch_owner`
 - `internal/cmd/watchdog.go:481-484` — `pollAgents` skips non-running sessions (R5 basis)

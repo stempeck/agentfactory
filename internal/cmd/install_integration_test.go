@@ -79,6 +79,19 @@ func TestInstallInit_CreatesDispatchJson(t *testing.T) {
 	if notify, ok := cfg["notify_on_complete"].(string); !ok || notify != "manager" {
 		t.Errorf("notify_on_complete should be 'manager', got: %v", cfg["notify_on_complete"])
 	}
+
+	// The learnings vault root (issue #515 Phase 3) rides along on this --init run rather than
+	// getting its own test: every end-to-end --init spawns the Python MCP server, and the unit
+	// tier cannot reach runInstallInit at all. Without this assertion the vault-root creation is
+	// the one Phase 3 change no test covers.
+	vaultRoot := config.MemoryDir(dir)
+	info, err := os.Stat(vaultRoot)
+	if err != nil {
+		t.Fatalf("install --init must create the memory vault root at %s: %v", vaultRoot, err)
+	}
+	if !info.IsDir() {
+		t.Errorf("%s must be a directory", vaultRoot)
+	}
 }
 
 // TestInstallInit_AgentsMdRelocation_Behavioral is the behavioral half of issue

@@ -73,12 +73,18 @@ type DispatchReader interface {
 	Status(ctx context.Context) (dispatch.View, error)
 }
 
-// SettingsService is the curated config read + the af-routed write. config.Service satisfies
-// it: Read returns the secret-stripped settings, Write routes the edited config through
-// `af config <file> set` (atomic + cross-file validated inside af-core).
+// SettingsService is the tier-gated config read + the af-routed write. config.Service satisfies it.
+// Read returns every file's disposition alongside its document — opaque bytes for the secret-free
+// raw tier, secret-free projections for the rest — so this layer never learns a config schema. An
+// error from Read means the READ failed (unreadable or malformed file); a document the console is
+// not allowed to see is data, not an error, and travels at 200 with the reason why.
+//
+// Write routes a complete edited document through `af config <file> set` (atomic + cross-file
+// validated inside af-core). ifContentHash is the fingerprint the console read, forwarded as a
+// compare-and-set precondition; empty means an unconditional write.
 type SettingsService interface {
 	Read(ctx context.Context) (config.Settings, error)
-	Write(ctx context.Context, file string, payload []byte) (exec.Result, error)
+	Write(ctx context.Context, file string, payload []byte, ifContentHash string) (exec.Result, error)
 }
 
 // FormulaResolver answers "what formula is agent <name> configured to run" from static
@@ -539,9 +545,11 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	s.write(w, http.StatusOK, Envelope{OK: true, Data: view})
 }
 
-// handleSettings (read) returns the curated settings: editable dispatch.json/startup.json, the
-// read-only factory.json, and the secret-free agent roster. Per-agent secrets
-// (Model/BaseURL/AuthToken) are stripped by construction in the config package, never here.
+// handleSettings (read) returns every config file's disposition and, where the tier allows it, its
+// document: raw bytes for the secret-free files (dispatch/startup/messaging/statusline, plus
+// read-only factory), a secret-free summary of the agent roster, model-profile NAMES for the picker,
+// and the running af binary's schema fingerprint. Nothing is redacted here — the config package
+// chooses one pipeline per file so a secret has no path to this layer to be redacted from.
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r, false) {
 		return
@@ -558,11 +566,23 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	s.write(w, http.StatusOK, Envelope{OK: true, Data: view})
 }
 
-// handleSettingsWrite (state-changing) persists an edited config file. {file} ∈ {dispatch,startup}
-// (factory.json is read-only). The raw request body IS the complete edited config document — it is
-// fed straight to `af config <file> set` on stdin: the web module never decodes it into a
-// typed struct nor re-implements validation. af-core validates (struct + cross-file) and writes
-// atomically; on a non-zero exit its friendly per-field message is surfaced as the validation error.
+// settingsIfContentHashHeader carries the fingerprint the console read for {file}, turning the PUT
+// into a compare-and-set. A HEADER rather than a wrapper field around the document, because the
+// request body is contractually the complete config document, byte for byte, all the way to af's
+// stdin — wrapping it would reintroduce a web-module-declared shape on the exact path this phase
+// exists to keep opaque.
+const settingsIfContentHashHeader = "X-AF-If-Content-Hash"
+
+// handleSettingsWrite (state-changing) persists an edited config file. {file} is a tier-table noun;
+// which nouns are writable is the config package's decision, and a refusal carries that table's
+// recorded reason. The raw request body IS the complete edited config document — it is fed straight
+// to `af config <file> set` on stdin: the web module never decodes it into a typed struct nor
+// re-implements validation. af-core validates (struct + cross-file) and writes atomically; on a
+// non-zero exit its friendly per-field message is surfaced as the validation error.
+//
+// The guard is s.guard, not the stricter s.guardWrite the formula routes use: this is an existing
+// mutation surface inheriting its tier unchanged, and no new file added to the allowlist creates an
+// unauthenticated path that dispatch/startup did not already have (security.md:154-156).
 func (s *Server) handleSettingsWrite(w http.ResponseWriter, r *http.Request) {
 	if !s.guard(w, r, true) {
 		return
@@ -572,6 +592,11 @@ func (s *Server) handleSettingsWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	file := r.PathValue("file")
+	// Cap the body before it is buffered, exactly as the formula PUT and generate POST do. The
+	// MaxBytesReader error surfaces through the io.ReadAll arm below as a 400 — it writes no status
+	// of its own — which keeps this handler's "4xx, never 5xx" contract without inventing a 413 the
+	// rest of this file does not use.
+	r.Body = http.MaxBytesReader(w, r.Body, maxWriteBody)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		s.write(w, http.StatusBadRequest, Envelope{OK: false, Message: "could not read request body"})
@@ -581,13 +606,42 @@ func (s *Server) handleSettingsWrite(w http.ResponseWriter, r *http.Request) {
 		s.write(w, http.StatusBadRequest, Envelope{OK: false, Message: "empty settings body: send the complete edited config as JSON"})
 		return
 	}
-	res, err := s.settings.Write(r.Context(), file, body)
+	ifContentHash := r.Header.Get(settingsIfContentHashHeader)
+	res, err := s.settings.Write(r.Context(), file, body, ifContentHash)
 	switch {
 	case err == nil:
+		// Metadata-only audit breadcrumb, mirroring the formula-write handler: an operator surprised
+		// by a settings change has only this line to attribute it, so it is emitted on the success
+		// path ONLY — a line for a write that did not happen would make the trail worse than none.
+		// No document bytes are logged.
+		//
+		// Two honesty notes, because both fields mean something narrower than a bare name would.
+		// precondition= is the PRECONDITION THE REQUEST CARRIED ("-" when it carried none) — not the
+		// file's previous content, which this layer never reads. The formula-write line at the bottom
+		// of this file logs the ACTUAL prior content under sha256_before=, so the two lines carry
+		// DISTINCT field names and a grep of `audit:` no longer conflates them. sha256_after digests
+		// the SUBMITTED document, which is what this layer saw — af-core re-indents and injects
+		// defaults, so the resulting file's digest is its own to report.
+		log.Printf("audit: settings write file=%s bytes=%d precondition=%s sha256_after=%s",
+			file, len(body), orDash(ifContentHash), hashHex(body))
 		s.write(w, http.StatusOK, Envelope{OK: true, Message: "settings saved", Data: map[string]int{"exit_code": res.ExitCode}})
-	case errors.Is(err, config.ErrNotWritable):
-		// A read-only / unknown file is a client error.
+	case errors.Is(err, config.ErrNotWritable), errors.Is(err, config.ErrBadPrecondition):
+		// A read-only / unknown file, or a precondition header that is not a digest: both are
+		// malformed requests. ErrNotWritable's message carries the tier row's reason.
 		s.write(w, http.StatusBadRequest, Envelope{OK: false, Message: err.Error()})
+	case errors.Is(err, config.ErrHashMismatch):
+		// The file changed between the read and this write. Nothing was written. It is checked BEFORE
+		// the generic non-zero-exit arm below, because af signals a failed precondition with the same
+		// exit code as a validation rejection — order is what makes this a 409 and not a 422.
+		s.write(w, http.StatusConflict, Envelope{OK: false, Message: err.Error()})
+	case errors.Is(err, config.ErrAfTooOld):
+		// The af binary on PATH is too old to process this write — it rejected the forwarded
+		// --if-content-hash flag it does not register. The operator's document is fine; the local
+		// binary is stale. Like the ErrHashMismatch arm, this MUST precede the non-zero-exit arm below:
+		// an af-too-old failure also exits non-zero, so placing it after would mis-map it to a 422 "did
+		// not validate" — a false statement about a fine document. 502 is the honest code: the same
+		// infrastructure arm as an af that could not run at all.
+		s.write(w, http.StatusBadGateway, Envelope{OK: false, Message: err.Error()})
 	case res.ExitCode != 0:
 		// af ran and rejected the config (struct/cross-file validation): a non-zero child exit. The
 		// friendly per-field message af printed to stderr is embedded in err. 422 = did not validate.
@@ -740,7 +794,7 @@ func (s *Server) resolveFormula(ctx context.Context, w http.ResponseWriter, name
 }
 
 // DetailView is the per-agent detail payload (#500). Agent embeds readmodel.AgentView VERBATIM
-// (twelve snake_case keys) — never a fork (#455). DeclaredFormula is the agents.json formula,
+// — every key it declares, never a fork (#455). DeclaredFormula is the agents.json formula,
 // carried as a SEPARATE, distinctly-labelled field from Agent.Formula (the RUNNING formula). Tail
 // is the honest session snapshot.
 type DetailView struct {

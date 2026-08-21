@@ -365,7 +365,7 @@ single step, the console says so instead of inventing a number).
 
 ```bash
 af up [agents...]                  # start agent tmux sessions
-af down [agents...] [--all]        # stop sessions
+af down [agents...] [--all]        # stop sessions (factory-wide teardown is operator-only)
 af attach <agent>                  # attach to a running session
 af install --init                  # initialize factory
 af install <role>                  # provision an agent

@@ -4,11 +4,30 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/stempeck/agentfactory/internal/config"
 )
+
+// frozenStatusLineCmd is the byte-exact command the statusLine block must carry in BOTH
+// settings templates (issue #591, K6). It reuses the same PATH-export idiom as every other
+// hook command, swapping the verb to `af statusline render`. "padding": 0 is deliberately
+// omitted (deferred to the P4b padding probe). Any drift here is a launch-adjacent contract
+// break, so the pin tests below assert this string verbatim.
+const frozenStatusLineCmd = `export PATH="$HOME/go/bin:$HOME/.local/bin:$HOME/bin:$PATH" && af statusline render`
+
+// frozenStatusLineRefresh is the statusLine refresh cadence in SECONDS (issue #596 K1). Claude
+// Code re-runs the statusline command every N seconds in addition to its event-driven updates;
+// without it an idle or wedged session simply stops rendering and its occupancy snapshot freezes,
+// making "stale" indistinguishable from "healthy but quiet".
+//
+// The value is load-bearing, not cosmetic: internal/config's staleness floor is
+// 3x(refresh + watchdog tick) = 3x(30+30) = 180, which is EXACTLY the shipped staleness_secs
+// default. TestRecoveryRefreshInterval_MatchesSettingsTemplates (internal/config) is the guard
+// that keeps this number and recoveryRefreshIntervalSecs from drifting apart.
+const frozenStatusLineRefresh = 30
 
 func TestRoleTypeFor_Interactive(t *testing.T) {
 	agents := &config.AgentConfig{
@@ -71,6 +90,22 @@ func TestEnsureSettings_Autonomous(t *testing.T) {
 		t.Error("autonomous settings.json SessionStart missing 'af prime --hook && af mail check --inject'")
 	}
 
+	// Parse and check the SessionStart hook command specifically. Asserting on the parsed command
+	// rather than the whole file is what stops the UserPromptSubmit occurrence of a verb from
+	// satisfying a SessionStart claim (issue #515 Phase 3: injection is SessionStart-only).
+	hooks := parsed["hooks"].(map[string]interface{})
+	sessionStart := hooks["SessionStart"].([]interface{})
+	firstEntry := sessionStart[0].(map[string]interface{})
+	hooksList := firstEntry["hooks"].([]interface{})
+	firstHook := hooksList[0].(map[string]interface{})
+	cmd := firstHook["command"].(string)
+	if !strings.Contains(cmd, "af memory check --inject") {
+		t.Errorf("autonomous SessionStart missing 'af memory check --inject', got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "af prime --hook && af mail check --inject") {
+		t.Errorf("autonomous SessionStart must keep 'af prime --hook && af mail check --inject' contiguous, got: %s", cmd)
+	}
+
 	// Stop hook must reference quality-gate.sh
 	if !strings.Contains(content, "quality-gate.sh") {
 		t.Error("autonomous settings.json missing quality-gate.sh in Stop hook")
@@ -128,6 +163,12 @@ func TestEnsureSettings_Interactive(t *testing.T) {
 	cmd := firstHook["command"].(string)
 	if strings.Contains(cmd, "af mail check") {
 		t.Error("interactive SessionStart should NOT contain 'af mail check --inject'")
+	}
+	// Interactive gets memory injection too — it is the only hook that delivers it (issue #515
+	// Phase 3). Asserted on the parsed command, not the whole file, so UserPromptSubmit's own
+	// clause cannot satisfy it.
+	if !strings.Contains(cmd, "af memory check --inject") {
+		t.Errorf("interactive SessionStart missing 'af memory check --inject', got: %s", cmd)
 	}
 
 	// Stop hook must reference quality-gate.sh
@@ -323,6 +364,113 @@ func TestEnsureSettings_PreToolUseContainment(t *testing.T) {
 			// ${AF_ROOT} (that token belongs only to the bash-script Stop hooks).
 			if !strings.Contains(cmd, `export PATH="$HOME/go/bin:`) {
 				t.Errorf("%s PreToolUse command should carry the export PATH= prefix, got: %s", tc.name, cmd)
+			}
+		})
+	}
+}
+
+// TestSettingsTemplates_StatusLineKeyPinned pins the K6 contract (issue #591): BOTH embedded
+// templates carry a top-level statusLine block, their subtrees are byte-identical, and the
+// command is the frozen string. It compares ONLY the statusLine subtree, never the whole file:
+// the two templates DIVERGE elsewhere (D9 — SessionStart, PreCompact, and the Stop array), so a
+// whole-file parity test would spuriously fail.
+func TestSettingsTemplates_StatusLineKeyPinned(t *testing.T) {
+	load := func(name string) map[string]interface{} {
+		data, err := settingsFS.ReadFile(name)
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("%s is not valid JSON: %v", name, err)
+		}
+		return m
+	}
+
+	auto := load("config/settings-autonomous.json")
+	inter := load("config/settings-interactive.json")
+
+	autoSL, ok := auto["statusLine"]
+	if !ok {
+		t.Fatal("settings-autonomous.json is missing the top-level statusLine key")
+	}
+	interSL, ok := inter["statusLine"]
+	if !ok {
+		t.Fatal("settings-interactive.json is missing the top-level statusLine key")
+	}
+
+	if !reflect.DeepEqual(autoSL, interSL) {
+		t.Errorf("statusLine subtrees diverge across templates:\n autonomous=%#v\n interactive=%#v", autoSL, interSL)
+	}
+
+	slMap, ok := autoSL.(map[string]interface{})
+	if !ok {
+		t.Fatalf("statusLine is not a JSON object: %T", autoSL)
+	}
+	if got, _ := slMap["type"].(string); got != "command" {
+		t.Errorf("statusLine.type = %q, want \"command\"", got)
+	}
+	cmd, _ := slMap["command"].(string)
+	if cmd != frozenStatusLineCmd {
+		t.Errorf("statusLine.command = %q, want %q", cmd, frozenStatusLineCmd)
+	}
+	if !strings.HasSuffix(cmd, "af statusline render") {
+		t.Errorf("statusLine.command must end with 'af statusline render', got %q", cmd)
+	}
+	// refreshInterval must be a bare JSON NUMBER. The host validates it with a zod schema that
+	// silently drops anything else to undefined, installing no timer at all — a failure with no
+	// error, no log, and a green "the key is present" grep (issue #596 K1).
+	refresh, present := slMap["refreshInterval"]
+	if !present {
+		t.Fatal("statusLine is missing refreshInterval; renders would stay purely event-driven")
+	}
+	if got, ok := refresh.(float64); !ok || got != float64(frozenStatusLineRefresh) {
+		t.Errorf("statusLine.refreshInterval = %#v (%T), want the number %d", refresh, refresh, frozenStatusLineRefresh)
+	}
+}
+
+// TestEnsureSettings_ProvisionedContentHasKey proves provisioning writes the statusLine key
+// (issue #591, K6). EnsureSettings copies the selected embedded template verbatim, so a fresh
+// .claude/settings.json must carry the top-level statusLine block with the frozen command for
+// both role types (mirrors the role-type walk in TestEnsureSettings_PreToolUseContainment).
+func TestEnsureSettings_ProvisionedContentHasKey(t *testing.T) {
+	cases := []struct {
+		name     string
+		roleType RoleType
+	}{
+		{"Interactive", Interactive},
+		{"Autonomous", Autonomous},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := EnsureSettings(dir, tc.roleType); err != nil {
+				t.Fatalf("EnsureSettings(%s) error: %v", tc.name, err)
+			}
+
+			data, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+			if err != nil {
+				t.Fatalf("reading settings.json: %v", err)
+			}
+			var parsed map[string]interface{}
+			if err := json.Unmarshal(data, &parsed); err != nil {
+				t.Fatalf("settings.json is not valid JSON: %v", err)
+			}
+
+			sl, ok := parsed["statusLine"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("%s settings.json missing top-level statusLine object", tc.name)
+			}
+			if cmd, _ := sl["command"].(string); cmd != frozenStatusLineCmd {
+				t.Errorf("%s statusLine.command = %q, want %q", tc.name, cmd, frozenStatusLineCmd)
+			}
+			// The refresh cadence must reach the PROVISIONED file, not just the template:
+			// an agent whose settings.json lacks it renders only on events, so its occupancy
+			// channel freezes the moment it goes quiet and "stale" stops meaning anything
+			// (issue #596 K1).
+			if got, _ := sl["refreshInterval"].(float64); got != float64(frozenStatusLineRefresh) {
+				t.Errorf("%s statusLine.refreshInterval = %v, want %d", tc.name, sl["refreshInterval"], frozenStatusLineRefresh)
 			}
 		})
 	}

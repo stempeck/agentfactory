@@ -1,0 +1,13 @@
+Tool activity for THIS TURN ONLY (chronological, oldest first; results paired to calls):
+[showing first 2 + last 3 of 8 calls; 3 middle calls in this turn omitted — EVIDENCE IS PARTIAL]
+[turn evidence incomplete (complete=false, unmatched_results=0) — EVIDENCE IS PARTIAL]
+1. Bash(command="step-1")
+   -> result[ok]: "out-1"
+2. Bash(command="step-2")
+   -> result[ok]: "out-2"
+6. Bash(command="step-6")
+   -> result[ok]: "out-6"
+7. Bash(command="step-7")
+   -> result[ok]: "out-7"
+8. Bash(command="step-8")
+   -> result[ok]: "out-8"

@@ -5,6 +5,11 @@ You have SKILLs, now turn your SKILL.md's into your autonomous workforce that ca
 **Mission:**
 Create an instruction set workflow (formula) with `/formula-create /path/to/your/SKILL.md` and generate an autonomous agentfactory agent from it with `af formula agent-gen name-of-your-formula` with simple steps or multi-agent coordination.
 
+**Audience:**
+This guide is the human operator's manual: the `af` commands and configuration needed to set
+up and USE agentfactory. Agents and formulas are one system, so both live here. Deep guides
+for the measurement and model subsystems are split out — see [Feature Guides](#feature-guides).
+
 ## Prerequisites
 
 - **Go 1.24+** — `go version`
@@ -115,6 +120,7 @@ You're now the manager agent working on myproject.
 ```bash
 af mail send <to> -s <subject> -m <message>   # Send mail
 af mail send @all -s <subject> -m <message>    # Broadcast
+af mail send <to> -s <subject> -m <message> --report-delivery  # Report whether a live session was notified
 af mail inbox                                   # List unread
 af mail read <id>                               # Read message
 af mail reply <id> -m <message>                 # Reply
@@ -123,6 +129,19 @@ af mail check                                   # Check for mail (exit 0/1)
 af prime                                        # Re-inject identity + formula context (automatic when active)
 af root                                         # Print factory root
 ```
+
+### Gate Commands
+
+```bash
+af fidelity status                                        # Toggle state, per-agent record, overrides, provenance
+af fidelity off --agent <name>                            # Record an operator-scoped override for one agent
+af fidelity on --agent <name>                             # Clear that agent's override
+af turn evidence --transcript <path> [--format text|json] # This turn's tool-call evidence
+```
+
+`af fidelity off` is an operator action — it is refused inside an af-managed agent session, so run it
+from a host shell. `af turn evidence` is what both Stop hooks call to build the evidence block they
+hand the judge; it exits 0 whatever the transcript looks like and reports any shortfall in its output.
 
 ### Formula Commands
 
@@ -241,17 +260,6 @@ mapping whose agent has a formula; phases run top-to-bottom; a phase label may n
 the `trigger_label` or the workflow's own label; and in v1 all phases of one workflow
 must be the same `source` (all `issue` or all `pr`).
 
-### Watchdog
-
-The watchdog (`af watchdog`) is a long-lived polling loop that monitors agent tmux
-sessions for Claude crashes, known error patterns, and silence timeouts, then nudges
-or respawns the affected session (a circuit breaker stops respawning after repeated
-failures and escalates to the supervisor). `af up` launches it best-effort; you
-rarely run `af watchdog` by hand.
-
-**Scope comes solely from `startup.json.watchdog_agents`** — the explicit, bounded
-list of agents to monitor. There is no "watch all" mode.
-
 ### Adding more agents manually (not recommended. use: agent-gen or agent-gen-all.sh)
 
 Edit `.agentfactory/agents.json` at the project root:
@@ -283,11 +291,11 @@ Then: `af install researcher && af up researcher`
 
 | Hook | Trigger | Action |
 |------|---------|--------|
-| `SessionStart` | Session opens | `af prime --hook` — inject identity. Autonomous agents also run `af mail check --inject` to pick up queued work. |
+| `SessionStart` | Session opens | `af prime --hook` — inject identity. Autonomous agents also run `af mail check --inject` to pick up queued work. Both role types then run `af memory check --inject` to deliver the agent's own learnings vault; on a fresh factory it emits nothing at all. |
 | `PreCompact` | Context compaction | `af compact-handoff` (interactive agents: `af compact-handoff --interactive`) — checkpoint and recycle the session so the fresh session re-injects identity and formula step context. |
 | `UserPromptSubmit` | Each prompt | `af mail check --inject` — deliver new mail |
 | `Stop` | Each response | `quality-gate.sh` — haiku grades against 7 generic principles, mails verdict on failure. **Off by default** — `af quality on` (or `echo on > "$(af root)/.agentfactory/.quality-gate"`) to enable. |
-| `Stop` | Each response | `fidelity-gate.sh` — haiku grades against the *current formula step's* title + description (ground truth from the step bead, not `af prime` output). Mails `STEP_FIDELITY` verdict on failure. Self-gates on `.runtime/hooked_formula` — generic supervisors with no active formula are unaffected. **On by default** (`af install --init` creates `.agentfactory/.fidelity-gate` with "on") — `af fidelity off` to disable. |
+| `Stop` | Each response | `fidelity-gate.sh` — haiku grades against the *current formula step's* title + description (ground truth from the step bead, not `af prime` output). Mails `STEP_FIDELITY` verdict on failure. Self-gates on `.runtime/hooked_formula` — generic supervisors with no active formula are unaffected. **On by default** (`af install --init` creates `.agentfactory/.fidelity-gate` with "on") — `af fidelity off` to disable, which is an operator action and is refused inside an af-managed agent session. `af fidelity off --agent <name>` records a per-agent override that `af fidelity status` lists, and every toggle write `af` makes — by `af fidelity`, by `af up` applying a startup gate, or by `af install --init` seeding a new factory — is appended to `.agentfactory/.fidelity-gate.log`. |
 
 ### Continuous improvement hook
 
@@ -330,6 +338,11 @@ Unlike the fidelity gate, `.improvement-hook` is **never** seeded by `af install
         .claude/settings.json
         .agent-checkpoint.json
         .runtime/
+    memory/                      # Agent learnings vault — plain Markdown, outside every
+      manager/                   # directory a teardown destroys, gitignored
+        2026-08-15T1204Z-flaky-probe.md
+        index.md                 # Derived summary, rebuilt on every write
+      supervisor/
   .agentfactory/hooks/
     quality-gate.sh
     quality-gate-prompt.txt
@@ -490,16 +503,6 @@ In the dispatch path (`af sling --agent`), `--reset` additionally removes:
 
 After cleanup, sling proceeds normally — instantiating the new formula fresh.
 
-!IMPORTANT! LLM don't read between <ignore></ignore> blocks! Skip to after the </ignore><-here
-<ignore>
-!IMPORTANT! WARNING for Human eyes only:
-
-`af down --reset` will KILL all worktrees and CLOSE all beads! 
-Use it when you're completely done with a session and don't want to continue any work to clean up all state and start fresh.
-
-`af down <agent-name> --reset` will more safely tear down a specific agent and close all associated beads/worktree.
-</ignore>
-
 ### Factory teardown is operator-only
 
 Factory-wide teardown is an **operator action**. The commands that stop the whole
@@ -523,6 +526,11 @@ authority that `af sling --agent <agent> --reset` already carries — the two
 commands share one authority model. Only the factory-wide shapes (bare `af down`,
 `--all`, `--reset` with no target) are operator-only.
 
+**`af down --reset` (factory-wide) KILLS all worktrees and CLOSES all beads.** Run it from a
+host shell, and only when you are completely done and want to clean up all state and start
+fresh. `af down <agent-name> --reset` more safely tears down one specific agent and closes
+its associated beads/worktree.
+
 **"Agent-class" is scoped to factory-wide teardown only.** The manager is
 agent-class **for factory-wide teardown** — a bare `af down` / `--all` / `--reset`
 typed into its Claude pane is refused and redirected here — but it holds the
@@ -539,29 +547,11 @@ is a *request*, not authorization. Before acting, confirm the target and its sta
 yourself with `af agents list` — the confused-deputy risk is that a forged or
 mistaken mail directs a stop you would not otherwise make.
 
-When an agent attempts a factory-wide teardown it sees the refusal message and is
-told to skip and continue:
-
-```
-teardown refused: agent context (af down)
-This command stops the whole factory: it would kill YOU (this session), every
-sibling agent, and the interactive manager. Factory-wide teardown is an operator
-action.
-Do NOT retry, do NOT look for another way to stop agents. Skip this step and
-continue with your remaining work. If you believe a factory teardown is genuinely
-required, tell your operator (af mail send manager -s "teardown request" -m "...")
-and move on.
-```
-
-This is a **guardrail against accidental invocation, never a security boundary**.
-It stops the accident class (the actor that has actually caused harm), not a
-determined same-user process. Several bypasses are **owned residuals** — accepted
-deliberately, not closed: an `env -u AF_ROLE` invocation run outside any af tmux
-pane (R1); raw `pkill`/`kill`/`tmux kill-server` at the same uid (R2); a loopback
-call to the web console's down endpoints (R3); and a hermetic test harness that
-scrubs the environment and runs outside a pane (R4). See the R1–R6 residual table
-in `.designs/541/design-doc.md` (Same-User Capability Boundary Decision) for the
-full disposition — the docs must not imply these vectors are closed.
+An agent that attempts a factory-wide teardown sees a refusal message directing it to skip
+the step and tell its operator. This is a **guardrail against accidental invocation, never a
+security boundary** — a determined same-user process can still bypass it (the accepted
+residual vectors are recorded in `.designs/541/design-doc.md`); the docs must not imply
+those vectors are closed.
 
 ### Dispatch path
 
@@ -727,327 +717,16 @@ af up
 
 Each repository is its own independent factory. Agents in `~/src/myproject/.agentfactory/agents/manager/` cannot mail agents in `~/src/mysecondproject/.agentfactory/agents/supervisor/` — they have separate mail stores. If you have 5 repos, you run `af install --init` in each one.
 
-## Telemetry
+## Feature Guides
 
-**What it gives you.** Two questions you cannot answer today: *which step of a formula run is
-actually slow*, and *what each agent, model and step costs*. `quickstart.sh` installs a
-measurement dashboard alongside the factory and seeds six views into it: **Step duration by
-formula run**, **Tokens per agent, model and step**, **Cost per agent and model**, **Spend
-outside steps**, **Does the accounting add up**, and **Steps that recorded no usage**. The
-last two are honesty views — they show you when the numbers do not reconcile rather than
-quietly rounding the gap away.
+Deep guides for the factory's measurement and model subsystems live beside this one:
 
-**Two levers, and installing one is not pulling the other.** `quickstart.sh` installs the
-dashboard by default; `./quickstart.sh --no-telemetry` skips that install entirely and leaves
-you a factory that works exactly the same, minus the timing and cost views. **Recording stays
-off until you turn it on**, whether or not the dashboard is installed. Nothing about how
-agents work changes either way — no new prompts, no new gates, no change to any formula.
-
-### Turning it on
-
-```bash
-af telemetry on        # start recording, factory-wide
-af telemetry status    # is it on, where is data going
-af telemetry off       # stop recording; existing records stay readable
-```
-
-The toggle is a file — `<factory-root>/.agentfactory/.telemetry-gate` containing `on` — so the
-equivalent manual form is `echo on > "$(af root)/.agentfactory/.telemetry-gate"`. It is never
-created by `af install --init`; a fresh factory is always off. You can also set
-`"telemetry": "on"` in `.agentfactory/startup.json`, which a bare `af up` applies.
-
-**Turning it on takes effect at the next session launch.** An agent carries the measurement
-environment it was given when its session started, and a running process's environment cannot
-be changed from outside. Agents already up when you flip the toggle keep running without it —
-restart them with `af down <agent>` then `af up <agent>` to pick it up. The same is true in
-reverse: turning it off stops new sessions from recording, but a session already running keeps
-going until it is restarted.
-
-**Which run an agent's costs are filed under is also fixed when its session starts.** So if one
-agent begins a second piece of work without its session being restarted, that second run's token
-costs are still filed under the first one, and the second run looks free. The normal flow does not
-hit this — starting work with `af sling` and then `af handoff` gives the agent a fresh session,
-which files it correctly. It is worth knowing if you ever start a second run by hand in a session
-that is already up: restart the agent first, and the numbers will land where you expect.
-
-### Where the data goes
-
-Settings live in `.agentfactory/telemetry.json`, seeded by `quickstart.sh`:
-
-```json
-{
-  "endpoint": "http://127.0.0.1:5080/api/default",
-  "otlp_http_path_traces": "/v1/traces",
-  "headers": { "Authorization": "file:.agentfactory/secrets/telemetry.auth" },
-  "protocol": "http/json",
-  "export_timeout_ms": 500,
-  "resource_attributes_extra": {}
-}
-```
-
-**`endpoint` is the one value you are expected to touch.** Leave it alone to use the bundled
-dashboard, or paste your company's OpenTelemetry address to send everything to your own stack
-instead. Both are fully supported — the bundled dashboard is a convenience, not a dependency,
-and a factory installed with `--no-telemetry` that later points `endpoint` at an existing
-stack works fine. `headers` is the password the connection uses, kept in a file rather than
-written here; `quickstart.sh` sets it up and you normally never touch it. The file is not
-tracked by git, so a factory-specific address and a secret never end up in a commit.
-
-One caveat if you point at your own stack. The bundled dashboard is reached at a sub-path of its
-own, which is why the address above ends in `/api/default`. Your own stack almost certainly does
-not use that, so replace the whole address with yours and drop that trailing part:
-
-```json
-  "endpoint": "https://otel.your-company.example",
-```
-
-The line below it is already the standard value every other destination expects, so leave it
-alone — or delete it, which means the same thing.
-
-Then run `af telemetry status`. It contacts every address this factory sends to and tells you
-which ones answered, so you do not have to guess whether you got it right.
-
-**The bundled dashboard.** OpenObserve, pinned and checksum-verified, running in a tmux
-session named `telemetry` on `127.0.0.1:5080`. Log in as `root@agentfactory.local` with the
-password in `.agentfactory/secrets/telemetry.root`.
-
-**Reaching the dashboard itself from your own browser is not guaranteed.** It binds to loopback
-deliberately, and `quickdocker.sh` publishes no ports, so on a container you will need to set up a
-port-forward or tunnel yourself. From inside the container it always works — a browser there,
-`curl`, or `af telemetry report` in the terminal. **You no longer need any of that to read your
-telemetry from a host browser:** the web console has a Telemetry panel that reads the same data
-over the console's existing connection. See *Reading telemetry from the console* below.
-
-**`af up` and the watchdog relaunch it for you when the recording gate is on — for the bundled
-backend on this machine.** There is still no service manager, but `af up`'s telemetry step and the
-watchdog's periodic tick (roughly every 30 seconds, when `watchdog_agents` is non-empty) both check
-the backend and relaunch it if the tmux session is gone. `quickstart.sh`'s guard on
-`~/.bash_profile` remains as a manual fallback for the one case neither can autonomously clear — a
-session that is alive but wedged, not exited: start a login shell (`bash -l`), or check it directly
-with `tmux attach -t telemetry`.
-
-If you pointed `endpoint` at your own stack instead, none of that applies: agentfactory never
-starts, stops, or watches a backend it did not install, so a remote address that stops answering
-stays down until you bring it back. `bash -l` would start the bundled backend here rather than
-reach yours.
-
-### Reading telemetry from the console
-
-Open the console the way you already do — a clean `./quickdocker.sh <github-repo-path>` reveals it
-for you, and `./quickdocker.sh <github-repo-path> --web` re-opens it later, printing the loopback
-URL `http://127.0.0.1:<HOSTPORT>/`. Click **Telemetry** in the console's navigation: the panel reads
-this factory's telemetry over the connection the console already has, so there is nothing extra to
-forward or tunnel.
-
-**What the three panes show.** *Step timings* is the same per-step duration table
-`af telemetry report` prints, read from the records `af` writes locally. *Token usage* is what
-`af telemetry usage` returns from the backend, broken down by agent, model, and step **when the
-backend holds the per-request records that breakdown is built from** — see the note below, because
-on a factory where it does not, the pane says so rather than showing an empty table. *Session
-metrics* is an instant reading of the current counters — it does not honour the time-window control
-above it, and the panel says so on screen.
-
-**The per-step token breakdown is not available on this backend, and the pane checks before it
-asks.** It would join the step windows `af` records against the per-request records Claude Code
-sends, but every real capture taken against the pinned backend — kept in
-`internal/telemetry/testdata/openobserve-v0.91.3/` and `internal/telemetry/testdata/recorded-real/`
-— shows the columns that join needs are not carried under any name the schema has. Rather than send
-a query the schema pre-flight already knows will fail, the pane checks the backend's own schema
-first and reports `query_failed` with the gap named in its own words — never the backend's raw
-error text. Whole-run totals and the session counters are unaffected. If your Token usage pane
-reports a failed query, that is the state you are in; it is a known, permanent gap and not a fault
-in your factory or in the console.
-
-**The banner stack tells you what to fix, one line per problem.** The panel checks three things in a
-fixed order — whether telemetry is installed, whether recording is on, and whether the backend
-answers — and prints a line only for the ones that are degraded. When all three are healthy it
-prints a single reassurance line instead, ending in `Nothing to act on.`
-
-| Banner line | What it means | Next step it gives you |
-|---|---|---|
-| Telemetry is not configured: no `telemetry.json` found | This factory was never set up to export; step timing is still recorded locally while recording is on | Run `quickstart.sh` with telemetry, or create `.agentfactory/telemetry.json` |
-| The telemetry configuration could not be read | `telemetry.json` exists but will not parse, so nothing can be resolved from it | Same — repair or recreate `.agentfactory/telemetry.json` |
-| No endpoint is configured in `.agentfactory/telemetry.json` | Records stay local because there is no address to query | Same — add an `endpoint` |
-| Recording is off | The current recording state; records already written stay readable below | `af telemetry on` |
-| The backend was not probed | No measurement was taken, usually because the credential could not be read — so no state shown is a verdict | Check `.agentfactory/secrets/telemetry.root`, or re-run the quickstart credential step |
-| A backend address answered `401` or `403` | The address was reachable but rejected the credential | Check `.agentfactory/secrets/telemetry.root`, or re-run the quickstart credential step |
-| A backend address answered `404` | The address is reachable but the path is wrong | Check that the configured endpoint ends in `/api/default` |
-| A backend address did not answer at all | Nothing is listening — usually the backend died | For the bundled backend on this machine: `af up` (cold start) or the next watchdog tick (~30s) relaunches it automatically when the recording gate is on. Still down after that? Start a login shell (`bash -l`) as a manual fallback, or `tmux attach -t telemetry` if it is alive but unresponsive. If `endpoint` is your own stack, nothing here restarts it — check that the address is up and reachable from this machine |
-
-Two states are deliberately not reported as healthy. An unprobed backend prints "no measurement was
-taken" rather than a green verdict, because a check that never ran is not a check that passed. A log
-whose every record is corrupt reports zero rows *with* a non-zero error count, so it can never be
-mistaken for "no records yet".
-
-**The Token usage and Session metrics panes speak for themselves**, and what they say is not the
-banner lines above. The banner describes this factory's setup; these describe what happened to the
-one query the pane asked for. Each is a sentence in the pane where the table would be, so the pane
-is never blank and never shows an empty table in place of an explanation.
-
-| What the pane says | What it means | Next step it gives you |
-|---|---|---|
-| No telemetry endpoint is configured, so nothing was queried | There is no address to ask, so no query was sent. The pane is empty because nothing was measured, not because the answer was zero | Run `quickstart.sh` with telemetry, or create `.agentfactory/telemetry.json` |
-| The backend did not answer the query | The address was asked and nothing came back — usually the backend died | For the bundled backend on this machine: `af up` (cold start) or the next watchdog tick (~30s) relaunches it automatically when the recording gate is on. Still down after that? Start a login shell (`bash -l`) as a manual fallback, or `tmux attach -t telemetry` if it is alive but unresponsive. If `endpoint` is your own stack, nothing here restarts it — check that the address is up and reachable from this machine |
-| The backend was reachable but the credential was rejected | The address is right and the password is not | Check `.agentfactory/secrets/telemetry.root`, or re-run the quickstart credential step |
-| The query reached the backend and failed (`query_failed`) | For the Token usage pane, this is almost always the known per-step gap: a schema pre-flight checked before sending the query and found the columns it needs are not on this backend. For other queries the text in brackets is the backend's own answer | If the pane names the missing-column gap, use the whole-run totals and the bundled dashboards for anything finer. Otherwise, read the bracketed cause |
-| The query did not complete | Any other reason the query produced no answer | Run `af telemetry usage` from a shell: it prints the same payload as JSON, and its `state` field carries this verdict with any cause the backend gave |
-| No session metric returned a value, though every one was queried | The pane no longer leaves this ambiguous: it asks the backend's series API whether each silent metric has ever existed. **Idle — history exists**: the factory really was idle at this instant. **Never recorded here, or the names have moved**: no series has ever existed under that name — Claude Code may have renamed it | For "idle — history exists," nothing to do — query a wider window or wait for activity. For "never recorded... names have moved," the query needs updating |
-
-**The six bundled dashboards live in the backend, not in the console.** The console panel is the
-supported way to read this data from a browser on your host machine; the dashboards remain available
-inside the container at `127.0.0.1:5080`, as described above.
-
-**A rebuilt console does not replace one that is already running.** `make build-webui` writes a new
-binary, but starting it finds the healthy address the previous one published, reports that the web
-UI is already running, and exits without serving. Your browser keeps loading the **old build** — so
-a panel added by an update is simply absent, with nothing anywhere to explain why.
-
-The running console names itself in `.runtime/webui_server.json` at your factory root, which records
-the address it is serving on and the **process id** that owns it. There is no `af` verb that stops
-it: end that process yourself, then start the console again and it will be the new build that comes
-up.
-
-### Reading the data into a decision
-
-`af telemetry report` prints how long each step took, from records `af` writes locally. It
-works with no dashboard installed and it keeps working after `af telemetry off` — records
-already on disk stay readable:
-
-```
-AGENT   STEP        STATUS  DURATION  STARTED               MODEL     VERB_MS
-manager plan        closed  4m12s     2026-07-23T09:14:02Z  opus-4-8  38
-Latency only. Token and cost figures live in the telemetry backend; af records step windows, never tokens.
-```
-
-Narrow it with `--agent NAME` or `--instance ID`, and use `--export` to push the local backlog
-to the dashboard before rendering.
-
-**Token counts come from the backend, not from disk.** `af` records how long each step took; it
-never records tokens. To read those without opening a dashboard, ask the backend directly:
-
-```
-af telemetry usage
-af telemetry usage --agent solver --instance af-4e894132
-```
-
-It answers with machine-readable JSON and **always exits 0** — a dead backend, a rejected
-credential and a refused query are all reported in the `state` field rather than as a failed
-command, so a script branches on the answer instead of on the exit code. Because the numbers live
-in the backend and not on disk, this is the one telemetry verb that needs the dashboard reachable;
-`af telemetry status` will tell you whether it is. Recording being switched off does not hide
-anything here — data already collected stays readable, exactly as the local table does.
-
-**The decision loop.** Open **Tokens per agent, model and step** and **Cost per agent and
-model**, find the agent-and-model pairing that spends a lot for what it produces, then change
-**that agent's** profile in `.agentfactory/models.json`. That is the whole loop.
-**There is no per-step model setting** — the model is chosen per agent, so a slow expensive
-step is fixed by re-profiling the agent that runs it, or by changing the formula.
-
-**The local table is bounded by rotation.** `af` keeps the current record file plus exactly one
-previous generation per agent, so on a busy factory the oldest formula runs eventually fall out
-of `af telemetry report` even though they already reached the dashboard. Anything dropped is
-counted and printed in the report — the loss is never silent.
-
-### Privacy
-
-| What is recorded | Contains your content? | Default | Where it goes |
-|------------------|------------------------|---------|---------------|
-| `af`'s own step records — step names, timings, IDs, agent and model names | No | On when telemetry is on | Local file, and forwarded to the backend |
-| Token counts and model names, per request | No | On when telemetry is on | Backend |
-| Session, cost and lines-changed counters | No | On when telemetry is on | Backend |
-| Your prompts, the assistant's replies, tool inputs and tool results | Yes | **Off** — `af` never turns these on | Nowhere |
-| Error text returned by the model provider | Possibly | On, and covered by no content switch | Backend |
-
-**The five content switches are named, and `af` sets none of them.** Claude Code can be made
-to record conversation content through `OTEL_LOG_USER_PROMPTS`,
-`OTEL_LOG_ASSISTANT_RESPONSES`, `OTEL_LOG_TOOL_DETAILS`, `OTEL_LOG_TOOL_CONTENT` and
-`OTEL_LOG_RAW_API_BODIES`. `af` sets none of the five and offers no setting that turns any of
-them on — the absence is the posture. If you set one yourself, your prompts, files and tool
-results go to whatever `endpoint` points at.
-
-**Who you are travels with the measurements.** Claude Code's own measurements carry your
-account email, organisation ID, account UUIDs and a session ID by default. That is harmless
-against a dashboard on your own machine; if you point `endpoint` at a remote stack, those
-identifiers leave the host with every measurement. Decide that deliberately.
-
-**One field can carry free text.** When a request to the model provider fails, the provider's
-error message is recorded as-is. No content switch covers it, and a provider is free to put
-whatever it likes in an error string.
-
-**`af`'s own records cannot carry content.** The record format is a fixed list of fields — IDs,
-titles, timings, model names — and step descriptions, formula variables and the text of a
-dispatched task have no field to travel in. There is no redaction step, because there is
-nothing to redact.
-
-### If it isn't working
-
-Start with `af telemetry status`, which answers the layers in order:
-
-```
-telemetry: on
-config: .agentfactory/telemetry.json (endpoint http://127.0.0.1:5080/api/default, 1 configured headers)
-endpoint: step timings: reachable (HTTP 200)
-endpoint: token usage: reachable (HTTP 200)
-endpoint: session metrics: reachable (HTTP 200)
-```
-
-Line one is the toggle. Line two is your settings — it names the address and counts the
-headers, never printing a header's name or value. The lines after it are the answer to "can
-anything I record actually arrive": `af` contacts each address it sends to and reports what came
-back. There are three because the timing of your formula steps and the token counts from your
-agents' own sessions travel to different addresses, and they can fail independently — one
-reachable and another not is the normal shape of a half-working setup, and it is worth seeing
-rather than averaging away.
-
-What the verdicts mean for you:
-
-- **reachable** — the address answered and accepted the check. Data sent there arrives.
-- **not served** — something is listening and your credential is fine, but nothing handles that
-  address, so anything sent to it is discarded. Check that `endpoint` ends in `/api/default` if
-  you are using the bundled dashboard.
-- **credential was rejected** — the address is right and the password is not. The two files that
-  have to agree are `.agentfactory/secrets/telemetry.root` (the dashboard's password) and
-  `.agentfactory/secrets/telemetry.auth` (the header built from it); if you changed the password in
-  the dashboard, or replaced one file and not the other, they have drifted apart. Re-running
-  `quickstart.sh` only regenerates them when the stored password is one the backend would refuse
-  outright, so for an ordinary mismatch delete both files and re-run — that rebuilds the pair. Note
-  the dashboard keeps the password it was first started with, so you may also need to remove
-  `.agentfactory/telemetry/openobserve` to start clean, which discards previously collected data.
-- **refused the data** — the address answered and the credential was accepted, but it rejected the
-  check itself. Usually a destination that speaks a different protocol version than expected; the
-  status line quotes the code it returned.
-- **unreachable** — nothing answered. The backend is probably not running; see
-  **`af up` and the watchdog relaunch it for you when the recording gate is on — for the
-  bundled backend on this machine** above.
-- **not probed** — no address was contacted at all, because a credential named in `headers` could
-  not be resolved first. The line says which of the four causes it was: the file could not be read,
-  it is empty, its `file:` reference has no path, or it resolves outside the factory root and was
-  refused. That last one is a deliberate refusal rather than a fault — a reference is only followed
-  inside the factory, so a path pointing elsewhere is declined even when the file is perfectly
-  readable. The header's name is never printed here; this line reports counts only.
-
-This is the one place `af telemetry status` reaches out over the network: it sends an empty check to
-each address in turn. Each check waits between two and ten seconds — your `export_timeout_ms`,
-raised to two seconds if it is lower and capped at ten if it is higher — so an address that accepts
-the connection and then never answers holds the command for that long, and three such addresses hold
-it for up to thirty seconds. Nothing else in `af` waits on the network; the checks are deliberately
-empty so that asking the question cannot add to what you are measuring. Every other `af` command
-reads local files only.
-
-If line two says `config: none`, `af` is recording step timing locally and sending nothing; if it
-says `telemetry: off`, nothing is being recorded at all. See **Telemetry dashboard is empty**
-under Troubleshooting for what to check next.
-
-### Costs for non-Anthropic endpoints
-
-Token counts stay exact no matter which provider a model profile points at — they are counted
-by the same client that makes the call. **Dollar figures do not.** Where a request does not
-report its own cost, the figure is worked out from token counts using Anthropic pricing, so a
-profile redirected to another provider or to a local model produces a dollar number computed
-on the wrong basis. A model with no listed price shows an empty cost rather than a misleading
-zero. The price list is yours to edit — `.agentfactory/telemetry/views/pricing.json`, the one
-seeded file `quickstart.sh` never overwrites — then re-run `quickstart.sh` to republish the
-views. Treat tokens as the number to trust and dollars as a guide.
+- [USING_TELEMETRY.md](USING_TELEMETRY.md) — run measurement: the telemetry backend, its dashboards, and the session statusline
+- [USING_RECOVERY.md](USING_RECOVERY.md) — the watchdog, context-exhaustion recovery, and the step-context ladder
+- [USING_MEMORY.md](USING_MEMORY.md) — the per-agent memory vault: what survives teardown, export/import, host mounts
+- [USING_MODELS.md](USING_MODELS.md) — model profiles and classes (`.agentfactory/models.json`)
+- [USING_LITELLM.md](USING_LITELLM.md) — running agents on non-Anthropic models through a gateway
+- [web/README.md](web/README.md) — the optional web console
 
 ## Troubleshooting
 
@@ -1069,31 +748,11 @@ The quality gate is OFF by default. Create `<factory-root>/.agentfactory/.qualit
 
 ### Fidelity gate not running
 
-The fidelity gate is ON by default — `af install --init` creates `.agentfactory/.fidelity-gate` containing "on". To disable: `af fidelity off` or `echo off > "$(af root)/.agentfactory/.fidelity-gate"`. Also requires `claude`, `jq`, and `af` on PATH. Additionally, the fidelity gate self-gates on `.runtime/hooked_formula` — if no formula is active in the agent's working directory, the hook exits silently regardless of toggle state. Confirm with `af step current --json` (output should have `state == "ready"` for the gate to fire). The two gates use distinct PID-file locks (`.runtime/fidelity-gate.lock` vs `.runtime/quality-gate.lock`) and run independently — stale locks from dead processes are automatically recovered via PID-based detection. NOTICE: The Fidelity gate is MUCH less noisy because it only fires when claude doesn't properly follow a formula step, which doesn't happen very often.
+Start with `af fidelity status`: it answers whether the gate is on, which agents have an override recorded, what each agent's run record has counted (evaluations, failures, last graded step) plus the step its escalation latch holds, and who last moved the switch. The fidelity gate is ON by default — `af install --init` creates `.agentfactory/.fidelity-gate` containing "on". To disable: `af fidelity off` or `echo off > "$(af root)/.agentfactory/.fidelity-gate"`. If it is off and you did not turn it off, `.agentfactory/.fidelity-gate.log` records every toggle write `af` makes as `ts actor source state`, and the `source` field names which of the three writers it was: `cli` for `af fidelity`, `af-up` for a startup gate applied by `af up`, `install` for the fresh-factory seed. Only a hand-edited toggle file leaves no trace there. An override recorded by `af fidelity off --agent <name>` is a file at `.agentfactory/fidelity-overrides/<name>` that `af fidelity on --agent <name>` removes; no hook reads that directory yet, so an override is a record of an operator decision, not a mute, and it is never the reason a gate is not firing. Also requires `claude`, `jq`, and `af` on PATH. Additionally, the fidelity gate self-gates on `.runtime/hooked_formula` — if no formula is active in the agent's working directory, the hook exits silently regardless of toggle state. Confirm with `af step current --json` (output should have `state == "ready"` for the gate to fire). The two gates use distinct PID-file locks (`.runtime/fidelity-gate.lock` vs `.runtime/quality-gate.lock`) and run independently — stale locks from dead processes are automatically recovered via PID-based detection. NOTICE: The Fidelity gate is MUCH less noisy because it only fires when claude doesn't properly follow a formula step, which doesn't happen very often.
 
 ### Improvement hook not firing
 
 The continuous-improvement hook is AND-gated and OFF by default. If a finished agent never receives its `/improve-agent` instruction, run `af improvement` and confirm the factory line reads `on` and the agent's row shows `effective: fires` (both `af improvement on` and `af improvement on --agent <name>`; a fresh factory is always off). The hook fires only on a dispatched `WORK_DONE` `af done` (needs a non-empty `.runtime/formula_caller`), the store formula `<factory-root>/.agentfactory/store/formulas/<agent>.formula.toml` must exist (check the factory root, not a worktree copy — a worktree's git-tracked duplicate always exists and tells you nothing), and it won't re-fire while `.runtime/improvement_pending` is pending (run `af improvement complete` to clear). A stale session that never completed is auto-reaped only for agents in `startup.json`'s `watchdog_agents`; otherwise run `af improvement complete` yourself.
-
-### Telemetry dashboard is empty
-
-Work down the layers. `af telemetry status` first: `telemetry: off` means nothing is being
-recorded — run `af telemetry on`. `config: none` means there is no `.agentfactory/telemetry.json`,
-so step timing is kept locally and nothing is sent anywhere — re-run `quickstart.sh` without
-`--no-telemetry`, or write the file yourself. Next, **agents started before you turned telemetry
-on keep running without it** — that is the single most common cause of a factory that looks
-enabled and reports nothing; restart them with `af down <agent>` then `af up <agent>`. Then
-check the backend is actually up: `tmux has-session -t telemetry` and
-`curl -s http://127.0.0.1:5080/healthz`; for the bundled backend on this machine, `af up` and the
-watchdog's periodic tick relaunch it automatically when the gate is on, so a reboot should
-self-heal within the next `af up` or the next ~30s tick — if it is still down after that, fall
-back to a login shell (`bash -l`). If `endpoint` points at your own stack, none of that applies —
-nothing here restarts it, and `bash -l` would start the bundled backend instead. If the
-timing views are empty while the token and
-cost views have data, read step timing locally with `af telemetry report` and look for a
-`warning: telemetry export failed:` line on stderr from the last `af done` — that message names
-the reason `af`'s own step records did not reach the backend. `af telemetry report` is never
-gated, so it works even when everything above is misconfigured.
 
 ### Agent can't see project files
 

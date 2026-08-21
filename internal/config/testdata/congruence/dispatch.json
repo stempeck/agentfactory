@@ -1,0 +1,28 @@
+{
+  "repos": [
+    "repos[]"
+  ],
+  "trigger_label": "trigger_label",
+  "notify_on_complete": "notify_on_complete",
+  "mappings": [
+    {
+      "labels": [
+        "mappings[].labels[]"
+      ],
+      "source": "issue",
+      "agent": "mappings[].agent",
+      "model": "mappings[].model"
+    }
+  ],
+  "interval_seconds": 11,
+  "retry_after_seconds": 11,
+  "remove_trigger_after_dispatch": true,
+  "workflows": [
+    {
+      "label": "workflows[].label",
+      "phases": [
+        "mappings[].labels[]"
+      ]
+    }
+  ]
+}

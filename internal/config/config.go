@@ -344,6 +344,31 @@ func SaveBuildHostConfig(path string, cfg *BuildHostConfig) error {
 	return fsutil.WriteFileAtomic(path, data, 0644)
 }
 
+// SaveMessagingConfig atomically writes messaging.json, mirroring SaveBuildHostConfig and
+// SaveStartupConfig. messaging.json was load-only until issue #620, which left the web console
+// with no seam through which an operator could edit groups.
+//
+// It runs NO validation, unlike every sibling Save*. validateMessagingConfig is entirely a
+// cross-file check — a group's members are agent names, and judging them needs an *AgentConfig
+// this package may not load for itself (ADR-004 keeps internal/config decoupled; the same
+// reasoning keeps the startup membership check in the cmd layer, startup.go:183-186). So the
+// only validation messaging has belongs to the caller, and runConfigMessagingSet performs it
+// before calling here — the ordering runConfigDispatchSet established.
+//
+// One visible consequence of skipping the validator: it is also where a nil Groups map is
+// normalized to an empty one, so a caller passing nil writes {"groups": null}. The cmd layer
+// rejects a document with no "groups" key outright rather than normalizing it, because on the
+// WRITE path an absent key does not mean "empty" — it would silently erase every group the
+// operator has, which is the same failure the statusline nil-"elements" reject exists to stop.
+func SaveMessagingConfig(path string, cfg *MessagingConfig) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling messaging config: %w", err)
+	}
+	data = append(data, '\n')
+	return fsutil.WriteFileAtomic(path, data, 0644)
+}
+
 // RemoveAgentEntry removes a formula-generated agent from the config.
 // Returns ErrAgentNotFound if the agent doesn't exist, or ErrManualAgent
 // if the agent was not created by agent-gen (Formula field is empty).

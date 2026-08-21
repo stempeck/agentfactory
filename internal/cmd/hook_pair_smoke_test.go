@@ -23,11 +23,13 @@ import (
 // slice of R-INT-10 (Q1 in the design doc) at `make test` time instead
 // of post-merge.
 //
-// Relies on the silent-exit path because CI has no `claude`, no `jq`,
-// and no `af` on PATH. The test runs with cwd = t.TempDir() so
-// `af root` (if the binary exists) walks up to an ancestor that has no
-// .agentfactory directory and returns empty — guaranteeing silent exit
-// even on developer machines with a real factory in the filesystem.
+// Deliberately narrow: it drives the silent-exit path only. The test runs with cwd = t.TempDir()
+// so `af root` walks up to an ancestor that has no .agentfactory directory and returns empty,
+// guaranteeing EXIT1 before jq, claude, locks or traps are reached — which is what makes it a
+// collision check rather than a behavior check. The transcript-driven coverage lives in
+// TestHookPair_EvidenceParityOverRealTranscript and TestHookPair_FailurePathsNeverBlock below;
+// those run the whole path behind PATH shims and require jq, which CI now provisions
+// (.github/workflows/test.yml, unit job).
 func TestHookPair_SequentialSmoke(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 	qualityGate := filepath.Join(repoRoot, "hooks", "quality-gate.sh")
@@ -48,6 +50,169 @@ func TestHookPair_SequentialSmoke(t *testing.T) {
 	// trap/cleanup ordering issues)
 	runHookSmoke(t, fidelityGate, payload, tmpDir)
 	runHookSmoke(t, qualityGate, payload, tmpDir)
+}
+
+// hookE2EParityTranscript is the fixture both gates are graded over. Its first turn uses a tool no
+// other turn uses, so an evidence block that names Grep would be reporting the PREVIOUS turn —
+// the AC-1 over-report Design 562 exists to remove — and the assertion below would catch it.
+//
+// AUTHORED, not captured (see hookE2EWriteTranscript for why that distinction is written down).
+func hookE2EParityTranscript(t *testing.T, dir string) string {
+	t.Helper()
+	return hookE2EWriteTranscript(t, dir, "recorded_turn.jsonl",
+		turnPrompt("u0", "an earlier prompt"),
+		turnCall("a0", "m0", "t0", "Grep", `{"pattern":"previous turn only"}`),
+		turnResult("r0", "t0", "previous turn output", false),
+		turnPrompt("u1", "do the thing"),
+		turnCall("a1", "m1", "t1", "Bash", `{"command":"af mail inbox"}`),
+		turnResult("r1", "t1", "no new mail", false),
+		turnCall("a2", "m2", "t2", "Read", `{"file_path":"/x/y.md"}`),
+		turnResult("r2", "t2", "file contents", false),
+	)
+}
+
+// TestHookPair_EvidenceParityOverRealTranscript is AC-8 (design-doc.md:283): both gates must hand
+// the judge the identical evidence block for the identical transcript. It is also the first test in
+// this repo to drive a non-empty transcript_path through a gate at all — every prior hook assertion
+// is a text pin over the script source, or a smoke run that exits at the first branch.
+//
+// SCOPE (H-1, design-doc.md:148): the judge here is a PATH-shim stub. This proves PLUMBING —
+// extractor -> evidence block -> judge input. It proves nothing about judge behavior, which is
+// covered only by Phase 6's live-judge validation gate (.designs/562/live-judge-validation.md).
+func TestHookPair_EvidenceParityOverRealTranscript(t *testing.T) {
+	rig := newHookE2ERig(t)
+	workDir := setupGateLockTestEnv(t)
+	hookE2ESetStep(t, workDir, "bd-p7-parity", "Drive a recorded turn through both gates")
+
+	transcript := hookE2EParityTranscript(t, t.TempDir())
+	payload := hookE2EPayload(t, "Checked the mailbox and read the file.", transcript)
+
+	blocks := map[string]string{}
+	for _, gate := range hookE2EGates() {
+		out, exitCode := rig.run(t, gate, workDir, payload, "")
+		if exitCode != 0 {
+			t.Fatalf("%s: exit %d, want 0\noutput: %s", gate.script, exitCode, out)
+		}
+		if !strings.Contains(out, `{"ok": true}`) {
+			t.Fatalf("%s did not emit `{\"ok\": true}`:\n%s", gate.script, out)
+		}
+		if log := hookE2EDebugLog(t, workDir, gate); !strings.Contains(log, gate.completionLabel) {
+			t.Fatalf("%s: debug log missing %q — the run did not reach the end:\n%s", gate.script, gate.completionLabel, log)
+		}
+
+		block := hookE2EEvidenceBlock(t, hookE2EJudgeInput(t, workDir, gate.name), gate.name)
+		hookE2ERequireEvidence(t, block, gate.name)
+		blocks[gate.name] = block
+	}
+
+	if blocks["fidelity"] != blocks["quality"] {
+		t.Errorf("AC-8 parity: the gates handed the judge different evidence\n--- fidelity ---\n%s\n--- quality ---\n%s",
+			blocks["fidelity"], blocks["quality"])
+	}
+
+	block := blocks["fidelity"]
+	bash := strings.Index(block, `1. Bash(command="af mail inbox")`)
+	read := strings.Index(block, `2. Read(file_path="/x/y.md")`)
+	if bash < 0 || read < 0 || bash > read {
+		t.Errorf("evidence block does not carry the turn's calls oldest-first:\n%s", block)
+	}
+	if strings.Contains(block, "Grep") {
+		t.Errorf("evidence block leaked a call from the PREVIOUS turn (AC-1 over-report):\n%s", block)
+	}
+}
+
+// TestHookPair_FailurePathsNeverBlock is AC-10 (design-doc.md:284) and ADR-007's never-block rule:
+// no gate-infrastructure failure may stop an agent. Every case asserts exit 0, `{"ok": true}` AND
+// the debug-log label, so a pass is attributable to the branch under test rather than to some other
+// early exit that happens to be quiet.
+func TestHookPair_FailurePathsNeverBlock(t *testing.T) {
+	rig := newHookE2ERig(t)
+
+	cases := []struct {
+		name    string
+		missing string
+		// label resolves per gate because the two scripts number no_claude_binary differently.
+		label func(hookE2EGate) string
+		// transcript returns the path the Stop payload advertises.
+		transcript func(t *testing.T, dir string) string
+	}{
+		{
+			name:  "transcript path does not exist",
+			label: func(g hookE2EGate) string { return g.completionLabel },
+			transcript: func(t *testing.T, dir string) string {
+				return filepath.Join(dir, "no_such_session.jsonl")
+			},
+		},
+		{
+			name:  "transcript is malformed JSONL",
+			label: func(g hookE2EGate) string { return g.completionLabel },
+			transcript: func(t *testing.T, dir string) string {
+				return hookE2EWriteTranscript(t, dir, "malformed.jsonl",
+					`{"type":"user","uuid":`, `not json at all`, `{"type":`)
+			},
+		},
+		{
+			name:    "af is absent from PATH",
+			missing: "af",
+			label:   func(hookE2EGate) string { return "EXIT6: no_af_binary" },
+			transcript: func(t *testing.T, dir string) string {
+				return hookE2EParityTranscript(t, dir)
+			},
+		},
+		{
+			name:    "claude is absent from PATH",
+			missing: "claude",
+			label:   func(g hookE2EGate) string { return g.noClaudeLabel },
+			transcript: func(t *testing.T, dir string) string {
+				return hookE2EParityTranscript(t, dir)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		for _, gate := range hookE2EGates() {
+			t.Run(tc.name+"/"+gate.name, func(t *testing.T) {
+				workDir := setupGateLockTestEnv(t)
+				hookE2ESetStep(t, workDir, "bd-p7-failopen", "Fail open, never block")
+
+				payload := hookE2EPayload(t, "a response the gate must not block", tc.transcript(t, t.TempDir()))
+				out, exitCode := rig.run(t, gate, workDir, payload, tc.missing)
+
+				if exitCode != 0 {
+					t.Fatalf("exit %d, want 0 (ADR-007: a gate never blocks)\noutput: %s", exitCode, out)
+				}
+				if !strings.Contains(out, `{"ok": true}`) {
+					t.Fatalf("output does not carry `{\"ok\": true}`:\n%s", out)
+				}
+				if log := hookE2EDebugLog(t, workDir, gate); !strings.Contains(log, tc.label(gate)) {
+					t.Fatalf("debug log missing %q — the run exited somewhere else:\n%s", tc.label(gate), log)
+				}
+			})
+		}
+	}
+
+	// A transcript that is present but unreadable is the one degraded state the gate cannot tell
+	// apart from a genuinely tool-free turn, so the fidelity gate says so once
+	// (fidelity-gate.sh:199-203). An absent transcript is NOT that state and must stay silent.
+	t.Run("only a present-but-unreadable transcript raises the extraction notice", func(t *testing.T) {
+		gate := hookE2EGates()[0]
+
+		malformed := setupGateLockTestEnv(t)
+		hookE2ESetStep(t, malformed, "bd-p7-notice", "Notice once, not every turn")
+		rig.run(t, gate, malformed, hookE2EPayload(t, "response",
+			hookE2EWriteTranscript(t, t.TempDir(), "malformed.jsonl", `{"type":`)), "")
+		if !hookE2EMarkerExists(malformed, "grader_notice_extraction_unavailable") {
+			t.Errorf("a present-but-unreadable transcript did not raise the extraction notice")
+		}
+
+		absent := setupGateLockTestEnv(t)
+		hookE2ESetStep(t, absent, "bd-p7-notice", "Notice once, not every turn")
+		rig.run(t, gate, absent, hookE2EPayload(t, "response",
+			filepath.Join(t.TempDir(), "gone.jsonl")), "")
+		if hookE2EMarkerExists(absent, "grader_notice_extraction_unavailable") {
+			t.Errorf("an absent transcript raised the extraction notice; it is reserved for a transcript that exists")
+		}
+	})
 }
 
 // gateHookFiles are the four copies of the two Stop-hook gate scripts: the two

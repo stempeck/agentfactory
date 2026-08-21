@@ -294,18 +294,21 @@ func TestAgentsList_JSON_SchemaSnapshot(t *testing.T) {
 	keys := arr[0]
 
 	want := map[string]bool{
-		"name":         true,
-		"type":         true,
-		"formula":      true,
-		"running":      true,
-		"status":       true,
-		"step_id":      true,
-		"step_title":   true,
-		"step_state":   true,
-		"is_gate":      true,
-		"gate_id":      true,
-		"inputs":       true,
-		"foreign_root": true,
+		"name":          true,
+		"type":          true,
+		"formula":       true,
+		"running":       true,
+		"status":        true,
+		"step_id":       true,
+		"step_title":    true,
+		"step_state":    true,
+		"is_gate":       true,
+		"gate_id":       true,
+		"inputs":        true,
+		"foreign_root":  true,
+		"context_pct":   true,
+		"context_state": true,
+		"recovery":      true,
 	}
 	if len(keys) != len(want) {
 		t.Errorf("key count = %d (%v), want %d", len(keys), keysOf(keys), len(want))

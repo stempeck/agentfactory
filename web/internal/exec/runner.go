@@ -381,22 +381,90 @@ func (w *Wrapper) DispatchStatusJSON(ctx context.Context) (string, error) {
 	return res.Stdout, nil
 }
 
-// ConfigSet writes a curated config file by piping payload (a COMPLETE JSON config document) to the
-// stdin of `af config <file> set`, where file ∈ {"dispatch","startup"}. af-core is the single
-// canonical validator/writer: it validates (struct + cross-file ValidateDispatchConfig for dispatch)
-// and writes atomically (temp+rename), exiting non-zero with a friendly stderr message on any
-// validation failure — which RunStdin surfaces in the returned error. The web module never
-// re-declares the config schema nor re-implements validation on the write side.
+// ConfigFingerprintJSON returns the raw stdout of `af config fingerprint --json` — the running
+// binary's digest of the config schema IT speaks, recomputed in memory from its own canonical
+// structs rather than baked in at build time. The console renders a version-skew banner from it; it
+// does NOT compare it against a build-time embedded-fixture hash (that ADR-008 baseline is deferred),
+// so the banner fires on a missing or between-reads-changed fingerprint. Like the other structured reads
+// this is a READ (no lock, no pre-flight); the verb encodes failure as {"state":"error",...} and the
+// caller branches on that .state shape rather than on the exit code — with one caveat the caller
+// must handle: an af PREDATING this verb rejects `--json` at the flag parser and exits NON-zero with
+// empty stdout, so "err != nil" is a third, equally ordinary "unavailable" outcome. It reads no
+// config and needs no factory root. The "config" verb is already on the allowlist (validate.go).
+func (w *Wrapper) ConfigFingerprintJSON(ctx context.Context) (string, error) {
+	res, err := w.runner.Run(ctx, "config", "fingerprint", "--json")
+	if err != nil {
+		return "", err
+	}
+	return res.Stdout, nil
+}
+
+// configWritableFiles is this module's copy of the #620 T1 tier truth: the set of config documents
+// af-core exposes a `set` verb for AND the console is allowed to write. It is deliberately a SECOND
+// copy — web/internal/config owns the authoritative table but imports this package, so the
+// dependency cannot run the other way — and the two are pinned to identical verdicts by
+// TestSettings_AllowlistsEqual. Keeping both checks is defence in depth on the exec boundary, not an
+// oversight: this one is the last gate before an argv is built.
+var configWritableFiles = map[string]bool{
+	"dispatch":   true,
+	"startup":    true,
+	"messaging":  true,
+	"statusline": true,
+}
+
+// ConfigSet writes a config file by piping payload (a COMPLETE JSON config document) to the stdin of
+// `af config <file> set`, where file ∈ configWritableFiles. af-core is the single canonical
+// validator/writer: it validates (struct + cross-file checks against agents.json) and writes
+// atomically (temp+rename), exiting non-zero with a friendly stderr message on any validation
+// failure — which RunStdin surfaces in the returned error. The web module never re-declares the
+// config schema nor re-implements validation on the write side.
 //
-// file is checked against the {dispatch,startup} allowlist BEFORE exec (factory.json is read-only —
-// there is no `af config factory set`), so a caller can never smuggle an arbitrary subcommand as the
-// second argv element. This is a config write, not an agent session mutation: no per-agent lock and
-// no .runtime/dispatched pre-flight.
-func (w *Wrapper) ConfigSet(ctx context.Context, file string, payload []byte) (Result, error) {
-	if file != "dispatch" && file != "startup" {
+// file is checked against the allowlist BEFORE exec (factory.json and the secret-bearing files have
+// no console setter), so a caller can never smuggle an arbitrary subcommand as the second argv
+// element. This is a config write, not an agent session mutation: no per-agent lock and no
+// .runtime/dispatched pre-flight.
+//
+// ifContentHash, when non-empty, becomes af-core's --if-content-hash compare-and-set precondition:
+// the write proceeds only if the file still matches the digest the console read, and a mismatch
+// exits non-zero leaving the file untouched. It is shape-checked here (64 hex, the sha256 af-core
+// compares against) before exec, matching this wrapper's rule that every method validates its own
+// inputs; an empty value means "no precondition" rather than "validate and fail", as telemetryArgs
+// treats its optional filters. Single-token `=` form so a dash-leading value can never re-parse as a
+// flag, and appended only when present so an unconditional write's argv stays exactly [file set].
+func (w *Wrapper) ConfigSet(ctx context.Context, file string, payload []byte, ifContentHash string) (Result, error) {
+	if !configWritableFiles[file] {
 		return Result{}, fmt.Errorf("config file %q is not writable", file)
 	}
-	return w.runner.RunStdin(ctx, payload, "config", file, "set")
+	args := []string{file, "set"}
+	if ifContentHash != "" {
+		if !isHexSHA256(ifContentHash) {
+			return Result{}, fmt.Errorf("if-content-hash %q is not a sha256 hex digest", ifContentHash)
+		}
+		args = append(args, "--if-content-hash="+ifContentHash)
+	}
+	return w.runner.RunStdin(ctx, payload, "config", args...)
+}
+
+// IsContentHash reports whether s has the shape of a compare-and-set precondition: exactly 64 hex
+// digits, the sha256 af-core compares against. Exported because config.Service.Write must reach the
+// SAME predicate — it compares the precondition against the file on disk BEFORE ConfigSet is called,
+// so without a shared shape check a malformed header would come back as "the file changed" (a 409
+// telling the client to reload and retry) rather than "that is not a digest" (a 400).
+func IsContentHash(s string) bool { return isHexSHA256(s) }
+
+// isHexSHA256 reports whether s is exactly 64 hex digits.
+func isHexSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // mailFooter is appended to every web-sent body so recipients don't wait on a reply-blackhole:

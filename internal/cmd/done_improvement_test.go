@@ -148,7 +148,7 @@ func TestDone_ImprovementHook_FinalOnOn_Fires(t *testing.T) {
 
 	var stdout string
 	stdout, _ = captureOutErr(t, func() {
-		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID); err != nil {
+		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID, false); err != nil {
 			t.Fatalf("sendWorkDoneAndCleanup: %v", err)
 		}
 	})
@@ -229,7 +229,7 @@ func TestDone_ImprovementHook_Dispatched_DefersTerminate(t *testing.T) {
 	defer func() { sendWorkDoneMail = origMail }()
 
 	_, stderr := captureOutErr(t, func() {
-		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID); err != nil {
+		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID, false); err != nil {
 			t.Fatalf("sendWorkDoneAndCleanup: %v", err)
 		}
 	})
@@ -264,7 +264,7 @@ func TestDone_OffPathIdentical_Golden(t *testing.T) {
 	defer func() { sendWorkDoneMail = origMail }()
 
 	stdout, stderr := captureOutErr(t, func() {
-		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID); err != nil {
+		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID, false); err != nil {
 			t.Fatalf("sendWorkDoneAndCleanup: %v", err)
 		}
 	})
@@ -390,7 +390,7 @@ func TestDone_ImprovementHook_VelocityBlocked_NoFire(t *testing.T) {
 	instanceID := seedCompletedFormula(t, mem, "Formula: widget")
 
 	_, _ = captureOutErr(t, func() {
-		err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID)
+		err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID, false)
 		if err == nil {
 			t.Error("velocity guard should have blocked completion")
 		}
@@ -413,7 +413,7 @@ func TestDone_ImprovementHook_Callerless_NoFire(t *testing.T) {
 	instanceID := seedCompletedFormula(t, mem, "Formula: widget")
 
 	stdout, _ := captureOutErr(t, func() {
-		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID); err != nil {
+		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID, false); err != nil {
 			t.Fatalf("sendWorkDoneAndCleanup: %v", err)
 		}
 	})
@@ -452,7 +452,7 @@ func TestDone_ImprovementHook_PreexistingMarker_NoSecondFire(t *testing.T) {
 	defer func() { sendWorkDoneMail = origMail }()
 
 	stdout, _ := captureOutErr(t, func() {
-		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID); err != nil {
+		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID, false); err != nil {
 			t.Fatalf("sendWorkDoneAndCleanup: %v", err)
 		}
 	})
@@ -483,7 +483,7 @@ func TestImprovement_FailOpen_MissingFormula_SkipRecorded(t *testing.T) {
 	defer func() { sendWorkDoneMail = origMail }()
 
 	stdout, stderr := captureOutErr(t, func() {
-		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID); err != nil {
+		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID, false); err != nil {
 			t.Fatalf("sendWorkDoneAndCleanup: %v", err)
 		}
 	})
@@ -521,7 +521,7 @@ func TestImprovement_FailOpen_UnresolvableName_SkipRecorded(t *testing.T) {
 	defer func() { sendWorkDoneMail = origMail }()
 
 	stdout, _ := captureOutErr(t, func() {
-		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID); err != nil {
+		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID, false); err != nil {
 			t.Fatalf("sendWorkDoneAndCleanup: %v", err)
 		}
 	})
@@ -565,7 +565,7 @@ func TestDone_ImprovementDelivery_MailBeforeNudge(t *testing.T) {
 	defer func() { sendImprovementMail = origMail; deliverImprovementNudge = origNudge }()
 
 	_, _ = captureOutErr(t, func() {
-		if err := sendWorkDoneAndCleanup(t.Context(), mem, root, root, instanceID); err != nil {
+		if err := sendWorkDoneAndCleanup(t.Context(), mem, root, root, instanceID, false); err != nil {
 			t.Fatalf("sendWorkDoneAndCleanup: %v", err)
 		}
 	})
@@ -585,7 +585,7 @@ func TestDone_ImprovementDelivery_MailFails_NudgeStillFires(t *testing.T) {
 	defer func() { sendImprovementMail = origMail; deliverImprovementNudge = origNudge }()
 
 	stdout, stderr := captureOutErr(t, func() {
-		if err := sendWorkDoneAndCleanup(t.Context(), mem, root, root, instanceID); err != nil {
+		if err := sendWorkDoneAndCleanup(t.Context(), mem, root, root, instanceID, false); err != nil {
 			t.Fatalf("sendWorkDoneAndCleanup: %v", err)
 		}
 	})
@@ -614,7 +614,7 @@ func TestDone_ImprovementDelivery_NudgeFails_StdoutEmits(t *testing.T) {
 	defer func() { sendImprovementMail = origMail; deliverImprovementNudge = origNudge }()
 
 	stdout, stderr := captureOutErr(t, func() {
-		if err := sendWorkDoneAndCleanup(t.Context(), mem, root, root, instanceID); err != nil {
+		if err := sendWorkDoneAndCleanup(t.Context(), mem, root, root, instanceID, false); err != nil {
 			t.Fatalf("sendWorkDoneAndCleanup: %v", err)
 		}
 	})
@@ -645,7 +645,7 @@ func TestImprovement_FailOpen_UnreadableAgentsJSON_SkipRecorded(t *testing.T) {
 	defer func() { sendWorkDoneMail = origMail }()
 
 	stdout, _ := captureOutErr(t, func() {
-		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID); err != nil {
+		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID, false); err != nil {
 			t.Fatalf("sendWorkDoneAndCleanup: %v", err)
 		}
 	})

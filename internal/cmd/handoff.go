@@ -131,11 +131,16 @@ func runHandoffCore(ctx context.Context, cwd, subject, message string, collect, 
 		PaneID:       pane,
 		CmdPrefix:    sleepPrefix,
 		AgentWorkDir: cwd,
+		Trigger:      triggerSelfHandoff,
 	})
 }
 
 // sendHandoffMail shells out to `af mail send` to deliver the handoff message.
-func sendHandoffMail(agentName, subject, body string) error {
+// Declared as a var so tests can observe recipient/subject/body with a recording
+// fake (seam pattern, mirrors sendWorkDoneMail): the isTestBinary() no-op below
+// keeps unit tests hermetic, which also means a test could otherwise only prove
+// "it did not error", never WHAT was sent.
+var sendHandoffMail = func(agentName, subject, body string) error {
 	if isTestBinary() {
 		return nil
 	}

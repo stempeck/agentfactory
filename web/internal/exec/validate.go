@@ -60,7 +60,7 @@ var allowedVerbs = map[string]bool{
 	"formula":  true,
 	"dispatch": true,
 	"step":     true,
-	"config":   true, // Phase 3: `af config <dispatch|startup> set` — the curated settings write path.
+	"config":   true, // the settings surface: `af config <file> set` (write, allowlisted per file in ConfigSet) and `af config fingerprint --json` (read).
 	"mail":     true, // Phase 1 (#500): the wrapper fixes the subcommand to `send` — the web mail composer's write path.
 	"install":  true, // #502 Phase 1d: allow-lists the install verb for the exec.Wrapper path. NB: the production "Generate All Agents" regeneration does NOT flow through here — genjob (web/internal/genjob/job.go) spawns `af install --agents` via its own os/exec, bypassing this allowlist; Wrapper.GenerateAgents is currently test-only. Kept so any future Wrapper-routed install stays allow-listed; no generic install passthrough.
 	// #580: the wrapper fixes the subcommand to one of the three READ verbs — status, report, usage.

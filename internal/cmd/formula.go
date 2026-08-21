@@ -522,6 +522,13 @@ func generateAgentTemplate(f *formula.Formula, agentName string, agentType strin
 	b.WriteString("- Follow the factory's established conventions and workflows.\n")
 	b.WriteString("- Act autonomously — do not wait for user prompts between tasks.\n")
 
+	// Deliberately NOT routed through escapeTmplDelimiters: the section carries a live
+	// {{ .Role }} that must survive into the rendered CLAUDE.md as the agent's own name.
+	// The blank line is written here rather than baked into the const so the const stays a
+	// section, not a section-with-a-leading-gap the built-ins have to reproduce exactly.
+	b.WriteString("\n")
+	b.WriteString(templates.MemoryProtocolSection)
+
 	return b.String()
 }
 

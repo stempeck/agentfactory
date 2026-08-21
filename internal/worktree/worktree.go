@@ -20,6 +20,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/fsutil"
 	"github.com/stempeck/agentfactory/internal/lock"
+	"github.com/stempeck/agentfactory/internal/memory"
 	"github.com/stempeck/agentfactory/internal/templates"
 )
 
@@ -860,6 +861,18 @@ func GC(factoryRoot string) (int, error) {
 		// full Agents list (issue #392 K6/D4).
 		if HasUnfinishedFormula(factoryRoot, meta) {
 			continue
+		}
+
+		// Best-effort preservation report (AC-626-6). GC runs inside a stranger's
+		// ResolveOrCreate with both return values discarded, so this writer is the only stream
+		// it has and the line may well land in an unrelated command's output — which is why the
+		// design downgrades this path to best-effort rather than promising the loud line the
+		// other three teardowns give. Emitted before ForceRemove for the same reason they are:
+		// it describes a vault that is still standing.
+		for _, agent := range meta.Agents {
+			if line := memory.PreservedLine(factoryRoot, agent); line != "" {
+				fmt.Fprintf(stderrWriter, "%s\n", line)
+			}
 		}
 
 		// Session not running — remove worktree

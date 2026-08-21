@@ -31,6 +31,71 @@ MANUAL FIX: <what the operator had to do>
 AFFECTED PATHS: <specific files/directories>
 ```
 
+## Phase 1.5: Context Review
+
+Phase 1 collects what the operator noticed. This phase collects what the run **measured** — the
+per-step context figures the formula's own step records carry. Do it before reading the formula, so
+Phase 2 already knows which steps are suspect.
+
+1. **Find this run's instance.** Read `.runtime/improvement_pending` (relative to your own agent
+   directory) and take its `instance_id` field. The marker survives the whole improvement session —
+   it is consumed only by `af improvement complete`.
+
+2. **Pull the report.**
+
+    ```bash
+    af telemetry report --instance <instance_id> --json
+    ```
+
+    Read the JSON body, not the exit code: this command reports infrastructure failure as data and
+    still exits 0. Branch on the `state` VALUE, which every payload carries: `"error"` means the
+    read failed, `"ok"` and `"degraded"` both mean the payload is the report.
+
+3. **Select the steps worth reviewing.** From `rows[]`, take every step matching any of:
+
+    | Class | How it reads in `--json` | Table twin |
+    |-------|--------------------------|------------|
+    | Recycled mid-step | `"status":"INTERRUPTED"` (see `interrupted_trigger`) | `INTERRUPTED` |
+    | Consumption unattributable | `"consumption_state":"unattributable"` | `recycled mid-step — consumption unattributable` |
+    | Over-bound occupancy | `"over_occupancy":true` | `over_occupancy` |
+    | Over-bound consumption | `"over_consumption":true` | `over_consumption` |
+
+    The supporting figures are `ctx_tokens_start`, `ctx_tokens_end`, `ctx_tokens_total`,
+    `ctx_used_pct`, `cum_tokens_delta` and `ctx_bound_tokens`; the drift markers are
+    `compacted_mid_step`, `ctx_observed_stale` and `bound_exceeds_window`.
+
+    **`null` means NOT JUDGED, never `false` and never `0`.** A `null` `over_occupancy` says the
+    verdict could not be computed, not that the step stayed inside its bound. Never round a `null`
+    into a finding.
+
+    **INTERRUPTED and unattributable steps are the worst class** — their true cost is unknown and
+    unbounded, so rank them above any step whose overrun you can actually measure.
+
+4. **Classify each selected step into exactly one of two arms.**
+
+    - **Upstream, with evidence** — use this ONLY when the step's consumption is dominated by
+      *intake of a named incoming artifact the step does not control*, and you can state the
+      evidence: the artifact's byte size, and/or a start-to-end pattern exceeding a stated fraction
+      of `ctx_bound_tokens`. Then use the Skill tool to load `/github-issue`, and hand it the step
+      id, the measured figures, and the artifact's identity. Do not prescribe a fix — the issue
+      carries evidence.
+    - **ANY OTHER CASE — own the formula.** Split the step, slim its instructions, or externalize
+      its intermediates to files. This is the default arm; "upstream" is the exception, and an
+      upstream issue without the evidence above is noise the operator has to triage.
+
+5. **If the report returns no context data, say so — do not guess.** No rows for the instance, or
+   rows whose context figures are all `null`, means this run was not measured (usually the factory
+   telemetry gate was off: `af telemetry on` arms it). State that plainly in the Phase 8 summary and
+   proceed on Phase 1's evidence alone. Absence of measurement is never evidence of a healthy step.
+
+**Output** — state explicitly:
+- **Measured?**: "no context data for instance `<id>`" or the count of steps reviewed
+- **Per selected step**: step id, the class from the table above, the arm chosen, and the figures
+  that justify it
+
+Carry the step-owned findings into Phase 2's insertion-point reasoning and Phase 3's
+classification; a context finding names the step, it does not by itself name the failure category.
+
 ## Phase 2: Read and Understand the Formula
 
 Read the full formula TOML. For each step, note:
@@ -131,7 +196,8 @@ If any check fails, return to Phase 5 and redesign.
 
 Present findings to the user interactively:
 
-1. **Summary**: The gap, classification, and sibling scan results
+1. **Summary**: The gap, classification, sibling scan results, and the Phase 1.5 context review —
+   the steps reviewed and the arm chosen for each, or "no context data for instance `<id>`"
 2. **Proposed changes**: List each insertion/modification with before→after
 3. **Validation results**: The Phase 7 checklist (all passing)
 4. **Ask**: "Which improvements should I apply?"

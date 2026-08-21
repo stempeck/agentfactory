@@ -53,7 +53,7 @@ func TestDone_ImprovementHook_WorkDoneMailFails_StillFires(t *testing.T) {
 	defer func() { sendWorkDoneMail = origMail }()
 
 	_, stderr := captureOutErr(t, func() {
-		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID); err != nil {
+		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID, false); err != nil {
 			t.Fatalf("sendWorkDoneAndCleanup: %v", err)
 		}
 	})

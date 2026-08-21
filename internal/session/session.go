@@ -28,6 +28,12 @@ const (
 	envBaseURL   = "ANTHROPIC_BASE_URL"
 	envAuthToken = "ANTHROPIC_AUTH_TOKEN"
 
+	// envAPIKey names the key the profile-key-universe hygiene must never clear (issue
+	// #602). It is a legal profile key, so it appears in the union the cmd layer computes;
+	// the carve-out that spares it lives in universeCarveOutVars. Named here rather than
+	// inline so the exclusion reads the same as the redirect family's.
+	envAPIKey = "ANTHROPIC_API_KEY"
+
 	// Git identity env (issue #371 AC-2): exported only when no ambient identity
 	// resolves, so they never clobber a present one (C-4). GIT_AUTHOR_*/
 	// GIT_COMMITTER_* override config unconditionally, hence the presence-gate.
@@ -80,6 +86,13 @@ var redirectFamilyVars = []string{
 	"ANTHROPIC_DEFAULT_OPUS_MODEL",
 	"ANTHROPIC_DEFAULT_SONNET_MODEL",
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+	// Cleared by no hygiene pass before issue #598: it is in neither family list, so a value
+	// exported from an operator's shell rc would silently redirect fable-class requests on every
+	// profile, including the direct Anthropic ones. Clearing it costs nothing for a profile that
+	// does not declare it. Deliberately NOT a config.EndpointClassKeys member — the inventory
+	// waits on a live observation of the deployed CLI, while clearing an inherited value is right
+	// either way.
+	"ANTHROPIC_DEFAULT_FABLE_MODEL",
 	"CLAUDE_CODE_SUBAGENT_MODEL",
 }
 
@@ -100,6 +113,72 @@ var telemetryFamilyVars = []string{
 	"OTEL_EXPORTER_OTLP_ENDPOINT",
 	envOTelHeaders,
 	"OTEL_RESOURCE_ATTRIBUTES",
+}
+
+// managerOwnedVars enumerates the env this Manager exports on its own authority — git
+// identity, trailer activation, build host. config.validateModelProfile denylists only the
+// AF_* identity and OTel keys, so an operator MAY legally name one of these in a profile,
+// which would pull it into the profile-key universe. Inline, the universe's unset segment
+// follows the export statement, so an uncarved key here would be exported and then wiped in
+// the same command — a respawned agent would silently lose its git identity. That is PR
+// #509 T1's auth-token clobber one class wider, so these are carved out rather than
+// reordered around (reordering would move the first `&&` that several tests index on).
+var managerOwnedVars = []string{
+	envGitAuthorName,
+	envGitAuthorEmail,
+	envGitCommitterName,
+	envGitCommitterEmail,
+	envGitConfigCount,
+	envGitConfigKey0,
+	envGitConfigValue0,
+	envCoauthorName,
+	envCoauthorEmail,
+	"AF_BUILD_MODE",
+	"AF_BUILD_HOST",
+	"AF_BUILD_USER",
+	"AF_HOST_MOUNT",
+}
+
+// universeCarveOutVars are the keys the profile-key-universe hygiene (issue #602) must never
+// clear, even on a launch that does not carry them. Three groups, three reasons:
+//
+//   - redirectFamilyVars and telemetryFamilyVars already own their keys and clear them with
+//     the proven KEY='' idiom. Two idioms for two classes is deliberate; letting the universe
+//     true-unset these would silently change the behavior #508 and #329 each pinned.
+//   - envAPIKey is a legal profile key so it lands in the union, but security.md I2 decides it
+//     is never auto-cleared: a default-profile agent may authenticate via an ambient key.
+//   - managerOwnedVars would otherwise be exported and immediately unset in one command.
+//
+// The carve-outs live in this package — the owner of the family lists and of the exports they
+// protect — rather than in the cmd layer that computes the raw union (ADR-004).
+var universeCarveOutVars = func() map[string]bool {
+	out := map[string]bool{envAPIKey: true}
+	for _, family := range [][]string{redirectFamilyVars, telemetryFamilyVars, managerOwnedVars} {
+		for _, key := range family {
+			out[key] = true
+		}
+	}
+	return out
+}()
+
+// shellCriticalVars are environment names the universe hygiene must never `unset`, even when a
+// profile defines one that the current launch does not carry (issue #602 P1). Unlike
+// universeCarveOutVars — keys the factory itself owns — these belong to the shell and loader the
+// bare `claude` command runs under: `unset PATH` before `claude` leaves it unresolvable so a
+// handoff/compact/watchdog respawn never relaunches, and the others would corrupt command lookup,
+// home-dir resolution, or the dynamic loader the same way. A profile naming one is a
+// misconfiguration, but the never-brick posture requires the cleanup to degrade to "leave it set"
+// (recoverable) rather than emit a launch-breaking `unset`. This is a cleanup-side guard only: the
+// write boundary does NOT reject these names (they are valid identifiers), so a dormant one never
+// fails a registry load.
+var shellCriticalVars = map[string]bool{
+	"PATH":            true,
+	"HOME":            true,
+	"SHELL":           true,
+	"IFS":             true,
+	"LD_LIBRARY_PATH": true,
+	"LD_PRELOAD":      true,
+	"LD_AUDIT":        true,
 }
 
 var checkAvailableMemoryFunc = checkAvailableMemory
@@ -245,6 +324,19 @@ type Manager struct {
 	// telemetry-off relaunch leaves no stale OTel var. Set via SetTelemetryEnv.
 	telemetryEnv []config.EnvVar
 
+	// Every env key any models.json profile defines — the profile-key universe (issue #602).
+	// A THIRD channel, orthogonal to modelEnv and telemetryEnv: it emits nothing, it only
+	// bounds what the hygiene passes may clear. The two family lists are hardcoded in Go while
+	// a profile is a generic string map, so an operator-added key was emitted by modelEnv and
+	// cleared by neither family; deriving the clear scope from the same config the emit scope
+	// comes from closes that class for every key STILL DECLARED IN SOME PROFILE. A key deleted
+	// from EVERY profile leaves the universe, so a value already written into a live session's
+	// env is no longer cleared until `af down && af up` — the accepted residual (design 602 Risk
+	// Registry; documented in USING_*.md). Applied OUTSIDE the modelEnv presence gate at both
+	// twins, so a switch to no profile at all still clears. Order is preserved as handed in (the
+	// cmd layer sorts) so the launch line is deterministic. Set via SetModelKeyUniverse.
+	modelKeyUniverse []string
+
 	// Git identity to export when no ambient identity resolves (issue #371 AC-2).
 	// Empty ⇒ not exported (presence-gate / C-4); set via SetGitIdentity.
 	gitAuthorName  string
@@ -320,6 +412,18 @@ func (m *Manager) SetModelEnv(env []config.EnvVar) {
 	m.modelEnv = env
 }
 
+// SetModelKeyUniverse configures the profile-key universe: every env key any models.json
+// profile defines (issue #602). The cmd layer computes the sorted union after loading the
+// registry and hands it in after NewManager. Unlike SetModelEnv this is wired
+// UNCONDITIONALLY at every launch site — a launch that resolves NO profile is exactly the
+// case that must still clear a previous profile's keys, so gating the call on a non-empty
+// model-env set would leave the headline stale-on-switch case unfixed. A nil/empty universe
+// clears nothing and leaves the launch line byte-identical to a factory that never defined
+// such a key.
+func (m *Manager) SetModelKeyUniverse(keys []string) {
+	m.modelKeyUniverse = keys
+}
+
 // SetTelemetryEnv configures the telemetry OTel launch-env set (issue #329). The cmd
 // layer builds it via telemetry.LaunchEnv only when the factory telemetry gate is on and
 // hands it in after NewManager; a nil/empty set (gate off) emits no OTel var, while the
@@ -355,6 +459,29 @@ func modelEnvHasKey(env []config.EnvVar, key string) bool {
 		}
 	}
 	return false
+}
+
+// staleUniverseKeys returns the profile-key-universe keys this launch does NOT carry and is
+// allowed to clear: everything in the universe minus what effective records as emitted, minus
+// the carve-outs. One filter feeds both twins, so the tmux env and the inline command can
+// never disagree about what was cleared. Order follows the universe as handed in (sorted by
+// the cmd layer), which is what keeps the emitted unset segment deterministic across runs.
+func (m *Manager) staleUniverseKeys(effective map[string]bool) []string {
+	var stale []string
+	for _, key := range m.modelKeyUniverse {
+		if effective[key] || universeCarveOutVars[key] {
+			continue
+		}
+		// A profile key rides into `unset K1 K2 …` unquoted (issue #602 P1/F1), so a name that is
+		// not a safe shell identifier (a space or shell metacharacter) or a shell/loader-critical
+		// name (PATH …) must never reach the emitted segment on either twin. IsValidEnvKeyName is
+		// the same predicate the write boundary rejects by, so the two cannot disagree.
+		if shellCriticalVars[key] || !config.IsValidEnvKeyName(key) {
+			continue
+		}
+		stale = append(stale, key)
+	}
+	return stale
 }
 
 // SessionID returns the tmux session name for this agent.
@@ -539,6 +666,18 @@ func (m *Manager) Start() error {
 			_ = m.tmux.UnsetEnvironment(sessionID, key)
 		}
 	}
+	// Profile-key-universe hygiene (issue #602), the third channel. The two loops above clear
+	// by hardcoded family lists, but a models.json profile is a generic string map: an
+	// operator-defined key outside both families — CLAUDE_CODE_AUTO_COMPACT_WINDOW is the
+	// first — was emitted by the model-env block and cleared by nothing, so it survived a
+	// profile switch on a reused session. Clearing by the config-derived universe closes that
+	// for every key still declared in some profile without a per-key Go edit (a key deleted from
+	// EVERY profile leaves the universe — the accepted residual). OUTSIDE the modelEnv gate
+	// (closed above) so a switch to NO profile clears too. UnsetEnvironment on an absent key
+	// is a silent no-op, so the loop needs no presence check.
+	for _, key := range m.staleUniverseKeys(effective) {
+		_ = m.tmux.UnsetEnvironment(sessionID, key)
+	}
 	// Git identity fallback (best-effort; presence-gated — issue #371 AC-2/C-4).
 	if m.gitAuthorName != "" && m.gitAuthorEmail != "" {
 		_ = m.tmux.SetEnvironment(sessionID, envGitAuthorName, m.gitAuthorName)
@@ -629,13 +768,15 @@ func (m *Manager) buildStartupCommand() string {
 		exports += fmt.Sprintf(" AF_WORKTREE=%s AF_WORKTREE_ID=%s",
 			shellQuote(m.worktreePath), shellQuote(m.worktreeID))
 	}
+	// effective records the keys this launch actually emits inline, so the hygiene passes can
+	// clear the rest — the inline twin of Start()'s bookkeeping. Function-scoped, like its
+	// twin: the universe pass below runs OUTSIDE the model-env gate, on the no-profile path
+	// where that gate never opens, and must still see what was emitted.
+	effective := map[string]bool{}
 	if len(m.modelEnv) > 0 {
 		// Resolved model-env set supersedes the legacy fields (issue #480), in the
 		// same slot the legacy exports occupied. Every value is single-quoted via
 		// shellQuote (shell-injection inert); an empty value emits KEY='' to clear it.
-		// effective records the redirect-family keys this launch actually emits so the
-		// hygiene pass below can clear the rest — the inline twin of Start()'s pass.
-		effective := map[string]bool{}
 		for _, ev := range m.modelEnv {
 			// A file:<path> ANTHROPIC_AUTH_TOKEN is dereferenced to "$(cat '<abs>')" so
 			// the pane shell reads the secret at exec time — the value never lands on
@@ -759,7 +900,26 @@ func (m *Manager) buildStartupCommand() string {
 		claude += " " + shellQuote(m.initialPrompt)
 	}
 
-	return fmt.Sprintf("%s && %s", exports, claude)
+	// Profile-key-universe hygiene, inline twin (issue #602) — the ONLY clear a respawn ever
+	// emits, since the respawn paths rebuild through here and never call Start(). This class
+	// clears by a TRUE `unset` rather than the families' KEY='': the host's handling of an
+	// empty value for these keys is unverified, whereas unset makes "absent" byte-identical to
+	// "never launched with the key". `unset` cannot ride the export statement — `export A=1
+	// unset B` parses, but exports a variable literally named `unset` — so it takes its own
+	// command segment, and the launch line grows from two segments to three.
+	//
+	// The segment is emitted ONLY when something is actually stale. That is what holds the
+	// zero-delta contract: with nothing to clear this reduces to exports + " && " + claude,
+	// byte-identical to the single Sprintf it replaced, so a factory that never defines such a
+	// key sees no change at all. `&&` rather than `;` keeps the short-circuit chain the
+	// `sleep N && ` respawn prefix relies on; `unset` returns 0 for names that are not set, so
+	// it never breaks that chain.
+	segments := []string{exports}
+	if clears := m.staleUniverseKeys(effective); len(clears) > 0 {
+		segments = append(segments, "unset "+strings.Join(clears, " "))
+	}
+	segments = append(segments, claude)
+	return strings.Join(segments, " && ")
 }
 
 // derefFileRefInline renders one inline `KEY=<deref>` export for a file: secret reference:

@@ -109,6 +109,48 @@ func TestHandoff_MailSkipUnderTest(t *testing.T) {
 	}
 }
 
+// K12 (#596): sendHandoffMail is an ADR-009 package-var seam so the escalation path
+// is unit-observable. isTestBinary() makes the real send a silent no-op under
+// `go test`, so before the seam a test could assert only "it did not error" — never
+// WHAT was sent, meaning an assertion like "escalation reached the right recipient"
+// would pass whether or not the code sent anything. Driven through runHandoffCore,
+// the real caller at handoff.go:100, rather than by calling the var directly.
+func TestHandoff_MailSeamRecordsRecipientSubjectBody(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-501/default,12345,0")
+	t.Setenv("TMUX_PANE", "%0")
+
+	dir := setupTestFactoryForDone(t, "manager")
+	workDir := filepath.Join(dir, ".agentfactory", "agents", "manager")
+
+	var mailCalled bool
+	var mailRecipient, mailSubject, mailBody string
+	origSendHandoffMail := sendHandoffMail
+	sendHandoffMail = func(agentName, subject, body string) error {
+		mailCalled = true
+		mailRecipient = agentName
+		mailSubject = subject
+		mailBody = body
+		return nil
+	}
+	defer func() { sendHandoffMail = origSendHandoffMail }()
+
+	// Fails later at respawn (no real tmux); the send happens first.
+	_ = runHandoffCore(t.Context(), workDir, "HANDOFF: seam", "seam body", false, false, false)
+
+	if !mailCalled {
+		t.Fatal("sendHandoffMail should have been called on the non-dry-run handoff path")
+	}
+	if mailRecipient != "manager" {
+		t.Errorf("handoff mail recipient = %q, want \"manager\" (handoff mails to self)", mailRecipient)
+	}
+	if mailSubject != "HANDOFF: seam" {
+		t.Errorf("handoff mail subject = %q, want \"HANDOFF: seam\"", mailSubject)
+	}
+	if mailBody != "seam body" {
+		t.Errorf("handoff mail body = %q, want \"seam body\"", mailBody)
+	}
+}
+
 func TestHandoff_FlagRegistration(t *testing.T) {
 	flags := []string{"subject", "message", "collect", "dry-run", "idle"}
 	for _, name := range flags {

@@ -1,0 +1,17 @@
+{
+  "agents": {
+    "CANARY-agent": {
+      "type": "autonomous",
+      "description": "CANARY-agents{}.description",
+      "directive": "CANARY-agents{}.directive",
+      "formula": "CANARY-agents{}.formula",
+      "sparse_paths": [
+        "CANARY-agents{}.sparse_paths[]"
+      ],
+      "model": "CANARY-agents{}.model",
+      "base_url": "https://canary.invalid",
+      "auth_token": "CANARY-agents{}.auth_token",
+      "continuous_improvement": true
+    }
+  }
+}

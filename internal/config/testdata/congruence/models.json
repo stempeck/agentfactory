@@ -1,0 +1,11 @@
+{
+  "default": "CANARY-profile",
+  "models": {
+    "CANARY-profile": {
+      "ANTHROPIC_MODEL": "CANARY-models{}{}"
+    }
+  },
+  "agents": {
+    "CANARY-agent": "CANARY-profile"
+  }
+}

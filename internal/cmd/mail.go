@@ -38,6 +38,7 @@ func init() {
 	sendCmd.Flags().String("priority", "normal", "Priority: urgent, high, normal, low")
 	sendCmd.Flags().String("reply-to", "", "ID of message being replied to")
 	sendCmd.Flags().String("from", "", "Send as this identity (agents.json member or 'operator'); skips sender auto-detection")
+	sendCmd.Flags().Bool("report-delivery", false, "Report whether a live session was actually notified instead of reporting an unconditional send")
 	_ = sendCmd.MarkFlagRequired("subject")
 	_ = sendCmd.MarkFlagRequired("message")
 	mailCmd.AddCommand(sendCmd)
@@ -100,6 +101,7 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 	priorityStr, _ := cmd.Flags().GetString("priority")
 	replyToID, _ := cmd.Flags().GetString("reply-to")
 	from, _ := cmd.Flags().GetString("from")
+	reportDelivery, _ := cmd.Flags().GetBool("report-delivery")
 
 	wd, err := getWd()
 	if err != nil {
@@ -169,12 +171,34 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := router.Send(cmd.Context(), msg); err != nil {
+	delivery, err := router.SendReporting(cmd.Context(), msg)
+	if err != nil {
 		return err
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Sent to %s: %s\n", to, subject)
+	// Without --report-delivery the line is the one every existing caller has
+	// always seen, byte for byte.
+	if !reportDelivery {
+		fmt.Fprintf(cmd.OutOrStdout(), "Sent to %s: %s\n", to, subject)
+		return nil
+	}
+	fmt.Fprint(cmd.OutOrStdout(), deliveryLine(to, subject, delivery))
 	return nil
+}
+
+// deliveryLine words a send as what it actually achieved, so a caller reading
+// this output can claim delivery only when delivery happened. The reason rides
+// along on the filed variant because the only consumer that cares — an
+// escalation reporting an unreachable recipient — needs to say why.
+func deliveryLine(to, subject string, d mail.Delivery) string {
+	switch {
+	case d.Notified:
+		return fmt.Sprintf("Notified %s: %s\n", to, subject)
+	case d.Filed:
+		return fmt.Sprintf("Filed for %s: %s (%s)\n", to, subject, d.Reason)
+	default:
+		return fmt.Sprintf("Not delivered to %s: %s (%s)\n", to, subject, d.Reason)
+	}
 }
 
 func runMailInbox(cmd *cobra.Command, _ []string) error {

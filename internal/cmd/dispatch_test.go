@@ -345,6 +345,7 @@ func TestBuildDispatchLoopCmd(t *testing.T) {
 				"dispatch loop exiting",
 				"dispatch cycle starting",
 				"rc=$?",
+				"/usr/local/bin/af memory status --nag",
 			},
 		},
 		{
@@ -356,6 +357,7 @@ func TestBuildDispatchLoopCmd(t *testing.T) {
 				"export AF_ROOT='/srv/factory';",
 				"while true",
 				"/home/user/.local/bin/af dispatch",
+				"/home/user/.local/bin/af memory status --nag",
 				"sleep 60",
 				"done",
 				"trap",
@@ -369,6 +371,7 @@ func TestBuildDispatchLoopCmd(t *testing.T) {
 			wantHas: []string{
 				"export AF_ROOT='/factory';",
 				"af dispatch",
+				"af memory status --nag",
 				"sleep 120",
 				"trap",
 				"rc=$?",
@@ -388,6 +391,20 @@ func TestBuildDispatchLoopCmd(t *testing.T) {
 			// cycle) inherits AF_ROOT (issue #519 review follow-up).
 			if !strings.HasPrefix(cmd, "export AF_ROOT=") {
 				t.Errorf("buildDispatchLoopCmd must lead with the AF_ROOT export; got: %s", cmd)
+			}
+			// The hygiene pass (#515 Phase 5) rides this loop, and WHERE it rides is the whole
+			// correctness question: $? holds the status of the LAST command, so a nag spliced in
+			// ahead of `rc=$?` would make rc report the nag's exit code and silence the dispatch
+			// failure line for good. Ordering, not mere presence.
+			nag := strings.Index(cmd, tc.afBin+" memory status --nag")
+			rc := strings.Index(cmd, "rc=$?")
+			sleep := strings.Index(cmd, "sleep ")
+			if nag < 0 || rc < 0 || sleep < 0 {
+				t.Fatalf("loop is missing the nag, the rc capture or the sleep:\n%s", cmd)
+			}
+			if !(rc < nag && nag < sleep) {
+				t.Errorf("the nag must run after the rc capture (%d) and before the sleep (%d); it is at %d\ngot: %s",
+					rc, sleep, nag, cmd)
 			}
 		})
 	}
@@ -662,6 +679,14 @@ func TestDispatchStatus_JSON_SchemaSnapshot(t *testing.T) {
 	if err := saveDispatchState(dir, state); err != nil {
 		t.Fatalf("saveDispatchState: %v", err)
 	}
+	// K11 (#596): the recovery key is omitempty, so it renders only for an agent the
+	// K5 breaker has something to say about. Latching ONLY the workflow entry's agent
+	// is what keeps the two frozen shapes distinguishable — entries[0] must still prove
+	// an un-latched agent emits exactly the original 6 keys.
+	if err := saveRecoveryState(dir, "engineer",
+		recoveryState{Halted: true, HaltReason: haltReasonMaxAttempts}); err != nil {
+		t.Fatalf("saveRecoveryState: %v", err)
+	}
 
 	origDir, _ := os.Getwd()
 	os.Chdir(dir)
@@ -727,12 +752,13 @@ func TestDispatchStatus_JSON_SchemaSnapshot(t *testing.T) {
 		}
 	}
 
-	// entries[1] (workflow) freezes the expanded 9-key contract: the 6 base keys PLUS the
-	// additive workflow / phase / phase_complete keys.
+	// entries[1] (workflow) freezes the expanded 10-key contract: the 6 base keys PLUS the
+	// additive workflow / phase / phase_complete keys and the #596 K11 recovery key.
 	wantEntryWorkflow := map[string]bool{
 		"issue": true, "agent": true, "agent_running": true,
 		"item_url": true, "source": true, "dispatched_at": true,
 		"workflow": true, "phase": true, "phase_complete": true,
+		"recovery": true,
 	}
 	if len(entries[1]) != len(wantEntryWorkflow) {
 		t.Errorf("workflow entry key count = %d (%v), want %d", len(entries[1]), keysOf(entries[1]), len(wantEntryWorkflow))
@@ -760,6 +786,12 @@ func TestDispatchStatus_JSON_SchemaSnapshot(t *testing.T) {
 	we := parsed.Entries[1]
 	if we.Issue != "owner/repo#2" || we.Workflow != "soldesign" || we.Phase != "design" || !we.PhaseComplete {
 		t.Errorf("workflow entry = %+v, want issue=owner/repo#2 workflow=soldesign phase=design phase_complete=true", we)
+	}
+	if we.Recovery != "halted" {
+		t.Errorf("workflow entry recovery = %q, want %q — the latched breaker must reach the contract", we.Recovery, "halted")
+	}
+	if e.Recovery != "" {
+		t.Errorf("non-workflow entry recovery = %q, want empty so omitempty elides the key", e.Recovery)
 	}
 }
 

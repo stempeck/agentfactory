@@ -80,6 +80,169 @@ func TestImprovementInstruction_EditTargetIsAbsoluteFactoryRoot(t *testing.T) {
 	}
 }
 
+// --- #515 Phase 5 / AC-515-7: the instruction closes the loop between the improvement hook and
+// the memory vault. Before this the two systems were complete and unaware of each other: the hook
+// could rediscover a learning the vault had recorded a month earlier, and the vault never heard
+// what the hook found. ---
+
+func TestImprovementInstruction_ReadsMemoryBeforeEditingAndWritesAfter(t *testing.T) {
+	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
+	writeFormulaFile(t, root, "fx", true)
+
+	instruction, f, ok := improvementInstruction(root, "Formula: fx")
+	if !ok {
+		t.Fatal("expected improvementInstruction to resolve")
+	}
+
+	// The read line carries the FORMULA NAME, not the path: `af memory list --formula` matches
+	// Note.Formula exactly, so an absolute path there would silently return an empty list — a
+	// wiring that looks done and injects nothing.
+	read := "af memory list --formula " + f.Name
+	readAt := strings.Index(instruction, read)
+	if readAt < 0 {
+		t.Fatalf("instruction does not tell the agent to read prior learnings (%q):\n%s", read, instruction)
+	}
+	// The write line must SCOPE the note it asks for. runMemoryAdd's fallback reads
+	// .runtime/hooked_formula, and af done deletes it in cleanupRuntimeArtifacts (done.go:352)
+	// before delivering this instruction (done.go:369) — so an unscoped note is stamped with an
+	// empty formula and the read line above can never return it. The loop would look closed and
+	// carry nothing, which is the failure this whole phase exists to end.
+	write := "af memory add --type improvement --formula " + f.Name
+	writeAt := strings.Index(instruction, write)
+	if writeAt < 0 {
+		t.Fatalf("instruction does not tell the agent to record what it learned, scoped to the "+
+			"formula the read line filters on (%q):\n%s", write, instruction)
+	}
+	editAt := strings.Index(instruction, "formula at "+f.AbsPath)
+	if editAt < 0 {
+		t.Fatalf("instruction lost its edit target:\n%s", instruction)
+	}
+
+	// Ordering is the whole point: read-then-edit is what stops the hook rediscovering last
+	// month's learning, and edit-then-write is what stops a note claiming an edit never made.
+	if !(readAt < editAt && editAt < writeAt) {
+		t.Errorf("instruction must read memory (%d), then edit (%d), then record (%d):\n%s",
+			readAt, editAt, writeAt, instruction)
+	}
+
+	// Each verb on its own physical line: an agent skims this, and a one-line command it can
+	// copy is the difference between an instruction and a suggestion.
+	for _, verb := range []string{read, write} {
+		if !instructionHasOwnLine(instruction, verb) {
+			t.Errorf("%q must start its own line so it can be copied verbatim:\n%s", verb, instruction)
+		}
+	}
+}
+
+// TestImprovementInstruction_MemoryWiringLeftIssue483Intact is the regression half. Phase 5
+// composes two finished systems; #483's own instruction — the edit target, the evidence
+// discipline, the JSON verification, the single completion verb — is not the thing being changed,
+// and a template rewrite is exactly how that gets lost by accident.
+func TestImprovementInstruction_MemoryWiringLeftIssue483Intact(t *testing.T) {
+	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
+	writeFormulaFile(t, root, "fx", true)
+
+	instruction, f, ok := improvementInstruction(root, "Formula: fx")
+	if !ok {
+		t.Fatal("expected improvementInstruction to resolve")
+	}
+	for _, want := range []string{
+		"Derive the evidence from",
+		"af formula show " + f.Name + " --json",
+		"leave promotion to the human operator",
+	} {
+		if !strings.Contains(instruction, want) {
+			t.Errorf("#483's instruction lost %q:\n%s", want, instruction)
+		}
+	}
+	// Exactly one completion verb. Two would make the agent run the whole teardown twice, and
+	// the second run consumes no marker and reports "no pending improvement" as a failure.
+	if got := strings.Count(instruction, "af improvement complete"); got != 1 {
+		t.Errorf("instruction must name `af improvement complete` exactly once; got %d:\n%s", got, instruction)
+	}
+	// No unsubstituted verb: a template whose %s count and argument list disagree renders a
+	// literal %!s(MISSING) into an agent's prompt, and go vet's printf check only catches the
+	// disagreement when it can see both.
+	if strings.Contains(instruction, "%!") {
+		t.Errorf("instruction carries an unsubstituted verb:\n%s", instruction)
+	}
+}
+
+// TestImprovementInstruction_MemoryRoundTripsThroughTheVerbsItNames is T-483's second half
+// (design-doc.md:48, "instruction template contains both verbs; outcome-note round-trip"). The
+// grep half of AC-515-1 can only see that two literals are present; only running them can show
+// that the note the write line produces is the note the read line returns. They are joined by the
+// --formula scope, and every way of getting that scope wrong — omitting it, passing the absolute
+// path, passing the instance-bead title with its "Formula: " prefix — leaves both lines looking
+// correct and the loop carrying nothing.
+func TestImprovementInstruction_MemoryRoundTripsThroughTheVerbsItNames(t *testing.T) {
+	factoryRoot, aliceDir := setupMemoryFixture(t)
+	writeStoreFormula(t, factoryRoot, "fx", "name = \"fx\"\n")
+
+	instruction, _, ok := improvementInstruction(factoryRoot, "Formula: fx")
+	if !ok {
+		t.Fatal("expected improvementInstruction to resolve")
+	}
+	writeScope := instructionFormulaScope(t, instruction, "af memory add ")
+	readScope := instructionFormulaScope(t, instruction, "af memory list ")
+	if writeScope != readScope {
+		t.Fatalf("the write line scopes the note to %q but the read line filters on %q — the loop "+
+			"is open:\n%s", writeScope, readScope, instruction)
+	}
+
+	t.Chdir(aliceDir)
+	t.Setenv("AF_ROLE", "alice")
+	added, err := execMemoryOut(t, "add", "--type", "improvement", "--formula", writeScope,
+		"--subject", "step three needed a longer settle")
+	if err != nil {
+		t.Fatalf("the instruction's write verb must work as written: %v", err)
+	}
+	fields := strings.Fields(added)
+	if len(fields) < 2 || fields[0] != "recorded" {
+		t.Fatalf("unexpected add output %q", added)
+	}
+	id := fields[1]
+
+	listed, err := execMemoryOut(t, "list", "--formula", readScope)
+	if err != nil {
+		t.Fatalf("the instruction's read verb must work as written: %v", err)
+	}
+	if !strings.Contains(listed, id) {
+		t.Errorf("the note the write line recorded (%s) does not come back on the read line:\n%s", id, listed)
+	}
+}
+
+// instructionFormulaScope returns the --formula argument on the instruction line beginning with
+// prefix, read out of the shipped text rather than assumed.
+func instructionFormulaScope(t *testing.T, instruction, prefix string) string {
+	t.Helper()
+	for _, line := range strings.Split(instruction, "\n") {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if f == "--formula" && i+1 < len(fields) {
+				return fields[i+1]
+			}
+		}
+		t.Fatalf("line %q names no --formula scope", line)
+	}
+	t.Fatalf("instruction has no line beginning %q:\n%s", prefix, instruction)
+	return ""
+}
+
+// instructionHasOwnLine reports whether verb begins a line of the instruction. Prefix, not
+// equality: the memory verbs carry arguments the caller fills in.
+func instructionHasOwnLine(instruction, verb string) bool {
+	for _, line := range strings.Split(instruction, "\n") {
+		if strings.HasPrefix(line, verb) {
+			return true
+		}
+	}
+	return false
+}
+
 // --- AC3 / C1: the verification step must not tell the agent to trust an exit code
 // that is always 0 by design. ---
 
@@ -143,7 +306,7 @@ func TestImprovementComplete_OutcomeMessage_NamesArtifactLocation(t *testing.T) 
 	if err := writeImprovementMarker(root, "alpha", m); err != nil {
 		t.Fatal(err)
 	}
-	if err := runImprovementCompleteCore(agentDir, root, false); err != nil {
+	if err := runImprovementCompleteCore(agentDir, root, false, ""); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	if !strings.Contains(*subject+*body, absFormula) {
@@ -175,7 +338,7 @@ func TestImprovementComplete_UnchangedVerdictDoesNotAssertAnEdit(t *testing.T) {
 	if err := writeImprovementMarker(root, "alpha", m); err != nil {
 		t.Fatal(err)
 	}
-	if err := runImprovementCompleteCore(agentDir, root, false); err != nil {
+	if err := runImprovementCompleteCore(agentDir, root, false, ""); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 
@@ -208,7 +371,7 @@ func TestImprovementComplete_VerdictPathReachesPrintedSurface(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() {
-		if err := runImprovementCompleteCore(agentDir, root, false); err != nil {
+		if err := runImprovementCompleteCore(agentDir, root, false, ""); err != nil {
 			t.Fatalf("complete: %v", err)
 		}
 	})
@@ -244,7 +407,7 @@ func TestImprovementComplete_WorktreeDivergence_InstructionTargetsSameFileVerdic
 	if err := writeImprovementMarker(fx.trueRoot, fx.agent, m); err != nil {
 		t.Fatal(err)
 	}
-	if err := runImprovementCompleteCore(agentDir, fx.trueRoot, false); err != nil {
+	if err := runImprovementCompleteCore(agentDir, fx.trueRoot, false, ""); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	if !strings.Contains(*subject, "unchanged") {
@@ -298,7 +461,7 @@ func TestImprovementComplete_WorktreeInvalidEdit_StillTearsDown(t *testing.T) {
 	if err := writeImprovementMarker(fx.trueRoot, fx.agent, m); err != nil {
 		t.Fatal(err)
 	}
-	if err := runImprovementCompleteCore(agentDir, fx.trueRoot, false); err != nil {
+	if err := runImprovementCompleteCore(agentDir, fx.trueRoot, false, ""); err != nil {
 		t.Fatalf("broken formula must fail open (exit 0), got err %v", err)
 	}
 	if !strings.Contains(*subject, "validation FAILED") {
@@ -512,7 +675,7 @@ func TestImprovementComplete_RealGitWorktree_SurvivesRealForceRemove(t *testing.
 	if err := writeImprovementMarker(trueRoot, "alpha", m); err != nil {
 		t.Fatal(err)
 	}
-	if err := runImprovementCompleteCore(agentDir, trueRoot, false); err != nil {
+	if err := runImprovementCompleteCore(agentDir, trueRoot, false, ""); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	if !strings.Contains(*subject, "changed") || !strings.Contains(*subject, "validation passed") {

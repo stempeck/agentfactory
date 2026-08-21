@@ -145,35 +145,59 @@
 </section>
 
 <!-- ============================ SETTINGS VIEW ============================ -->
+<!-- #620 U1 — a disposition-driven panel per config document. Each panel states what the console may
+     change (the payload's own `reason`) and when a change lands (`effective_when`), and saves EXACTLY
+     ONE file. There is deliberately no global save button: one button that wrote several files is the
+     partial-write shape AC-5 forbids. -->
 <section id="view-settings" hidden>
   <div class="view-head">
     <h1 class="view-title">Settings</h1>
-    <p class="view-sub">Decide which agent handles each issue label, and tune how the factory boots. Changes are validated and saved atomically — a mapping to a non-existent agent is rejected without corrupting the file.</p>
+    <p class="view-sub">Every configuration document under <code>.agentfactory/</code> — what the console may change, and when a change takes effect. Each panel saves one file through <code>af</code>, the single validator and writer, and saves back everything it read: keys this console has never heard of ride through untouched.</p>
+    <button class="ghost inline" type="button" id="set-reload">Reload settings</button>
   </div>
 
-  <div class="cols even">
-    <!-- LEFT: dispatch routes (label → agent mapping editor) -->
-    <section class="panel" aria-label="Label to agent mapping">
-      <h2>Dispatch routes</h2>
-      <p class="muted" style="margin-bottom:14px">When an issue gets a label on the left, the dispatcher slings the agent on the right.</p>
+  <div class="tel-banner" id="set-banner"></div>
 
-      <div class="formrow">
+  <div class="cols even">
+    <!-- dispatch.json — trigger label + label→agent routes (each row keeps its own raw document row) -->
+    <section class="panel" id="set-panel-dispatch" aria-label="Dispatch routing">
+      <h2>Dispatch routes</h2>
+      <p class="muted" id="set-reason-dispatch"></p>
+      <p class="keyhint" id="set-when-dispatch"></p>
+
+      <div class="formrow" style="margin-top:16px">
         <label class="lbl" for="set-trigger">Trigger label</label>
         <input class="field w" id="set-trigger" aria-describedby="set-dispatch-err" placeholder="e.g. agent:go">
       </div>
 
       <div id="mapRows"></div>
       <button class="add-row" type="button" id="set-add-row">+ Add route</button>
+      <p class="keyhint">A route may carry several labels — separate them with commas. The model column pins a profile from <code>models.json</code>; leave it blank to use the agent's own model.</p>
 
+      <details class="advanced">
+        <summary>Advanced — raw dispatch.json</summary>
+        <div class="body">
+          <p class="keyhint">The document exactly as <code>af</code> wrote it. The controls above overlay this text when you save. Labels, agents and model pins belong to the route rows — change those there; change everything else here. Editing them in both places, or changing which routes exist in both, is refused rather than guessed. A key <code>af</code>'s schema does not declare is refused with a 422 naming the key — remove it, or propose it for af's schema.</p>
+          <textarea class="field w mono" id="set-adv-dispatch" aria-label="Raw dispatch.json" spellcheck="false"></textarea>
+        </div>
+      </details>
+
+      <div id="set-diff-dispatch" class="set-diff"></div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
+        <button class="btn primary" type="button" id="set-save-dispatch" disabled>Save dispatch.json</button>
+        <button class="ghost inline" type="button" id="set-dismiss-dispatch" hidden>Dismiss</button>
+      </div>
       <p class="validation" id="set-dispatch-err" hidden></p>
-      <div class="success" id="set-dispatch-ok" hidden style="margin-top:12px"><span class="ic" aria-hidden="true">✦</span><div>Dispatch routes saved.</div></div>
+      <div class="success" id="set-dispatch-ok" hidden style="margin-top:12px"><span class="ic" aria-hidden="true">✦</span><div>dispatch.json saved.</div></div>
     </section>
 
-    <!-- RIGHT: curated factory options + read-only factory.json + save -->
-    <section class="panel" aria-label="Factory options">
-      <h2>Factory options</h2>
+    <!-- startup.json — the agents sentinel is three-valued, so its control is too -->
+    <section class="panel" id="set-panel-startup" aria-label="Startup">
+      <h2>Startup</h2>
+      <p class="muted" id="set-reason-startup"></p>
+      <p class="keyhint" id="set-when-startup"></p>
 
-      <div class="toggle-row">
+      <div class="toggle-row" style="margin-top:16px">
         <span class="tlabel">Auto-dispatch on startup
           <small>Start the dispatcher automatically when the factory boots.</small>
         </span>
@@ -181,19 +205,123 @@
       </div>
 
       <div class="formrow" style="margin-top:16px">
-        <label class="lbl" for="set-startup-agents">Startup agents</label>
-        <input class="field w" id="set-startup-agents" aria-describedby="set-startup-err" placeholder="comma-separated agent names — blank means ALL">
-        <p class="validation" id="set-startup-err" hidden></p>
+        <span class="lbl">Startup agents</span>
+        <div class="radios" role="radiogroup" aria-label="Startup agents">
+          <label><input type="radio" name="set-startup-agents-mode" value="all"> All — the key stays absent, so <code>af</code> starts every configured agent</label>
+          <label><input type="radio" name="set-startup-agents-mode" value="none"> None — an empty list, so <code>af</code> starts no agent</label>
+          <label><input type="radio" name="set-startup-agents-mode" value="list"> Just these:</label>
+        </div>
+        <input class="field w" id="set-startup-agents" aria-label="Startup agent names" aria-describedby="set-startup-err" placeholder="manager, go, docs">
+        <p class="keyhint">Absent and empty are different documents to <code>af</code>: absent means ALL, <code>[]</code> means none. Whichever you pick is what gets written.</p>
       </div>
 
-      <div class="success" id="set-startup-ok" hidden style="margin:8px 0 14px"><span class="ic" aria-hidden="true">✦</span><div>Startup settings saved.</div></div>
+      <div class="formrow">
+        <label class="lbl" for="set-gate-quality">Quality gate</label>
+        <select class="field w" id="set-gate-quality"><option value="">— not set (key absent) —</option><option value="on">on</option><option value="off">off</option><option value="default">default</option></select>
+      </div>
+      <div class="formrow">
+        <label class="lbl" for="set-gate-fidelity">Fidelity gate</label>
+        <select class="field w" id="set-gate-fidelity"><option value="">— not set (key absent) —</option><option value="on">on</option><option value="off">off</option><option value="default">default</option></select>
+      </div>
+      <div class="formrow">
+        <label class="lbl" for="set-gate-improvement">Improvement gate</label>
+        <select class="field w" id="set-gate-improvement"><option value="">— not set (key absent) —</option><option value="on">on</option><option value="off">off</option><option value="default">default</option></select>
+      </div>
+      <div class="formrow">
+        <label class="lbl" for="set-gate-telemetry">Telemetry gate</label>
+        <select class="field w" id="set-gate-telemetry"><option value="">— not set (key absent) —</option><option value="on">on</option><option value="off">off</option><option value="default">default</option></select>
+      </div>
 
+      <details class="advanced">
+        <summary>Advanced — raw startup.json (including the recovery block)</summary>
+        <div class="body">
+          <p class="keyhint">The 14 <code>recovery</code> knobs live here, next to <code>af</code>'s own error messages. Note that <code>af</code> materializes a default for any recovery integer you leave at 0 the first time this file is saved, so a stated 0 comes back as the default. A key <code>af</code>'s schema does not declare is refused with a 422 naming the key — remove it, or propose it for af's schema.</p>
+          <textarea class="field w mono" id="set-adv-startup" aria-label="Raw startup.json" spellcheck="false"></textarea>
+        </div>
+      </details>
+
+      <div id="set-diff-startup" class="set-diff"></div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
-        <button class="btn primary" type="button" id="set-save">Save changes</button>
+        <button class="btn primary" type="button" id="set-save-startup" disabled>Save startup.json</button>
+        <button class="ghost inline" type="button" id="set-dismiss-startup" hidden>Dismiss</button>
+      </div>
+      <p class="validation" id="set-startup-err" hidden></p>
+      <div class="success" id="set-startup-ok" hidden style="margin-top:12px"><span class="ic" aria-hidden="true">✦</span><div>startup.json saved.</div></div>
+    </section>
+
+    <!-- messaging.json — one map of groups; JSON is the honest control for it in v1 -->
+    <section class="panel" id="set-panel-messaging" aria-label="Messaging groups">
+      <h2>Messaging groups</h2>
+      <p class="muted" id="set-reason-messaging"></p>
+      <p class="keyhint" id="set-when-messaging"></p>
+
+      <details class="advanced" open>
+        <summary>Raw messaging.json</summary>
+        <div class="body">
+          <p class="keyhint">One map of group name to agent names — <code>{"groups": {"builders": ["go", "docs"]}}</code>. A key <code>af</code>'s schema does not declare is refused with a 422 naming the key.</p>
+          <textarea class="field w mono" id="set-adv-messaging" aria-label="Raw messaging.json" spellcheck="false"></textarea>
+        </div>
+      </details>
+
+      <div id="set-diff-messaging" class="set-diff"></div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
+        <button class="btn primary" type="button" id="set-save-messaging" disabled>Save messaging.json</button>
+        <button class="ghost inline" type="button" id="set-dismiss-messaging" hidden>Dismiss</button>
+      </div>
+      <p class="validation" id="set-messaging-err" hidden></p>
+      <div class="success" id="set-messaging-ok" hidden style="margin-top:12px"><span class="ic" aria-hidden="true">✦</span><div>messaging.json saved.</div></div>
+    </section>
+
+    <!-- statusline.json — two keys, and one of them is a third sentinel of the absent-means-something family -->
+    <section class="panel" id="set-panel-statusline" aria-label="Statusline">
+      <h2>Statusline</h2>
+      <p class="muted" id="set-reason-statusline"></p>
+      <p class="keyhint" id="set-when-statusline"></p>
+
+      <div class="formrow" style="margin-top:16px">
+        <span class="lbl">Elements</span>
+        <div id="set-statusline-elements"></div>
       </div>
 
-      <h3 style="margin-top:22px">factory.json <span class="muted" style="font-size:12px;font-weight:400">· read-only</span></h3>
+      <div class="formrow">
+        <span class="lbl">Colour</span>
+        <div class="radios" role="radiogroup" aria-label="Statusline colour">
+          <label><input type="radio" name="set-statusline-color" value="default"> Not set — colour renders ON and no key is written</label>
+          <label><input type="radio" name="set-statusline-color" value="on"> On</label>
+          <label><input type="radio" name="set-statusline-color" value="off"> Off</label>
+        </div>
+        <p class="keyhint">An absent <code>color</code> key already means ON, and <code>af</code> deliberately never fills it in. Leaving this on "Not set" keeps it that way. Note that <code>af config statusline set</code> requires an <code>elements</code> list, so a colour-only document is refused — pick at least one element above.</p>
+      </div>
+
+      <details class="advanced">
+        <summary>Advanced — raw statusline.json</summary>
+        <div class="body">
+          <textarea class="field w mono" id="set-adv-statusline" aria-label="Raw statusline.json" spellcheck="false"></textarea>
+        </div>
+      </details>
+
+      <div id="set-diff-statusline" class="set-diff"></div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
+        <button class="btn primary" type="button" id="set-save-statusline" disabled>Save statusline.json</button>
+        <button class="ghost inline" type="button" id="set-dismiss-statusline" hidden>Dismiss</button>
+      </div>
+      <p class="validation" id="set-statusline-err" hidden></p>
+      <div class="success" id="set-statusline-ok" hidden style="margin-top:12px"><span class="ic" aria-hidden="true">✦</span><div>statusline.json saved.</div></div>
+    </section>
+
+    <!-- factory.json — shown, never edited (C-9). #set-factory keeps its id and .readonly-block class. -->
+    <section class="panel" id="set-panel-factory" aria-label="Factory identity">
+      <h2>factory.json <span class="badge neutral">Read-only · recorded decision C-9</span></h2>
+      <p class="muted" id="set-reason-factory"></p>
+      <p class="keyhint" id="set-when-factory"></p>
       <pre class="readonly-block mono" id="set-factory" aria-label="factory.json (read-only)"></pre>
+    </section>
+
+    <!-- The stated exclusions. This panel is what turns "absent entirely" into a discoverable decision. -->
+    <section class="panel" id="set-panel-unmanaged" aria-label="Settings the console does not manage">
+      <h2>Not managed here</h2>
+      <p class="muted">Configuration the console deliberately does not read or write, with the command that does manage each one. A stated decision, not a gap.</p>
+      <div id="set-unmanaged" class="set-unmanaged"></div>
     </section>
   </div>
 </section>
@@ -206,15 +334,15 @@
   </div>
 
   <div class="proto-cols">
-    <!-- LEFT: list of agent-built prototypes (from GET /api/prototypes) -->
-    <section class="panel" aria-label="Prototype directories">
+    <!-- LEFT, ROW 1: list of agent-built prototypes (from GET /api/prototypes) -->
+    <section class="panel proto-pane-list" aria-label="Prototype directories">
       <h2>Built by agents · <span id="proto-count">0</span></h2>
       <div class="proto-list" id="proto-list" role="listbox" aria-label="Choose a prototype"></div>
       <p class="keyhint" id="proto-empty" hidden>No prototypes yet — dispatch a design agent to build one.</p>
     </section>
 
-    <!-- CENTER: sandboxed viewer (iframe src = GET /proto/{id}/) -->
-    <section aria-label="Prototype viewer">
+    <!-- MAIN: sandboxed viewer (iframe src = GET /proto/{id}/) — the wide column, spanning both rows -->
+    <section class="proto-pane-viewer" aria-label="Prototype viewer">
       <div class="viewer">
         <div class="vh">
           <span class="dots" aria-hidden="true"><i style="background:#FF5630"></i><i style="background:#FFC24B"></i><i style="background:#20E5FF"></i></span>
@@ -227,8 +355,9 @@
       </div>
     </section>
 
-    <!-- RIGHT: feedback side-panel (does not overlay the viewer) -->
-    <section class="panel" aria-label="Feedback">
+    <!-- Feedback panel. Placed by CSS under the list in column 1 (#629); it stays HERE in source
+         order so narrow screens and screen readers reach the preview before the feedback form. -->
+    <section class="panel proto-pane-feedback" aria-label="Feedback">
       <h2>Your feedback</h2>
       <div class="success" id="proto-fb-ok" hidden>
         <span class="ic" aria-hidden="true">✦</span>

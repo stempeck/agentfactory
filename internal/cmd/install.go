@@ -20,6 +20,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/fsutil"
 	"github.com/stempeck/agentfactory/internal/issuestore/mcpstore"
+	"github.com/stempeck/agentfactory/internal/memory"
 	"github.com/stempeck/agentfactory/internal/templates"
 )
 
@@ -171,12 +172,23 @@ func runInstallInit(cmd *cobra.Command) error {
 		return fmt.Errorf("creating agents directory: %w", err)
 	}
 
+	// 2c. Create .agentfactory/memory/ — the learnings vault root. It sits beside agents/ rather
+	// than inside it because it must be durable: agents/ is rewritten by af install and
+	// worktrees/ is destroyed by teardown, and a learning has to outlive both.
+	if err := os.MkdirAll(config.MemoryDir(cwd), 0755); err != nil {
+		return fmt.Errorf("creating memory directory: %w", err)
+	}
+
 	// 3. Write starter configs (only if they don't exist — idempotent)
 	starterConfigs := map[string]string{
 		// Built from the in-code defaults (incl. the C-3 git_identity) so the on-disk
 		// literal cannot drift from internal/config's constants (issue #371 Gap-6).
-		"factory.json":   config.DefaultFactoryConfigJSON(),
-		"agents.json":    `{"agents":{"manager":{"type":"interactive","description":"Interactive agent for human-supervised work","directive":"Read your memory and docs, and prove it."},"supervisor":{"type":"autonomous","description":"Autonomous agent for independent task execution","directive":"Read your memory and docs, and prove it."}}}`,
+		"factory.json": config.DefaultFactoryConfigJSON(),
+		// The directive names the verbs on both halves of the loop (#515). "Read your memory"
+		// alone described a habit with no mechanism behind it; naming af memory list and
+		// af memory add makes the seed a runnable instruction, which instruction_reality_test.go
+		// then holds against the cobra tree. No backticks: this is a Go raw string literal.
+		"agents.json":    `{"agents":{"manager":{"type":"interactive","description":"Interactive agent for human-supervised work","directive":"Read your memory (af memory list) and docs, and prove it. Record durable learnings with af memory add."},"supervisor":{"type":"autonomous","description":"Autonomous agent for independent task execution","directive":"Read your memory (af memory list) and docs, and prove it. Record durable learnings with af memory add."}}}`,
 		"messaging.json": `{"groups":{"all":["manager","supervisor"]}}`,
 		"dispatch.json":  `{"repos":[],"trigger_label":"agentic","notify_on_complete":"manager","mappings":[],"interval_seconds":300,"retry_after_seconds":1800}`,
 		// Opinionated defaults for fresh installs (see TestLoadStartupConfig_ScaffoldLoads).
@@ -276,11 +288,25 @@ func runInstallInit(cmd *cobra.Command) error {
 	}
 
 	// Enable fidelity gate by default for new factories
-	fidelityToggle := filepath.Join(configDir, ".fidelity-gate")
-	if _, err := os.Stat(fidelityToggle); os.IsNotExist(err) {
-		if err := os.WriteFile(fidelityToggle, []byte("on\n"), 0644); err != nil {
-			return fmt.Errorf("writing .fidelity-gate: %w", err)
+	if err := seedFidelityGate(cwd); err != nil {
+		return err
+	}
+
+	// Seed the statusline gate on for new factories (issue #591). seed-if-absent — a
+	// re-run --init must NOT clobber an operator's later `af statusline off`.
+	statuslineGate := filepath.Join(configDir, ".statusline-gate")
+	if _, err := os.Stat(statuslineGate); os.IsNotExist(err) {
+		if err := os.WriteFile(statuslineGate, []byte("on\n"), 0644); err != nil {
+			return fmt.Errorf("writing .statusline-gate: %w", err)
 		}
+	}
+	// Reflect the ACTUAL gate state, not an unconditional "on": an operator who ran
+	// `af statusline off` before this re-init must not be told "on" (PR #595 T6/F3). The
+	// seed above is seed-if-absent, so a fresh factory still reads "on" here.
+	if statuslineFactoryEnabled(cwd) {
+		fmt.Fprintln(cmd.OutOrStdout(), "Statusline: on (af statusline to configure)")
+	} else {
+		fmt.Fprintln(cmd.OutOrStdout(), "Statusline: off (af statusline on to enable)")
 	}
 
 	// 7b. Re-provision agent settings with current templates
@@ -332,6 +358,27 @@ func runInstallInit(cmd *cobra.Command) error {
 	}
 
 	fmt.Fprintln(cmd.OutOrStdout(), "Factory initialized successfully.")
+	return nil
+}
+
+// seedFidelityGate enables the fidelity gate for a new factory and records the seed as one
+// provenance line in .agentfactory/.fidelity-gate.log — it is the third toggle writer, and an
+// operator asking "who turned it back on" must be able to see it alongside the other two.
+//
+// It is seed-if-absent: a re-run --init must NOT clobber an operator's later `af fidelity off`,
+// and since it writes nothing in that case it logs nothing either.
+//
+// Extracted from runInstallInit so it can be unit-tested without the Python 3.12 / MCP server
+// dependencies that runInstallInit requires (mirrors renderGitHooks and writeFormulas).
+func seedFidelityGate(factoryRoot string) error {
+	fidelityToggle := fidelityGateFile(factoryRoot)
+	if _, err := os.Stat(fidelityToggle); !os.IsNotExist(err) {
+		return nil
+	}
+	if err := os.WriteFile(fidelityToggle, []byte("on\n"), 0644); err != nil {
+		return fmt.Errorf("writing .fidelity-gate: %w", err)
+	}
+	appendFidelityProvenance(factoryRoot, fidelitySourceInstall, "on")
 	return nil
 }
 
@@ -589,6 +636,19 @@ func runInstallRole(cmd *cobra.Command, role string) error {
 	roleType := claude.RoleTypeFor(role, agents)
 	if err := claude.EnsureSettings(roleDir, roleType); err != nil {
 		return fmt.Errorf("writing settings: %w", err)
+	}
+
+	// 6. Seed the agent's vault index — seed-if-absent. RebuildIndex is deliberately
+	// last-writer-wins (store.go:423-426), so the os.Stat guard is the caller's job: an existing
+	// index.md may already describe a populated vault and must never be rewritten from here.
+	// Seeding through the core rather than writing the empty-state text by hand keeps that
+	// sentence to the one copy the drift test pins. The vault hangs off factoryRoot, not roleDir,
+	// so it survives every worktree teardown.
+	indexPath := filepath.Join(config.AgentMemoryDir(factoryRoot, role), "index.md")
+	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
+		if err := memory.RebuildIndex(factoryRoot, role); err != nil {
+			return fmt.Errorf("seeding memory index: %w", err)
+		}
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Agent %q provisioned successfully.\n", role)

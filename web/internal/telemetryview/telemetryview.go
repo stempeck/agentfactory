@@ -108,6 +108,13 @@ type StateDTO struct {
 	} `json:"backend"`
 	// UnprobedCause says why no probe ran, in the operator's terms. It never names a header.
 	UnprobedCause string `json:"unprobed_cause"`
+	// StepContext carries the two step-context knobs the root lane also prints in prose. They are
+	// config, not health, so they are reported on every state and feed no verdict — an operator
+	// reading a degraded status still needs to know which budget the agents are running against.
+	StepContext struct {
+		BoundTokens int `json:"bound_tokens"`
+		HandoffPct  int `json:"handoff_pct"`
+	} `json:"step_context"`
 }
 
 // SignalDTO mirrors internal/cmd/telemetry_json.go telemetrySignalJSON. One entry per signal rather
@@ -142,6 +149,38 @@ type ReportRowDTO struct {
 	Model      string `json:"model"`
 	VerbMS     int    `json:"verb_ms"`
 	InstanceID string `json:"instance_id"`
+
+	// #622 C6/C10: what the step's context window held, what the step cost, and the read-time
+	// verdicts on both. POINTERS, not plain scalars, and that is a decoding requirement rather than
+	// a style choice — the goldens carry explicit `null` on every column an unmeasured step leaves
+	// empty, and a plain int64 decodes that null to 0 and RE-ENCODES it as 0. The round-trip
+	// assertion catches it, but the real cost is downstream: a console rendering 0% occupancy for a
+	// step nobody measured states the opposite of the truth.
+	CtxTokensStart *int64   `json:"ctx_tokens_start"`
+	CtxTokensEnd   *int64   `json:"ctx_tokens_end"`
+	CtxTokensTotal *int64   `json:"ctx_tokens_total"`
+	CtxUsedPct     *float64 `json:"ctx_used_pct"`
+	CumTokensDelta *int64   `json:"cum_tokens_delta"`
+	CtxBoundTokens *int64   `json:"ctx_bound_tokens"`
+
+	// Null is a third answer on both verdicts: "not judged", because no bound was recorded or there
+	// was no figure to compare against it. Reading null as false reports every unmeasured step as
+	// inside its budget.
+	OverOccupancy   *bool `json:"over_occupancy"`
+	OverConsumption *bool `json:"over_consumption"`
+	// ConsumptionState separates the two ways over_consumption goes null: "unattributable" is a step
+	// whose session was recycled mid-flight, "unmeasurable" is having nothing to subtract.
+	ConsumptionState string `json:"consumption_state"`
+
+	CompactedMidStep   *bool `json:"compacted_mid_step"`
+	CtxObservedStale   *bool `json:"ctx_observed_stale"`
+	BoundExceedsWindow *bool `json:"bound_exceeds_window"`
+
+	// InterruptedTrigger names the recycle that ended a step the funnel log shows was interrupted;
+	// such a row's Status is the derived "INTERRUPTED". The occupancy is null, never 0, for the
+	// trigger classes that record none.
+	InterruptedTrigger     string   `json:"interrupted_trigger"`
+	InterruptedObservedPct *float64 `json:"interrupted_observed_pct"`
 }
 
 // ReadStatsDTO mirrors internal/cmd/telemetry_json.go telemetryReadStatsJSON.

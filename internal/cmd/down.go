@@ -7,10 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
+	"github.com/stempeck/agentfactory/internal/memory"
 	"github.com/stempeck/agentfactory/internal/session"
 	"github.com/stempeck/agentfactory/internal/worktree"
 )
@@ -78,6 +80,19 @@ func runDown(cmd *cobra.Command, args []string) error {
 		for _, name := range args {
 			writeTeardownGrantedArtifact(tiers[name], name)
 		}
+	}
+
+	// R1 (#515), the teardown half of the af-up preflight warning. Factory-wide only: stopping one
+	// agent is routine and a reminder there would be filtered long before the one time it mattered,
+	// whereas `af down --all` is the last thing an operator runs before the container is a
+	// candidate for `docker rm`.
+	//
+	// BELOW the K5 authority gate, not above it. The gate refuses agent-initiated factory-wide
+	// teardown, and a note count printed before the refusal would tell a caller something about a
+	// factory it was just told it may not touch. Unconditional when notes exist, per design R1 —
+	// this is the one surface that fires whether or not anything looks wrong.
+	if downAll {
+		warnVaultExportStaleness(cmd.ErrOrStderr(), root, time.Now())
 	}
 
 	// Resolve agent list
@@ -233,6 +248,13 @@ func cleanupAgentWorktree(cmd *cobra.Command, factoryRoot, agentName string) {
 			"%s: kept worktree %s — in-flight formula present; use 'af down %s --reset' to force-remove\n",
 			agentName, meta.ID, agentName)
 		return
+	}
+	// Named BEFORE the removal below, so it reads as a statement about a vault that is still
+	// standing rather than a claim made after the fact. It sits after the in-flight guard's
+	// return on purpose: that branch tears nothing down, and preservation is only news when
+	// something was destroyed alongside it.
+	if line := memory.PreservedLine(factoryRoot, agentName); line != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", agentName, line)
 	}
 	updated, empty, err := worktree.RemoveAgent(factoryRoot, meta.ID, agentName)
 	if err != nil {

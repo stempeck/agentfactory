@@ -853,3 +853,91 @@ func TestQuickdockerWebRevealAtCompletion(t *testing.T) {
 		}
 	})
 }
+
+// The optional host-visible vault (AF_MEMORY_HOST_DIR). No docker in the unit lane, so this is a
+// textual guard in the shape the file already uses — but the three properties it pins are the
+// three that were each got wrong once, and none of them is observable from Go otherwise.
+func TestQuickdockerMemoryVaultMount(t *testing.T) {
+	root := findModuleRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "quickdocker.sh"))
+	if err != nil {
+		t.Fatalf("reading quickdocker.sh: %v", err)
+	}
+	content := string(data)
+
+	// ADR-019: opt-in and creation-time only. An unconditional mount would make every existing
+	// container wrong until it was recreated, which is the one thing the ADR forbids.
+	t.Run("mount_is_opt_in_and_creation_time_only", func(t *testing.T) {
+		if !strings.Contains(content, `MEMORY_DOCKER_ARGS=""`) {
+			t.Error("MEMORY_DOCKER_ARGS must be initialized empty so the mount is absent by default")
+		}
+		// Each site needs its OWN guard: the two blocks are hundreds of lines apart, and a search
+		// that settled for "some guard earlier in the file" would stay green with the second one
+		// unconditionalized — which is a container relinking its vault to a mount that was never
+		// requested.
+		for _, guarded := range []string{
+			`MEMORY_DOCKER_ARGS="-v `,
+			`  Linking the memory vault to `,
+		} {
+			idx := strings.Index(content, guarded)
+			if idx < 0 {
+				t.Fatalf("quickdocker.sh no longer contains %q", guarded)
+			}
+			guard := strings.LastIndex(content[:idx], `if [[ -n "${AF_MEMORY_HOST_DIR:-}" ]]; then`)
+			if guard < 0 || strings.Count(content[guard:idx], "\n") > 5 {
+				t.Errorf("%q has no `AF_MEMORY_HOST_DIR` guard immediately above it — the vault mount "+
+					"would apply to every new container instead of being opt-in", guarded)
+			}
+		}
+	})
+
+	// The B2 regression. Docker pre-creates a missing container-side mount path at `docker run`
+	// time, so a mount ON the vault path leaves the repo clone facing a non-empty destination and
+	// the whole run aborts under `set -e`. The target must stay outside the workspace.
+	t.Run("mount_target_is_outside_the_clone_destination", func(t *testing.T) {
+		re := regexp.MustCompile(`MEMORY_MOUNT_PATH="([^"]*)"`)
+		m := re.FindStringSubmatch(content)
+		if m == nil {
+			t.Fatal("quickdocker.sh no longer assigns MEMORY_MOUNT_PATH")
+		}
+		for _, forbidden := range []string{"$WORKSPACE_DIR", "${WORKSPACE_DIR}", "$REPO_NAME", "${REPO_NAME}"} {
+			if strings.Contains(m[1], forbidden) {
+				t.Errorf("MEMORY_MOUNT_PATH=%q is inside the clone destination; docker will pre-create it "+
+					"and Step 5's `gh repo clone` will abort", m[1])
+			}
+		}
+		if !strings.Contains(content, `-v ${AF_MEMORY_HOST_DIR}:${MEMORY_MOUNT_PATH}`) {
+			t.Error("the bind mount must target MEMORY_MOUNT_PATH, not a path composed at the mount site")
+		}
+	})
+
+	// Spliced into the SAME `docker run` as its IOS_DOCKER_ARGS sibling. A variable assigned but
+	// never passed is the silent-no-op this whole feature would become.
+	t.Run("mount_is_spliced_into_the_docker_run", func(t *testing.T) {
+		idx := strings.Index(content, "docker run -dit")
+		if idx < 0 {
+			t.Fatal("quickdocker.sh no longer contains `docker run -dit`")
+		}
+		invocation := content[idx:]
+		if end := strings.Index(invocation, "\n\n"); end > 0 {
+			invocation = invocation[:end]
+		}
+		if !strings.Contains(invocation, "$MEMORY_DOCKER_ARGS") {
+			t.Errorf("$MEMORY_DOCKER_ARGS is not passed to the container-creating `docker run`:\n%s", invocation)
+		}
+	})
+
+	// The link can only run after `af install --init` has created .agentfactory/, which quickstart
+	// does. Hoisting it above Step 8 would silently leave every vault container-local.
+	t.Run("link_runs_after_quickstart", func(t *testing.T) {
+		idxQuickstart := strings.Index(content, `step 8 "Running quickstart.sh`)
+		idxLink := strings.Index(content, "Step 8b:")
+		if idxQuickstart < 0 || idxLink < 0 {
+			t.Fatalf("anchors missing (quickstart=%d, link=%d)", idxQuickstart, idxLink)
+		}
+		if idxLink < idxQuickstart {
+			t.Error("the vault link must run AFTER quickstart.sh — before it there is no .agentfactory/ " +
+				"to link, so the mount would stay unused")
+		}
+	})
+}

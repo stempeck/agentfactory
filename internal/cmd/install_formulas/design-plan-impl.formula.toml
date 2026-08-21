@@ -656,8 +656,8 @@ grep -nE '(af (sling|up|down|install|handoff)|make (install|check-regen)|gh pr (
 # Expected: every `go test -run <name>` in the outline is paired this way.
 
 # 2d. COMMANDS AND FLAGS EXIST. Every `af`/`make`/shell verb an AC invokes must
-#     be real — flags are the common miss (`af install --root`, `af up --dry-run`
-#     and `af config models show --json` do not exist).
+#     be real — flags are the common miss (a `--root` flag on `af install`, a
+#     `--dry-run` on `af up`, a `--json` on `af config models show`: none exist).
 # For each distinct command in /tmp/ac-lines.txt: run `<cmd> --help` (or grep the
 # cobra registration) and confirm every flag used is registered.
 # Expected: no unknown flag / unknown command.

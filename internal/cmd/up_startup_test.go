@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/stempeck/agentfactory/internal/config"
 )
 
 // writeAFFile writes root/.agentfactory/<name> with the given body.
@@ -43,11 +45,19 @@ func watchdogSendOp(ops []string) string {
 	return ""
 }
 
-// C-4 + N4 (issue #408 Phase 3): no startup.json ⇒ all agents start, no dispatcher
-// starts, and both gate files are left untouched. With no watchdog_agents the scope
-// is empty, so the watchdog launch is SKIPPED with a notice + breadcrumb — never a
-// silent bare "watch all".
-func TestRunUp_NoStartupConfig_AllStart_WatchdogSkipped(t *testing.T) {
+// C-4 (issue #408 Phase 3): no startup.json ⇒ all agents start, no dispatcher starts, and
+// both gate files are left untouched.
+//
+// The watchdog half is REVISED by #596 Phase 3. This test previously asserted that an empty
+// watchdog_agents SKIPPED the launch entirely, with a notice and a durable breadcrumb. That
+// is exactly the behaviour Decision 4 removed: "no startup.json" is the factory's own
+// default state, and skipping the launch there left the default factory with no recovery
+// process running at all — reproducing the incident in which an exhausted agent sat outside
+// the configured scope with nothing watching it. The watchdog now LAUNCHES in recovery-only
+// mode. The containment #408 asked for is unchanged and is asserted where it lives, on the
+// pane scope (TestWatchdog_EmptyScopeYieldsInertPaneSurface); the launch is still a bare
+// `af watchdog`, never a widened "watch all".
+func TestRunUp_NoStartupConfig_AllStart_WatchdogLaunchesRecoveryOnly(t *testing.T) {
 	root := t.TempDir()
 	initTestGitRepo(t, root)
 	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
@@ -71,16 +81,22 @@ func TestRunUp_NoStartupConfig_AllStart_WatchdogSkipped(t *testing.T) {
 	if !agentTouched(out, "alpha") || !agentTouched(out, "bravo") {
 		t.Errorf("no startup.json must start ALL agents; out=%q", out)
 	}
-	// N4: an empty watchdog scope SKIPS the launch — no session, a one-line notice,
-	// and the namespaced breadcrumb (never a silent bare "watch all").
-	if send := watchdogSendOp(fake.ops); send != "" {
-		t.Errorf("an empty watchdog scope must SKIP the launch (no send op); got %q", send)
+	// #596 Decision 4: the launch PROCEEDS on an empty scope, as a bare `af watchdog`.
+	send := watchdogSendOp(fake.ops)
+	if send == "" {
+		t.Errorf("an empty watchdog scope must still LAUNCH the watchdog (recovery-only mode); ops=%v out=%q", fake.ops, out)
 	}
-	if !strings.Contains(out, "watchdog: not started") {
-		t.Errorf("an empty scope must print the skip notice; out=%q", out)
+	if strings.Contains(send, "--agents") {
+		t.Errorf("the launch must stay a bare `af watchdog` (no widening to watch-all); got %q", send)
 	}
-	if _, statErr := os.Stat(filepath.Join(root, ".runtime", "watchdog_last_error")); statErr != nil {
-		t.Errorf("the skip path must write the namespaced breadcrumb watchdog_last_error: %v", statErr)
+	if !strings.Contains(out, "recovery-only mode") {
+		t.Errorf("an empty scope must announce that the pane surface is inert and why; out=%q", out)
+	}
+	// No breadcrumb: an omitted watchdog_agents is a supported configuration, not an
+	// error. Writing an error record for the default state would train operators to
+	// ignore the one file that names real failures.
+	if _, statErr := os.Stat(filepath.Join(root, ".runtime", "watchdog_last_error")); statErr == nil {
+		t.Error("an empty scope is a supported configuration and must NOT write the error breadcrumb")
 	}
 	if opRecorded(fake.ops, "NewSession "+dispatchSessionName) {
 		t.Errorf("no startup.json ⇒ no dispatcher should start; ops=%v", fake.ops)
@@ -531,11 +547,12 @@ func TestRunUp_WatchdogAgentsAllKnown_NoWarning(t *testing.T) {
 	}
 }
 
-// N4 (issue #408 Phase 3): a non-empty but ALL-UNKNOWN watchdog scope is the early,
-// observable echo of the watchdog's own refusal — `af up` SKIPS the launch (no
-// session), names the misconfiguration in a one-line notice, writes the namespaced
-// breadcrumb, and never aborts (best-effort, W1).
-func TestRunUp_WatchdogAgentsAllUnknown_Skipped(t *testing.T) {
+// A non-empty but ALL-UNKNOWN watchdog scope, REVISED by #596 Phase 3: `af up` no longer
+// skips the launch, but — unlike the empty-scope case above — this one stays loud and keeps
+// the durable breadcrumb. Names configured that do not exist in agents.json are an operator
+// error, not a configuration choice, and collapsing the two would make a typo in
+// watchdog_agents indistinguishable from deliberately running pane-inert.
+func TestRunUp_WatchdogAgentsAllUnknown_LaunchesRecoveryOnlyButStaysLoud(t *testing.T) {
 	root := t.TempDir()
 	initTestGitRepo(t, root)
 	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
@@ -556,14 +573,15 @@ func TestRunUp_WatchdogAgentsAllUnknown_Skipped(t *testing.T) {
 	err := runUp(cmd, nil)
 	out := buf.String()
 
-	if send := watchdogSendOp(fake.ops); send != "" {
-		t.Errorf("an all-unknown watchdog scope must SKIP the launch (no send op); got %q", send)
+	if send := watchdogSendOp(fake.ops); send == "" {
+		t.Errorf("an all-unknown scope must still LAUNCH the watchdog (recovery-only mode); ops=%v out=%q", fake.ops, out)
 	}
-	if !strings.Contains(out, "watchdog: not started") || !strings.Contains(out, "ghost") {
-		t.Errorf("the skip notice must name the all-unknown misconfiguration; out=%q", out)
+	if !strings.Contains(out, "recovery-only mode") || !strings.Contains(out, "ghost") {
+		t.Errorf("the notice must name the all-unknown misconfiguration; out=%q", out)
 	}
+	// Unlike the empty-scope case, this one IS an error and keeps its durable record.
 	if _, statErr := os.Stat(filepath.Join(root, ".runtime", "watchdog_last_error")); statErr != nil {
-		t.Errorf("the all-unknown skip path must write the namespaced breadcrumb: %v", statErr)
+		t.Errorf("a name absent from agents.json is a real misconfiguration and must still write the namespaced breadcrumb: %v", statErr)
 	}
 	// Best-effort: a watchdog-scope gap must NOT abort af up (the configured agent
 	// still started cleanly).
@@ -624,15 +642,18 @@ func TestRunUp_FreshScaffold_WatchdogLaunchesScoped(t *testing.T) {
 	}
 }
 
-// W1 (issue #408 Phase 4 / AC-3, AC-6): a watchdog scope gap is a MONITORING gap,
-// not a START failure. An empty watchdog_agents scope must SKIP the launch and
-// write the durable refusal breadcrumb, yet must NOT flip allOK or change af up's
-// exit code — even though af up is otherwise clean. The empty-scope exit-code half
-// of W1 is unpinned by the P1 test (TestRunUp_NoStartupConfig_AllStart_WatchdogSkipped
-// discards runUp's error at :68); this names and asserts it directly, complementing
-// the all-unknown variant (TestRunUp_WatchdogAgentsAllUnknown_Skipped) which uses a
-// non-empty all-unknown scope.
-func TestRunUp_WatchdogRefusal_DoesNotAbortUp(t *testing.T) {
+// W1 (issue #408 Phase 4 / AC-3, AC-6): a watchdog scope gap is a MONITORING gap, not a
+// START failure — it must not flip allOK or change af up's exit code, even though af up is
+// otherwise clean. That half is untouched by #596 Phase 3 and is the reason this test
+// survives.
+//
+// REVISED: the scope gap used to mean "skip the launch and write the refusal breadcrumb".
+// Under Decision 4 an empty scope launches in recovery-only mode and writes no breadcrumb,
+// so those two assertions are inverted here. The name changed with them — "Refusal" names a
+// contract that no longer exists. The exit-code assertion is what this test is FOR, and it
+// is unchanged: the sibling P1 test discards runUp's error, so this is the only place the
+// empty-scope exit code is pinned.
+func TestRunUp_WatchdogScopeGap_DoesNotAbortUp(t *testing.T) {
 	root := t.TempDir()
 	initTestGitRepo(t, root)
 	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
@@ -664,15 +685,22 @@ func TestRunUp_WatchdogRefusal_DoesNotAbortUp(t *testing.T) {
 	if err != nil {
 		t.Errorf("a watchdog scope gap must be best-effort (no abort / clean exit code); got %v", err)
 	}
-	// The launch was SKIPPED (an empty scope is never a silent bare "watch all").
-	if send := watchdogSendOp(fake.ops); send != "" {
-		t.Errorf("an empty watchdog scope must SKIP the launch (no send op); got %q", send)
+	// The launch PROCEEDS (#596 Decision 4) — and still as a bare `af watchdog`, so the
+	// removed refusal did not become a silent widening to "watch all".
+	send := watchdogSendOp(fake.ops)
+	if send == "" {
+		t.Errorf("an empty watchdog scope must still launch the watchdog; ops=%v out=%q", fake.ops, out)
 	}
-	// The refusal stays observable: the no-abort must not silence the durable signal.
-	// R2-L1: the NAMESPACED breadcrumb <root>/.runtime/watchdog_last_error, NOT a
-	// per-agent last_error.
-	if _, statErr := os.Stat(filepath.Join(root, ".runtime", "watchdog_last_error")); statErr != nil {
-		t.Errorf("the refusal path must write the namespaced breadcrumb watchdog_last_error: %v", statErr)
+	if strings.Contains(send, "--agents") {
+		t.Errorf("the launch must stay a bare `af watchdog`; got %q", send)
+	}
+	// No breadcrumb: an omitted watchdog_agents is a supported configuration. The gap is
+	// still observable — it is announced on the launch notice — but it is not an error.
+	if _, statErr := os.Stat(filepath.Join(root, ".runtime", "watchdog_last_error")); statErr == nil {
+		t.Error("an empty scope must not write the error breadcrumb — it is a configuration, not a failure")
+	}
+	if !strings.Contains(out, "recovery-only mode") {
+		t.Errorf("the scope gap must stay observable on the launch notice; out=%q", out)
 	}
 }
 
@@ -740,5 +768,207 @@ func TestEscalationTargets_IncludesSupervisor(t *testing.T) {
 	}
 	if escalationTarget != "supervisor" {
 		t.Errorf("escalationTarget = %q, want supervisor", escalationTarget)
+	}
+}
+
+// provisionAgentSettings writes a factory-root agent dir with the given .claude/settings.json,
+// simulating an agent provisioned at some point in the past — the state the K20 pre-check
+// exists to inspect.
+func provisionAgentSettings(t *testing.T, root, agent, settings string) {
+	t.Helper()
+	claudeDir := filepath.Join(root, ".agentfactory", "agents", agent, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// K20 (#596): an agent whose settings.json predates the statusLine key writes no occupancy
+// snapshot, so the reader honestly reports "none" and recovery correctly declines to act on
+// absent evidence — silently. `af up` is the one guaranteed operator touchpoint, so it must
+// say so before launching the watchdog that will appear to be doing nothing.
+//
+// The remediation verb is the load-bearing part. `af install --init` reprovisions
+// factory-root agent dirs only; what actually delivers the settings template to a live agent
+// is worktree.SetupAgent, reached from `af up` and both `af sling` paths. Naming the wrong
+// verb would send an operator to a command that silently does nothing for them.
+func TestRunUp_MissingStatusLineWiring_WarnsWithUpRemediation(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
+	writeAFFile(t, root, "agents.json",
+		`{"agents":{"alpha":{"type":"autonomous","description":"a"},"stale":{"type":"autonomous","description":"s"}}}`)
+	// Only alpha starts, so `stale` never passes through SetupAgent on this run — exactly
+	// the agent class the pre-check is for.
+	writeAFFile(t, root, "startup.json", `{"agents":["alpha"]}`)
+	writeAFFile(t, root, ".statusline-gate", "on\n")
+	provisionAgentSettings(t, root, "stale", `{"model":"opus"}`) // provisioned, no statusLine key
+
+	t.Setenv("AF_WORKTREE", "")
+	t.Setenv("AF_WORKTREE_ID", "")
+	t.Chdir(root)
+	setupHermeticSessions(t)
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	_ = runUp(cmd, nil)
+	out := buf.String()
+
+	if !strings.Contains(out, "stale") || !strings.Contains(out, "statusLine") {
+		t.Errorf("af up must name the agent whose occupancy recovery cannot observe; out=%q", out)
+	}
+	if !strings.Contains(out, "af up") || !strings.Contains(out, "af sling") {
+		t.Errorf("the remediation must name the verbs that actually deliver the settings template; out=%q", out)
+	}
+	// The corrected verb (design-doc.md:383). `af install --init` is mentioned only to say
+	// what it does NOT cover, so the per-agent form must never appear.
+	if strings.Contains(out, "af install stale") {
+		t.Errorf("the remediation must not send the operator to `af install <agent>`; out=%q", out)
+	}
+	// The warning must not route through writeWatchdogLastError: that breadcrumb is the
+	// watchdog's own error record, and a provisioning notice there would make a functional
+	// launch indistinguishable from a failed one.
+	if _, statErr := os.Stat(filepath.Join(root, ".runtime", "watchdog_last_error")); statErr == nil {
+		t.Error("the K20 warning must not write the watchdog error breadcrumb")
+	}
+	// Two literals other af up tests assert the ABSENCE of, checked against the K20 lines
+	// themselves rather than the whole run: the recovery-only launch notice legitimately
+	// names watchdog_agents, and it only prints on factories whose scope is empty — which
+	// is never true of the tests that forbid the literal.
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "cannot observe") && !strings.Contains(line, "remediation:") {
+			continue
+		}
+		for _, forbidden := range []string{"unknown agent", "watchdog_agents"} {
+			if strings.Contains(line, forbidden) {
+				t.Errorf("the K20 warning must not contain %q — other af up tests assert its absence; line=%q", forbidden, line)
+			}
+		}
+		// agentTouched's three shapes: several af up tests assert an agent was NOT
+		// processed, and a warning naming agents in those shapes would break them.
+		if strings.Contains(line, "stale: ") || strings.Contains(line, "af install stale") || strings.HasSuffix(line, "for stale") {
+			t.Errorf("the K20 warning must not name an agent in an agentTouched shape; line=%q", line)
+		}
+	}
+}
+
+// The negative companion. Without it the test above passes for an implementation that warns
+// unconditionally, which would be worse than silence — an always-on warning is ignored.
+func TestRunUp_StatusLineWiringPresent_NoWarning(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
+	writeAFFile(t, root, "agents.json", `{"agents":{"alpha":{"type":"autonomous","description":"a"}}}`)
+	writeAFFile(t, root, "startup.json", `{"agents":["alpha"]}`)
+	writeAFFile(t, root, ".statusline-gate", "on\n")
+	provisionAgentSettings(t, root, "alpha", `{"statusLine":{"type":"command","command":"af statusline render"}}`)
+
+	t.Setenv("AF_WORKTREE", "")
+	t.Setenv("AF_WORKTREE_ID", "")
+	t.Chdir(root)
+	setupHermeticSessions(t)
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	_ = runUp(cmd, nil)
+
+	if out := buf.String(); strings.Contains(out, "cannot observe") {
+		t.Errorf("a correctly-wired factory must produce no provisioning warning; out=%q", out)
+	}
+}
+
+// The factory-wide gate is the OTHER way every occupancy snapshot stops being written, and
+// it short-circuits the render path before any per-agent setting matters — so a per-agent
+// check alone would report "all clear" on a factory where recovery is blind for everyone.
+func TestRunUp_StatuslineGateOff_WarnsRecoveryIsBlind(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
+	writeAFFile(t, root, "agents.json", `{"agents":{"alpha":{"type":"autonomous","description":"a"}}}`)
+	writeAFFile(t, root, "startup.json", `{"agents":["alpha"]}`)
+	// .statusline-gate deliberately absent ⇒ off.
+
+	t.Setenv("AF_WORKTREE", "")
+	t.Setenv("AF_WORKTREE_ID", "")
+	t.Chdir(root)
+	setupHermeticSessions(t)
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	_ = runUp(cmd, nil)
+	out := buf.String()
+
+	if !strings.Contains(out, "statusline gate is off") {
+		t.Errorf("an off statusline gate blinds recovery factory-wide and must be reported; out=%q", out)
+	}
+	if !strings.Contains(out, "af statusline on") {
+		t.Errorf("the gate warning must name its own remediation; out=%q", out)
+	}
+}
+
+// HIGH-1 / #622 G5, asserted where the damage would land. An operator who legitimately tightened
+// recovery.context_threshold_pct BEFORE upgrading has no step_context block on disk, and the
+// shipped handoff default of 75 does not fit under their threshold. If the new ladder rejected that
+// DERIVED value the way it rejects a written one, LoadStartupConfig would hard-error here — and
+// up.go:112 wraps and returns that error, blocking ALL agent launch for the whole factory.
+//
+// The start set is deliberately empty: this test is about reaching past the config load, and an
+// empty set keeps it off the worktree-creation path (and therefore off that path's disk-space
+// floor) while the watchdog launch, which is downstream of up.go:112, still proves progress. Per
+// ADR-018 nothing is launched for real — setupHermeticSessions swaps the tmux seams.
+func TestUp_TightenedRecoveryAbsentStepContextStartupConfigLoads(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
+	writeAFFile(t, root, "agents.json", `{"agents":{"alpha":{"type":"autonomous","description":"a"}}}`)
+	writeAFFile(t, root, "startup.json",
+		`{"agents":[],"recovery":{"context_threshold_pct":70,"context_advisory_pct":60}}`)
+
+	t.Setenv("AF_WORKTREE", "")
+	t.Setenv("AF_WORKTREE_ID", "")
+	t.Chdir(root)
+
+	fake, _ := setupHermeticSessions(t)
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	err := runUp(cmd, nil)
+	out := buf.String()
+
+	if err != nil && strings.Contains(err.Error(), "loading startup config") {
+		t.Fatalf("a tightened recovery ladder with no step_context block bricked af up: %v", err)
+	}
+	if strings.Contains(out, "loading startup config") {
+		t.Errorf("af up surfaced a startup config load failure; out=%q", out)
+	}
+	if watchdogSendOp(fake.ops) == "" {
+		t.Errorf("af up did not reach the watchdog launch, which is downstream of the config load; ops=%v out=%q", fake.ops, out)
+	}
+
+	cfg, cfgErr := config.LoadStartupConfig(root)
+	if cfgErr != nil {
+		t.Fatalf("LoadStartupConfig: %v", cfgErr)
+	}
+	if cfg.StepContext.HandoffPct != 69 {
+		t.Errorf("effective handoff_pct = %d, want 69 = min(75, threshold-1)", cfg.StepContext.HandoffPct)
+	}
+	if warning, ok := config.StepContextLint(cfg); !ok {
+		t.Error("the clamped ladder must leave a warning for the cmd layer to surface")
+	} else if !strings.Contains(warning, "handoff_pct") {
+		t.Errorf("warning must name the on-disk key, got %q", warning)
 	}
 }

@@ -40,9 +40,13 @@ func newTestCmd() (*cobra.Command, *bytes.Buffer) {
 }
 
 // knownScope returns a single-name watchdog scope plus a matching agentsCfg so
-// launchWatchdog's N4 pre-check (issue #408) treats the name as known and proceeds
-// to the launch path. Shared by the launchWatchdog call-site tests that must keep
-// exercising session creation now that an empty/all-unknown scope is a skip.
+// launchWatchdog's pre-check treats the name as known.
+//
+// It no longer changes WHETHER the launch happens — #596 Decision 4 removed the
+// empty/all-unknown skip, so launchWatchdog now creates the session on every scope. What a
+// known scope still changes is the OUTPUT: it suppresses the pane-inert / recovery-only
+// notice. The tests below share this because they assert on session-lifecycle ops and
+// root resolution, and a scope that provoked extra notices would only add noise.
 func knownScope(name string) ([]string, *config.AgentConfig) {
 	return []string{name}, &config.AgentConfig{
 		Agents: map[string]config.AgentEntry{name: {Type: "autonomous", Description: name}},

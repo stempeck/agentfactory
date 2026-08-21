@@ -793,7 +793,7 @@ func TestDone_PrematureCompletionWarning(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
-	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID)
+	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID, false)
 
 	w.Close()
 	os.Stderr = origStderr
@@ -841,7 +841,7 @@ func TestDone_NoPrematureWarning_AllClosed(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
-	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID)
+	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID, false)
 
 	w.Close()
 	os.Stderr = origStderr
@@ -1031,7 +1031,7 @@ func TestDone_WorktreePreserved_WhenNotDispatched(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
-	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID)
+	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID, false)
 
 	w.Close()
 	os.Stderr = origStderr
@@ -1100,7 +1100,7 @@ func TestDone_WorktreeCleanedUp_WhenTerminating(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
-	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID)
+	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID, false)
 
 	w.Close()
 	os.Stderr = origStderr
@@ -1154,7 +1154,7 @@ func TestSendWorkDoneAndCleanup_WarningIncludesContext(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
-	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID)
+	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID, false)
 
 	w.Close()
 	os.Stderr = origStderr
@@ -1221,7 +1221,7 @@ func TestDone_WorkDone_ManagerFallback_Terminates(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
-	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID)
+	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID, false)
 
 	w.Close()
 	os.Stderr = origStderr
@@ -1292,7 +1292,7 @@ func TestDone_LegacyCliCaller_RoutesToManager(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
-	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID)
+	_ = sendWorkDoneAndCleanup(t.Context(), mem, dir, dir, instance.ID, false)
 
 	w.Close()
 	os.Stderr = origStderr

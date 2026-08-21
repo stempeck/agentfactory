@@ -1,7 +1,9 @@
 package mail
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -67,7 +69,7 @@ func TestResolveGroupAddress_Unknown(t *testing.T) {
 
 	msg := err.Error()
 	for _, want := range []string{
-		"unknown group: @",                 // leading clause preserved (prefix callers unaffected)
+		"unknown group: @",                  // leading clause preserved (prefix callers unaffected)
 		"agents are addressed by bare name", // bare-name hint
 		"supervisors",                       // a known group is listed
 		"all",                               // the implicit "all" group is listed
@@ -100,11 +102,21 @@ func TestSendDispatchesGroup(t *testing.T) {
 	}
 }
 
+// TestNotifyRecipientBestEffort deliberately does NOT install the recording
+// notifier: it is the one test that still drives the REAL client under the
+// default-build guard, which is why it can assert the no-session outcome
+// without any tmux server (tmux.go:251-254).
 func TestNotifyRecipientBestEffort(t *testing.T) {
 	r := &Router{}
 	msg := NewMessage("manager", "supervisor", "test", "body")
 	// Should not panic even without tmux
-	r.notifyRecipient(msg)
+	notified, reason := r.notifyRecipient(msg)
+	if notified {
+		t.Errorf("notifyRecipient reported notified with no tmux server, reason %q", reason)
+	}
+	if reason != reasonNoSession {
+		t.Errorf("reason = %q, want %q", reason, reasonNoSession)
+	}
 }
 
 func TestNewRouterLoadsConfigs(t *testing.T) {
@@ -210,6 +222,248 @@ func TestGroupSendSkipsSender(t *testing.T) {
 	if len(recipients) == 0 {
 		t.Error("expected at least one non-sender recipient")
 	}
+}
+
+// recordingNotifier is the hermetic double for the routerTmux seam: it records
+// every probe and banner in call order and performs no I/O. It exists because
+// the default-build guard answers HasSession with (false, nil) for EVERY name
+// (internal/tmux/tmux.go:251-254), so against the real client "no banner was
+// sent" is true whether or not the wake was skipped — the assertion this phase
+// needs would be vacuous. Mirrors fakeTmux (internal/cmd/hermetic_test.go:33).
+type recordingNotifier struct {
+	ops           []string
+	present       map[string]bool
+	claudeRunning map[string]bool
+	probeErr      error
+	bannerErr     error
+}
+
+func (f *recordingNotifier) HasSession(name string) (bool, error) {
+	f.ops = append(f.ops, "has-session:"+name)
+	if f.probeErr != nil {
+		return false, f.probeErr
+	}
+	return f.present[name], nil
+}
+
+func (f *recordingNotifier) IsClaudeRunning(session string) bool {
+	f.ops = append(f.ops, "is-claude:"+session)
+	return f.claudeRunning[session]
+}
+
+func (f *recordingNotifier) SendNotificationBanner(session, from, subject string) error {
+	f.ops = append(f.ops, "banner:"+session)
+	return f.bannerErr
+}
+
+func (f *recordingNotifier) bannerCount() int {
+	n := 0
+	for _, op := range f.ops {
+		if strings.HasPrefix(op, "banner:") {
+			n++
+		}
+	}
+	return n
+}
+
+// liveNotifier returns a double whose named sessions are present and running
+// Claude, i.e. the only state in which a real send would push a banner.
+func liveNotifier(sessions ...string) *recordingNotifier {
+	f := &recordingNotifier{present: map[string]bool{}, claudeRunning: map[string]bool{}}
+	for _, s := range sessions {
+		f.present[s] = true
+		f.claudeRunning[s] = true
+	}
+	return f
+}
+
+// installNotifier swaps the package seam for the test's lifetime. Callers must
+// not use t.Parallel: newRouterTmux is a package global.
+func installNotifier(t *testing.T, f *recordingNotifier) {
+	t.Helper()
+	orig := newRouterTmux
+	newRouterTmux = func() routerTmux { return f }
+	t.Cleanup(func() { newRouterTmux = orig })
+}
+
+// newTestRouterWithStore mirrors newTestRouter but also hands back the memstore,
+// which no pre-existing test needed. It is a sibling rather than a signature
+// change so newTestRouter's six call sites stay untouched.
+func newTestRouterWithStore(t *testing.T) (*Router, *memstore.Store) {
+	t.Helper()
+	root := setupTestFactory(t)
+	store := memstore.New()
+	r, err := NewRouter(root, store)
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	return r, store
+}
+
+func mailboxCount(t *testing.T, store *memstore.Store, identity string) int {
+	t.Helper()
+	msgs, err := NewMailbox(identity, store).List(context.Background())
+	if err != nil {
+		t.Fatalf("listing %s's mailbox: %v", identity, err)
+	}
+	return len(msgs)
+}
+
+// TestRouter_SelfAddressedSendWakes pins PR #608: a gate verdict mailed by an agent
+// to ITSELF files the bead AND wakes the agent — mail always wakes now that --no-wake
+// is removed. The containment alarm depends on the same self-addressed wake.
+func TestRouter_SelfAddressedSendWakes(t *testing.T) {
+	const subject = "STEP_FIDELITY: 6/10"
+
+	t.Run("self_addressed_send_files_and_wakes", func(t *testing.T) {
+		r, store := newTestRouterWithStore(t)
+		fake := liveNotifier("af-supervisor")
+		installNotifier(t, fake)
+
+		d, err := r.SendReporting(context.Background(),
+			NewMessage("supervisor", "supervisor", subject, "body"))
+		if err != nil {
+			t.Fatalf("SendReporting: %v", err)
+		}
+
+		if fake.bannerCount() != 1 {
+			t.Fatalf("self-addressed send recorded ops %v, want exactly one banner", fake.ops)
+		}
+		if n := mailboxCount(t, store, "supervisor"); n != 1 {
+			t.Errorf("supervisor's mailbox has %d messages, want 1", n)
+		}
+		if !d.Notified || d.Reason != reasonNotified {
+			t.Errorf("Delivery = %+v, want notified", d)
+		}
+	})
+
+	t.Run("plain_Send_is_unchanged", func(t *testing.T) {
+		r, store := newTestRouterWithStore(t)
+		fake := liveNotifier("af-supervisor")
+		installNotifier(t, fake)
+
+		// The ADR-009 containment alarm (internal/cmd/containment.go:411-435) is a
+		// self-addressed send through this exact entry point and must keep waking.
+		if err := r.Send(context.Background(),
+			NewMessage("supervisor", "supervisor", "CONTAINMENT BREACH", "body")); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if fake.bannerCount() != 1 {
+			t.Errorf("Send recorded ops %v, want exactly one banner", fake.ops)
+		}
+		if n := mailboxCount(t, store, "supervisor"); n != 1 {
+			t.Errorf("supervisor's mailbox has %d messages, want 1", n)
+		}
+	})
+}
+
+// TestRouter_DeliveryReport_LiveVsAbsentRecipient pins D-7: a send to a stopped
+// or never-started agent files a bead and notifies nobody, so the report must
+// distinguish the two rather than letting the caller claim delivery it cannot
+// know (cross-review C-1).
+func TestRouter_DeliveryReport_LiveVsAbsentRecipient(t *testing.T) {
+	boom := errors.New("banner failed")
+
+	cases := []struct {
+		name         string
+		present      bool
+		running      bool
+		probeErr     error
+		bannerErr    error
+		wantNotified bool
+		wantReason   string
+		wantOps      int
+	}{
+		{name: "probe_fails", probeErr: errors.New("tmux unreachable"), wantReason: reasonProbeFailed, wantOps: 1},
+		{name: "live", present: true, running: true, wantNotified: true, wantReason: reasonNotified, wantOps: 3},
+		{name: "absent", wantReason: reasonNoSession, wantOps: 1},
+		{name: "present_but_claude_stopped", present: true, wantReason: reasonNotRunning, wantOps: 2},
+		{name: "banner_fails", present: true, running: true, bannerErr: boom, wantReason: reasonBannerFailed, wantOps: 3},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, store := newTestRouterWithStore(t)
+			fake := &recordingNotifier{
+				present:       map[string]bool{"af-supervisor": tc.present},
+				claudeRunning: map[string]bool{"af-supervisor": tc.running},
+				probeErr:      tc.probeErr,
+				bannerErr:     tc.bannerErr,
+			}
+			installNotifier(t, fake)
+
+			d, err := r.SendReporting(context.Background(),
+				NewMessage("manager", "supervisor", "subj", "body"))
+			if err != nil {
+				t.Fatalf("SendReporting: %v", err)
+			}
+
+			if d.Notified != tc.wantNotified {
+				t.Errorf("Notified = %v, want %v (ops %v)", d.Notified, tc.wantNotified, fake.ops)
+			}
+			if d.Reason != tc.wantReason {
+				t.Errorf("Reason = %q, want %q", d.Reason, tc.wantReason)
+			}
+			if len(fake.ops) != tc.wantOps {
+				t.Errorf("ops = %v, want %d probe/banner calls", fake.ops, tc.wantOps)
+			}
+			if !d.Filed {
+				t.Error("Filed = false, want true — the bead is written before any probe")
+			}
+			if n := mailboxCount(t, store, "supervisor"); n != 1 {
+				t.Errorf("supervisor's mailbox has %d messages, want 1", n)
+			}
+		})
+	}
+}
+
+// TestRouter_GroupFanOut_DeliveryAggregate pins the conservative aggregate: a
+// group send may claim "notified" only when every attempted member was actually
+// notified.
+func TestRouter_GroupFanOut_DeliveryAggregate(t *testing.T) {
+	t.Run("default_wakes_every_member_but_the_sender", func(t *testing.T) {
+		r, _ := newTestRouterWithStore(t)
+		fake := liveNotifier("af-manager", "af-supervisor")
+		installNotifier(t, fake)
+
+		d, err := r.SendReporting(context.Background(),
+			NewMessage("manager", "@all", "broadcast", "body"))
+		if err != nil {
+			t.Fatalf("SendReporting(@all): %v", err)
+		}
+		if fake.bannerCount() != 1 {
+			t.Errorf("ops = %v, want exactly one banner (supervisor only; the sender is skipped)", fake.ops)
+		}
+		for _, op := range fake.ops {
+			if strings.HasSuffix(op, ":af-manager") {
+				t.Errorf("group send touched the sender's own session: ops %v", fake.ops)
+			}
+		}
+		if !d.Notified {
+			t.Errorf("Delivery = %+v, want notified (every attempted member was notified)", d)
+		}
+	})
+
+	t.Run("partial_wake_is_not_notified", func(t *testing.T) {
+		r, _ := newTestRouterWithStore(t)
+		// supervisor is live, but @all's other member is the sender, so widen the
+		// group: send from a non-member so BOTH agents are attempted and only one
+		// is reachable.
+		fake := liveNotifier("af-supervisor")
+		installNotifier(t, fake)
+
+		d, err := r.SendReporting(context.Background(),
+			NewMessage("operator", "@all", "broadcast", "body"))
+		if err != nil {
+			t.Fatalf("SendReporting(@all): %v", err)
+		}
+		if d.Notified {
+			t.Errorf("Delivery = %+v, want not notified — one of two members was unreachable", d)
+		}
+		if !strings.Contains(d.Reason, "1 of 2") {
+			t.Errorf("Reason = %q, want it to state how many of how many were notified", d.Reason)
+		}
+	})
 }
 
 // setupTestFactory creates a minimal factory layout for testing.

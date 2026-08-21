@@ -62,6 +62,24 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # Design 562 Phase 7, in the same DECLARED-exception form as the Issue #435 step above.
+      # This lane's header declares "no external backend on PATH", yet TestHookAC7CompliantRun,
+      # TestHookStormReplay and TestHookPair_EvidenceParityOverRealTranscript
+      # (internal/cmd/hook_ac7_run_test.go, hook_storm_replay_test.go,
+      # hook_pair_smoke_test.go) pipe a real Stop payload through hooks/fidelity-gate.sh and
+      # hooks/quality-gate.sh, and both scripts route every branch through jq — the recursion
+      # guard, the message extraction, the lock PID read, the evidence JSON and the run record.
+      # Without jq those tests skip (requireHookE2ETools, hook_e2e_harness_test.go:85-92): the
+      # lane stays green while executing none of the seam Phase 7 exists to cover. jq is already
+      # a declared project dependency (CLAUDE.md "Dependencies") and the af/claude binaries stay
+      # absent, so the lane's hermeticity is otherwise unchanged.
+      #
+      # Side effect, recorded rather than papered over: with jq present the four
+      # TestGateLockFile_* subtests reach one branch further in CI than they did before — the
+      # lock assertions they make (EXIT4a/EXIT4b) are written before either binary is consulted,
+      # so what they measure does not change.
+      - name: install jq (both Stop gates parse every branch with it; Design 562 Phase 7)
+        run: sudo apt-get update && sudo apt-get install -y jq
       - name: go build
         run: go build ./...
       - name: make test
@@ -187,3 +205,18 @@ jobs:
       # app.js and asserts the lines the operator would actually see.
       - name: telemetry banner behaviour (shipped app.js, real DTOs)
         run: node web/conformance/test-telemetry-banner.js
+      # The occupancy/recovery badge (#596 K10-web). Same lesson as the banner above: the
+      # Go-side checks are source scans, and a one-character inversion of the 'none' gate
+      # reinstates finding H-4 — halted agents lose their badge — with the whole Go suite
+      # still green. This drives the shipped helpers and asserts the badges an operator sees.
+      - name: recovery badge behaviour (shipped app.js, real DTOs)
+        run: node web/conformance/test-recovery-badge.js
+      # The settings client's save payload (#620 — the per-row merge is that design's top risk).
+      # Same lesson as the two above, one level sharper: web/internal/web/settings_save_test.go is
+      # a SOURCE SCAN, so it can see there is exactly ONE write call site but not what the client
+      # SENDS. Replacing the per-row merge with a rebuild, collapsing a nil-vs-[] sentinel, or
+      # chaining a second PUT after a failure keeps every Go test green while changing what lands
+      # on disk. This drives the shipped app.js and asserts the PUT bodies. Node only — the python
+      # step above is test-engine.js's tomllib ground truth, which this script does not use.
+      - name: settings client behaviour (shipped app.js, PUT payload)
+        run: node web/conformance/test-settings.js

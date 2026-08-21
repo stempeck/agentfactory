@@ -26,6 +26,23 @@ func setupGateLockTestEnv(t *testing.T) string {
 	os.WriteFile(filepath.Join(afDir, ".fidelity-gate"), []byte("on\n"), 0644)
 	os.WriteFile(filepath.Join(afDir, ".quality-gate"), []byte("on\n"), 0644)
 
+	// Both gates read their judge preamble from here (fidelity-gate.sh:59, quality-gate.sh:41) and
+	// splice it into the system prompt with `$(cat "$PROMPT_FILE")`. Copying the real files rather
+	// than inventing placeholder text keeps the constructed prompt the one that ships, and stops an
+	// unreadable path from writing `cat:` noise onto stderr on every full run.
+	hooksDir := filepath.Join(afDir, "hooks")
+	os.MkdirAll(hooksDir, 0755)
+	repoRoot := findRepoRoot(t)
+	for _, prompt := range []string{"fidelity-gate-prompt.txt", "quality-gate-prompt.txt"} {
+		body, err := os.ReadFile(filepath.Join(repoRoot, "hooks", prompt))
+		if err != nil {
+			t.Fatalf("read %s: %v", prompt, err)
+		}
+		if err := os.WriteFile(filepath.Join(hooksDir, prompt), body, 0644); err != nil {
+			t.Fatalf("write %s: %v", prompt, err)
+		}
+	}
+
 	os.MkdirAll(filepath.Join(workDir, ".runtime"), 0755)
 
 	return workDir
@@ -33,13 +50,26 @@ func setupGateLockTestEnv(t *testing.T) string {
 
 func runHookWithEnv(t *testing.T, scriptPath, workDir string, inputJSON []byte) (string, int) {
 	t.Helper()
+
+	// The gates resolve `af` and `claude` off PATH, so PATH is the seam. Prepending the shim pair
+	// keeps these tests off the network and away from the operator's issue store; the branches they
+	// assert on (EXIT4a/EXIT4b) are written before either binary is consulted, so the shim cannot
+	// change what they measure.
+	// Where no shim can be planted, the fallback still has to close the network path, so the two
+	// binaries are removed from PATH outright: the gate then exits at no_af_binary instead of
+	// reaching a live judge. Both are strictly weaker than the shim — no evidence is derived — and
+	// neither changes what these tests measure.
+	path := os.Getenv("PATH")
+	if shim := hookE2EHermeticShimDir(t); shim != "" {
+		path = shim + string(os.PathListSeparator) + path
+	} else {
+		path = hookE2EPathWithout(t, "af", "claude")
+	}
+
 	cmd := exec.Command("bash", scriptPath)
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(),
-		"AF_ROOT="+workDir,
-		"PATH="+os.Getenv("PATH"),
-	)
+	cmd.Env = hookE2EEnv(workDir, path)
 	out, err := cmd.CombinedOutput()
 	exitCode := 0
 	if err != nil {

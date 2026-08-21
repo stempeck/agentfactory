@@ -87,8 +87,6 @@ func TestRenderRole_AllFieldsSubstituted(t *testing.T) {
 	}
 }
 
-
-
 func TestManagerTemplate_HasBehavioralSections(t *testing.T) {
 	tmpl := New()
 	data := RoleData{
@@ -508,5 +506,26 @@ func TestHasRole(t *testing.T) {
 	}
 	if tmpl.HasRole("nonexistent") {
 		t.Error("HasRole should return false for nonexistent role")
+	}
+}
+
+// The section is rendered, not just stored, so the vault path an agent reads names that agent.
+// A literal placeholder here would have been a fifth thing telling agents about a directory they
+// then have to translate themselves.
+func TestMemoryProtocolRendersTheAgentsOwnVaultPath(t *testing.T) {
+	output, err := New().RenderRole("supervisor", RoleData{
+		Role:        "supervisor",
+		Description: "test",
+		RootDir:     "/tmp/factory",
+		WorkDir:     "/tmp/factory",
+	})
+	if err != nil {
+		t.Fatalf("RenderRole failed: %v", err)
+	}
+	if !strings.Contains(output, ".agentfactory/memory/supervisor/") {
+		t.Error("rendered Memory Protocol should name the agent's own vault path")
+	}
+	if strings.Contains(output, "{{ .Role }}") {
+		t.Error("rendered template still contains an unexpanded {{ .Role }} action")
 	}
 }

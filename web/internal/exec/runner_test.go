@@ -5,6 +5,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -487,13 +488,28 @@ func TestDispatchStatusJSON_Argv(t *testing.T) {
 
 // ConfigSet pipes the full config payload to `af config <file> set` on stdin and validates the
 // file allowlist (factory.json is read-only).
+//
+// #620 Phase 2 widened the allowlist from two files to four. The loop is driven by
+// configWritableFiles — the allowlist ITSELF — rather than by a hand-typed list, so adding a fifth
+// file cannot land with this test still covering only the original two.
 func TestConfigSet_RoutesStdinThroughAfConfigSet(t *testing.T) {
 	payload := []byte(`{"repos":["o/r"],"trigger_label":"go","mappings":[{"labels":["bug"],"agent":"rootcause"}]}`)
 
-	for _, file := range []string{"dispatch", "startup"} {
+	files := make([]string, 0, len(configWritableFiles))
+	for f, ok := range configWritableFiles {
+		if ok {
+			files = append(files, f)
+		}
+	}
+	sort.Strings(files)
+	if want := []string{"dispatch", "messaging", "startup", "statusline"}; len(files) != len(want) {
+		t.Fatalf("the write allowlist is %v, want the four files af-core ships a console setter for (%v)", files, want)
+	}
+
+	for _, file := range files {
 		fr := newFakeRunner()
 		w := NewWrapper(fr, "")
-		if _, err := w.ConfigSet(context.Background(), file, payload); err != nil {
+		if _, err := w.ConfigSet(context.Background(), file, payload, ""); err != nil {
 			t.Fatalf("ConfigSet(%s): %v", file, err)
 		}
 		c := fr.lastCall()
@@ -510,13 +526,86 @@ func TestConfigSet_RoutesStdinThroughAfConfigSet(t *testing.T) {
 	}
 
 	// factory.json (and any other file) is rejected BEFORE exec — there is no `af config factory set`.
-	fr := newFakeRunner()
-	w := NewWrapper(fr, "")
-	if _, err := w.ConfigSet(context.Background(), "factory", payload); err == nil {
-		t.Fatalf("ConfigSet(factory) must be rejected (read-only)")
+	// models is in the same class for a different reason: af-core registers no --if-content-hash on
+	// its setter, and the console never sends a profile body back.
+	for _, file := range []string{"factory", "agents", "models", "telemetry", "build-host", "", "../dispatch", "dispatch set"} {
+		fr := newFakeRunner()
+		w := NewWrapper(fr, "")
+		if _, err := w.ConfigSet(context.Background(), file, payload, ""); err == nil {
+			t.Fatalf("ConfigSet(%q) must be rejected", file)
+		}
+		if fr.callCount() != 0 {
+			t.Fatalf("a non-writable file (%q) must never reach exec (recorded %d calls)", file, fr.callCount())
+		}
 	}
-	if fr.callCount() != 0 {
-		t.Fatalf("a non-writable file must never reach exec (recorded %d calls)", fr.callCount())
+}
+
+// #620 Phase 2 — the compare-and-set precondition reaches af as ONE argv token. The single-token `=`
+// form is what makes the value unable to re-parse as a flag no matter what it contains, and the
+// digest is shape-checked here so a caller-supplied string can never become an argv element at all.
+func TestConfigSet_ForwardsIfContentHash(t *testing.T) {
+	const digest = "9f2c1b4e5a6d7c8f90a1b2c3d4e5f60718293a4b5c6d7e8f9012a3b4c5d6e7f8"
+	payload := []byte(`{}`)
+
+	fr := newFakeRunner()
+	if _, err := NewWrapper(fr, "").ConfigSet(context.Background(), "dispatch", payload, digest); err != nil {
+		t.Fatalf("ConfigSet with a precondition: %v", err)
+	}
+	c := fr.lastCall()
+	want := []string{"dispatch", "set", "--if-content-hash=" + digest}
+	if len(c.Args) != 3 || c.Args[0] != want[0] || c.Args[1] != want[1] || c.Args[2] != want[2] {
+		t.Fatalf("argv = %v, want %v", c.Args, want)
+	}
+
+	// Omitted: the argv must not grow a flag at all, so an af without the flag still works.
+	fr = newFakeRunner()
+	if _, err := NewWrapper(fr, "").ConfigSet(context.Background(), "dispatch", payload, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(fr.lastCall().Args) != 2 {
+		t.Fatalf("argv = %v, want exactly [dispatch set]", fr.lastCall().Args)
+	}
+
+	// Anything that is not a sha256 hex digest is refused BEFORE exec. The shape rule is the whole
+	// defence: a value that reached argv could otherwise carry `--force`, a newline, or a quote.
+	for _, bad := range []string{
+		"not-a-hash",
+		digest + "0",             // too long
+		digest[:63],              // too short
+		"ZZ" + digest[2:],        // non-hex
+		"--force",                // a flag
+		digest + " --something",  // a smuggled second token
+		digest + "\n--something", // a smuggled newline
+	} {
+		fr := newFakeRunner()
+		if _, err := NewWrapper(fr, "").ConfigSet(context.Background(), "dispatch", payload, bad); err == nil {
+			t.Errorf("ConfigSet accepted the malformed precondition %q", bad)
+		}
+		if fr.callCount() != 0 {
+			t.Errorf("the malformed precondition %q reached exec (%d calls)", bad, fr.callCount())
+		}
+	}
+}
+
+// ConfigFingerprintJSON is a pure read: no stdin, and the argv is three literal tokens with nothing
+// caller-supplied in it.
+func TestConfigFingerprint_RoutesThroughAfConfigFingerprint(t *testing.T) {
+	fr := newFakeRunner()
+	fr.resp["config"] = Result{Stdout: `{"state":"ok","fingerprint":"abc"}`}
+	got, err := NewWrapper(fr, "").ConfigFingerprintJSON(context.Background())
+	if err != nil {
+		t.Fatalf("ConfigFingerprintJSON: %v", err)
+	}
+	if got != `{"state":"ok","fingerprint":"abc"}` {
+		t.Fatalf("stdout = %q, want the envelope verbatim", got)
+	}
+	c := fr.lastCall()
+	want := []string{"fingerprint", "--json"}
+	if c.Verb != "config" || len(c.Args) != 2 || c.Args[0] != want[0] || c.Args[1] != want[1] {
+		t.Fatalf("argv = %s %v, want config %v", c.Verb, c.Args, want)
+	}
+	if c.Stdin != nil {
+		t.Fatalf("a read must not pipe stdin, got %q", c.Stdin)
 	}
 }
 
@@ -525,7 +614,7 @@ func TestConfigSet_SurfacesValidationError(t *testing.T) {
 	fr := newFakeRunner()
 	fr.err["config"] = errFakeReject
 	w := NewWrapper(fr, "")
-	if _, err := w.ConfigSet(context.Background(), "dispatch", []byte(`{}`)); err == nil {
+	if _, err := w.ConfigSet(context.Background(), "dispatch", []byte(`{}`), ""); err == nil {
 		t.Fatalf("ConfigSet must surface the af validation error")
 	}
 }

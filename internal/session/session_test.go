@@ -53,11 +53,18 @@ func TestBuildStartupCommand_Autonomous(t *testing.T) {
 	}
 }
 
+// scaffoldDirective is the directive internal/cmd/install.go seeds into a fresh agents.json,
+// pinned here so a rewrite of one without the other reds this test (T-DIR, #515). It is spelled
+// out rather than imported because internal/cmd depends on internal/session, not the reverse —
+// the pin is a copy on purpose, and its whole job is to break when the copy stops matching.
+const scaffoldDirective = "Read your memory (af memory list) and docs, and prove it. " +
+	"Record durable learnings with af memory add."
+
 func TestBuildNudge_WithDirective(t *testing.T) {
 	entry := config.AgentEntry{
 		Type:        "interactive",
 		Description: "test",
-		Directive:   "Read your memory and docs, and prove it.",
+		Directive:   scaffoldDirective,
 	}
 	mgr := NewManager("/tmp/factory", "manager", entry)
 
@@ -66,7 +73,7 @@ func TestBuildNudge_WithDirective(t *testing.T) {
 	if !strings.Contains(nudge, "Run `af prime` to check mail and begin work.") {
 		t.Error("nudge should contain the base startup instruction")
 	}
-	if !strings.Contains(nudge, "Read your memory and docs, and prove it.") {
+	if !strings.Contains(nudge, scaffoldDirective) {
 		t.Error("nudge should contain the custom directive")
 	}
 }

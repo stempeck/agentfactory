@@ -426,7 +426,7 @@ func stubTeardownAndMail(t *testing.T) (teardowns *int, recipient, subject, body
 func TestImprovementComplete_MissingMarker(t *testing.T) {
 	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
 	agentDir := config.AgentDir(root, "alpha")
-	err := runImprovementCompleteCore(agentDir, root, false)
+	err := runImprovementCompleteCore(agentDir, root, false, "")
 	if err == nil || !strings.Contains(err.Error(), "no pending improvement (missing .runtime/improvement_pending)") {
 		t.Fatalf("want missing-marker error idiom, got %v", err)
 	}
@@ -443,7 +443,7 @@ func TestImprovementComplete_ConsumeOnceTerminates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := runImprovementCompleteCore(agentDir, root, false); err != nil {
+	if err := runImprovementCompleteCore(agentDir, root, false, ""); err != nil {
 		t.Fatalf("first complete: %v", err)
 	}
 	if *teardowns != 1 {
@@ -458,7 +458,7 @@ func TestImprovementComplete_ConsumeOnceTerminates(t *testing.T) {
 	}
 
 	// Second run (the watchdog-vs-agent race loser): no marker → error, NO second teardown.
-	err := runImprovementCompleteCore(agentDir, root, false)
+	err := runImprovementCompleteCore(agentDir, root, false, "")
 	if err == nil || !strings.Contains(err.Error(), "no pending improvement") {
 		t.Fatalf("second complete want missing-marker error, got %v", err)
 	}
@@ -486,7 +486,7 @@ func TestImprovementComplete_NoTerminateLeavesSessionRunning(t *testing.T) {
 	if err := writeImprovementMarker(root, "alpha", m); err != nil {
 		t.Fatal(err)
 	}
-	if err := runImprovementCompleteCore(agentDir, root, false); err != nil {
+	if err := runImprovementCompleteCore(agentDir, root, false, ""); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	if *teardowns != 0 {
@@ -507,7 +507,7 @@ func TestImprovementComplete_ValidationFailOpen(t *testing.T) {
 	if err := writeImprovementMarker(root, "alpha", m); err != nil {
 		t.Fatal(err)
 	}
-	if err := runImprovementCompleteCore(agentDir, root, false); err != nil {
+	if err := runImprovementCompleteCore(agentDir, root, false, ""); err != nil {
 		t.Fatalf("broken formula must fail open (exit 0), got err %v", err)
 	}
 	if !strings.Contains(*subject+*body, "validation FAILED") {
@@ -545,7 +545,7 @@ func TestImprovementComplete_OutcomeChangedUnchanged(t *testing.T) {
 			if err := writeImprovementMarker(root, "alpha", m); err != nil {
 				t.Fatal(err)
 			}
-			if err := runImprovementCompleteCore(agentDir, root, false); err != nil {
+			if err := runImprovementCompleteCore(agentDir, root, false, ""); err != nil {
 				t.Fatalf("complete: %v", err)
 			}
 			if !strings.Contains(*subject, "fx") {
@@ -590,7 +590,7 @@ func TestImprovementComplete_RealSecondEdit_ChangedWithRealFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := runImprovementCompleteCore(agentDir, root, false); err != nil {
+	if err := runImprovementCompleteCore(agentDir, root, false, ""); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	if !strings.Contains(*subject, "changed") {
@@ -611,7 +611,7 @@ func TestImprovementComplete_OutcomeSupervisorFallback(t *testing.T) {
 	if err := writeImprovementMarker(root, "alpha", m); err != nil {
 		t.Fatal(err)
 	}
-	if err := runImprovementCompleteCore(agentDir, root, false); err != nil {
+	if err := runImprovementCompleteCore(agentDir, root, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	if *recipient != escalationTarget {
@@ -629,7 +629,7 @@ func TestImprovementComplete_ReapRelabelsOutcomeMail(t *testing.T) {
 	if err := writeImprovementMarker(root, "alpha", m); err != nil {
 		t.Fatal(err)
 	}
-	if err := runImprovementCompleteCore(agentDir, root, true); err != nil {
+	if err := runImprovementCompleteCore(agentDir, root, true, ""); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(*subject, "IMPROVEMENT_REAPED:") {
@@ -661,5 +661,102 @@ func TestImprovementComplete_ReapRequiresDir(t *testing.T) {
 	err := runImprovementComplete(improvementCompleteCmd, nil)
 	if err == nil || !strings.Contains(err.Error(), "--reap requires --dir") {
 		t.Fatalf("--reap without --dir must error, got %v", err)
+	}
+}
+
+// --- #515 Phase 5: --note carries the agent's own account of the edit into the verdict. ---
+
+func TestImprovementComplete_NoteReachesTheOutcomeBody(t *testing.T) {
+	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
+	agentDir := config.AgentDir(root, "alpha")
+	writeFormulaFile(t, root, "fx", true)
+	_, _, subject, body := stubTeardownAndMail(t)
+
+	m := improvementMarker{Formula: "fx", Caller: "manager", FiredAt: time.Now().UTC().Format(time.RFC3339)}
+	if err := writeImprovementMarker(root, "alpha", m); err != nil {
+		t.Fatal(err)
+	}
+	const note = "split step three; the retry was masking a real timeout"
+	if err := runImprovementCompleteCore(agentDir, root, false, note); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if !strings.Contains(*body, note) {
+		t.Errorf("the note must reach the verdict body; got %q", *body)
+	}
+	// The subject is a machine-read label: improvement_test.go asserts its exact shape, mail
+	// clients truncate it, and agent-supplied text there would let a hook's free text choose how
+	// the verdict gets filed.
+	if strings.Contains(*subject, note) {
+		t.Errorf("the note must not reach the subject label; got %q", *subject)
+	}
+	if !strings.Contains(*body, "Formula path:") {
+		t.Errorf("the note must be appended to the #563 verdict, not replace it; got %q", *body)
+	}
+}
+
+// TestImprovementComplete_EmptyNoteLeavesTheBodyByteIdentical is the control that makes the flag
+// additive: every caller that does not pass --note — the watchdog reap, `af done`'s own replay,
+// every pre-#515 script — must get exactly the body #483 shipped.
+func TestImprovementComplete_EmptyNoteLeavesTheBodyByteIdentical(t *testing.T) {
+	// Whitespace-only counts as empty: an agent passing --note "$SUMMARY" with an unset variable
+	// would otherwise get a verdict ending in a heading with nothing under it.
+	subjectWith, bodyWith := improvementOutcomeMessage("fx", "/f/fx.formula.toml", true, true, false, "  \n\t ", "")
+	subjectWithout, bodyWithout := improvementOutcomeMessage("fx", "/f/fx.formula.toml", true, true, false, "", "")
+	if subjectWith != subjectWithout {
+		t.Errorf("an empty note must not change the subject: %q vs %q", subjectWith, subjectWithout)
+	}
+	if bodyWith != bodyWithout {
+		t.Errorf("a whitespace-only note must not change the body:\n%q\n%q", bodyWith, bodyWithout)
+	}
+}
+
+// TestImprovementCompleteHelp_NamesNoteExactlyOnce guards AC-515-2 and the trap under it: --help
+// renders Long AND the generated flags block, and this command's Long hand-lists --reap and --dir,
+// so each of those appears twice. A --note added to both would measure two and fail an acceptance
+// check that is counting occurrences, not asking whether the flag is documented.
+func TestImprovementCompleteHelp_NamesNoteExactlyOnce(t *testing.T) {
+	help := improvementCompleteCmd.Long + "\n" + improvementCompleteCmd.UsageString()
+	if got := strings.Count(help, "--note"); got != 1 {
+		t.Errorf("`improvement complete --help` must name --note exactly once; got %d in:\n%s", got, help)
+	}
+	if improvementCompleteCmd.Flags().Lookup("note") == nil {
+		t.Error("complete must expose the --note flag")
+	}
+}
+
+// TestImprovementComplete_NoteIsThreadedFromTheFlag closes the gap between AC-515-2 and the
+// behaviour under it. The AC greps `--help`, and the body test above calls the core directly, so
+// between them they prove the flag is DOCUMENTED and that the core USES a note — and neither would
+// notice `runImprovementComplete` dropping the flag on the floor, which is the only path a real
+// caller takes. Idiom follows TestImprovementComplete_ReapRequiresDir: set the flag on the real
+// command, then call the real RunE.
+func TestImprovementComplete_NoteIsThreadedFromTheFlag(t *testing.T) {
+	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
+	agentDir := config.AgentDir(root, "alpha")
+	writeFormulaFile(t, root, "fx", true)
+	_, _, _, body := stubTeardownAndMail(t)
+
+	m := improvementMarker{Formula: "fx", Caller: "manager", FiredAt: time.Now().UTC().Format(time.RFC3339)}
+	if err := writeImprovementMarker(root, "alpha", m); err != nil {
+		t.Fatal(err)
+	}
+
+	const note = "rewrote step two after the timeout kept masking a real failure"
+	if err := improvementCompleteCmd.Flags().Set("dir", agentDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := improvementCompleteCmd.Flags().Set("note", note); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = improvementCompleteCmd.Flags().Set("dir", "")
+		_ = improvementCompleteCmd.Flags().Set("note", "")
+	})
+
+	if err := runImprovementComplete(improvementCompleteCmd, nil); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if !strings.Contains(*body, note) {
+		t.Errorf("--note must reach the verdict body through the real command path; got %q", *body)
 	}
 }
