@@ -2,6 +2,7 @@
   "permissions": {
     "deny": ["AskUserQuestion"]
   },
+  "statusLine": {"type": "command", "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$HOME/bin:$PATH\" && af statusline render", "refreshInterval": 30},
   "hooks": {
     "PreToolUse": [
       {
@@ -20,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$HOME/bin:$PATH\" && af prime --hook"
+            "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$HOME/bin:$PATH\" && af prime --hook && af memory check --inject"
           }
         ]
       }

@@ -29,7 +29,7 @@ PR's design into an implementation plan.
 - One cross-review round, then commit + PR — the pipeline stays lean
 - The implementation plan is produced by a fresh agent dispatched off the PR
 - Event-driven coordination: the orchestrator is woken by each sub-agent's completion
-  mail (the af mail inject hook delivers it on wake). The orchestrator therefore does
+  mail (the `af mail check --inject` hook delivers it on wake). The orchestrator therefore does
   NOT poll, sleep, nudge, or send keepalives — sub-agents simply mail when done, and
   the orchestrator advances on wake. Agent liveness is the factory watchdog's job.
 
@@ -42,7 +42,7 @@ The orchestrator never busy-waits. When an action says "wait for signal X":
 1. Check your inbox once: `af mail inbox --json`.
 2. If the awaited signal(s) are present, archive them (`af mail delete`) and continue.
 3. If not present, STOP and end your turn. Do NOT sleep, loop, nudge, or keepalive.
-   When the sub-agent mails you, the af mail inject hook wakes this session and you
+   When the sub-agent mails you, the `af mail check --inject` hook wakes this session and you
    re-run the check. Unprocessed completion mails accumulate in the inbox, so on each
    wake you can tell exactly which signals have arrived.
 
@@ -282,7 +282,7 @@ PR's design into an implementation plan.
 - One cross-review round, then commit + PR — the pipeline stays lean
 - The implementation plan is produced by a fresh agent dispatched off the PR
 - Event-driven coordination: the orchestrator is woken by each sub-agent's completion
-  mail (the af mail inject hook delivers it on wake). The orchestrator therefore does
+  mail (the `af mail check --inject` hook delivers it on wake). The orchestrator therefore does
   NOT poll, sleep, nudge, or send keepalives — sub-agents simply mail when done, and
   the orchestrator advances on wake. Agent liveness is the factory watchdog's job.
 
@@ -295,7 +295,7 @@ The orchestrator never busy-waits. When an action says "wait for signal X":
 1. Check your inbox once: `af mail inbox --json`.
 2. If the awaited signal(s) are present, archive them (`af mail delete`) and continue.
 3. If not present, STOP and end your turn. Do NOT sleep, loop, nudge, or keepalive.
-   When the sub-agent mails you, the af mail inject hook wakes this session and you
+   When the sub-agent mails you, the `af mail check --inject` hook wakes this session and you
    re-run the check. Unprocessed completion mails accumulate in the inbox, so on each
    wake you can tell exactly which signals have arrived.
 

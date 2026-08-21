@@ -51,7 +51,7 @@ modes, tests, performance, history, operations, architecture.
 | Suite won't run on base or head | Record what blocked it in the log artifact; it goes in the coverage statement — never silently skip residence |
 | PR adds no tests | Mutation log opens `Reverted: NONE — NO-TESTS` with cited diff evidence; a recorded, evidenced null result passes |
 | Sideways check MISMATCH | Becomes a [Verified] Blocker finding — the review continues, it does not halt |
-| Gap-hunter sub-agent crashes | Re-spawn once; the `## Gap-Hunter` section must exist with a Result regardless |
+| Gap-hunter sub-agent crashes | Re-spawn once, also with no model override (inherit the session model); the `## Gap-Hunter` section must exist with a Result regardless |
 | PR gained commits mid-review | Re-check head sha vs target.md before posting; re-anchor against the current diff or review the new commits — never post stale anchors |
 | Posting returns HTTP 422 | A comment anchor is outside the diff — fix it or move that finding to the review body with a permalink; do NOT retry blindly |
 | Context filling | Use af handoff to cycle to fresh session |
@@ -232,7 +232,7 @@ modes, tests, performance, history, operations, architecture.
 | Suite won't run on base or head | Record what blocked it in the log artifact; it goes in the coverage statement — never silently skip residence |
 | PR adds no tests | Mutation log opens `Reverted: NONE — NO-TESTS` with cited diff evidence; a recorded, evidenced null result passes |
 | Sideways check MISMATCH | Becomes a [Verified] Blocker finding — the review continues, it does not halt |
-| Gap-hunter sub-agent crashes | Re-spawn once; the `## Gap-Hunter` section must exist with a Result regardless |
+| Gap-hunter sub-agent crashes | Re-spawn once, also with no model override (inherit the session model); the `## Gap-Hunter` section must exist with a Result regardless |
 | PR gained commits mid-review | Re-check head sha vs target.md before posting; re-anchor against the current diff or review the new commits — never post stale anchors |
 | Posting returns HTTP 422 | A comment anchor is outside the diff — fix it or move that finding to the review body with a permalink; do NOT retry blindly |
 | Context filling | Use af handoff to cycle to fresh session |
