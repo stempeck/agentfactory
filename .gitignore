@@ -134,3 +134,8 @@ test_results.txt
 !.claude/skills/architecture-elevation/**
 !.claude/skills/six-sigma-challenge/
 !.claude/skills/six-sigma-challenge/**
+
+# Scratch dir the Stop-hook e2e harness falls back to when /tmp is noexec
+# (internal/cmd/hook_e2e_harness_test.go). Removed by t.Cleanup; ignored so a hard kill
+# cannot leave a 16 MB af binary staged.
+/internal/cmd/testdata/hooke2e*

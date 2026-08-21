@@ -47,7 +47,16 @@ func TestFidelityGate_StateCheckBypass(t *testing.T) {
 	}
 }
 
-func TestFidelityGate_EvalCountNoResetGuard(t *testing.T) {
+// TestFidelityGate_DeadEvalStateRemoved replaces TestFidelityGate_EvalCountNoResetGuard, which
+// pinned that the per-step eval counter's reset was guarded by IS_AF_DONE_TURN. Design 562 D-8
+// deletes the counter itself — it was written every turn and read by nothing, the third instance
+// of the "state written, consequence never built" class — so the property that test protected has
+// no subject left.
+//
+// The presence assertion is what keeps the three absence assertions from being satisfiable by an
+// empty file: fidelity_violations is the counter that IS read, by the escalation tier and by
+// `af fidelity status`.
+func TestFidelityGate_DeadEvalStateRemoved(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 	data, err := os.ReadFile(filepath.Join(repoRoot, "hooks", "fidelity-gate.sh"))
 	if err != nil {
@@ -55,14 +64,13 @@ func TestFidelityGate_EvalCountNoResetGuard(t *testing.T) {
 	}
 	content := string(data)
 
-	resetIdx := strings.Index(content, `echo 0 > "$EVAL_COUNT_FILE"`)
-	if resetIdx < 0 {
-		t.Fatal("fidelity-gate.sh must contain eval count reset logic")
+	for _, dead := range []string{"EVAL_COUNT_FILE", "fidelity_eval_count", "fidelity_eval_step"} {
+		if strings.Contains(content, dead) {
+			t.Errorf("fidelity-gate.sh must no longer write %s (D-8: write-only state)", dead)
+		}
 	}
-
-	doneGuardBeforeReset := strings.LastIndex(content[:resetIdx], "IS_AF_DONE_TURN")
-	if doneGuardBeforeReset < 0 {
-		t.Error("eval count reset must be guarded by IS_AF_DONE_TURN to prevent spurious reset on af done turns")
+	if !strings.Contains(content, "fidelity_violations") {
+		t.Error("fidelity-gate.sh must still maintain fidelity_violations, the counter that is read")
 	}
 }
 

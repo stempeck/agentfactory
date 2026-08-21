@@ -16,23 +16,31 @@ import (
 // the test does not flag mere command references. manager.md.tmpl / supervisor.md.tmpl carry no
 // authority claim and are intentionally NOT scanned.
 //
-// The assertions are green against the current text (Phase 3 changes no docs). Phase 4 tightens
-// them as it rewrites the surfaces for the #548 manager tier.
+// The soldesign-plan formula/template are carved out of the OSS publish (todos/
+// public_repo_files.md Excludes), so their sweep lives in TestTeardownDocLanguageDriftPro
+// (teardown_doc_drift_pro_test.go, SKIPOSS) — this file ships to OSS and must only scan
+// surfaces that exist there.
+type teardownDocSurface struct {
+	path          string // relative to the module root
+	mustContain   string // the tier/authority baseline that must survive
+	mustNotAppear string // stale/inaccurate framing that must stay absent
+}
+
 func TestTeardownDocLanguageDrift(t *testing.T) {
 	root := findModuleRoot(t)
 
-	surfaces := []struct {
-		path          string // relative to the module root
-		mustContain   string // the tier/authority baseline that must survive
-		mustNotAppear string // stale/inaccurate framing that must stay absent
-	}{
+	assertTeardownDocLanguage(t, root, []teardownDocSurface{
 		{"USING_AGENTFACTORY.md", "operator action", "self-only"},
+		{"README.md", "operator-only", "self-only"},
 		{"CLAUDE.md", "operator-only", "self-only"},
 		{"internal/cmd/down.go", "operator action", "self-only"},
 		{"internal/cmd/install_formulas/rapid-soldesign-plan.formula.toml", "operator action", "self-only"},
 		{"internal/templates/roles/rapid-soldesign-plan.md.tmpl", "operator action", "self-only"},
-	}
+	})
+}
 
+func assertTeardownDocLanguage(t *testing.T, root string, surfaces []teardownDocSurface) {
+	t.Helper()
 	for _, s := range surfaces {
 		t.Run(s.path, func(t *testing.T) {
 			data, err := os.ReadFile(filepath.Join(root, s.path))

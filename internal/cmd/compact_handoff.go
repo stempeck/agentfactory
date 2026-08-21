@@ -114,6 +114,7 @@ func runCompactHandoffCore(ctx context.Context, cwd string, interactive bool) er
 		AgentEntry:   *agentEntry,
 		PaneID:       pane,
 		AgentWorkDir: cwd,
+		Trigger:      triggerCompactHandoff,
 	})
 }
 

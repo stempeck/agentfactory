@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/session"
+	"github.com/stempeck/agentfactory/internal/statusline"
 )
 
 // resolvedVarsLabel is the generic discriminating label on the dedicated bead
@@ -83,6 +86,21 @@ type agentListItem struct {
 	// DIFFERENT from the querying factory (K9b, #519). Like gate_id it deliberately
 	// OMITS omitempty so the key set stays stable for jq/snapshot consumers.
 	ForeignRoot bool `json:"foreign_root"`
+	// Occupancy and recovery visibility (K10-cli, #596). Like gate_id and foreign_root
+	// these deliberately OMIT omitempty so the key set stays stable for jq/snapshot
+	// consumers — and because a missing key here would read as "nothing to worry
+	// about", which is the exact masking this phase exists to remove.
+	//
+	// ContextPct is -1 when there is no datum. It is NOT 0: the reader returns
+	// (0, false) for a channel with nothing in it, and a 0 that reads as "empty
+	// context" is the 0%-reads-healthy defect internal/statusline exists to prevent.
+	// ContextState carries the reader's five-literal ChannelState verbatim
+	// (fresh|stale|dark|none|malformed) — malformed is never collapsed into none.
+	// Recovery is the K5 breaker's verdict: none|recovering|halted. None of the three
+	// feeds deriveAgentStatus: the honesty enum keeps its three inputs.
+	ContextPct   int    `json:"context_pct"`
+	ContextState string `json:"context_state"`
+	Recovery     string `json:"recovery"`
 }
 
 // runAgentsList is the RunE for `af agents list`. It enumerates agents.json and,
@@ -131,26 +149,105 @@ func runAgentsList(cmd *cobra.Command, _ []string) error {
 	}
 	sort.Strings(names)
 
+	// The occupancy sweep wants its roster before the row loop, but ForeignRoot — the one
+	// exclusion axis an ADR-004-clean reader cannot observe for itself, so applying it is
+	// explicitly the caller's job — is a per-row derivation. Resolve liveness and
+	// foreign-rootness once here and let the loop consume the memoized values; the tmux call
+	// count per row is unchanged.
+	facts := make(map[string]sessionFacts, len(names))
+	scope := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		sessionName := session.SessionName(name)
+		running, _ := tmux.HasSession(sessionName)
+		f := sessionFacts{running: running}
+		if running {
+			f.foreignRoot = sessionForeignRoot(tmux, sessionName, root)
+		}
+		facts[name] = f
+		// Coverage mirrors pollOccupancy's (recovery.go): agents.json ∩ live sessions, minus
+		// foreign-root sessions. An agent with no session has no context to occupy, and
+		// another factory's leftover snapshot is not this factory's occupancy.
+		if f.running && !f.foreignRoot {
+			scope[name] = struct{}{}
+		}
+	}
+	readings := readAgentOccupancy(root, scope)
+
 	items := make([]agentListItem, 0, len(names))
 	for _, name := range names {
 		entry := agentsCfg.Agents[name]
-		sessionName := session.SessionName(name)
-		running, _ := tmux.HasSession(sessionName)
+		f := facts[name]
 		item := agentListItem{
 			Name:        name,
 			Type:        entry.Type,
 			Formula:     entry.Formula,
-			Running:     running,
+			Running:     f.running,
 			StepState:   "no_formula",
 			Inputs:      map[string]string{},
-			ForeignRoot: running && sessionForeignRoot(tmux, sessionName, root),
+			ForeignRoot: f.foreignRoot,
+			// Unknown until a reading says otherwise. A row outside the sweep must reach
+			// StateNone explicitly: the zero ChannelReading normalises to malformed (so a
+			// value nobody produced can never pass for health), which would be a different
+			// and wrong claim here.
+			ContextPct:   -1,
+			ContextState: string(statusline.StateNone),
+			Recovery:     recoveryStatus(loadRecoveryState(root, name)),
+		}
+		if reading, ok := readings[name]; ok {
+			item.ContextState = string(reading.State())
+			// The bool is the whole point: a false with a 0 is "no reading", not "empty
+			// context", and -1 is how this contract encodes that.
+			if pct, has := reading.UsedPct(); has {
+				item.ContextPct = int(math.Round(pct))
+			}
 		}
 		populateAgentStep(ctx, store, name, &item)
-		item.Status = deriveAgentStatus(running, item.StepState, item.IsGate)
+		item.Status = deriveAgentStatus(f.running, item.StepState, item.IsGate)
 		items = append(items, item)
 	}
 
 	return emitAgents(cmd, items)
+}
+
+// sessionFacts memoizes the two live-tmux derivations runAgentsList needs twice: once to build
+// the occupancy sweep's roster, once to fill the row.
+type sessionFacts struct {
+	running     bool
+	foreignRoot bool
+}
+
+// readAgentOccupancy classifies the occupancy channel for every agent in scope, in ONE sweep per
+// invocation (mirroring the computePhaseCompletion precompute in dispatch.go).
+//
+// Best-effort in both directions, because `af agents list` is a cheap machine read whose error
+// envelope is reserved for cwd/root/agents.json/store failures. A startup.json that will not load,
+// or thresholds that are not configured, SKIP the sweep rather than handing the reader zero
+// thresholds — zero thresholds classify every channel as dark, so the "safe" fallback would report
+// a factory-wide outage that is not happening. A reader error is ignored deliberately: the reader
+// still returns a fully-populated all-"none" map alongside it, so the rows stay honest.
+//
+// recovery.enabled and recovery.exclude are deliberately NOT consulted. They govern whether the
+// engine ACTS on an agent; this is a pure observation surface, and hiding an excluded agent's
+// occupancy would recreate the masking defect the phase exists to close.
+func readAgentOccupancy(root string, scope map[string]struct{}) map[string]statusline.ChannelReading {
+	if len(scope) == 0 {
+		return nil
+	}
+	cfg, err := config.LoadStartupConfig(root)
+	if err != nil {
+		return nil
+	}
+	staleness := time.Duration(cfg.Recovery.StalenessSecs) * time.Second
+	darkAfter := time.Duration(cfg.Recovery.DarkGraceSecs) * time.Second
+	if staleness <= 0 || darkAfter <= 0 {
+		return nil
+	}
+	readings, _ := statusline.ReadObservations(config.StatuslineSessionsDir(root), statusline.ReadOptions{
+		KnownAgents: scope,
+		Staleness:   staleness,
+		DarkAfter:   darkAfter,
+	}, time.Now())
+	return readings
 }
 
 // sessionForeignRoot reports whether a live session's baked AF_ROOT resolves to a

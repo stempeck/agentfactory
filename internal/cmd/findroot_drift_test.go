@@ -104,6 +104,7 @@ func TestT_INT_4_FindRootResolversConfinedToSeam(t *testing.T) {
 	// function, so the single allowlist entry covers them.
 	factoryAllow := map[string]bool{
 		"resolveInvokerRoot":     true,
+		"resolveInvokerRootWarn": true, // helpers.go — the writer-injected invoker seam (PR #595 T9); resolveInvokerRoot is its os.Stderr-bound wrapper and the render path passes io.Discard. Same seam, same chokepoint.
 		"resolveWatchdogRoot":    true,
 		"containmentRoutingRoot": true, // containment.go — AF_ROOT-first routing of the containment mail (thread 7b); routes by session identity, never decides the escape boundary
 	}

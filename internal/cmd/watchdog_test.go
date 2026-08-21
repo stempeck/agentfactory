@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +20,7 @@ import (
 
 func TestWatchdog_DetectsErrorPattern(t *testing.T) {
 	output := "Some output...\nInvalid signature in thinking block\nMore output"
-	detected, pattern := detectErrorPattern(output)
+	detected, pattern, _ := detectErrorPattern(output)
 	if !detected {
 		t.Fatal("should detect 'Invalid signature in thinking block'")
 	}
@@ -35,7 +36,7 @@ func TestWatchdog_HTTP400NotDetected(t *testing.T) {
 		"HTTP 400 in response from upstream",
 	}
 	for _, output := range outputs {
-		detected, pattern := detectErrorPattern(output)
+		detected, pattern, _ := detectErrorPattern(output)
 		if detected {
 			t.Errorf("HTTP 400 should NOT trigger detection, but got pattern %q for input %q", pattern, output)
 		}
@@ -48,7 +49,7 @@ func TestWatchdog_Status400NotDetected(t *testing.T) {
 		"API call failed with status 400",
 	}
 	for _, output := range outputs {
-		detected, pattern := detectErrorPattern(output)
+		detected, pattern, _ := detectErrorPattern(output)
 		if detected {
 			t.Errorf("status 400 should NOT trigger detection, but got pattern %q for input %q", pattern, output)
 		}
@@ -56,7 +57,7 @@ func TestWatchdog_Status400NotDetected(t *testing.T) {
 }
 
 func TestWatchdog_OnlyThinkingBlockTriggers(t *testing.T) {
-	detected, pattern := detectErrorPattern("Some output\nInvalid signature in thinking block\nMore output")
+	detected, pattern, _ := detectErrorPattern("Some output\nInvalid signature in thinking block\nMore output")
 	if !detected {
 		t.Fatal("should detect 'Invalid signature in thinking block'")
 	}
@@ -78,7 +79,7 @@ func TestWatchdog_NoFalsePositive(t *testing.T) {
 		"read tcp 127.0.0.1:54233->127.0.0.1:6379: connection timed out",
 	}
 	for _, output := range outputs {
-		detected, pattern := detectErrorPattern(output)
+		detected, pattern, _ := detectErrorPattern(output)
 		if detected {
 			t.Errorf("false positive on %q: detected pattern %q", output, pattern)
 		}
@@ -109,12 +110,17 @@ func TestWatchdog_DetectsEndpointSignatures(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			detected, cause := detectErrorPattern(tc.output)
+			detected, cause, mailOnly := detectErrorPattern(tc.output)
 			if !detected {
 				t.Fatalf("expected an endpoint signature to be detected in %q", tc.output)
 			}
 			if !strings.Contains(cause, "endpoint failure") {
 				t.Errorf("cause should name an endpoint failure, got %q", cause)
+			}
+			// Every signature here predates the #598 mail-only posture and must keep respawning;
+			// a stray true in the table would otherwise leave a class of failures unrecovered.
+			if mailOnly {
+				t.Errorf("%q must not carry the mail-only posture", tc.output)
 			}
 		})
 	}
@@ -126,11 +132,11 @@ func TestWatchdog_DetectsEndpointSignatures(t *testing.T) {
 // respawn. sendHandoffMail is a no-op under `go test`, so the mail text is proven
 // through the pure watchdogFailureMail formatter that recoverAgent feeds.
 func TestWatchdog_EndpointCauseNamedInEscalationMail(t *testing.T) {
-	detected, cause := detectErrorPattern("the gateway returned 503 Service Unavailable")
+	detected, cause, mailOnly := detectErrorPattern("the gateway returned 503 Service Unavailable")
 	if !detected {
 		t.Fatal("expected 503 to be detected")
 	}
-	subject, body := watchdogFailureMail("worker_a", cause)
+	subject, body := watchdogFailureMail("worker_a", cause, mailOnly)
 	if !strings.Contains(subject, "worker_a") {
 		t.Errorf("escalation subject should name the agent, got %q", subject)
 	}
@@ -155,6 +161,378 @@ func TestWatchdog_SilenceDetection(t *testing.T) {
 		if i == threshold-1 && !silent {
 			t.Error("should detect silence after threshold polls")
 		}
+	}
+}
+
+// TestWatchdog_SilenceDetectionWithStatusline is the Gap-2 behavioral proof (issue #591): a
+// rendered statusline must NOT defeat the watchdog's silence detection, and the mechanism that
+// guarantees it is the SENTINEL, not the content. It holds the STATIC case — a statusline whose
+// text happens not to change across polls — so it pins that stripping sentinel-marked lines did
+// not disturb the ordinary path. The CHANGING case is TestCheckSilence_StatuslineOnlyChange_StillTrips.
+//
+// Its original rationale ("the default element set excludes the only ticking element") no longer
+// holds: issue #600 restored elapsed and daily to the default and moved the guarantee into the
+// watchdog itself. The fixture is now the CURRENT eight-element render built by statuslinePane,
+// replacing the pre-#595 six-element literal that still carried the removed "· N tok"
+// occupancy-as-spend halves (K9 item 6).
+//
+// A marked static pane ALONE would only re-prove TestWatchdog_SilenceDetection: the strip removes
+// the statusline before hashing, so the remaining signal is the unchanging body. The differential
+// below is what this test uniquely states — the strip is driven by the sentinel, not by
+// statusline-shaped content, and it removes exactly the marked lines.
+func TestWatchdog_SilenceDetectionWithStatusline(t *testing.T) {
+	const body = "agent1: waiting for input..."
+	marked := statuslinePane(body, "2m5s", "4.56")
+	unmarked := strings.ReplaceAll(marked, statuslineSentinel, "")
+
+	// The strip must actually ENGAGE on this fixture; if statuslinePane ever stopped marking, every
+	// assertion below would pass for the ordinary reason.
+	if stripStatuslineLines(marked) == marked {
+		t.Fatal("the fixture carries no sentinel: the strip is a no-op here, so this test would only " +
+			"re-prove TestWatchdog_SilenceDetection")
+	}
+	// ...and it must engage ONLY on the mark. Byte-identical statusline text without the sentinel
+	// must survive, or the strip is matching content and the dormant I1.2 fallback has leaked into I1.1.
+	if stripStatuslineLines(unmarked) != unmarked {
+		t.Fatal("an UNMARKED statusline was stripped: the strip is keying on content, not the sentinel")
+	}
+	// The strip is line-selective rather than a nuke: what survives is EXACTLY the agent body, which
+	// is what the silence hash must then see.
+	if got := strings.TrimSpace(stripStatuslineLines(marked)); got != body {
+		t.Fatalf("strip must leave exactly the agent body\n got: %q\nwant: %q", got, body)
+	}
+
+	// The ordinary path is undisturbed in BOTH shapes: a static statusline pane still reaches the
+	// silence threshold whether or not its lines are marked.
+	for _, tc := range []struct{ name, pane string }{{"marked", marked}, {"unmarked", unmarked}} {
+		state := make(map[string]*watchdogAgentState)
+		threshold := 3
+
+		for i := 0; i < threshold; i++ {
+			silent := checkSilence("agent1", tc.pane, state, threshold)
+			if i < threshold-1 && silent {
+				t.Errorf("%s poll %d: a static statusline pane must not read as activity before threshold", tc.name, i)
+			}
+			if i == threshold-1 && !silent {
+				t.Errorf("%s: a static statusline pane must still reach the silence threshold", tc.name)
+			}
+		}
+	}
+}
+
+// statuslinePane builds an idle agent pane whose only variable content is a sentinel-marked
+// two-line statusline, so a test can vary the chrome while holding the agent body fixed.
+// The sentinel sits AFTER a visible character on each line, mirroring K6's emission
+// constraint (tmux discards a zero-width rune written at column 0 — see statuslineSentinel).
+func statuslinePane(body, elapsed, daily string) string {
+	return strings.Join([]string{
+		body,
+		"Opus 4.8 | /repo | main | +12 -3 | T " + elapsed + statuslineSentinel,
+		"██░░░░░░░░ 18% (35k/200k) | $ 1.23 | D $ " + daily + statuslineSentinel,
+	}, "\n")
+}
+
+// TestCheckSilence_StatuslineOnlyChange_StillTrips is the AC-3 core: once the watchdog strips
+// sentinel-marked lines, a hung agent whose pane differs ONLY in its statusline must still trip
+// the silence threshold. Both restored-by-K4 volatile elements move here — "elapsed" ticks with
+// wall time and "daily" is moved by a SECOND session's snapshot (design-doc.md:554-555), which
+// is the case the 6-element default was invented to avoid and which now has no config-side
+// defense at all.
+//
+// This test is the replacement guarantee that lets K9 ledger item 4 invert: the render-side
+// byte-identical-across-spend pin (internal/statusline/fable_increment_pr595_test.go) can stop
+// carrying the masking property precisely because this one now does
+// (integration.md:106-109).
+func TestCheckSilence_StatuslineOnlyChange_StillTrips(t *testing.T) {
+	state := make(map[string]*watchdogAgentState)
+	body := "agent1: waiting for input..."
+	panes := []string{
+		statuslinePane(body, "2m5s", "4.56"),
+		statuslinePane(body, "2m15s", "9.01"),
+		statuslinePane(body, "2m25s", "12.30"),
+	}
+	threshold := len(panes)
+
+	// Non-vacuity: if the fixtures ever collapse to one string this degrades into
+	// TestWatchdog_SilenceDetection and would pass for the wrong reason.
+	for i := range panes {
+		for j := i + 1; j < len(panes); j++ {
+			if panes[i] == panes[j] {
+				t.Fatalf("fixture panes %d and %d are identical; the test would pass vacuously", i, j)
+			}
+		}
+	}
+
+	for i, out := range panes {
+		silent := checkSilence("agent1", out, state, threshold)
+		if i < threshold-1 && silent {
+			t.Errorf("poll %d: should not be silent yet", i)
+		}
+		if i == threshold-1 && !silent {
+			t.Error("a pane changing ONLY in its sentinel-marked statusline must still reach the silence threshold")
+		}
+	}
+}
+
+// TestCheckSilence_WrappedNarrowPane_StillTrips pins Gap 3. On a narrow pane tmux wraps one
+// logical statusline across several physical rows and only the FIRST row carries the sentinel,
+// so a per-line strip over a plain capture leaves the ticking figure in the continuation
+// fragment and the hash keeps moving. Capturing with -J rejoins the wrap into one logical line
+// that the strip removes whole.
+//
+// Both shapes are asserted: the joined one because it is the shipped behavior, and the plain
+// one because pinning the known-bad variant is the clearest statement of WHY the joined capture
+// is load-bearing rather than a nicety.
+func TestCheckSilence_WrappedNarrowPane_StillTrips(t *testing.T) {
+	body := "agent1: waiting for input..."
+
+	// One logical statusline row as tmux -J returns it: the wrap boundary is gone.
+	joined := func(elapsed, daily string) string {
+		return strings.Join([]string{
+			body,
+			"Opus 4.8 | /very/long/repo/path | main | +12 -3 | T " + elapsed + statuslineSentinel,
+			"██░░░░░░░░ 18% (35k/200k) | $ 1.23 | D $ " + daily + statuslineSentinel,
+		}, "\n")
+	}
+	// The same content as a PLAIN capture of a 30-column pane: tmux emits each wrapped
+	// fragment as its own physical line and only the first fragment carries the sentinel.
+	plain := func(elapsed, daily string) string {
+		return strings.Join([]string{
+			body,
+			"Opus 4.8 | /very/long/repo/" + statuslineSentinel,
+			"path | main | +12 -3 | T " + elapsed,
+			"██░░░░░░░░ 18% (35k/200k) |" + statuslineSentinel,
+			" $ 1.23 | D $ " + daily,
+		}, "\n")
+	}
+
+	ticks := []struct{ elapsed, daily string }{{"2m5s", "4.56"}, {"2m15s", "9.01"}, {"2m25s", "12.30"}}
+	threshold := len(ticks)
+
+	joinedState := make(map[string]*watchdogAgentState)
+	for i, tk := range ticks {
+		silent := checkSilence("agent1", joined(tk.elapsed, tk.daily), joinedState, threshold)
+		if i == threshold-1 && !silent {
+			t.Error("a joined (-J) wrapped statusline must be stripped whole and still trip silence")
+		}
+	}
+
+	// PLAIN capture: tmux emits each wrapped fragment as its own physical line, so only the fragments
+	// carrying the sentinel are stripped — the others (`… | T <elapsed>` and `$ 1.23 | D $ <daily>`)
+	// leak their ticking figures past the strip. Before I1.2 was armed this leak made the plain capture
+	// fail to trip, which is why -J (joined capture) is the strip's primary mechanism. With the mask now
+	// ARMED (PR #601 BODY-1/F-A) those leaked volatile figures are normalized to placeholders, so the
+	// plain capture ALSO trips: the mask backstops a wrap the strip missed. -J still matters — it strips
+	// the whole statusline cleanly instead of relying on per-figure masking of whatever leaked.
+	plainState := make(map[string]*watchdogAgentState)
+	var plainTripped bool
+	for _, tk := range ticks {
+		if checkSilence("agent1", plain(tk.elapsed, tk.daily), plainState, threshold) {
+			plainTripped = true
+		}
+	}
+	if !plainTripped {
+		t.Error("a plain (non -J) wrapped statusline leaks ticking figures past the strip; the armed " +
+			"I1.2 mask must normalize them so a hung agent's statusline-only churn still trips silence")
+	}
+}
+
+// TestCheckSilence_RealActivity_ResetsHash is the anti-vacuity partner of the two tests above:
+// without it the strip could degenerate into hashing a constant and both would still pass.
+func TestCheckSilence_RealActivity_ResetsHash(t *testing.T) {
+	state := make(map[string]*watchdogAgentState)
+	threshold := 5
+
+	for i := 0; i < 3; i++ {
+		checkSilence("agent1", statuslinePane("agent1: waiting for input...", "2m5s", "4.56"), state, threshold)
+	}
+	if state["agent1"].silenceCount != 3 {
+		t.Fatalf("expected silence count 3 before real activity, got %d", state["agent1"].silenceCount)
+	}
+
+	// Same statusline, different agent body: genuine work must still reset the counter.
+	if checkSilence("agent1", statuslinePane("agent1: running go test ./...", "2m5s", "4.56"), state, threshold) {
+		t.Error("genuine pane activity must not read as silence")
+	}
+	if state["agent1"].silenceCount != 0 {
+		t.Errorf("silence counter should reset on real agent output change, got %d", state["agent1"].silenceCount)
+	}
+}
+
+// TestMaskVolatileRenders_CatchesShippedFormats is the I1.2 fallback's drift defense
+// (integration.md:62: "a guard test renders examples and asserts the masks catch them").
+// The fallback is dormant, so nothing else would notice if a render format moved out from under
+// its regexes — this test is the only thing standing between a format change and a fallback that
+// silently masks nothing on the day it is activated.
+func TestMaskVolatileRenders_CatchesShippedFormats(t *testing.T) {
+	// The SHIPPED forms come first — these are what the renderer emits today, taken from the
+	// golden at internal/statusline/render_test.go. A mask that only handles the format the design
+	// doc anticipated would be a fallback that masks nothing on the day it is switched on.
+	for _, tc := range []struct{ name, in, want string }{
+		{"bar (shipped)", "████░░░░░░ 35% (352k/1.0M)", "<bar>"},
+		{"session cost (shipped, spaced)", "$ 12.34", "<session>"},
+		{"daily cost (shipped, spaced)", "D $ 80.64", "<daily>"},
+		{"daily redirected (shipped, spaced)", "D ~$ 80.64", "<daily>"},
+		// Every duration band Go's Duration.String() produces — it emits no spaces between
+		// components, so the hour band ("1h6m6s") looks nothing like K5's planned "1h 06m".
+		// A long-running autonomous session is the normal case, not an edge case.
+		{"elapsed seconds (shipped)", "T 45s", "<elapsed>"},
+		{"elapsed minutes (shipped)", "T 2m5s", "<elapsed>"},
+		{"elapsed hours (shipped)", "T 1h6m6s", "<elapsed>"},
+		{"elapsed exact hour (shipped)", "T 1h0m0s", "<elapsed>"},
+		{"elapsed half-day (shipped)", "T 12h34m56s", "<elapsed>"},
+
+		// K5 (Phase 3) reformats these; both forms must mask so the reformat cannot disarm the
+		// fallback silently.
+		{"session cost+tokens (K5)", "$21.95 · 352k tok", "<session>"},
+		{"daily cost+tokens (K5)", "D $80.64 · 1.4M tok", "<daily>"},
+		{"daily redirected (K5)", "D ~$80.64", "<daily>"},
+		{"elapsed hours (K5)", "T 1h 06m", "<elapsed>"},
+	} {
+		if got := maskVolatileRenders(tc.in); got != tc.want {
+			t.Errorf("%s: maskVolatileRenders(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+
+	// Elapsed fixtures DERIVED, not hand-copied. Both format gaps found in review came from
+	// fixtures written by hand that the renderer never emits, so the elapsed band — the one that
+	// ticks every second — is generated the same way internal/statusline's formatDuration does
+	// (Duration.Round(time.Second).String()). A future duration shape is then covered mechanically
+	// instead of depending on someone remembering to add a row.
+	for _, ms := range []int64{
+		300, // 0s        — sub-second rounds to "T 0s", and renderElement drops elapsed
+		//                        only when the duration is EXACTLY 0, so this really renders
+		1000,      // 1s
+		45000,     // 45s
+		60000,     // 1m0s
+		125000,    // 2m5s      — the golden fixture's value
+		3599000,   // 59m59s    — last value before the hour band
+		3600000,   // 1h0m0s    — exact hour boundary
+		3966000,   // 1h6m6s
+		45296000,  // 12h34m56s
+		356400000, // 99h0m0s   — three-digit hours
+	} {
+		in := "T " + (time.Duration(ms) * time.Millisecond).Round(time.Second).String()
+		if got := maskVolatileRenders(in); got != "<elapsed>" {
+			t.Errorf("elapsed mask misses a shipped duration: maskVolatileRenders(%q) = %q, want %q",
+				in, got, "<elapsed>")
+		}
+	}
+
+	// Whole-pane sweep in BOTH formats: nothing volatile may survive. The shipped case is the one
+	// that matters — cross-session daily movement is the hazard this fallback exists to absorb.
+	for _, pane := range []string{
+		"Opus 4.8 | /repo | main | +12 -3 | T 2m5s\n████░░░░░░ 35% (352k/1.0M) | $ 12.34 | D $ 80.64",
+		"Opus 4.8 | /repo | main | +12 -3 | T 1h6m6s\n████░░░░░░ 35% (352k/1.0M) | $ 12.34 | D $ 80.64",
+		"Opus 4.8 | /repo | main | +12 -3 | T 1h 06m\n████░░░░░░ 35% (352k/1.0M) | $21.95 · 352k tok | D $80.64 · 1.4M tok",
+	} {
+		masked := maskVolatileRenders(pane)
+		for _, leaked := range []string{"2m5s", "1h6m6s", "1h 06m", "35%", "352k/1.0M", "12.34", "21.95", "80.64"} {
+			if strings.Contains(masked, leaked) {
+				t.Errorf("volatile figure %q survived masking:\n in=%q\nout=%q", leaked, pane, masked)
+			}
+		}
+	}
+
+	// Non-volatile content must be left alone — a mask that ate the whole pane would "pass" every
+	// assertion above while destroying the watchdog's ability to see real activity.
+	const body = "agent1: running go test ./..."
+	if got := maskVolatileRenders(body); got != body {
+		t.Errorf("ordinary agent output must pass through unmasked: %q -> %q", body, got)
+	}
+}
+
+// TestMaskVolatileRenders_IsArmed pins that I1.2 IS wired into the silence path as a belt-and-
+// suspenders alongside I1.1 (the sentinel strip). The Phase-5a live probe that would confirm the
+// sentinel survives Claude's display hop CANNOT run in an autonomous factory (ADR-018 — CI cannot
+// observe the live factory), so the display hop is permanently UNVERIFIED: masking (a superset of
+// stripping) closes the watchdog-masking hazard whether or not the sentinel survives (PR #601
+// BODY-1/F-A). It is one-way safe — masking can only make silence MORE willing to trip, never less,
+// so it can never hide a real hang.
+//
+// The distinguishing case is an UNMARKED volatile figure — a statusline whose sentinel was eaten by
+// the display hop: the strip lets it through (hash moves), but the armed mask normalizes it so a
+// statusline-only pane change still trips silence.
+func TestMaskVolatileRenders_IsArmed(t *testing.T) {
+	state := make(map[string]*watchdogAgentState)
+	threshold := 3
+	// No sentinel anywhere: this is indistinguishable from real agent output.
+	pane := func(daily string) string {
+		return "agent1: waiting for input...\n████░░░░░░ 18% (35k/200k) | $ 1.23 | D $ " + daily
+	}
+
+	dailies := []string{"4.56", "9.01", "12.30"}
+	// Non-vacuity, same guard as the AC-3 matrix: if the fixtures ever collapse to one string the
+	// hash would be stable for the ordinary reason and this test would stop testing dormancy.
+	for i := range dailies {
+		for j := i + 1; j < len(dailies); j++ {
+			if pane(dailies[i]) == pane(dailies[j]) {
+				t.Fatalf("fixture panes %d and %d are identical; the test would pass vacuously", i, j)
+			}
+		}
+	}
+	// The masks must actually cover this fixture, or "silence did not trip" proves nothing.
+	if maskVolatileRenders(pane("4.56")) == pane("4.56") {
+		t.Fatal("the fixture contains nothing the I1.2 masks recognize, so it cannot distinguish " +
+			"strip from mask; update it alongside volatileRenderMasks")
+	}
+
+	var tripped bool
+	for _, d := range dailies {
+		if checkSilence("agent1", pane(d), state, threshold) {
+			tripped = true
+		}
+	}
+	if !tripped {
+		t.Error("checkSilence did NOT normalize UNMARKED volatile figures — the I1.2 mask fallback " +
+			"must be ARMED (mask-after-strip) so an un-sentineled statusline still trips silence " +
+			"detection; the sentinel strip alone cannot cover Claude's display hop (PR #601 BODY-1/F-A)")
+	}
+}
+
+// TestWatchdog_SilencePathReadsJoinedCapture pins WHICH capture feeds the silence hash. The
+// strip is only sound on a -J capture: tmux marks just the first physical row of a wrapped line,
+// so a plain capture leaks continuation fragments past it. A refactor that kept checkSilence
+// correct but quietly reverted the poll loop to the plain capture would leave every other test
+// green, which is exactly what this one exists to catch.
+func TestWatchdog_SilencePathReadsJoinedCapture(t *testing.T) {
+	root := t.TempDir()
+	writeTestAgentsConfig(t, root, `{
+		"agents": {
+			"factoryworker": {"type": "autonomous", "description": "autonomous worker"}
+		}
+	}`)
+
+	// The plain capture never repeats (so it could never trip silence); the joined capture is
+	// static (so it trips at the threshold). A nudge therefore proves the joined view was used.
+	var pollCount int
+	oldTmux := newWatchdogTmux
+	newWatchdogTmux = func() watchdogTmux {
+		pollCount++
+		return &fakeWatchdogTmux{
+			output: fmt.Sprintf("plain capture, poll %d, never repeats", pollCount),
+			joined: "idle, waiting for input",
+		}
+	}
+	defer func() { newWatchdogTmux = oldTmux }()
+
+	nudged := map[string]int{}
+	oldNudge := watchdogNudgeFn
+	watchdogNudgeFn = func(sessionID string) error {
+		nudged[sessionID]++
+		return nil
+	}
+	defer func() { watchdogNudgeFn = oldNudge }()
+
+	agentStates := make(map[string]*watchdogAgentState)
+	failures := make(map[string]int)
+	scope := map[string]struct{}{"factoryworker": {}}
+	for i := 0; i < 3; i++ {
+		pollAgents(&cobra.Command{}, root, scope, agentStates, failures, 3)
+	}
+
+	if len(nudged) == 0 {
+		t.Error("silence never tripped: the poll loop is hashing the plain capture, not the joined one")
 	}
 }
 
@@ -294,11 +672,20 @@ func TestWatchdog_InteractiveAgentNoRespawn(t *testing.T) {
 
 // fakeWatchdogTmux reports every session as alive with static output so the
 // silence threshold trips on every agent, letting a test drive the poll loop.
-type fakeWatchdogTmux struct{ output string }
+// joined is the -J view the silence path reads; it falls back to output so the
+// existing construction sites keep meaning what they meant, and a test that needs
+// the two capture paths to differ sets it explicitly.
+type fakeWatchdogTmux struct{ output, joined string }
 
 func (f *fakeWatchdogTmux) HasSession(string) (bool, error)         { return true, nil }
 func (f *fakeWatchdogTmux) IsClaudeRunning(string) bool             { return true }
 func (f *fakeWatchdogTmux) CapturePane(string, int) (string, error) { return f.output, nil }
+func (f *fakeWatchdogTmux) CapturePaneJoined(string, int) (string, error) {
+	if f.joined != "" {
+		return f.joined, nil
+	}
+	return f.output, nil
+}
 
 func writeTestAgentsConfig(t *testing.T, root, json string) {
 	t.Helper()

@@ -14,5 +14,9 @@
     "probed": false,
     "signals": []
   },
-  "unprobed_cause": ""
+  "unprobed_cause": "",
+  "step_context": {
+    "bound_tokens": 200000,
+    "handoff_pct": 75
+  }
 }

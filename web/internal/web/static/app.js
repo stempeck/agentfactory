@@ -44,18 +44,26 @@
   // sendWrite issues one state-changing request carrying the current token; writeReq wraps it with a
   // single first-write retry: a 401 prompts the operator for the token and retries once. Reads never
   // require the token, so GET is unchanged.
-  function sendWrite(method, path, body) {
+  //
+  // `extra` carries per-request headers. It exists because the settings CAS precondition travels as a
+  // REQUEST HEADER (X-AF-If-Content-Hash, server.go:574) and the settings body is contractually the
+  // bare document — there is no envelope field to hide a precondition in, the way the formulas editor
+  // hides one in `base_sha256`.
+  function sendWrite(method, path, body, extra) {
     var h = { 'Content-Type': 'application/json' };
     var t = authToken(); if (t) h['X-AF-Token'] = t;
+    if (extra) {
+      for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) h[k] = extra[k]; }
+    }
     return fetch(path, {
       method: method, headers: h, credentials: 'same-origin',
       body: body ? JSON.stringify(body) : '{}'
     }).then(parse);
   }
-  function writeReq(method, path, body) {
-    return sendWrite(method, path, body).then(function (env) {
+  function writeReq(method, path, body, extra) {
+    return sendWrite(method, path, body, extra).then(function (env) {
       if (env && env._status === 401 && promptForToken()) {
-        return sendWrite(method, path, body); // retry once with the freshly-pasted token
+        return sendWrite(method, path, body, extra); // retry once with the freshly-pasted token
       }
       return env;
     });
@@ -69,7 +77,7 @@
     post: function (path, body) { return writeReq('POST', path, body); },
     // put sends the COMPLETE edited document as the request body (settings: fed to `af config <file>
     // set` on stdin; formulas: the {text, base_sha256} CAS save).
-    put: function (path, body) { return writeReq('PUT', path, body); }
+    put: function (path, body, extra) { return writeReq('PUT', path, body, extra); }
   };
   function parse(res) {
     return res.json().catch(function () { return { ok: false, message: 'bad response' }; })
@@ -85,6 +93,71 @@
     stopped: { cls: 's-idle',    label: 'Stopped', neutral: true },
     error:   { cls: 's-error',   label: 'Needs attention' }
   };
+  // ---- occupancy + recovery → look (K10-web, #596) ----
+  // These ride BESIDE the status badge and never feed STATUS, data-status or FILTERS: the honesty
+  // enum keeps its three Phase-0 inputs, so a breaker-halted agent still reports "working" and it
+  // is this badge that stops the card reading as fine.
+  //
+  // Both helpers decide on the STRING field and never on context_pct. An `af` predating Phase 4A
+  // omits the keys entirely, Go decodes the absent int as 0, and 0 reads as "0% used = healthy" —
+  // indistinguishable from a genuinely fresh agent. The emitted domains of context_state and
+  // recovery both exclude "", so empty means exactly "this af has no datum to give".
+  //
+  // Each falls through to a terminal return rather than a lookup-map miss: a literal we do not
+  // recognise still renders. Silently dropping an unknown state is how a malformed channel would
+  // come to read as healthy, which is the defect class this phase closes.
+
+  // recoveryLook returns the badge look for a breaker verdict, or null when there is nothing to
+  // say. 'none' is the NORMAL healthy value every agent carries — not an absence.
+  function recoveryLook(v) {
+    if (!v || v === 'none') return null;
+    if (v === 'halted') return { cls: 'badge halt', label: 'Recovery halted' };
+    if (v === 'recovering') return { cls: 'badge warn', label: 'Recovering' };
+    return { cls: 'badge halt', label: 'Recovery ' + v };
+  }
+
+  // contextLook returns the badge look for an occupancy channel. 'fresh' is the only healthy
+  // state, and a fresh reading still renders its percentage: an exhausted-but-not-yet-halted
+  // agent is visible ONLY through the number, and the web module cannot see af's threshold
+  // config, so it reports the datum rather than inventing a verdict about it.
+  function contextLook(state, pct) {
+    if (!state) return null;
+    var shown = (typeof pct === 'number' && pct >= 0) ? (pct + '%') : null;
+    if (state === 'fresh') {
+      return shown ? { cls: 'badge neutral', label: 'Context ' + shown } : null;
+    }
+    var label;
+    if (state === 'stale') label = 'Context stale';
+    else if (state === 'dark') label = 'Context dark';
+    else if (state === 'none') label = 'No context datum';
+    else if (state === 'malformed') label = 'Context malformed';
+    else label = 'Context ' + state;
+    return { cls: 'badge warn', label: shown ? (label + ' · ' + shown) : label };
+  }
+
+  // badgeEl builds one badge through el(), never innerHTML (module-wide lint).
+  function badgeEl(look) {
+    var b = el('span', look.cls);
+    b.appendChild(el('span', 'pip'));
+    b.appendChild(document.createTextNode(look.label));
+    return b;
+  }
+
+  // appendHealthBadges puts the recovery badge first — it is the more urgent of the two.
+  //
+  // A STOPPED agent is the one case where 'none' says nothing: af reports state 'none' for every
+  // agent outside its running-only occupancy sweep, so "no context datum" on a stopped card is
+  // tautological rather than a finding. Every other state still renders there — stale/dark/
+  // malformed all imply a datum once existed — and the recovery badge ALWAYS renders, because a
+  // latched breaker outlives the session it halted and is exactly what an operator must see.
+  function appendHealthBadges(host, a) {
+    var r = recoveryLook(a && a.recovery);
+    if (r) host.appendChild(badgeEl(r));
+    if (a && a.running === false && a.context_state === 'none') return;
+    var c = contextLook(a && a.context_state, a && a.context_pct);
+    if (c) host.appendChild(badgeEl(c));
+  }
+
   // filter id → the statuses it matches
   var FILTERS = {
     all: null,
@@ -743,16 +816,61 @@
   function showProtoErr(msg) { var e = byId('proto-fb-err'); if (e) { e.textContent = msg; e.hidden = false; } }
 
   // =========================================================================
-  // SettingsViewModel — curated, validated, atomic editor for dispatch.json +
-  // startup.json (factory.json shown read-only; secrets never serialized). The
-  // mapping editor maps to DispatchMapping{labels, agent}. Save sends the
-  // COMPLETE edited config (merged onto the values read) through PUT
-  // /api/settings/{file}, which routes it to `af config <file> set` — the single
-  // canonical validator/writer. Friendly per-field errors are surfaced inline.
+  // SettingsViewModel — #620 M1/U1. One panel per config document under
+  // .agentfactory/, and one save per panel: `af config <file> set` stays the
+  // single canonical validator and writer, and a save carries back EVERYTHING
+  // the console read.
+  //
+  // THE PROPERTY THIS VIEW EXISTS FOR. The console never builds a document out
+  // of form state. Every payload STARTS as the document the server sent — per
+  // file AND per mapping row — and the controls overwrite only the members they
+  // own. So a canonical key af grows tomorrow survives a save today, with nobody
+  // editing this file. That is not a style preference. The same defect — a
+  // hand-maintained enumeration of keys sitting on a whole-document replace
+  // path — erased `improvement`, then `telemetry`, then `workflows` /
+  // `mappings[].model` / the 14-key `recovery` block, and each of the first two
+  // was "fixed" by adding one more key to the enumeration, i.e. by re-arming it.
+  // Phase 2 deleted the substrate on the server; collectMappings below was the
+  // same defect one level down, at row granularity.
+  //
+  // The reading test for any future edit here: if af grows a canonical key
+  // tomorrow and nobody touches app.js, does it still survive a save?
   // =========================================================================
+
+  // The documents the console may write, in panel order. The server's tier table is the authority on
+  // WHY each one is writable; every panel renders that row's own `reason` rather than restating it.
+  var SETTINGS_WRITABLE = ['dispatch', 'startup', 'messaging', 'statusline'];
+
+  // UNMANAGED_FILES is an explicit ALLOW-list, and must stay one. The served files map carries a
+  // `.agentfactory/secrets/` row (web/internal/config/tier.go:163-169), so a panel built from
+  // `!writable` or from `tier === 'excluded'` would render the secrets directory — C-1 says the
+  // console never reads, lists or names it. Naming the four files that ARE listed is the only shape
+  // in which that cannot happen by accident.
+  var UNMANAGED_FILES = ['models', 'telemetry', 'build-host', 'litellm.yaml'];
+
+  // Who owns each unmanaged file instead. Each row's `reason` already says this in prose; these are
+  // the commands, so the panel routes a secret-bearing workflow to the CLI rather than to a dead end.
+  var UNMANAGED_CLI = {
+    models: 'af config models set',
+    telemetry: 'af telemetry on|off — which writes the .telemetry-gate file; telemetry.json itself has no CLI writer',
+    'build-host': 'af config build-host',
+    'litellm.yaml': 'the gateway owns it — af has no seam for it'
+  };
+
+  // The statusline element vocabulary (internal/config/statusline.go:48), listed so the panel can
+  // offer the ones nobody has enabled yet. An element in the document that is NOT here still renders,
+  // marked unknown — dropping it from this list is exactly how it would get dropped from the file.
+  var STATUSLINE_ELEMENTS = ['model', 'dir', 'branch', 'diff', 'elapsed', 'context', 'session', 'daily'];
+
+  // The four startup gates, each an on|off|default enum (internal/config/startup.go:173-178).
+  var STARTUP_GATES = ['quality', 'fidelity', 'improvement', 'telemetry'];
+
   var SettingsViewModel = {
-    data: null,    // the full GET /api/settings document
-    agents: [],    // secret-free agent summaries (the mapping picker's options)
+    data: null,       // the full GET /api/settings document
+    agents: [],       // secret-free agent summaries (the mapping picker's options)
+    profiles: [],     // model-profile NAMES only (the mapping row's model picker)
+    baselines: {},    // file -> JSON text of the document AS READ; the diff's immutable other side
+    rows: [],         // one descriptor per mapping row: { node, base, removed }
 
     activate: function () { showSettings(); return this.load(); },
     load: function () {
@@ -761,72 +879,113 @@
         if (!env || !env.ok) { toast((env && env.message) || 'settings read failed'); return; }
         self.data = env.data || {};
         self.agents = self.data.agents || [];
+        self.profiles = self.data.profiles || [];
+        self.baselines = snapshotBaselines(self.data.files || {});
         renderSettings();
       }).catch(function (e) { toast(String(e)); });
     },
     addRow: function () {
-      var host = byId('mapRows'); if (host) host.appendChild(settingsMapRow(null));
+      var host = byId('mapRows');
+      if (host) { host.appendChild(settingsMapRow(null)); refreshSettingsPanel('dispatch'); }
     },
-    save: function () {
-      var self = this;
-      if (!this.data) return;
-      ['set-dispatch-err', 'set-dispatch-ok', 'set-startup-err', 'set-startup-ok'].forEach(hide);
-      var btn = byId('set-save'); if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
-
-      // dispatch.json: preserve everything we read, override the operator-editable trigger + routes.
-      var disp = shallowCopy(this.data.dispatch);
-      disp.trigger_label = (byId('set-trigger').value || '').trim();
-      disp.mappings = collectMappings();
-
-      // startup.json: preserve what we read, override the two curated fields.
-      var st = shallowCopy(this.data.startup);
-      var agentsStr = (byId('set-startup-agents').value || '').trim();
-      st.agents = agentsStr === '' ? null : agentsStr.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-      st.start_dispatch = byId('set-startdispatch').checked;
-
-      return API.put('/api/settings/dispatch', disp).then(function (env) {
-        if (env && env.ok) { show('set-dispatch-ok'); }
-        else { showValidation('set-dispatch-err', (env && env.message) || 'dispatch save failed'); }
-        return API.put('/api/settings/startup', st);
-      }).then(function (env) {
-        if (env && env.ok) { show('set-startup-ok'); }
-        else { showValidation('set-startup-err', (env && env.message) || 'startup save failed'); }
-        // re-read so the editor reflects af's normalization (e.g. lone label → labels) on success.
-        return self.load();
-      }).catch(function (e) { toast(String(e)); }).then(function () {
-        if (btn) { btn.disabled = false; btn.textContent = 'Save changes'; }
-      });
-    }
+    // save writes EXACTLY ONE file. Each panel's button calls it with that panel's own noun; no caller
+    // passes two, and saveSettingsFile has no second write for one to reach. See AC-5 there.
+    save: function (file) { return saveSettingsFile(file); }
   };
 
-  function renderSettings() {
+  function settingsFiles() {
     var d = SettingsViewModel.data || {};
-    var disp = d.dispatch || {};
-    var st = d.startup || {};
-
-    byId('set-trigger').value = disp.trigger_label || '';
-
-    var host = byId('mapRows'); host.innerHTML = '';
-    (disp.mappings || []).forEach(function (m) { host.appendChild(settingsMapRow(m)); });
-
-    byId('set-startup-agents').value = (st.agents || []).join(', ');
-    byId('set-startdispatch').checked = !!st.start_dispatch;
-
-    byId('set-factory').textContent = JSON.stringify(d.factory || {}, null, 2);
-
-    ['set-dispatch-err', 'set-dispatch-ok', 'set-startup-err', 'set-startup-ok'].forEach(hide);
+    return d.files || {};
   }
 
-  // settingsMapRow builds one label→agent row. mapping may be null (a fresh, empty row). The label
-  // input shows either the lone `label` or the first of `labels` (af normalizes either form on save).
+  // snapshotBaselines freezes every document AS READ, as TEXT, before any control can touch it. The
+  // rows hold references into these documents, so a baseline kept by reference would drift along with
+  // them and every diff would come out empty — which is the failure mode where the console shows "No
+  // unsaved changes" over a panel full of them.
+  //
+  // A file the payload omits entirely is stored as the text "null", not skipped, so `undefined`
+  // ("this console never read that file") stays distinguishable from `null` ("af has no document").
+  function snapshotBaselines(files) {
+    var out = {};
+    for (var k in files) {
+      if (Object.prototype.hasOwnProperty.call(files, k)) {
+        out[k] = JSON.stringify(files[k].doc === undefined ? null : files[k].doc);
+      }
+    }
+    return out;
+  }
+
+  function renderSettings() {
+    var files = settingsFiles();
+    renderSkewBanner();
+    renderDisposition('dispatch');
+    renderDisposition('startup');
+    renderDisposition('messaging');
+    renderDisposition('statusline');
+    renderDisposition('factory');
+    renderDispatchPanel(files.dispatch);
+    renderStartupPanel(files.startup);
+    renderRawEditor('messaging', files.messaging);
+    renderStatuslinePanel(files.statusline);
+    renderFactoryPanel(files.factory);
+    renderUnmanagedPanel(files);
+    // Success notices are per-save and do not survive a re-read. Error notices deliberately DO: they
+    // stay until the operator dismisses them or starts another save of that same panel.
+    SETTINGS_WRITABLE.forEach(function (file) { hide('set-' + file + '-ok'); refreshSettingsPanel(file); });
+  }
+
+  // renderDisposition prints the server's own words about a file: why the console may or may not
+  // change it, and when a change lands. Nothing here restates them — a second copy of a disposition
+  // is a second thing that has to be kept true.
+  function renderDisposition(file) {
+    var view = settingsFiles()[file] || {};
+    var reason = byId('set-reason-' + file);
+    if (reason) { reason.textContent = view.reason || ''; }
+    var when = byId('set-when-' + file);
+    if (!when) { return; }
+    // doc===null means two different things: for a RAW row the file is absent from disk, for a
+    // projected or excluded row the tier serves no document at all. Branch on tier, never on doc.
+    // Only a panel with a save path can promise not to invent a document; on a read-only row the
+    // sentence would be describing a choice the console never had.
+    var absent = view.tier === 'raw' && !view.doc && view.writable;
+    when.textContent = 'Takes effect: ' + (view.effective_when || 'unknown')
+      + (absent ? ' · this file does not exist yet, and the console will not invent one — nothing is written until you enter a document.' : '');
+  }
+
+  function renderDispatchPanel(view) {
+    view = view || {};
+    var doc = view.doc || null;
+    var trigger = byId('set-trigger');
+    if (trigger) { trigger.value = (doc && doc.trigger_label) || ''; }
+
+    SettingsViewModel.rows = [];
+    var host = byId('mapRows');
+    if (host) {
+      host.innerHTML = '';
+      ((doc && doc.mappings) || []).forEach(function (m) { host.appendChild(settingsMapRow(m)); });
+    }
+    renderRawEditor('dispatch', view);
+  }
+
+  // settingsMapRow builds one route row and — the point of the whole exercise — keeps the raw mapping
+  // object it was read with as `base`. Every collect starts from a fresh copy of that, so `source`,
+  // any label past the first, and every key this console has never heard of ride through. A row added
+  // by "+ Add route" has a base of {} for the same reason.
+  //
+  // `base` is never written to. The row is the file half of this view in miniature, and the file half
+  // learned the hard way (see settingsPayload) that an accumulator behind a preview that runs on every
+  // keystroke will keep values the operator has already taken back off the screen.
   function settingsMapRow(mapping) {
+    var raw = mapping || {};
     var row = el('div', 'map-row');
-    var labelVal = mapping ? (mapping.label || (mapping.labels && mapping.labels[0]) || '') : '';
+    var desc = { node: row, base: raw, removed: false };
+    var labels = raw.labels || (raw.label ? [raw.label] : []);
 
     var input = el('input', 'field');
-    input.setAttribute('aria-label', 'Label');
+    input.setAttribute('aria-label', 'Labels');
     input.setAttribute('data-role', 'label');
-    input.value = labelVal;
+    input.placeholder = 'label, another-label';
+    input.value = labels.join(', ');
     row.appendChild(input);
 
     row.appendChild(el('span', 'ar', '→'));
@@ -834,41 +993,716 @@
     var sel = el('select', 'field');
     sel.setAttribute('aria-label', 'Agent');
     sel.setAttribute('data-role', 'agent');
+    if (!raw.agent) {
+      var o0 = el('option', null, '— choose an agent —'); o0.value = ''; o0.selected = true;
+      sel.appendChild(o0);
+    }
     SettingsViewModel.agents.forEach(function (a) {
       var o = el('option', null, a.name); o.value = a.name;
-      if (mapping && mapping.agent === a.name) o.selected = true;
+      if (raw.agent === a.name) o.selected = true;
       sel.appendChild(o);
     });
     // if the mapping references an agent no longer in agents.json, keep it visible (don't silently drop).
-    if (mapping && mapping.agent && !SettingsViewModel.agents.some(function (a) { return a.name === mapping.agent; })) {
-      var o2 = el('option', null, mapping.agent + ' (unknown)'); o2.value = mapping.agent; o2.selected = true;
+    if (raw.agent && !SettingsViewModel.agents.some(function (a) { return a.name === raw.agent; })) {
+      var o2 = el('option', null, raw.agent + ' (unknown)'); o2.value = raw.agent; o2.selected = true;
       sel.appendChild(o2);
     }
     row.appendChild(sel);
 
+    // The per-row model pin, fed by the payload's `profiles` projection — profile NAMES only, because
+    // every profile BODY in models.json is a map of gateway credentials and never leaves the server.
+    // Blank means the agent's own model, matching DispatchMapping.Model's own semantics.
+    var msel = el('select', 'field');
+    msel.setAttribute('aria-label', 'Model profile');
+    msel.setAttribute('data-role', 'model');
+    var none = el('option', null, 'agent default'); none.value = '';
+    msel.appendChild(none);
+    SettingsViewModel.profiles.forEach(function (p) {
+      var o = el('option', null, p); o.value = p;
+      if (raw.model === p) o.selected = true;
+      msel.appendChild(o);
+    });
+    // Same house norm as the unknown agent above: a pin naming a profile models.json no longer lists
+    // stays visible rather than being silently unpinned.
+    if (raw.model && SettingsViewModel.profiles.indexOf(raw.model) < 0) {
+      var o3 = el('option', null, raw.model + ' (unknown)'); o3.value = raw.model; o3.selected = true;
+      msel.appendChild(o3);
+    }
+    row.appendChild(msel);
+
     var rm = el('button', 'rm', '×');
     rm.type = 'button';
     rm.setAttribute('aria-label', 'Remove route');
-    rm.addEventListener('click', function () { row.remove(); });
+    rm.addEventListener('click', function () {
+      desc.removed = true;
+      row.remove();
+      refreshSettingsPanel('dispatch');
+    });
     row.appendChild(rm);
 
+    SettingsViewModel.rows.push(desc);
     return row;
   }
-  function collectMappings() {
+
+  // collectMappings merges each row's controls onto a fresh copy of the RAW ROW OBJECT the document
+  // was read with. Nothing here constructs a mapping, which is why `source` and every key af grows
+  // after this console shipped survive: no line of this function has ever heard of them.
+  //
+  // It is pure, for the same reason settingsPayload is: the diff calls it on every keystroke, so a
+  // version that wrote back onto the row would keep values the operator had already taken off the
+  // screen — add a route, type a label, delete it, and the panel would go on PUTting a row that is
+  // visible nowhere.
+  //
+  // `seed` is the mappings array the Advanced editor currently holds, if any. `source` has no curated
+  // control, so that box is its only editor; merging onto the seed at the same position is what keeps
+  // a `source` typed there from being dropped the moment a model pin is touched on that row.
+  //
+  // The labels/label duality is the sharp edge. af-core rejects a mapping carrying BOTH as ambiguous
+  // (internal/config/dispatch.go:170-172), so writing `labels` must delete a lone `label` — and a row
+  // the operator did not touch keeps whichever form it arrived in, so an untouched document is not
+  // rewritten just by being looked at.
+  // The fields a route ROW owns: the labels box, the agent picker and the model picker. Everything
+  // else in a mapping — `source` today, whatever af adds after this console shipped — has no control,
+  // so the Advanced editor is its only editor.
+  function mappingRoleFields(m) {
+    return JSON.stringify([m.labels || (m.label ? [m.label] : []), m.agent, m.model]);
+  }
+
+  // firstReroutedIndex answers "does position i in the Advanced text still mean the same route as row
+  // i above?", and returns the first position where it does not (-1 when they all do).
+  //
+  // Equal lengths are not enough. Swap two routes in the text and every count still matches, but row
+  // 1's labels would be merged onto route 2's `source`. Comparing only the fields the rows own keeps
+  // editing `source` there a merge, and makes reordering — or retyping a label there while also
+  // editing a row — the disagreement it actually is.
+  function firstReroutedIndex(raw, was) {
+    for (var i = 0; i < was.length; i++) {
+      if (mappingRoleFields(raw[i] || {}) !== mappingRoleFields(was[i])) { return i; }
+    }
+    return -1;
+  }
+
+  function collectMappings(seed) {
     var out = [];
-    document.querySelectorAll('#mapRows .map-row').forEach(function (row) {
-      var label = (row.querySelector('[data-role="label"]').value || '').trim();
-      var agentSel = row.querySelector('[data-role="agent"]');
-      var agent = agentSel ? agentSel.value : '';
-      if (!label || !agent) return;
-      out.push({ labels: [label], agent: agent }); // emit the `labels` form (af normalizes either way)
+    SettingsViewModel.rows.forEach(function (desc, i) {
+      if (desc.removed) { return; }
+      var from = (seed && isPlainObject(seed[i])) ? seed[i] : desc.base;
+      var row = cloneDoc(from);
+      var labels = splitList(readRole(desc.node, 'label'));
+      var agent = readRole(desc.node, 'agent');
+      var model = readRole(desc.node, 'model');
+      // A row added and never filled in is not an edit. Anything else — including a row the operator
+      // deliberately blanked — goes to af and comes back as a 422, rather than vanishing quietly.
+      if (!labels.length && agent === '' && isEmptyObject(row)) { return; }
+      var was = row.labels || (row.label ? [row.label] : []);
+      if (!sameJSON(labels, was)) {
+        row.labels = labels;
+        delete row.label;
+      }
+      // A route that arrived WITHOUT an agent key must not grow one just by being looked at — that is
+      // the same harm as dropping a key, from the other direction. But a route the operator blanked
+      // keeps its now-empty key and goes to af for the 422, rather than quietly losing the agent.
+      setMember(row, 'agent', agent, agent !== '' || hasMember(row, 'agent'));
+      setMember(row, 'model', model, model !== '');
+      out.push(row);
     });
     return out;
   }
-  function shallowCopy(o) {
-    var out = {}; o = o || {};
-    for (var k in o) { if (Object.prototype.hasOwnProperty.call(o, k)) out[k] = o[k]; }
+
+  function renderStartupPanel(view) {
+    view = view || {};
+    var doc = view.doc || null;
+
+    var sd = byId('set-startdispatch');
+    if (sd) { sd.checked = !!(doc && doc.start_dispatch); }
+
+    // The agents sentinel is three-valued and is read back as three: absent or null means ALL, an
+    // empty array means none, a non-empty array is a list (internal/config/startup.go:106).
+    var agents = doc ? doc.agents : undefined;
+    var mode = 'all';
+    if (agents && agents.length) { mode = 'list'; }
+    else if (agents) { mode = 'none'; }
+    setRadio('set-startup-agents-mode', mode);
+    var names = byId('set-startup-agents');
+    if (names) { names.value = (agents && agents.length) ? agents.join(', ') : ''; }
+
+    STARTUP_GATES.forEach(function (g) {
+      var sel = byId('set-gate-' + g);
+      if (sel) { selectWithUnknown(sel, (doc && typeof doc[g] === 'string') ? doc[g] : ''); }
+    });
+
+    renderRawEditor('startup', view);
+  }
+
+  // The names box only means anything in "Just these" mode. Left live in the other two it would
+  // accept a list the save then silently discards — a small instance of exactly the harm this view
+  // exists to remove, so the control says so instead of the operator finding out later.
+  function syncStartupControls() {
+    var names = byId('set-startup-agents');
+    if (names) { names.disabled = getRadio('set-startup-agents-mode', 'all') !== 'list'; }
+  }
+
+  function renderStatuslinePanel(view) {
+    view = view || {};
+    var doc = view.doc || null;
+    renderStatuslineElements(doc);
+    // `color` is a *bool where ABSENT means ON, and af-core deliberately never fills it in
+    // (internal/config/statusline.go:25-40). A plain two-state checkbox would write a value the
+    // operator never typed into a document that had no such key — the same harm as dropping one they
+    // did type, one file over. So it gets the same three-way control the agents sentinel gets.
+    var color = doc ? doc.color : undefined;
+    setRadio('set-statusline-color', color === true ? 'on' : (color === false ? 'off' : 'default'));
+    renderRawEditor('statusline', view);
+  }
+
+  function renderStatuslineElements(doc) {
+    var host = byId('set-statusline-elements');
+    if (!host) { return; }
+    host.innerHTML = '';
+    var chosen = (doc && doc.elements) || [];
+    var order = [], seen = {};
+    // The document's own order first, so enabling a ninth element never reorders the operator's eight.
+    chosen.forEach(function (n) { if (!seen[n]) { seen[n] = true; order.push(n); } });
+    STATUSLINE_ELEMENTS.forEach(function (n) { if (!seen[n]) { seen[n] = true; order.push(n); } });
+    var group = el('div', 'radios');
+    order.forEach(function (name) {
+      var lab = el('label');
+      var cb = el('input');
+      cb.type = 'checkbox';
+      cb.value = name;
+      cb.setAttribute('data-role', 'sl-element');
+      cb.checked = chosen.indexOf(name) >= 0;
+      lab.appendChild(cb);
+      var unknown = STATUSLINE_ELEMENTS.indexOf(name) < 0 ? ' (unknown)' : '';
+      lab.appendChild(document.createTextNode(' ' + name + unknown));
+      group.appendChild(lab);
+    });
+    host.appendChild(group);
+  }
+
+  function collectStatuslineElements() {
+    var out = [];
+    document.querySelectorAll('#set-statusline-elements [data-role="sl-element"]').forEach(function (cb) {
+      if (cb.checked) { out.push(cb.value); }
+    });
     return out;
+  }
+
+  function renderFactoryPanel(view) {
+    view = view || {};
+    var pre = byId('set-factory');
+    if (!pre) { return; }
+    pre.textContent = view.doc ? JSON.stringify(view.doc, null, 2)
+      : 'factory.json is not present at this factory root.';
+  }
+
+  function renderUnmanagedPanel(files) {
+    var host = byId('set-unmanaged');
+    if (!host) { return; }
+    host.innerHTML = '';
+    UNMANAGED_FILES.forEach(function (file) {
+      var view = files[file];
+      if (!view) { return; }
+      var item = el('div', 'set-unmanaged-item');
+      item.appendChild(el('p', 'set-file', file.indexOf('.') >= 0 ? file : file + '.json'));
+      item.appendChild(el('p', 'muted', view.reason || ''));
+      var facts = el('div', 'facts');
+      facts.appendChild(settingsFactRow('Managed by', UNMANAGED_CLI[file] || 'not managed by af'));
+      facts.appendChild(settingsFactRow('Takes effect', view.effective_when || 'unknown'));
+      item.appendChild(facts);
+      host.appendChild(item);
+    });
+  }
+
+  function settingsFactRow(k, v) {
+    var row = el('div', 'fact');
+    row.appendChild(el('span', 'fk', k));
+    row.appendChild(el('span', 'fv', v));
+    return row;
+  }
+
+  // renderRawEditor fills a panel's Advanced textarea with the document as read. It is deliberately
+  // BLANK for a file that does not exist: an empty box is how the console says "af never wrote this",
+  // and a pretty-printed {} would be the console inventing a document — which is precisely what the
+  // deleted defaultStartup() did, and why a save then materialized defaults nobody chose.
+  function renderRawEditor(file, view) {
+    var box = byId('set-adv-' + file);
+    if (!box) { return; }
+    var doc = (view && view.doc) || null;
+    box.value = doc ? JSON.stringify(doc, null, 2) : '';
+  }
+
+  // ---- the settings skew banner ----
+  //
+  // This reports what the console can honestly know about version skew, and nothing more. The design's
+  // intent is to compare `schema_fingerprint` — the running af's own config-schema digest — against
+  // the fixtures this console was BUILT against. That baseline does not exist: nothing in web/ embeds
+  // af-core's congruence fixtures or a hash of them (they are reached only at test time, through a
+  // repo-relative walk-up, which no shipped binary can do). Rather than invent one, this renders the
+  // two skew facts that ARE real today: af could not report a fingerprint at all, and the fingerprint
+  // changed between two reads. Adding a build-time baseline is an ADR-008 embed-plus-drift-test job on
+  // the Go side, not something the client can conjure.
+  //
+  // The remembered fingerprint lives in sessionStorage — per tab, gone when the tab closes. That is
+  // the right lifetime for "af changed under you", and it is the only browser storage this view uses.
+  var SETTINGS_SKEW_KEY = 'af-settings-schema-fingerprint';
+
+  function renderSkewBanner() {
+    var host = byId('set-banner');
+    if (!host) { return; }
+    host.innerHTML = '';
+    var seen = (SettingsViewModel.data || {}).schema_fingerprint;
+    if (seen === undefined) { return; }
+    if (seen === '') {
+      telLine(host,
+        'This factory’s af did not report a config-schema fingerprint, so the console cannot check whether the two agree on what these documents look like.',
+        'Settings still load and save — af remains the validator either way. If `af config fingerprint --json` is unavailable, upgrade af.',
+        'unknown');
+      return;
+    }
+    // The remembered value is advanced on EVERY read, so the banner reports the read at which af
+    // changed and then stops. Remembering only the first read instead would leave the sentence below
+    // on screen for the rest of the tab's life, still claiming a change that has long since been
+    // taken in — a warning that cannot be cleared is one an operator learns to scroll past.
+    var previous = settingsSkewBaseline();
+    rememberSettingsSkewBaseline(seen);
+    if (previous && previous !== seen) {
+      telLine(host,
+        'The af binary’s config schema fingerprint changed between this read and the last one — the af serving this console is not the af it was.',
+        'Anything you had typed was written against the older schema. Check it against the panels above before saving.',
+        'unknown');
+    }
+  }
+
+  function settingsSkewBaseline() {
+    try { return window.sessionStorage.getItem(SETTINGS_SKEW_KEY) || ''; } catch (e) { return ''; }
+  }
+  function rememberSettingsSkewBaseline(v) {
+    try { window.sessionStorage.setItem(SETTINGS_SKEW_KEY, v); } catch (e) { /* no sessionStorage — the comparison simply cannot be made */ }
+  }
+
+  // ---- building the payload ----
+  //
+  // settingsPayload returns the EXACT object one panel will PUT. It throws when the Advanced editor
+  // does not parse, and returns null when there is nothing to write at all (an absent file nobody
+  // has authored).
+  //
+  // It is a PURE FUNCTION OF THE CURRENT CONTROL STATE, rebuilt from the document as read on every
+  // call — it accumulates nothing. That is not tidiness. The diff runs this on every keystroke, and
+  // an accumulating version leaves the last value it wrote behind: type "b" over "a", change your
+  // mind, type "a" again, and the control now agrees with the file while the document still holds
+  // "b" — a save that writes a value the operator can no longer see anywhere on screen.
+  //
+  // Starting from the document as read is also what carries the unknown keys: the payload BEGINS as
+  // a copy of exactly what the server sent, and the controls only overwrite the members they own.
+  //
+  // The diff preview calls this too, deliberately. One function builds the payload, so the preview
+  // cannot describe a document the save will not send — the two-sources drift that a separately
+  // derived preview would reintroduce.
+  function settingsPayload(file) {
+    var view = settingsFiles()[file] || {};
+    var box = byId('set-adv-' + file);
+    var text = box ? (box.value || '').trim() : '';
+    // The Advanced editor holds the WHOLE document (renderRawEditor puts it there), so when it has
+    // content it is the document. An empty box is not an instruction to delete anything — it is the
+    // absence of one — so the document as read stands, and for a file af never wrote that is {}.
+    var doc;
+    try { doc = text !== '' ? JSON.parse(text) : settingsBaseline(file); }
+    catch (e) {
+      throw new Error('The raw JSON in this panel is not valid JSON: ' + String((e && e.message) || e));
+    }
+
+    var base = settingsBaseline(file);
+    if (file === 'dispatch') { applyDispatchControls(doc, base); }
+    else if (file === 'startup') { applyStartupControls(doc, base); }
+    else if (file === 'statusline') { applyStatuslineControls(doc, base); }
+    // messaging has no curated control in v1 — its raw editor IS the panel.
+
+    // null means "there is nothing here to write", which is only true of a file af has never written
+    // and that the operator has not authored. An EXISTING document emptied to `{}` is an edit — and a
+    // legal one — so it goes to af. Refusing it here would be the console deciding which documents af
+    // is allowed to store, on top of a message ("this file does not exist") that would be false.
+    if (view.doc == null && text === '' && isEmptyObject(doc)) { return null; }
+    return doc;
+  }
+
+  // settingsBaseline is the document AS READ, parsed fresh on every call so no caller can hand a
+  // mutated copy to the next one. It is the same snapshot the diff is computed against.
+  //
+  // The curated controls compare themselves to it to decide whether they have anything to say, which
+  // is what makes "the operator did not touch this control" and "this control has no opinion" the
+  // same thing. Without that, a control would assert its rendered value over the Advanced editor on
+  // every save, and typing a key into the raw JSON box would be undone by a control nobody touched.
+  function settingsBaseline(file) {
+    var text = SettingsViewModel.baselines[file];
+    if (text === undefined) { return {}; }
+    var doc = JSON.parse(text);
+    return isPlainObject(doc) ? doc : {};
+  }
+
+  // Every apply* below follows one rule: a control that still reads what it was RENDERED with says
+  // nothing. Only a control the operator actually moved writes to the document.
+  function applyDispatchControls(doc, base) {
+    var trigger = byId('set-trigger');
+    var t = trigger ? (trigger.value || '').trim() : '';
+    if (t !== (base.trigger_label || '')) { setMember(doc, 'trigger_label', t, t !== ''); }
+
+    // Two editors over one array. `source` has no curated control, so the raw box is its only editor
+    // and its row-level edits must survive — but the route rows and the raw text can also disagree
+    // about WHICH routes exist, and then no merge is defined. The three cases, and the one refusal:
+    //
+    //   only the raw box changed the list  → the rows have no opinion; the raw text stands
+    //   only the rows changed              → the rows win, as the panel copy says
+    //   both changed, same routes in the
+    //   same order                         → merge row-wise by position (this is what carries `source`)
+    //   both changed, and the text no
+    //   longer lines up with the rows      → REFUSE. Seeding by position here does not merge, it
+    //                                        transplants: one route's `source` lands on another
+    //                                        route's labels — a legal document af accepts, so the
+    //                                        damage reaches disk. Refusing is the only answer that
+    //                                        does not require guessing.
+    var was = base.mappings || [];
+    var raw = Array.isArray(doc.mappings) ? doc.mappings : null;
+    var rawChanged = raw !== null && !sameJSON(raw, was);
+    var live = SettingsViewModel.rows.filter(function (d) { return !d.removed; }).length;
+    var counted = rawChanged && raw.length === was.length && live === was.length;
+    var off = counted ? firstReroutedIndex(raw, was) : -1;
+    var aligned = counted && off < 0;
+
+    var maps = collectMappings(aligned ? raw : null);
+    if (sameJSON(maps, was)) { return; }
+    // Two editors that arrived at the same array are not in disagreement, whatever route they took.
+    // Deleting a route with × AND deleting it in the text is the common shape, and refusing it would
+    // be the console insisting there is a conflict the operator can plainly see there is not.
+    if (rawChanged && !aligned && !sameJSON(maps, raw)) {
+      // Every refusal names the cheap way out. Emptying the box makes `settingsPayload` fall back to
+      // the document as read, so the raw edits go and the row edits stay — without it the only exit
+      // is Reload, which discards every panel's work.
+      throw new Error((counted
+        ? 'The raw JSON below changes a label, agent or model — the fields the route rows above own —'
+          + ' so route ' + (off + 1) + ' in the text is no longer the same route as row ' + (off + 1)
+          + ' above. Nothing was sent, because pairing them up would write one route\'s settings onto'
+          + ' another. Change labels, agents and models in the rows above, and use the JSON for the'
+          + ' keys they do not cover.'
+        : 'The route rows and the raw JSON below have both changed which routes exist (' + live
+          + ' in the rows, ' + raw.length + ' in the JSON, ' + was.length + ' on disk), so a route in'
+          + ' the text can no longer be matched to the row it belongs to. Nothing was sent, because'
+          + ' saving would have to guess. Change routes in one of the two places at a time.')
+        + ' Emptying the JSON box restores the document as af wrote it and keeps your row edits.');
+    }
+    doc.mappings = maps;
+  }
+
+  function applyStartupControls(doc, base) {
+    // The sentinel is compared as the THREE-VALUED thing it is: undefined (⇒ ALL), [] (⇒ none), or a
+    // list. Rendering `null` as ALL and then writing back "absent" would edit a byte nobody asked
+    // about, so an untouched control compares equal to null too and leaves it exactly as it was.
+    var mode = getRadio('set-startup-agents-mode', 'all');
+    var names = byId('set-startup-agents');
+    var want = mode === 'none' ? [] : (mode === 'list' ? splitList(names ? names.value : '') : undefined);
+    var had = (base.agents && base.agents.length) ? base.agents : (base.agents ? [] : undefined);
+    // "Just these:" with nothing typed yet is an unfinished thought, not the None sentinel. Writing
+    // `[]` here would silently start no agents at all under a radio that says "Just these".
+    if (mode === 'list' && !want.length) { want = had; }
+    if (!sameJSON(want, had)) {
+      if (want === undefined) { dropUnlessExplicitNull(doc, 'agents'); }
+      else { doc.agents = want; }
+    }
+
+    var sd = byId('set-startdispatch');
+    var on = !!(sd && sd.checked);
+    if (on !== !!base.start_dispatch) { setMember(doc, 'start_dispatch', on, on); }
+
+    STARTUP_GATES.forEach(function (g) {
+      var sel = byId('set-gate-' + g);
+      var v = sel ? sel.value : '';
+      if (v !== (typeof base[g] === 'string' ? base[g] : '')) { setMember(doc, g, v, v !== ''); }
+    });
+  }
+
+  function applyStatuslineControls(doc, base) {
+    var elems = collectStatuslineElements();
+    // An operator who unchecks everything means "show nothing", which is `[]`. Removing the key
+    // instead would hand the statusline back its defaults — the opposite of what they just said.
+    if (!sameJSON(elems, base.elements || [])) { doc.elements = elems; }
+
+    var mode = getRadio('set-statusline-color', 'default');
+    var want = mode === 'on' ? true : (mode === 'off' ? false : undefined);
+    var had = base.color === true ? true : (base.color === false ? false : undefined);
+    if (!sameJSON(want, had)) {
+      if (want === undefined) { dropUnlessExplicitNull(doc, 'color'); }
+      else { doc.color = want; }
+    }
+  }
+
+  // ---- the pre-save diff ----
+  //
+  // settingsDiff names the keys a save would change, computed from the SAME object settingsPayload
+  // hands to PUT and from the snapshot taken before any control could touch it.
+  //
+  // It returns either an ARRAY of key names or a STRING saying why no save is possible right now,
+  // because those are the only two things the panel ever has to report — and the string is the
+  // payload builder's own sentence, so the panel cannot describe the problem differently from the
+  // save that refused for it.
+  function settingsDiff(file) {
+    var payload;
+    try { payload = settingsPayload(file); }
+    catch (e) { return String((e && e.message) || e); }
+    var text = SettingsViewModel.baselines[file];
+    return diffKeys(text === undefined ? null : JSON.parse(text), payload);
+  }
+
+  // diffKeys names changes at the granularity an operator reasons at: a top-level key, or a member of
+  // one array element ("mappings[2].model").
+  function diffKeys(a, b) {
+    var out = [], seen = {}, k;
+    a = a || {};
+    b = b || {};
+    for (k in a) {
+      if (!Object.prototype.hasOwnProperty.call(a, k)) { continue; }
+      seen[k] = true;
+      if (!Object.prototype.hasOwnProperty.call(b, k)) { out.push(k + ' (removed)'); }
+      else if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) { out = out.concat(diffElements(k, a[k], b[k])); }
+    }
+    for (k in b) {
+      if (Object.prototype.hasOwnProperty.call(b, k) && !seen[k]) { out.push(k + ' (added)'); }
+    }
+    return out;
+  }
+
+  function diffElements(key, a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) { return [key]; }
+    var out = [];
+    for (var i = 0; i < a.length; i++) {
+      if (JSON.stringify(a[i]) === JSON.stringify(b[i])) { continue; }
+      if (!isPlainObject(a[i]) || !isPlainObject(b[i])) { out.push(key + '[' + i + ']'); continue; }
+      var sub = diffKeys(a[i], b[i]);
+      if (!sub.length) { out.push(key + '[' + i + ']'); continue; }
+      out = out.concat(sub.map(function (s) { return key + '[' + i + '].' + s; }));
+    }
+    return out.length ? out : [key];
+  }
+
+  // refreshSettingsPanel recomputes one panel's diff and, from it, whether there is anything to save.
+  // Dirty-state and the preview are the same computation, so a panel can never offer to save nothing,
+  // nor refuse to save something.
+  function refreshSettingsPanel(file) {
+    var view = settingsFiles()[file] || {};
+    if (file === 'startup') { syncStartupControls(); }
+    disarmSettingsReload();
+    var diff = settingsDiff(file);
+    var blocked = typeof diff === 'string';
+    var host = byId('set-diff-' + file);
+    if (host) {
+      host.innerHTML = '';
+      if (blocked) {
+        host.appendChild(el('p', 'tel-unknown', diff));
+      } else if (!diff.length) {
+        host.appendChild(el('p', 'tel-empty', 'No unsaved changes.'));
+      } else {
+        host.appendChild(el('p', 'set-diff-keys', 'Will change: ' + diff.join(', ')));
+      }
+    }
+    var btn = byId('set-save-' + file);
+    if (btn) { btn.disabled = !view.writable || blocked || !diff.length; }
+  }
+
+  // ---- the save ----
+  //
+  // saveSettingsFile writes EXACTLY ONE config file. That is the whole of AC-5. The chained save this
+  // replaced PUT dispatch and then, in an unconditional .then, PUT startup — so a rejected first write
+  // did not stop the second. The fix is not a guard on the second write; it is that this function has
+  // no second write for a guard to protect, so no later edit can invert a branch and bring the defect
+  // back.
+  //
+  // The re-read lives inside the ok arm, so af's normalization (a lone label coming back as labels;
+  // recovery defaults materialized on first save) is reflected only when something was actually
+  // written. writeReq has already resolved its one 401 retry by the time this sees `env`, so a token
+  // prompt cannot read as a failed save.
+  function saveSettingsFile(file) {
+    var self = SettingsViewModel;
+    if (!self.data) { return Promise.resolve(); }
+    hide('set-' + file + '-ok');
+    dismissSettingsError(file);
+
+    var payload;
+    // settingsPayload's own sentence is shown verbatim: it is the same string the panel's preview is
+    // already displaying, so the refusal cannot be described one way above the button and another below.
+    try { payload = settingsPayload(file); }
+    catch (e) {
+      showSettingsError(file, String((e && e.message) || e) + ' Nothing was sent.');
+      return Promise.resolve();
+    }
+    if (payload === null) {
+      showSettingsError(file, 'Nothing to save: this file does not exist and no document has been entered for it.');
+      return Promise.resolve();
+    }
+
+    var btn = byId('set-save-' + file);
+    var label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+
+    // The precondition is the fingerprint THIS panel read. A file with no document on disk carries no
+    // fingerprint, and an unparseable precondition is a 400 — so send no header at all rather than an
+    // empty or invented one.
+    var extra = {};
+    var fp = (settingsFiles()[file] || {}).fingerprint;
+    if (fp) { extra['X-AF-If-Content-Hash'] = fp; }
+
+    return API.put('/api/settings/' + file, payload, extra).then(function (env) {
+      if (env && env.ok) {
+        return self.load().then(function () { show('set-' + file + '-ok'); });
+      }
+      showSettingsError(file, settingsFailureCopy(file, env));
+      return null;
+    }).catch(function (e) {
+      showSettingsError(file, String(e));
+      return null;
+    }).then(function () {
+      if (btn) { btn.disabled = false; btn.textContent = label; }
+      refreshSettingsPanel(file);
+    });
+  }
+
+  // settingsFailureCopy turns one refused write into a sentence the operator can act on. The arms are
+  // distinguishable ONLY through _status: 400, 409, 422 and 502 all arrive as {ok:false, message}.
+  // 409 is the odd one out — it is not a rejection of the document at all. Nothing was written, and
+  // the edit is still valid; it was just based on a read that has since gone stale.
+  function settingsFailureCopy(file, env) {
+    var msg = (env && env.message) || (file + '.json could not be saved');
+    var status = env ? env._status : 0;
+    if (status === 409) {
+      return msg + ' — nothing was written. Reload the settings, re-apply this edit, and save again.';
+    }
+    if (status === 502) { return 'af could not run, so nothing was written: ' + msg; }
+    return msg;
+  }
+
+  // A failed save stays on screen until the operator dismisses it or starts another save of the same
+  // panel. A notice that clears itself is a notice the operator can miss.
+  function showSettingsError(file, msg) {
+    showValidation('set-' + file + '-err', msg);
+    show('set-dismiss-' + file);
+  }
+  function dismissSettingsError(file) {
+    hide('set-' + file + '-err');
+    hide('set-dismiss-' + file);
+  }
+
+  // reloadSettings re-reads every panel, which throws away whatever is unsaved in all four of them. It
+  // names them and asks again rather than doing it on the first click: the panels already compute a
+  // live dirty state, so the console knows exactly what it is about to discard and can say so.
+  function reloadSettings() {
+    var btn = byId('set-reload');
+    // A refusal counts as dirty: settingsDiff answers with a reason STRING there, and a panel the
+    // operator cannot save yet is exactly the one whose work a reload would throw away.
+    var dirty = SETTINGS_WRITABLE.filter(function (f) {
+      return settingsDiff(f).length > 0;
+    });
+    if (dirty.length && btn && btn.getAttribute('data-armed') !== '1') {
+      btn.setAttribute('data-armed', '1');
+      btn.textContent = 'Discard unsaved edits in ' + dirty.join(', ') + '? Click again';
+      return Promise.resolve();
+    }
+    disarmSettingsReload();
+    return SettingsViewModel.load();
+  }
+  function disarmSettingsReload() {
+    var btn = byId('set-reload');
+    if (btn && btn.getAttribute('data-armed') === '1') {
+      btn.removeAttribute('data-armed');
+      btn.textContent = 'Reload settings';
+    }
+  }
+
+  // wireSettingsPanels binds each panel's own Save and Dismiss and recomputes that panel's diff on
+  // every edit. One button, one noun: there is no wiring here through which two files could be asked
+  // for at once.
+  function wireSettingsPanels() {
+    SETTINGS_WRITABLE.forEach(function (file) {
+      var btn = byId('set-save-' + file);
+      if (btn) { btn.addEventListener('click', function () { SettingsViewModel.save(file); }); }
+      var dis = byId('set-dismiss-' + file);
+      if (dis) { dis.addEventListener('click', function () { dismissSettingsError(file); }); }
+      var panel = byId('set-panel-' + file);
+      if (panel) {
+        panel.addEventListener('input', function () { refreshSettingsPanel(file); });
+        panel.addEventListener('change', function () { refreshSettingsPanel(file); });
+      }
+    });
+  }
+
+  // ---- small settings helpers ----
+
+  function readRole(node, role) {
+    var e = node.querySelector('[data-role="' + role + '"]');
+    return e ? (e.value || '').trim() : '';
+  }
+  function splitList(s) {
+    return String(s || '').split(',').map(function (p) { return p.trim(); }).filter(Boolean);
+  }
+  function hasMember(o, key) {
+    return Object.prototype.hasOwnProperty.call(o, key);
+  }
+  function isEmptyObject(o) {
+    for (var k in o) { if (Object.prototype.hasOwnProperty.call(o, k)) { return false; } }
+    return true;
+  }
+  function isPlainObject(v) {
+    return v !== null && typeof v === 'object' && !Array.isArray(v);
+  }
+  // sameJSON compares two values the way the diff does, so "this control has nothing to say" and
+  // "this key is absent from the diff" can never disagree. undefined vs [] stays a difference, which
+  // is the whole point for the two three-valued sentinels.
+  function sameJSON(a, b) {
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
+  // cloneDoc copies a document (or one row of one) through JSON, the same encoding it arrived in and
+  // will leave in. Every key survives, including the ones this console has never heard of — which is
+  // the property, and is why the copy is structural rather than a list of members.
+  function cloneDoc(o) {
+    return JSON.parse(JSON.stringify(o));
+  }
+  // setMember writes a member the panel owns, or REMOVES it when the control says "not set". Writing a
+  // key the operator never typed is the same class of harm as dropping one they did.
+  function setMember(doc, key, value, present) {
+    if (present) { doc[key] = value; }
+    else { dropMember(doc, key); }
+  }
+  function dropMember(doc, key) {
+    if (hasMember(doc, key)) { delete doc[key]; }
+  }
+  // dropUnlessExplicitNull backs off from a document that already says null. To af, null and absent
+  // mean the same thing for both three-valued sentinels, so rewriting one as the other would be the
+  // console editing a byte nobody asked it to.
+  function dropUnlessExplicitNull(doc, key) {
+    if (hasMember(doc, key) && doc[key] === null) { return; }
+    dropMember(doc, key);
+  }
+  function setRadio(name, value) {
+    document.querySelectorAll('input[name="' + name + '"]').forEach(function (o) { o.checked = (o.value === value); });
+  }
+  function getRadio(name, fallback) {
+    var out = fallback;
+    document.querySelectorAll('input[name="' + name + '"]').forEach(function (o) { if (o.checked) { out = o.value; } });
+    return out;
+  }
+  // selectWithUnknown selects `cur`, keeping a value the enum does not list VISIBLE rather than
+  // letting the browser silently select nothing and the save then drop it.
+  function selectWithUnknown(sel, cur) {
+    sel.querySelectorAll('option[data-unknown]').forEach(function (o) { o.remove(); });
+    if (cur !== '' && !settingsHasOption(sel, cur)) {
+      var o = el('option', null, cur + ' (unknown)');
+      o.value = cur;
+      o.setAttribute('data-unknown', '1');
+      sel.appendChild(o);
+    }
+    sel.value = cur;
+  }
+  function settingsHasOption(sel, value) {
+    var opts = sel.querySelectorAll('option');
+    for (var i = 0; i < opts.length; i++) { if (opts[i].value === value) { return true; } }
+    return false;
   }
   function show(id) { var e = byId(id); if (e) e.hidden = false; }
   function hide(id) { var e = byId(id); if (e) e.hidden = true; }
@@ -982,6 +1816,7 @@
       if (!st.neutral) badge.appendChild(el('span', 'pip'));
       badge.appendChild(document.createTextNode(st.label));
       badgeHost.appendChild(badge);
+      appendHealthBadges(badgeHost, agent);
     }
 
     // Freshness strip — receipt-anchored. Stale ⇒ explicit warning; else "Ns ago".
@@ -1469,7 +2304,13 @@
       tr.appendChild(el('td', '', r.agent));
       tr.appendChild(el('td', '', r.step));
       tr.appendChild(el('td', '', r.status));
-      tr.appendChild(el('td', '', r.status === 'open' ? formatMs(r.duration_ms) + ' so far' : formatMs(r.duration_ms)));
+      // INTERRUPTED is an OPEN row that the recovery funnel explained, not a closed one: the join
+      // says why the step stopped being worked on, it never records an end. So it carries
+      // elapsed-so-far exactly as 'open' does, and dropping the qualifier here would present a
+      // figure nothing measured as a recorded duration.
+      tr.appendChild(el('td', '', r.status === 'open' || r.status === 'INTERRUPTED'
+        ? formatMs(r.duration_ms) + ' so far'
+        : formatMs(r.duration_ms)));
       tr.appendChild(el('td', '', r.model === '' ? '—' : r.model));
 
       if (stepsDark) {
@@ -1837,7 +2678,6 @@
 
   // darkCard is the stopped-agent card variant: dimmed, name + "Stopped" badge + last-known formula,
   // and a View button ONLY — no Down/Reset menu, since a stopped agent has nothing to stop.
-  // The card() builder is left byte-untouched.
   function darkCard(a) {
     var li = el('li', 'sign s-idle dark');
     li.setAttribute('data-name', a.name);
@@ -1847,6 +2687,9 @@
     var badge = el('span', 'badge neutral');
     badge.appendChild(document.createTextNode('Stopped'));
     badges.appendChild(badge);
+    // A latched breaker outlives the session it halted, so a stopped card is exactly where an
+    // operator needs to see that this agent will not be recycled until `af recovery reset`.
+    appendHealthBadges(badges, a);
     li.appendChild(badges);
 
     li.appendChild(el('div', 'name', a.name));
@@ -1887,6 +2730,7 @@
       var g = el('span', 'badge gate'); g.appendChild(el('span', 'pip'));
       g.appendChild(document.createTextNode('Gate')); badges.appendChild(g);
     }
+    appendHealthBadges(badges, a);
     li.appendChild(badges);
 
     if (s.gate) li.appendChild(el('div', 'gate-line', 'Gate · your input needed'));
@@ -1979,7 +2823,10 @@
 
     var dr = byId('dispatch-refresh'); if (dr) dr.addEventListener('click', function () { DispatchViewModel.refresh(); toast('Dispatch refreshed'); });
     var sar = byId('set-add-row'); if (sar) sar.addEventListener('click', function () { SettingsViewModel.addRow(); });
-    var ssave = byId('set-save'); if (ssave) ssave.addEventListener('click', function () { SettingsViewModel.save(); });
+    var srl = byId('set-reload'); if (srl) srl.addEventListener('click', function () { reloadSettings(); });
+    // Each settings panel owns its own Save. There is deliberately no factory-wide settings save to
+    // bind here: one button that wrote four files is what made a partial write possible (AC-5).
+    wireSettingsPanels();
     var pf = byId('proto-fb-form'); if (pf) pf.addEventListener('submit', function (e) { e.preventDefault(); PrototypesViewModel.send(); });
     var amf = byId('agent-mail-form'); if (amf) amf.addEventListener('submit', function (e) { e.preventDefault(); AgentDetailViewModel.send(); });
     var aback = byId('agent-back'); if (aback) aback.addEventListener('click', function () { AppViewModel.goHome(); });

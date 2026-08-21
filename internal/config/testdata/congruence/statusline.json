@@ -1,0 +1,13 @@
+{
+  "elements": [
+    "model",
+    "dir",
+    "branch",
+    "diff",
+    "elapsed",
+    "context",
+    "session",
+    "daily"
+  ],
+  "color": true
+}

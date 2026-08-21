@@ -20,7 +20,7 @@ func TestWatchdog_BareConnectionErrorNoFalsePositive(t *testing.T) {
 		"go: could not connect to proxy: dial tcp 10.0.0.5:443: connect: connection refused",
 	}
 	for _, output := range outputs {
-		detected, pattern := detectErrorPattern(output)
+		detected, pattern, _ := detectErrorPattern(output)
 		if detected {
 			t.Errorf("benign local connection error must not trigger a respawn: %q -> %q", output, pattern)
 		}
@@ -61,6 +61,9 @@ func TestRespawn_ProfileSwitch_ClearsStaleRedirectVars(t *testing.T) {
 		"ANTHROPIC_DEFAULT_OPUS_MODEL=''",
 		"ANTHROPIC_DEFAULT_SONNET_MODEL=''",
 		"ANTHROPIC_DEFAULT_HAIKU_MODEL=''",
+		// Kept in step with internal/session/pr509_redirect_test.go's inline-emitter twin: the
+		// fable key joined the family for issue #598, and the respawn path emits it too.
+		"ANTHROPIC_DEFAULT_FABLE_MODEL=''",
 		"CLAUDE_CODE_SUBAGENT_MODEL=''",
 	} {
 		if !strings.Contains(cmd, want) {

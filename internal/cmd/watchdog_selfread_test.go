@@ -8,15 +8,27 @@ import (
 )
 
 // Issue #408 Phase 2: the watchdog process self-reads its scope from
-// startup.json.watchdog_agents (NOT the --agents/--agent flags), validates
-// membership against agents.json, and refuses to start (returns a non-nil error
-// so cobra exits non-zero) on an empty OR all-unknown scope, writing a
-// watchdog-namespaced breadcrumb to <root>/.runtime/watchdog_last_error first.
+// startup.json.watchdog_agents (NOT the --agents/--agent flags) and validates membership
+// against agents.json.
 //
-// These tests follow the package's hermetic seams: AF_ROOT + a t.TempDir()
-// factory (per TestWatchdogToleratesMissingCwd) for the runWatchdog refuse path,
-// and direct resolveWatchdogScope(root) calls for the positive scope assertions
-// so they never block on the ticker loop.
+// #596 Phase 3 SUPERSEDED the second half of that contract. The watchdog used to REFUSE
+// to start — returning a non-nil error so cobra exits non-zero — on an empty or
+// all-unknown scope. It no longer does: an empty pane scope is now an inert pane surface,
+// not a refusal, because the refusal left a factory whose startup.json omits
+// watchdog_agents with no recovery process running at all, which is precisely the incident
+// #596 exists to prevent (design-doc.md Decision 4, conflicts.md:61-80). What #408 actually
+// bounded — kill/respawn blast radius (.designs/408/security.md:13) — is preserved exactly,
+// because pollAgents fail-closes per agent on the scope map.
+//
+// The empty-scope and all-unknown cases are deliberately no longer symmetric: an omitted
+// key is a supported configuration and stays quiet, while names that do not exist in
+// agents.json remain an operator error and keep the loud warning plus the durable
+// breadcrumb. The start-in-recovery-only-mode assertions live in watchdog_phase3_test.go;
+// what remains here is scope RESOLUTION.
+//
+// These tests follow the package's hermetic seams: AF_ROOT + a t.TempDir() factory (per
+// TestWatchdogToleratesMissingCwd), and direct resolveWatchdogScope(root) calls for the
+// scope assertions so they never block on the ticker loop.
 
 // newTestFactoryRoot creates a t.TempDir() factory with .agentfactory/factory.json
 // so resolveWatchdogRoot() (via AF_ROOT) resolves it.
@@ -73,9 +85,18 @@ func TestWatchdog_SelfReadsStartupScope(t *testing.T) {
 	}
 }
 
-// AC-2: absent/empty watchdog_agents ⇒ runWatchdog returns a non-nil error and
-// writes a <root>/.runtime/watchdog_last_error breadcrumb.
-func TestWatchdog_RefusesWhenScopeEmpty(t *testing.T) {
+// AC-2, REVISED by #596 Phase 3. This test previously asserted that each of these four
+// empty-scope shapes made runWatchdog return a non-nil error and write a breadcrumb. The
+// refusal is gone, so what it pins now is the surviving half of the old contract — every
+// shape still resolves to an INERT pane surface, and none of them is mistaken for "monitor
+// everything". That inversion is the point of the revision: the blast-radius containment
+// #408 asked for is preserved, while the process keeps running so occupancy recovery can
+// cover the agents the pane surface does not.
+//
+// resolveWatchdogScope is called directly rather than runWatchdog because the assertion is
+// about scope RESOLUTION; the process-starts half is
+// TestWatchdog_EmptyScopeStartsInRecoveryOnlyMode.
+func TestWatchdog_EmptyScopeYieldsInertPaneSurface(t *testing.T) {
 	cases := []struct {
 		name      string
 		writeFile bool
@@ -92,41 +113,52 @@ func TestWatchdog_RefusesWhenScopeEmpty(t *testing.T) {
 			if tc.writeFile {
 				writeTestStartupConfig(t, root, tc.startup)
 			}
-			t.Setenv("AF_ROOT", root)
 
-			cmd, _ := newTestCmd()
-			err := runWatchdog(cmd, nil)
-			if err == nil {
-				t.Fatal("empty scope must refuse: runWatchdog returned nil error")
+			ws, err := resolveWatchdogScope(root)
+			if err != nil {
+				t.Fatalf("an empty scope is a supported configuration, not an error: %v", err)
 			}
-			breadcrumb := filepath.Join(root, ".runtime", "watchdog_last_error")
-			if _, statErr := os.Stat(breadcrumb); statErr != nil {
-				t.Errorf("refusal must write breadcrumb %s: %v", breadcrumb, statErr)
+			if len(ws.agents) != 0 {
+				t.Errorf("an empty scope must resolve to an EMPTY pane set — never to 'all' — got %v", ws.agents)
+			}
+			if ws.agents == nil {
+				t.Error("the pane set must stay a non-nil empty map (the Phase-1 buildWatchdogScope contract)")
+			}
+			if ws.paneInertReason == "" {
+				t.Error("an inert pane surface must carry a reason, or the startup line cannot explain itself")
+			}
+			// An omitted key is a configuration choice, not a misconfiguration: it must not
+			// be reported as an operator error.
+			if ws.paneMisconfig {
+				t.Error("an empty scope must NOT be flagged as a misconfiguration — that is reserved for names that do not exist")
 			}
 		})
 	}
 }
 
-// AC-3 (R2-H1 path parity): a non-empty but all-unknown scope ⇒ a direct
-// af watchdog refuses with a non-nil error naming the offending agent — NOT a
-// silent zero-agent start.
-func TestWatchdog_RefusesWhenScopeAllUnknown(t *testing.T) {
+// AC-3 (R2-H1 path parity), REVISED by #596 Phase 3. Previously: an all-unknown scope made
+// runWatchdog return a non-nil error naming the agent. Now the process starts — but this
+// case is deliberately NOT treated like the empty-scope case above. Configured names that do
+// not exist in agents.json are an operator error, so the pane surface goes inert AND is
+// flagged as misconfigured, which is what keeps the warning and the durable breadcrumb.
+// Losing that distinction would make a typo indistinguishable from a deliberate choice.
+func TestWatchdog_AllUnknownScopeYieldsFlaggedInertPaneSurface(t *testing.T) {
 	root := newTestFactoryRoot(t)
 	writeTestAgentsConfig(t, root, `{"agents":{"realagent":{"type":"autonomous","description":"x"}}}`)
 	writeTestStartupConfig(t, root, `{"watchdog_agents":["ghost"]}`)
-	t.Setenv("AF_ROOT", root)
 
-	cmd, _ := newTestCmd()
-	err := runWatchdog(cmd, nil)
-	if err == nil {
-		t.Fatal("all-unknown scope must refuse (R2-H1 path parity): got nil error")
+	ws, err := resolveWatchdogScope(root)
+	if err != nil {
+		t.Fatalf("an all-unknown scope must no longer be an error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "ghost") {
-		t.Errorf("refusal error must name the offending agent 'ghost', got: %v", err)
+	if len(ws.agents) != 0 {
+		t.Errorf("no configured name exists, so the pane set must be empty, got %v", ws.agents)
 	}
-	breadcrumb := filepath.Join(root, ".runtime", "watchdog_last_error")
-	if _, statErr := os.Stat(breadcrumb); statErr != nil {
-		t.Errorf("refusal must write breadcrumb %s: %v", breadcrumb, statErr)
+	if !ws.paneMisconfig {
+		t.Error("names absent from agents.json are an operator error and must be flagged as such")
+	}
+	if !strings.Contains(ws.paneInertReason, "ghost") {
+		t.Errorf("the reason must name the offending agent 'ghost', got %q", ws.paneInertReason)
 	}
 }
 
@@ -192,19 +224,33 @@ func TestWatchdog_TransientAgentsReadGuard_DoesNotRefuse(t *testing.T) {
 	}
 }
 
-// TestWatchdog_EmptyAgentsJSON_Refuses pins T5 (PR #410): a successfully-parsed but
-// EMPTY agents.json (`{"agents":{}}`) is NOT a transient read — LoadAgentConfig returns
-// a non-nil config with an empty map and a nil error. Every configured watchdog_agents
-// name is then unknown, so the watchdog must REFUSE (all-unknown), not launch on a
-// configured-but-nonexistent scope. This is the fail-open hole the empty-map case fell
-// through; distinct from TestWatchdog_TransientAgentsReadGuard_DoesNotRefuse, which
-// covers the genuinely ABSENT-file path (agErr != nil).
-func TestWatchdog_EmptyAgentsJSON_Refuses(t *testing.T) {
+// TestWatchdog_EmptyAgentsJSON_YieldsFlaggedInertPaneSurface pins T5 (PR #410). The T5
+// distinction is untouched by #596 Phase 3 and must survive it: a successfully-parsed but
+// EMPTY agents.json (`{"agents":{}}`) is NOT a transient read — LoadAgentConfig returns a
+// non-nil config with an empty map and a nil error — so every configured name really is
+// unknown, and this must route to the all-unknown branch rather than the
+// presume-the-configured-scope branch. Only the CONSEQUENCE changed: the old contract was
+// "refuse to start", the new one is "inert pane surface, flagged as a misconfiguration".
+// Distinct from TestWatchdog_TransientAgentsReadGuard_DoesNotRefuse, which covers the
+// genuinely ABSENT-file path (agErr != nil) and must still presume the configured scope.
+func TestWatchdog_EmptyAgentsJSON_YieldsFlaggedInertPaneSurface(t *testing.T) {
 	root := newTestFactoryRoot(t)
 	writeTestAgentsConfig(t, root, `{"agents":{}}`) // valid parse, empty map (NOT a read failure)
 	writeTestStartupConfig(t, root, `{"watchdog_agents":["manager","supervisor"]}`)
 
-	if _, err := resolveWatchdogScope(root); err == nil {
-		t.Fatal("a valid-but-empty agents.json must REFUSE (all configured names unknown), got nil error")
+	ws, err := resolveWatchdogScope(root)
+	if err != nil {
+		t.Fatalf("an all-unknown scope is no longer an error: %v", err)
+	}
+	if len(ws.agents) != 0 {
+		t.Errorf("a valid-but-empty agents.json makes every configured name unknown, so the pane set must be empty, got %v", ws.agents)
+	}
+	// The T5 hole itself: an empty map must NOT be mistaken for a failed read, which would
+	// have monitored a configured-but-nonexistent scope.
+	if !ws.paneMisconfig {
+		t.Error("an empty agents.json map must route to the all-unknown branch (T5), not the transient-read branch")
+	}
+	if ws.membershipNote != "" {
+		t.Errorf("an empty map is not a transient read, so no membership note may be set; got %q", ws.membershipNote)
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/lock"
 	"github.com/stempeck/agentfactory/internal/session"
+	"github.com/stempeck/agentfactory/internal/statusline"
 )
 
 var dispatchDryRun bool
@@ -239,10 +240,15 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 			sessionID := session.SessionName(agent)
 			agentRunning, _ := t.HasSession(sessionID)
+			targetState := dispatchTargetState(root, agent, agentRunning)
 
 			if entry, ok := state.Dispatched[itemKey]; ok {
 				if agentRunning {
-					fmt.Fprintf(cmd.OutOrStdout(), "skip %s: agent %s is busy\n", itemKey, agent)
+					if targetState == targetStateHalted {
+						stallHaltedTarget(cmd, stats, itemKey, agent)
+						continue
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "skip %s: agent %s is busy%s\n", itemKey, agent, busySuffix(targetState))
 					stats.skipped++
 					continue
 				}
@@ -256,7 +262,11 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			}
 
 			if agentRunning {
-				fmt.Fprintf(cmd.OutOrStdout(), "skip %s: agent %s is busy\n", itemKey, agent)
+				if targetState == targetStateHalted {
+					stallHaltedTarget(cmd, stats, itemKey, agent)
+					continue
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "skip %s: agent %s is busy%s\n", itemKey, agent, busySuffix(targetState))
 				stats.skipped++
 				continue
 			}
@@ -1064,8 +1074,108 @@ func (w *workflowCtx) agentBusy(agent string) bool {
 }
 
 func (w *workflowCtx) skipBusy(agent string) {
-	fmt.Fprintf(w.cmd.OutOrStdout(), "skip %s: workflow agent %s is busy\n", w.itemKey, agent)
+	state := dispatchTargetState(w.root, agent, true)
+	if state == targetStateHalted {
+		w.stall(haltedStallReason, agent, agent)
+		return
+	}
+	fmt.Fprintf(w.cmd.OutOrStdout(), "skip %s: workflow agent %s is busy%s\n", w.itemKey, agent, busySuffix(state))
 	w.stats.skipped++
+}
+
+// --- K11 (#596): recovery-aware busy decisions --------------------------------------------------
+//
+// All three busy-skip sites used to key on tmux liveness alone and record every outcome as
+// stats.skipped++. A breaker-halted agent is never going to become un-busy on its own — it is
+// latched until an operator clears it — so recording it as an ordinary deferral silently queues
+// work behind an agent that will never take it. Halted therefore leaves the deferral path and
+// takes the distinctly-named stall shape, which counts as an error.
+
+// Target conditions beyond the bare liveness probe. The empty value for "free" is deliberate: it
+// is what a not-running target reports and the only value that lets a dispatch proceed.
+const (
+	targetStateFree       = ""
+	targetStateBusy       = "busy"
+	targetStateRecovering = "recovering"
+	targetStateDark       = "dark"
+	targetStateHalted     = "halted"
+)
+
+// haltedStallReason is the single spelling of the halted stall, shared by the workflow path (which
+// calls the real workflowCtx.stall) and the two non-workflow sites (where that method is out of
+// scope). It names the clearing verb exactly as the halt escalation does.
+const haltedStallReason = "agent %s recovery breaker is halted; run 'af recovery reset %s' before it can take work"
+
+// dispatchTargetState reports what is known about a dispatch target beyond "a tmux session
+// exists". It is the whole busy decision the three skip sites share, extracted so it can be
+// exercised at all: runDispatch shells out to `gh auth status` and `gh issue list` with no seam,
+// so its two item-loop sites are unreachable from a hermetic test.
+//
+// A not-running target is free by definition — the busy decision does not arise there, and this
+// phase deliberately does not extend the skip to idle agents.
+//
+// The ordering is the contract: the durable latch outranks everything, including an UNREADABLE
+// breaker (loadRecoveryState resolves that to halted, so a read fault can never dispatch into an
+// unknown state), then an in-flight recovery, then a dark occupancy channel, then plain busy.
+func dispatchTargetState(root, agent string, running bool) string {
+	if !running {
+		return targetStateFree
+	}
+	switch recoveryStatus(loadRecoveryState(root, agent)) {
+	case recoveryStatusHalted:
+		return targetStateHalted
+	case recoveryStatusRecovering:
+		return targetStateRecovering
+	}
+	if targetChannelDark(root, agent) {
+		return targetStateDark
+	}
+	return targetStateBusy
+}
+
+// targetChannelDark reports whether one agent's occupancy channel has stopped reporting. It only
+// ever refines the skip MESSAGE — it never changes the decision — so every failure degrades to
+// false rather than manufacturing an outage the dispatcher has no way to confirm. Zero thresholds
+// in particular are not passed to the reader: they classify every channel as dark, which on an
+// unconfigured factory would report a factory-wide outage that is not happening.
+func targetChannelDark(root, agent string) bool {
+	cfg, err := config.LoadStartupConfig(root)
+	if err != nil {
+		return false
+	}
+	staleness := time.Duration(cfg.Recovery.StalenessSecs) * time.Second
+	darkAfter := time.Duration(cfg.Recovery.DarkGraceSecs) * time.Second
+	if staleness <= 0 || darkAfter <= 0 {
+		return false
+	}
+	readings, _ := statusline.ReadObservations(config.StatuslineSessionsDir(root), statusline.ReadOptions{
+		KnownAgents: map[string]struct{}{agent: {}},
+		Staleness:   staleness,
+		DarkAfter:   darkAfter,
+	}, time.Now())
+	return readings[agent].State() == statusline.StateDark
+}
+
+// busySuffix renders the parenthetical that makes a busy-skip line state-aware. A plain busy
+// target keeps its byte-unchanged line: it is the overwhelmingly common case, and the one the
+// existing busy-skip tests pin.
+func busySuffix(state string) string {
+	switch state {
+	case targetStateRecovering:
+		return " (recovery in progress)"
+	case targetStateDark:
+		return " (occupancy channel dark)"
+	default:
+		return ""
+	}
+}
+
+// stallHaltedTarget mirrors workflowCtx.stall's shape — a distinctly-named line on stderr plus
+// stats.errors++ — at the two non-workflow sites, where runDispatch's item loop has no
+// workflowCtx to call the real method on.
+func stallHaltedTarget(cmd *cobra.Command, stats *dispatchCycleStats, itemKey, agent string) {
+	fmt.Fprintf(cmd.ErrOrStderr(), "stall %s: "+haltedStallReason+"\n", itemKey, agent, agent)
+	stats.errors++
 }
 
 func (w *workflowCtx) run() {
@@ -1602,8 +1712,13 @@ func runDispatchStatus(cmd *cobra.Command, args []string) error {
 	// command must stay a cheap, offline-friendly read and never abort on store trouble.
 	phaseComplete := computePhaseCompletion(cmd.Context(), root, state.Dispatched)
 
+	// K5 breaker verdicts (issue #596 K11), read ONCE per distinct agent here for the same
+	// reason as agentState and phaseComplete: the renderers stay pure and testable, and the
+	// status command stays a cheap offline read.
+	agentRecovery := computeAgentRecovery(root, state.Dispatched)
+
 	if jsonOut {
-		return emitDispatchStatusJSON(cmd, running, state.Dispatched, agentState, phaseComplete)
+		return emitDispatchStatusJSON(cmd, running, state.Dispatched, agentState, phaseComplete, agentRecovery)
 	}
 
 	out := formatDispatchStatus(running, state.Dispatched, agentState, phaseComplete)
@@ -1637,6 +1752,29 @@ func computePhaseCompletion(ctx context.Context, root string, entries map[string
 	return phaseComplete
 }
 
+// computeAgentRecovery returns each dispatched-to agent's K5 breaker verdict, keyed by agent name
+// and read once per DISTINCT agent (several items may target the same one). The value is the empty
+// string for an agent with nothing to report, which is what lets the entry field stay omitempty.
+//
+// loadRecoveryState cannot fail — an absent breaker is the zero value and an undecodable one reads
+// halted — so an unreadable file surfaces as "halted" here. That is the fail-closed direction the
+// breaker was designed with: the status surface reports a state it could not read as latched
+// rather than as fine.
+func computeAgentRecovery(root string, entries map[string]dispatchEntry) map[string]string {
+	byAgent := make(map[string]string)
+	for _, entry := range entries {
+		if _, seen := byAgent[entry.Agent]; seen {
+			continue
+		}
+		status := recoveryStatus(loadRecoveryState(root, entry.Agent))
+		if status == recoveryStatusNone {
+			status = ""
+		}
+		byAgent[entry.Agent] = status
+	}
+	return byAgent
+}
+
 // dispatchStatusEntry is the per-dispatch JSON shape emitted by
 // `af dispatch status --json`. The field set is a versioned contract pinned by
 // TestDispatchStatus_JSON_SchemaSnapshot. "issue" is the dispatch key (the
@@ -1658,6 +1796,14 @@ type dispatchStatusEntry struct {
 	Workflow      string `json:"workflow,omitempty"`
 	Phase         string `json:"phase,omitempty"`
 	PhaseComplete bool   `json:"phase_complete,omitempty"`
+
+	// Recovery visibility (issue #596 K11, additive) — the K5 breaker's verdict for the
+	// assigned agent: "recovering" or "halted". It is EMPTY, not "none", when there is
+	// nothing to report, so omitempty elides the key and the pinned 6-key non-workflow
+	// entry shape survives. (`af agents list --json` takes the opposite convention: its
+	// recovery field is always present and says "none", because a row missing the key
+	// there would read as "nothing to worry about".)
+	Recovery string `json:"recovery,omitempty"`
 }
 
 // dispatchStatusJSON is the top-level success shape of
@@ -1683,7 +1829,7 @@ func emitDispatchStatusError(cmd *cobra.Command, e error) error {
 
 // emitDispatchStatusJSON marshals the dispatcher state as JSON to stdout. Entries
 // are sorted by issue key for deterministic, snapshot-stable output.
-func emitDispatchStatusJSON(cmd *cobra.Command, running bool, entries map[string]dispatchEntry, agentState map[string]bool, phaseComplete map[string]bool) error {
+func emitDispatchStatusJSON(cmd *cobra.Command, running bool, entries map[string]dispatchEntry, agentState map[string]bool, phaseComplete map[string]bool, agentRecovery map[string]string) error {
 	keys := make([]string, 0, len(entries))
 	for k := range entries {
 		keys = append(keys, k)
@@ -1708,6 +1854,9 @@ func emitDispatchStatusJSON(cmd *cobra.Command, running bool, entries map[string
 			Workflow:      e.Workflow,
 			Phase:         e.Phase,
 			PhaseComplete: phaseComplete[k],
+			// Empty for an agent with nothing to report, so omitempty keeps the 6-key
+			// non-workflow contract intact.
+			Recovery: agentRecovery[e.Agent],
 		})
 	}
 
@@ -1729,6 +1878,17 @@ func emitDispatchStatusJSON(cmd *cobra.Command, running bool, entries map[string
 // the agent-session launch idiom (session.go buildStartupCommand). Without it a
 // dispatcher parked in a nested layout would either silently capture into the wrong
 // factory (pre-#519) or have its state-writing verbs refuse (K5, post-#519).
+//
+// The loop also carries the memory vault's hygiene pass (#515 Phase 5). It rides HERE rather than
+// in the watchdog because the watchdog's cadence is ~30s — three orders of magnitude faster than
+// the daily-scale curation the pass performs — and because this loop already owns the one thing
+// the pass needs and the watchdog does not: a periodic tick nobody is waiting on
+// (.designs/515/scale.md:125-138). The verb is silent on a healthy vault and caps itself at one
+// mail per agent per day, so the added per-cycle cost is one process that reads and exits.
+//
+// It sits AFTER the rc capture, never between `af dispatch` and `rc=$?`: $? holds the status of
+// the LAST command, so a second invocation spliced in ahead of it would make rc report the nag's
+// exit code and the dispatch failure line below would go silent for good.
 func buildDispatchLoopCmd(afBin, root string, interval int) string {
 	return fmt.Sprintf(
 		`export AF_ROOT=%s; `+
@@ -1738,9 +1898,10 @@ func buildDispatchLoopCmd(afBin, root string, interval int) string {
 			`%s dispatch 2>&1 | tee -a .runtime/dispatch.log; `+
 			`rc=$?; `+
 			`if [ $rc -ne 0 ]; then echo "[$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)] dispatch exited with code $rc" >> .runtime/dispatch.log; fi; `+
+			`%s memory status --nag 2>&1 | tee -a .runtime/dispatch.log; `+
 			`sleep %d; `+
 			`done`,
-		shellQuote(root), afBin, interval)
+		shellQuote(root), afBin, afBin, interval)
 }
 
 // shellQuote wraps s in POSIX single quotes, escaping any embedded single quote with

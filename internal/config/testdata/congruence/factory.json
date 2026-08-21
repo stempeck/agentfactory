@@ -1,0 +1,10 @@
+{
+  "type": "factory",
+  "version": 1,
+  "name": "name",
+  "max_worktrees": 11,
+  "git_identity": {
+    "name": "git_identity.name",
+    "email": "git_identity.email"
+  }
+}

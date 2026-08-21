@@ -38,8 +38,8 @@ import (
 //   - KillSession(  — anchored to the capital-K method/call token; it deliberately does NOT
 //     match tmux.go's lowercase "kill-session" string literals in guardOp/run.
 //   - mgr.Stop( / Manager.Stop(  — the Manager teardown call; the trailing "(" excludes the
-//     bare "Manager.Stop interlock" prose at session.go:185, and comment-skipping excludes the
-//     "Manager.Stop() call" comment at session.go:157. ticker.Stop() never matches.
+//     bare "Manager.Stop interlock" prose at session.go:289, and comment-skipping excludes the
+//     "Manager.Stop() call" comment at session.go:261. ticker.Stop() never matches.
 //   - pgrep / pkill  — the K10 runPkill orphan-sweep seam (down.go). "\b" keeps it off the
 //     "runPkill" identifier (capital P) and off pkill inside _test.go (not scanned here).
 var teardownCallPattern = regexp.MustCompile(`KillSession\(|\bmgr\.Stop\(|Manager\.Stop\(|\b(pgrep|pkill)\b`)
@@ -53,6 +53,33 @@ var teardownCallPattern = regexp.MustCompile(`KillSession\(|\bmgr\.Stop\(|Manage
 // above the session.go/helpers.go/up.go KillSession sites); same sites, moved, same classes.
 // Re-anchored again on 2026-07-28 for #561 (continuation directive added above the done.go
 // site); same site, moved, same class.
+// Re-anchored again on 2026-08-07 for #602 Phase 2 (profile-key-universe hygiene added the
+// carve-out lists above the session.go interface decl, the universe field/setter/filter above
+// the Start() sites, the tmux-twin clearing loop above the Start() cleanup sites, the inline
+// twin's unset segment above Manager.Stop, and the unconditional setter call above the up.go
+// watchdog respawn); same sites, moved, same classes.
+// Re-anchored again on 2026-08-07 for PR #605 review fixes (F1/P1 added shellCriticalVars + the
+// staleUniverseKeys shape/protected-name guard, and F6 softened the modelKeyUniverse field doc,
+// all above the session.go KillSession sites); same sites, moved, same classes.
+// Re-anchored again on 2026-08-08 for #598 Phase 1a (ANTHROPIC_DEFAULT_FABLE_MODEL joined
+// redirectFamilyVars, adding the member and its rationale comment above every session.go site);
+// same sites, moved, same classes.
+// Re-anchored again on 2026-08-15 for #515 Phase 4 (the preserved-memory teardown report
+// added an import to both files plus the report block inside finishDispatchedSession and
+// cleanupAgentWorktree, all above these sites); same sites, moved, same classes.
+// Re-anchored again on 2026-08-15 for #515 Phase 6 (the vault export-staleness warning added a
+// time import and a gated block to runDown, and a call plus its rationale to runUp, all above
+// these sites); same sites, moved, same classes.
+// Re-anchored again on 2026-08-14 for #622 Phase 2 (step-boundary occupancy capture and the
+// cooperative handoff added lines above the done.go site; the G10 kill-guard repair added
+// isSelfTmuxSession to the authKillGuard.KillSession permit set and a line to its doc, moving the
+// two helpers.go Phase-4 sites); same sites, moved, same classes.
+// Re-anchored again on 2026-08-15 for PR #623 B-2 (boundaryHandoffMessage extracted above the
+// done.go self-terminate site); same site, moved, same class.
+// Re-anchored again on 2026-08-16 for the #515<->main(#622/#623) merge: up.go/down.go carry only
+// #515's line shifts (main did not touch them), so their sites stay at #515's anchors; done.go was
+// edited by both designs, so its self-terminate site lands at :969 (beyond both branches' recorded
+// values); same sites, moved, same classes.
 // A matched line whose "relpath:line" key is absent here fails the scan — so adding a new audited
 // call site REQUIRES appending a classified entry in the same diff (design constraint C-1,
 // review-time). Classes:
@@ -68,27 +95,27 @@ var teardownCallPattern = regexp.MustCompile(`KillSession\(|\bmgr\.Stop\(|Manage
 var allowedTeardownSites = map[string]string{
 	// --- KillSession( : interface / method DECLARATIONS (token match, not a call) ---
 	"internal/cmd/helpers.go:76":      "decl", // cmdTmux interface method decl
-	"internal/cmd/helpers.go:104":     "decl", // K8 authKillGuard.KillSession override decl (Phase 4)
-	"internal/session/session.go:188": "decl", // session-tmux interface method decl
+	"internal/cmd/helpers.go:106":     "decl", // K8 authKillGuard.KillSession override decl (Phase 4)
+	"internal/session/session.go:267": "decl", // session-tmux interface method decl
 	"internal/tmux/tmux.go:266":       "decl", // *Tmux.KillSession method decl
 	// --- KillSession( : real calls ---
-	"internal/cmd/helpers.go:108":     "self",        // K8 guarded self-forward g.cmdTmux.KillSession (Phase 4)
-	"internal/session/session.go:394": "restorative", // Start() zombie kill-and-recreate
-	"internal/session/session.go:587": "restorative", // Start() shell-ready failure cleanup
-	"internal/session/session.go:594": "restorative", // Start() memory-check failure cleanup
-	"internal/session/session.go:603": "restorative", // Start() send-keys failure cleanup
-	"internal/session/session.go:825": "gated",       // Manager.Stop() teardown (K9 backstop)
-	"internal/cmd/up.go:552":          "restorative", // watchdog respawn
-	"internal/cmd/down.go:155":        "dispatch",    // watchdog-session teardown (K5)
-	"internal/cmd/down.go:161":        "dispatch",    // dispatch-session teardown (K5)
-	"internal/cmd/done.go:716":        "self",        // af done self-terminate
-	"internal/cmd/dispatch.go:1549":   "dispatch",    // af dispatch stop teardown (K7)
+	"internal/cmd/helpers.go:111":     "self",        // K8 guarded self-forward g.cmdTmux.KillSession (Phase 4)
+	"internal/session/session.go:521": "restorative", // Start() zombie kill-and-recreate
+	"internal/session/session.go:726": "restorative", // Start() shell-ready failure cleanup
+	"internal/session/session.go:733": "restorative", // Start() memory-check failure cleanup
+	"internal/session/session.go:742": "restorative", // Start() send-keys failure cleanup
+	"internal/session/session.go:985": "gated",       // Manager.Stop() teardown (K9 backstop)
+	"internal/cmd/up.go:596":          "restorative", // watchdog respawn (re-anchored from :567 by #596 Phase 5, which added the recovery config keys and the statusLine provisioning note to the cobra Long above this site; from :552 by #596 Phase 3, which added the K20 pre-check and the recovery-only launch notice)
+	"internal/cmd/down.go:170":        "dispatch",    // watchdog-session teardown (K5)
+	"internal/cmd/down.go:176":        "dispatch",    // dispatch-session teardown (K5)
+	"internal/cmd/done.go:969":        "self",        // af done self-terminate (re-anchored from :722 (#515) / :963 (main) by the merge)
+	"internal/cmd/dispatch.go:1659":   "dispatch",    // af dispatch stop teardown (K7) (re-anchored from :1549 by #596 Phase 4A, which added the K11 recovery-aware busy decisions and the dispatch-status recovery precompute above this site)
 	// --- Manager.Stop (mgr.Stop() calls) ---
-	"internal/cmd/down.go:106":  "gated", // K5 per-agent Stop loop (refusal proven by loop-never-entered)
+	"internal/cmd/down.go:121":  "gated", // K5 per-agent Stop loop (refusal proven by loop-never-entered)
 	"internal/cmd/sling.go:202": "gated", // --reset stop, gated by scopedStopAllowed (#548 P5): self/dispatcher/manager tiers with not-running + dispatch-daemon carve-outs, consistent with the af down per-agent Stop site (down.go:106)
 	// --- pgrep / pkill : K10 runPkill orphan-sweep seam ---
-	"internal/cmd/down.go:310": "dispatch", // exec.Command("pgrep", ...) orphan-sweep seam (K10)
-	"internal/cmd/down.go:313": "dispatch", // exec.Command("pkill", ...) orphan-sweep seam (K10)
+	"internal/cmd/down.go:332": "dispatch", // exec.Command("pgrep", ...) orphan-sweep seam (K10)
+	"internal/cmd/down.go:335": "dispatch", // exec.Command("pkill", ...) orphan-sweep seam (K10)
 }
 
 // scanTeardownCallSites walks root for PRODUCTION (non-_test.go) .go files and returns

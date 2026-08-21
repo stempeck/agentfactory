@@ -489,6 +489,7 @@ func TestTelemetryStatusJSON_SchemaSnapshot(t *testing.T) {
 	assertKeySet(t, keys, map[string]bool{
 		"v": true, "state": true, "installed": true,
 		"recording": true, "backend": true, "unprobed_cause": true,
+		"step_context": true,
 	}, out)
 
 	// The privacy contract lives in the nested objects: a top-level-only snapshot would not
@@ -498,6 +499,11 @@ func TestTelemetryStatusJSON_SchemaSnapshot(t *testing.T) {
 	}, "installed")
 	assertNestedKeySet(t, keys["recording"], map[string]bool{"enabled": true}, "recording")
 	assertNestedKeySet(t, keys["backend"], map[string]bool{"probed": true, "signals": true}, "backend")
+	// step_context is the JSON twin of the two knobs `af telemetry status` prints in prose; it is
+	// reported unconditionally, so a missing key here means the twin drifted from the text.
+	assertNestedKeySet(t, keys["step_context"], map[string]bool{
+		"bound_tokens": true, "handoff_pct": true,
+	}, "step_context")
 
 	var signals []map[string]json.RawMessage
 	if err := json.Unmarshal(keys["backend"], &struct {
@@ -582,6 +588,16 @@ func TestTelemetryReportJSON_SchemaSnapshot(t *testing.T) {
 		assertNestedKeySetMap(t, row, map[string]bool{
 			"agent": true, "step": true, "status": true, "duration_ms": true,
 			"started": true, "model": true, "verb_ms": true, "instance_id": true,
+
+			// #622 C6/C10. Listed even though this fixture measures nothing, because that is the
+			// snapshot's whole claim: no key is optional, so an unmeasured step emits every one of
+			// these as an explicit null rather than dropping it. An emitter that reverted to
+			// omitempty would leave this fixture's rows eight keys wide and fail right here.
+			"ctx_tokens_start": true, "ctx_tokens_end": true, "ctx_tokens_total": true,
+			"ctx_used_pct": true, "cum_tokens_delta": true, "ctx_bound_tokens": true,
+			"over_occupancy": true, "over_consumption": true, "consumption_state": true,
+			"compacted_mid_step": true, "ctx_observed_stale": true, "bound_exceeds_window": true,
+			"interrupted_trigger": true, "interrupted_observed_pct": true,
 		}, "rows["+string(rune('0'+i))+"]")
 	}
 

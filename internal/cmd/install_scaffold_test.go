@@ -214,3 +214,76 @@ func TestInstallScaffold_DefaultModel_MatchesQuickstart(t *testing.T) {
 		t.Errorf("seeded default profile ANTHROPIC_MODEL = %q, but quickstart.sh defaults to %q — af install --init and a quickstart bootstrap must agree on the default model", got, want)
 	}
 }
+
+// TestInstallScaffold_LmstudioClassCoverage closes GAP B (#598 Phase 3b): the one endpoint profile
+// af ships had four shape assertions above and nothing at all about the model CLASSES a session or
+// its sub-agents can request. Since Phase 2 those classes are filled by derivation from the single
+// declared ANTHROPIC_MODEL, so the seed's correctness now depends on a ladder no test held it to —
+// dropping ANTHROPIC_MODEL from the example, or declaring a class key that contradicts it, would
+// still pass TestInstallScaffold_ModelsJsonSeeded.
+//
+// The residual is the other half. af can seed an alias into a gateway config it writes; it cannot
+// seed one into somebody's LM Studio server, and the fable class has no env key to redirect. All af
+// can do is SAY so — which makes the lint string the only machine-readable surfacing of the gap, and
+// therefore the thing that has to be pinned (integration.md:118-130).
+func TestInstallScaffold_LmstudioClassCoverage(t *testing.T) {
+	data, err := os.ReadFile("install.go")
+	if err != nil {
+		t.Fatalf("read install.go: %v", err)
+	}
+	modelsLiteral := extractScaffoldLiteral(t, string(data), `"models.json":`)
+	var seed config.ModelsConfig
+	if err := json.Unmarshal([]byte(modelsLiteral), &seed); err != nil {
+		t.Fatalf("unmarshal scaffold models.json literal: %v\nliteral: %s", err, modelsLiteral)
+	}
+	lm, ok := seed.Models["lmstudio"]
+	if !ok {
+		t.Fatalf("seed must define an `lmstudio` example profile; got models=%v", seed.Models)
+	}
+	main := lm["ANTHROPIC_MODEL"]
+	if main == "" {
+		t.Fatal("the lmstudio example declares no ANTHROPIC_MODEL, so every class it can be asked for derives to nothing")
+	}
+
+	// Derivation, not configuration: one declared id must answer every class the launch exports.
+	completed := config.CompleteEndpointProfile(lm)
+	for _, key := range config.DerivedEndpointClassKeys() {
+		label, known := config.EndpointClassLabel(key)
+		if !known {
+			t.Fatalf("derived class key %s has no label; the inventory and the label table have diverged", key)
+		}
+		if got := completed[key]; got != main {
+			t.Errorf("class %s (%s) resolves to %q, want the declared main model %q — a class that derives "+
+				"to anything else asks an LM Studio server for a model it does not serve", label, key, got, main)
+		}
+	}
+
+	// MissingEndpointClasses reports what is UNDECLARED, not what is unfilled, so the fully-derived
+	// profile above still reports every derived class. Asserting that keeps the two meanings apart:
+	// were it to report only the unfilled ones, the write-time lint would go silent on this profile.
+	missing := config.MissingEndpointClasses(lm)
+	if !reflect.DeepEqual(missing, config.DerivedEndpointClassKeys()) {
+		t.Errorf("MissingEndpointClasses(lmstudio) = %v, want every derived class %v — the example declares "+
+			"none of them and relies entirely on derivation", missing, config.DerivedEndpointClassKeys())
+	}
+
+	// GAP B: the residual af cannot fix must at least be said out loud.
+	warning, has := config.CoverageLintProfile("lmstudio", lm)
+	if !has {
+		t.Fatal("the scaffold lmstudio profile produces no coverage warning at all; an operator copying it " +
+			"learns nothing about the classes it leaves to derivation")
+	}
+	if !strings.Contains(warning, "claude-fable-") {
+		t.Errorf("the lmstudio warning does not name the claude-fable- alias requirement, so the one gap af "+
+			"can neither derive nor seed stays invisible; warning = %q", warning)
+	}
+	for _, key := range config.DerivedEndpointClassKeys() {
+		label, known := config.EndpointClassLabel(key)
+		if !known {
+			t.Fatalf("class key %s has no label, so the warning assertions below would compare against an empty string", key)
+		}
+		if !strings.Contains(warning, label) {
+			t.Errorf("the lmstudio warning omits the %q class it leaves to derivation; warning = %q", label, warning)
+		}
+	}
+}

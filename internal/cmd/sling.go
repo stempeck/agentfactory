@@ -945,6 +945,10 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 	if len(modelEnv) > 0 {
 		mgr.SetModelEnv(modelEnv)
 	}
+	// Profile-key universe (issue #602), wired UNCONDITIONALLY — deliberately not inside the
+	// guard above. A launch that resolves no profile is exactly the case that must still clear
+	// the keys a previous profile left on the reused session.
+	mgr.SetModelKeyUniverse(launchModelKeyUniverse(root))
 	// Persist ONLY an explicit per-launch --model override (precedence step 2); a
 	// durable agents-map/agents.json default writes no marker (it resolves durably).
 	if cliModel != "" && modelName != "" {
@@ -1006,6 +1010,27 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 // The marker is read here in the cmd layer and passed INTO the pure resolver; the
 // resolver never reads a file or the environment (ADR-004).
 func resolveLaunchModelEnv(root, agentName, agentDir, cliModel, legacyModel string, skipFitness bool, warn io.Writer) (string, []config.EnvVar, error) {
+	return resolveModelEnvForSession(root, agentName, agentDir, cliModel, legacyModel, skipFitness, true, warn)
+}
+
+// resolveRespawnModelEnv re-resolves the export set for a session being rebuilt in place — handoff,
+// compact-handoff, watchdog. It is resolveLaunchModelEnv with the launch REPORTS suppressed: a
+// respawn is a continuation, not a decision, so it must add no line the operator did not already see
+// when they started the agent, and repeating a coverage warning on every compact would train them to
+// ignore it. Only the reports are dropped; the fail-safe warnings a respawn has always emitted (a
+// broken models.json, a missing secret) are untouched, as is the resolved env.
+//
+// Its existence is what makes the respawn's silence structural rather than incidental: the caller
+// that must stay quiet is the one that cannot ask for the reports.
+func resolveRespawnModelEnv(root, agentName, agentDir, legacyModel string, warn io.Writer) (string, []config.EnvVar, error) {
+	return resolveModelEnvForSession(root, agentName, agentDir, "", legacyModel, false, false, warn)
+}
+
+// resolveModelEnvForSession is the shared body. reportCoverage distinguishes a fresh launch from a
+// respawn, which cliModel cannot: a plain `af up` passes no --model and is still a launch the
+// operator is watching, so gating the coverage report on profile SELECTION would silence it on the
+// one path that runs most.
+func resolveModelEnvForSession(root, agentName, agentDir, cliModel, legacyModel string, skipFitness, reportCoverage bool, warn io.Writer) (string, []config.EnvVar, error) {
 	profileSelecting := cliModel != ""
 
 	cfg, err := config.LoadModelsConfig(root)
@@ -1037,6 +1062,22 @@ func resolveLaunchModelEnv(root, agentName, agentDir, cliModel, legacyModel stri
 		return "", nil, nil
 	}
 	if !ok {
+		// Ambient-endpoint escape (issue #598): the operator's shell exports ANTHROPIC_BASE_URL and
+		// this launch resolved no profile, so the agent runs against a gateway af never selected and
+		// has no coverage verdicts for.
+		//
+		// None of the redirect hygiene catches this one. The tmux unset-environment pass reaches new
+		// panes, but the pane already exists by then and the launch command is sent into its process
+		// env; the inline KEY='' twin that WOULD reach it sits inside the resolved-model-env branch,
+		// which this path never enters; and the profile-key universe clears only keys some profile in
+		// models.json declares — so a registry with no endpoint profile, the likeliest one to launch
+		// with nothing resolved, clears nothing at all.
+		//
+		// Presence only. The value is never read into the message, because an endpoint URL can carry
+		// credentials in its userinfo and this warning reaches a terminal and a log.
+		if reportCoverage && os.Getenv(baseURLKey) != "" {
+			warnAboutCoverageOnce(warn, "", "warning: %s is set in the environment but this launch resolved no model profile; the agent will inherit that endpoint unchecked — unset it in your shell rc, or define a profile so af can select a gateway and verify its class coverage\n", baseURLKey)
+		}
 		return "", nil, nil
 	}
 
@@ -1071,7 +1112,87 @@ func resolveLaunchModelEnv(root, agentName, agentDir, cliModel, legacyModel stri
 		}
 	}
 
+	// Class-coverage report (issue #598): `af config models check` records which model classes the
+	// gateway actually serves, and a launch relays that record. It reads a FILE and never probes — a
+	// gateway still coming up must not stall or fail a launch — and it only ever warns, unlike the
+	// attestation interlock above, because a class the operator never uses being unserved is not a
+	// reason to refuse the ones that are.
+	if endpoint := modelEnvValue(env, "ANTHROPIC_BASE_URL"); reportCoverage && endpoint != "" {
+		if warning, ok := modelCoverageWarning(root, name); ok {
+			warnAboutCoverageOnce(warn, name, "warning: %s\n", warning)
+		}
+	}
+
 	return name, env, nil
+}
+
+// modelCoverageWarned dedupes the launch-time coverage and ambient-endpoint warnings by profile
+// (the empty key is the ambient warning, which resolves no profile). `af up` calls the resolver once
+// per agent from a loop in its caller, so a per-call variable cannot suppress anything and a
+// ten-agent factory would print the same line ten times. Mirrors the package-level per-run maps
+// recoveryTracks and recoveredAgentUntil already in this package.
+var modelCoverageWarned = map[string]bool{}
+
+// resetModelCoverageWarnings clears the dedupe. Production never calls it — a run of `af up` wants
+// exactly the once-per-profile suppression — but a test binary runs every case in one process, so
+// without it the first case to trip a warning silently suppresses it for every later case, which
+// fails as a false green rather than as a red. Mirrors resetRecoveryTracks.
+func resetModelCoverageWarnings() { modelCoverageWarned = map[string]bool{} }
+
+func warnAboutCoverageOnce(warn io.Writer, key, format string, args ...any) {
+	if modelCoverageWarned[key] {
+		return
+	}
+	modelCoverageWarned[key] = true
+	fmt.Fprintf(warn, format, args...)
+}
+
+// modelCoverageWarning reports what the last `af config models check` observed for an endpoint
+// profile, and says nothing when the record is present, current and fully served — so a factory that
+// has done the work launches as quietly as it did before.
+//
+// Staleness is the record predating models.json rather than a wall-clock age: a check does not
+// expire, but a profile edited after it was measured is no longer the profile it measured. Everything
+// the record cannot vouch for — absent, corrupt, wrong version, wrong profile — warns, so the quiet
+// path is only ever reached by a real, current measurement.
+func modelCoverageWarning(root, profile string) (string, bool) {
+	remedy := fmt.Sprintf("run `af config models check %s`", profile)
+
+	info, statErr := os.Stat(modelCoveragePath(root, profile))
+	if statErr != nil {
+		return fmt.Sprintf("model %q: no coverage check on record for this endpoint profile, so no class coverage is known; %s", profile, remedy), true
+	}
+	rec, ok := readModelCoverageRecord(root, profile)
+	if !ok {
+		return fmt.Sprintf("model %q: the coverage record is unusable, so no class coverage is known; %s", profile, remedy), true
+	}
+	if modelsInfo, err := os.Stat(config.ModelsConfigPath(root)); err == nil && info.ModTime().Before(modelsInfo.ModTime()) {
+		return fmt.Sprintf("model %q: the coverage check (%s) predates the current models.json, so its verdicts may no longer describe this profile; %s", profile, rec.CheckedAt, remedy), true
+	}
+	if len(rec.Classes) == 0 {
+		return fmt.Sprintf("model %q: the last coverage check (%s) reached no verdicts, so no class coverage is known; %s", profile, rec.CheckedAt, remedy), true
+	}
+	if unserved := unservedCoverageClasses(rec); len(unserved) > 0 {
+		return fmt.Sprintf("model %q: last coverage check (%s) found %s NOT SERVED; %s", profile, rec.CheckedAt, strings.Join(unserved, ", "), remedy), true
+	}
+	return "", false
+}
+
+// unservedCoverageClasses names the classes the record found unserved, deduped: a registry naming
+// two fable ids records two fable-class rows, and a warning that said "fable-class, fable-class"
+// would read as a rendering bug rather than as the two aliases it is. `check` is where the
+// per-id detail belongs; the launch is only relaying which classes to go and look at.
+func unservedCoverageClasses(rec modelCoverageRecord) []string {
+	seen := map[string]bool{}
+	var classes []string
+	for _, verdict := range rec.Classes {
+		if verdict.Served || seen[verdict.Class] {
+			continue
+		}
+		seen[verdict.Class] = true
+		classes = append(classes, verdict.Class)
+	}
+	return classes
 }
 
 // globalDefaultDesc names the fallback target for a non-selecting launch whose selected
@@ -1083,6 +1204,45 @@ func globalDefaultDesc(legacyModel string) string {
 		return fmt.Sprintf("global default model %s", legacyModel)
 	}
 	return "global default model"
+}
+
+// launchModelKeyUniverse returns every env key any models.json profile defines — the
+// profile-key universe the session manager clears by (issue #602). It bounds what hygiene may
+// remove, so it must be derived from the same config the emitted set is derived from: the two
+// hardcoded family lists in internal/session cannot see an operator-added key, which is how
+// CLAUDE_CODE_AUTO_COMPACT_WINDOW came to be emitted on launch and cleared by nothing.
+//
+// A registry that fails to load yields an empty universe, so nothing is cleared and the launch
+// line is exactly today's — one bad models.json must never brick a launch, and the caller has
+// already warned about it (resolveLaunchModelEnv shares this load; warning again would
+// double-print). An absent models.json is not an error: LoadModelsConfig returns an empty
+// config, whose nil map ranges zero times and yields the same empty universe.
+//
+// Deliberately a sibling of resolveLaunchModelEnv rather than a fourth return value on it: the
+// universe must be present on EVERY branch that still launches — including the one where no
+// profile resolves at all, which is precisely the switch-away case that must clear. Expressing
+// that as one function body makes it structural, instead of a rule nine separate returns each
+// have to get right.
+func launchModelKeyUniverse(root string) []string {
+	cfg, err := config.LoadModelsConfig(root)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, profile := range cfg.Models {
+		for key := range profile {
+			seen[key] = true
+		}
+	}
+	keys := make([]string, 0, len(seen))
+	for key := range seen {
+		keys = append(keys, key)
+	}
+	// Sorted because this order reaches the launch line verbatim as `unset K1 K2 …`. Go
+	// randomizes map iteration per range statement, so an unsorted union would emit a
+	// different command on every process — nondeterminism the session package cannot repair.
+	sort.Strings(keys)
+	return keys
 }
 
 // knownProfiles returns the sorted, comma-joined profile names defined in cfg, so a

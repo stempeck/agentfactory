@@ -113,15 +113,40 @@ func isSelfSession(target string) bool {
 	return target == session.SessionName(os.Getenv("AF_ROLE"))
 }
 
-// isSelfSessionID reports whether target matches the caller's own raw .runtime/session_id
-// value — the session id the `af done` fallback path (done.go:616) hands to KillSession when
-// detectAgentName fails. That value is the Claude Code hook's session id, NOT
-// session.SessionName(AF_ROLE), so isSelfSession alone would wrongly refuse a legitimate
-// self-terminate (Discrepancy Ledger D9). It is read from the caller's cwd — the same path
-// done.go:616 reads (runDone derives its cwd from getWd()). Kept SEPARATE from isSelfSession so
-// K11's downSelfScoped equality stays a pure name compare; only the K8 guard consults this
-// superset. Best-effort: any read error or an empty file yields false (fail-closed toward
-// refusal).
+// isSelfTmuxSession reports whether target is the tmux session this process is running in.
+//
+// It is the AF_ROLE-free half of isSelfSession, and #622 G10 is why it has to exist. The `af done`
+// self-terminate fallback runs precisely when detectAgentName failed, and that can only happen with
+// AF_ROLE unset (resolveAgentName consults AF_ROLE last, helpers.go:549) — so isSelfSession there
+// compares against session.SessionName(""), which matches nothing. callerAuthority already trusts
+// this exact query to conclude the caller IS an agent (authority.go:79-83); a guard that reads
+// CurrentSessionName to say "you are an agent" but refuses to read it to say "and that is your own
+// session" would leave af done unable to kill the very session tmux just named for it, while
+// terminateSession had already written .runtime/last_termination — a durable record of a
+// termination that did not happen.
+//
+// This grants nothing an AF_ROLE-carrying caller could not already do; it closes an inconsistency
+// in how one signal is read. Best-effort: outside tmux, or on any query error, false (fail-closed
+// toward refusal). No recursion — only KillSession is overridden, so CurrentSessionName delegates
+// straight through the embed.
+func isSelfTmuxSession(target string) bool {
+	if target == "" || os.Getenv("TMUX") == "" {
+		return false
+	}
+	name, err := newCmdTmux().CurrentSessionName()
+	return err == nil && name != "" && name == target
+}
+
+// isSelfSessionID reports whether target matches the caller's own raw .runtime/session_id value —
+// the Claude Code hook's session id, NOT session.SessionName(AF_ROLE) (Discrepancy Ledger D9).
+//
+// #622 Phase 2 removed its only production caller: `af done`'s fallback handed that UUID to
+// KillSession as though it were a tmux session name, which is the LOW-3 bug, and it now resolves a
+// real name through isSelfTmuxSession instead. The predicate is RETAINED rather than retired
+// because narrowing the kill guard's permit set is an authority-model decision that belongs to
+// ADR-021, not to a step-context phase. Kept SEPARATE from isSelfSession so K11's downSelfScoped
+// equality stays a pure name compare; only the K8 guard consults this superset. Best-effort: any
+// read error or an empty file yields false (fail-closed toward refusal).
 func isSelfSessionID(target string) bool {
 	wd, err := getWd()
 	if err != nil {

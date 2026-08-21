@@ -20,7 +20,9 @@ import (
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/lock"
+	"github.com/stempeck/agentfactory/internal/memory"
 	"github.com/stempeck/agentfactory/internal/session"
+	"github.com/stempeck/agentfactory/internal/statusline"
 	"github.com/stempeck/agentfactory/internal/telemetry"
 	"github.com/stempeck/agentfactory/internal/tmux"
 	"github.com/stempeck/agentfactory/internal/worktree"
@@ -85,8 +87,15 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 	// paths below, so it sees everything this invocation recorded and still runs exactly once.
 	// af done is the only verb that exports — af prime is a session-start hook and must not
 	// put a network round trip in front of a session.
+	// Identity is resolved ONCE, above the gate, because two consumers need it and they are gated
+	// differently. The step records need it because the record store refuses a record it cannot
+	// attribute. The #622 C5 step boundary needs it because the occupancy reader's roster check
+	// admits no datum without a name — and that boundary is armed by statusline data alone, with
+	// the telemetry gate off, which is the default. Resolving it inside the gate block would have
+	// left the boundary permanently inert on most factories while every test still passed.
+	agentName, agentErr := detectAgentName(cwd, factoryRoot)
+
 	if telemetryFactoryEnabled(factoryRoot) {
-		agentName, agentErr := detectAgentName(cwd, factoryRoot)
 		if agentErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not resolve the agent name to record step timing: %v\n", agentErr)
 		} else {
@@ -122,7 +131,7 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 			return fmt.Errorf("no actionable steps (all remaining steps are blocked)")
 		}
 		// No open children at all — all steps complete, skip to WORK_DONE
-		return sendWorkDoneAndCleanup(ctx, store, cwd, factoryRoot, instanceID)
+		return sendWorkDoneAndCleanup(ctx, store, cwd, factoryRoot, instanceID, phaseComplete)
 	}
 
 	step := result.Steps[0]
@@ -161,6 +170,23 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 	// never closed is worse than no record at all, because nothing downstream could tell the
 	// difference. Placed before the gate branch below so that a --phase-complete invocation
 	// missing its --gate argument still records the close it really performed.
+	// #622 C4/C5: one occupancy read serves both the closing record and the boundary decision
+	// below. Taken before the record so the two cannot disagree about the same instant, and taken
+	// outside the telemetry gate because the boundary is armed by statusline data alone.
+	boundaryNow := time.Now()
+	// LoadStartupConfig returns (nil, err) on a malformed file — absent is the case that yields
+	// defaults, not unreadable — so stepCtx is derived once and every reader below goes through it
+	// rather than through startupCfg. Its zero value carries HandoffPct 0, which
+	// shouldBoundaryHandoff treats as unconfigured and never fires on: a factory whose bound cannot
+	// be read must not be recycled against a bound nobody knows.
+	startupCfg, startupErr := config.LoadStartupConfig(factoryRoot)
+	closeReading := statusline.NoReading()
+	var stepCtx config.StepContextConfig
+	if startupErr == nil {
+		closeReading = stepContextReading(factoryRoot, cwd, agentName, startupCfg.Recovery, boundaryNow)
+		stepCtx = startupCfg.StepContext
+	}
+
 	if vt := verbTelemetryFrom(ctx); vt.enabled {
 		ev := telemetryRecordFor(ctx, factoryRoot, cwd, vt.agent, instanceID, "")
 		ev.Event = telemetry.EventStepEnd
@@ -171,7 +197,15 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 		if phaseComplete {
 			ev.Status = telemetry.StatusGateWaiting
 		}
-		ev.StepSeq, ev.DurationMS = telemetryStepSpan(factoryRoot, vt.agent, instanceID, step.ID, ev.TS)
+		span := telemetryStepSpan(factoryRoot, vt.agent, instanceID, step.ID, ev.TS)
+		ev.StepSeq, ev.DurationMS = span.seq, span.durationMS
+		// A gate close records its occupancy like any other close (cross-review HIGH-2). The gate
+		// contract excludes it from the HANDOFF, not from the measurement — a step that filled its
+		// window and then hit a gate is exactly the step the improvement loop needs to see.
+		attachStepOccupancy(&ev, closeReading, factoryRoot, boundaryNow)
+		ev.CtxTokensStart = span.ctxTokensStart
+		ev.CtxBoundTokens = int64(stepCtx.BoundTokens)
+		ev.CumTokensDelta = stepCumTokensDelta(span, ev)
 		appendTelemetryRecord(factoryRoot, ev)
 	}
 
@@ -203,15 +237,183 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 		} else {
 			fmt.Println("Remaining steps are blocked. Waiting for dependencies.")
 		}
+
+		// #622 C5: the cooperative step boundary. LAST statement on this branch, because a
+		// successful respawn replaces the pane this process is running in and nothing after it
+		// would run. The step is already closed and its record already written, so there is no
+		// in-flight work to lose — the boundary only ever recycles a session between steps.
+		if shouldBoundaryHandoff(closeReading, stepCtx, phaseComplete, true) {
+			runBoundaryHandoff(ctx, cwd, factoryRoot, "step "+step.ID, instanceID, closeReading, stepCtx, false)
+		}
 		return nil
 	}
 
 	// 6. All complete — mail WORK_DONE
-	return sendWorkDoneAndCleanup(ctx, store, cwd, factoryRoot, instanceID)
+	return sendWorkDoneAndCleanup(ctx, store, cwd, factoryRoot, instanceID, phaseComplete)
+}
+
+// stepCumTokensDelta answers how many tokens this step consumed, or refuses to answer.
+//
+// cum_tokens counts ONE session's lifetime, so the subtraction is only arithmetic when both ends
+// were measured in the same session (cross-review HIGH-3). Across a mid-step recycle the new
+// session's counter starts near zero and the difference comes out large and negative — a number
+// that looks like a measurement, in the figure the improvement loop leans on hardest. Refusing is
+// the only honest answer, and the report renders the refusal as its own state rather than as zero.
+func stepCumTokensDelta(span stepSpan, ev telemetry.StepEvent) *int64 {
+	if span.cumTokens == nil || ev.CumTokens == nil {
+		return nil
+	}
+	if span.sessionID == "" || ev.SessionID == "" || span.sessionID != ev.SessionID {
+		return nil
+	}
+	delta := *ev.CumTokens - *span.cumTokens
+	if delta < 0 {
+		// Same session id and a falling lifetime counter is not a consumption figure, it is a
+		// contradiction. Suppress rather than record a negative the report would have to explain.
+		return nil
+	}
+	return &delta
+}
+
+// shouldBoundaryHandoff is #622 C5's decision: may this step close by handing off to a clean
+// session rather than leaving the next step to inherit a nearly-full window?
+//
+// Pure — no clock, no filesystem, no environment — so every cell of the decision matrix is
+// exercisable directly. Five conditions must ALL hold, and each rules out a way this could fire
+// when it should not:
+//
+//   - FRESH. A stale, dark, malformed or absent channel is not evidence of high occupancy; it is
+//     evidence of nothing. Absence must never be able to trigger an action (Gap 3).
+//   - SESSION-MATCHED. Not a parameter: it is delivered by construction, because the reading comes
+//     from the session-keyed reader, which names the file from the caller's own raw session id. A
+//     comparison here would put the raw id against a sanitized stem and could never match — the
+//     #563 class, which would leave this function returning false forever with every test green.
+//   - AT OR ABOVE handoff_pct. `>=`, so a threshold of exactly N fires at exactly N.
+//   - NOT A GATE CLOSE (cross-review HIGH-2). A gate close is an input rather than a placement
+//     accident: --phase-complete closes the gate bead and then STILL falls through to the
+//     more-steps branch whenever other steps are open. The gate contract already ends the session
+//     and dispatches a fresh agent when the gate resolves, so a handoff here would resurrect an
+//     ended session into a blocked step.
+//   - WORK FOLLOWS. Recycling a session with nothing left to do buys nothing and costs a respawn.
+//     The spec states this conjunct as a disjunction — steps-remain OR improvement-fired-final —
+//     and the two call sites supply one disjunct each: the more-steps branch knows steps are open,
+//     and the completion branch knows an improvement session is about to inherit this window. The
+//     parameter is named for what it decides rather than for either caller's evidence, so neither
+//     site has to pass a value that reads as a lie.
+//
+// A zero handoff_pct means nobody configured this, not "hand off at 0%".
+func shouldBoundaryHandoff(reading statusline.ChannelReading, cfg config.StepContextConfig, gateClose, workFollows bool) bool {
+	if gateClose || !workFollows {
+		return false
+	}
+	if cfg.HandoffPct < 1 {
+		return false
+	}
+	if !reading.IsHealthy() {
+		return false
+	}
+	pct, ok := reading.UsedPct()
+	if !ok {
+		// A false with a 0 is "no reading", never "empty context".
+		return false
+	}
+	return pct >= float64(cfg.HandoffPct)
+}
+
+// boundaryHandoffMessage is the self-mail body a boundary handoff leaves for the session that
+// inherits the fresh window. finalStep is the #622-C5 final-step case: the formula is already
+// complete and an improvement session inherits (driven by the marker + urgent self-mail), so there
+// is no next step to prime — the inheritor's action is to finish the improvement pass, not af prime.
+func boundaryHandoffMessage(pct float64, after string, finalStep bool) string {
+	if finalStep {
+		return fmt.Sprintf("Context at %.0f%% after %s. Fresh session: the improvement session inherits — run af mail check, then af improvement complete.", pct, after)
+	}
+	return fmt.Sprintf("Context at %.0f%% after %s. Fresh session: run af prime for the next step.", pct, after)
+}
+
+// runBoundaryHandoff performs the cooperative boundary handoff, or declines it for a reason worth
+// printing. Failure warns and returns: af done has already closed the step and must still exit 0,
+// and a session that could not be recycled is merely one the forceful recovery ladder may catch
+// later — which is the degradation this feature is layered above, not a new failure.
+func runBoundaryHandoff(ctx context.Context, cwd, factoryRoot, after, instanceID string,
+	reading statusline.ChannelReading, cfg config.StepContextConfig, finalStep bool) {
+	// af done legitimately runs outside tmux — an operator shell, a test. No pane, no handoff.
+	// Said out loud rather than declined silently: by the time this runs the decision has already
+	// come out true, so an operator whose factory never hands off has nothing else to grep for.
+	pane := os.Getenv("TMUX_PANE")
+	if !tmux.IsInsideTmux(os.Getenv("TMUX")) || pane == "" {
+		fmt.Fprintf(os.Stderr, "warning: step-boundary handoff skipped: not running in a tmux pane\n")
+		return
+	}
+	agentName, agentEntry, err := detectRole(cwd, factoryRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: step-boundary handoff skipped: %v\n", err)
+		return
+	}
+
+	pct, _ := reading.UsedPct()
+	fmt.Printf("Context at %.0f%% after %s — handing off for a clean session.\n", pct, after)
+
+	subject := "HANDOFF: step context boundary"
+	message := boundaryHandoffMessage(pct, after, finalStep)
+
+	// TriggerDetail is populated because this is the one cooperative class that KNOWS its
+	// occupancy. crash, error_pattern, compact_handoff and self_handoff leave it zero because they
+	// have no occupancy story; leaving it zero here would make the boundary indistinguishable from
+	// them in the funnel log, and the read surface renders a zero observed_pct as UNKNOWN.
+	detail := recycleDetail{ObservedPct: pct, ThresholdPct: cfg.HandoffPct, InstanceID: instanceID}
+	if obs, ok := reading.Observation(); ok {
+		// The sanitized stem, which is the spelling the funnel's own fence compares against.
+		detail.SessionID = obs.SessionID()
+	}
+
+	if err := boundaryHandoffExec(ctx, cwd, RespawnOptions{
+		FactoryRoot:   factoryRoot,
+		AgentName:     agentName,
+		AgentEntry:    *agentEntry,
+		PaneID:        pane,
+		AgentWorkDir:  cwd,
+		Trigger:       triggerStepBoundaryHandoff,
+		TriggerDetail: detail,
+	}, subject, message); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: step-boundary handoff failed: %v\n", err)
+	}
+}
+
+// boundaryHandoffExec runs the three legs of a boundary handoff: checkpoint, mail to self, respawn.
+//
+// It calls respawnSession DIRECTLY rather than exec'ing `af handoff`, which hardcodes
+// Trigger: triggerSelfHandoff and has no flag or env that can say otherwise. An exec'd handoff
+// would write the wrong class into the funnel log, and the whole value of a cooperative boundary
+// is being able to tell it apart from the forceful ladder afterwards.
+//
+// Declared as an ADR-009 package-var seam because the alternative leaves this untestable: the
+// nearest sibling, triggerHandoffRespawn, is a plain func nooped by isTestBinary(), so a test of it
+// can only ever assert "it did not error" — never that it ran, never that a failure warned and let
+// the verb succeed. Deliberately separate from doRespawn (recovery.go), whose doc scopes it to the
+// watchdog executor's own route into the funnel; two callers sharing one seam would let a test of
+// either silently substitute for the other.
+var boundaryHandoffExec = func(ctx context.Context, cwd string, opts RespawnOptions, subject, message string) error {
+	// Both legs are best-effort, mirroring af handoff: a checkpoint or a mailbox that failed is
+	// worth saying out loud, but neither is a reason to leave a session running on a full window.
+	if err := captureCheckpointWithFormula(ctx, cwd, subject, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: checkpoint write failed: %v\n", err)
+	}
+	if err := sendHandoffMail(opts.AgentName, subject, message); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: mail send failed: %v\n", err)
+	}
+	return respawnSession(opts)
 }
 
 // sendWorkDoneAndCleanup sends the WORK_DONE mail and removes the checkpoint.
-func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, factoryRoot, instanceID string) error {
+//
+// gateClose carries runDoneCore's --phase-complete down to the #622 C5 final-step handoff. It is a
+// parameter rather than a re-read because this function is reachable by two routes and neither can
+// recover the flag afterwards: the all-complete branch closes the last step with the flag set, and
+// nothing on disk afterwards distinguishes that from an ordinary close. AC-1 makes not-a-gate-close
+// a conjunct of the WHOLE boundary rule, final step included, so dropping it here would leave one
+// cell of the matrix firing where the spec says every gate-close cell is inert.
+func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, factoryRoot, instanceID string, gateClose bool) error {
 	totalSteps, totalErr := countAllChildren(ctx, store, instanceID)
 	if totalErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not count total children: %v\n", totalErr)
@@ -366,6 +568,25 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 	// On fire, deliver the instruction over the redundant trio (#483).
 	if improvementFired {
 		deliverImprovement(improvementAgent, improvementInstr, formulaName)
+
+		// #622 C5, the final-step extension. An improvement session inherits the dirtiest window
+		// of the whole run — the very last state of the formula that just finished — and it is the
+		// session whose whole job is reading a report and reasoning about it. So it starts clean.
+		//
+		// Strictly AFTER both durability legs, and only inside this branch. The marker is on disk
+		// (written inside evaluateImprovementFire) and the instruction has been mailed, so the
+		// respawn cannot lose the instruction: the mail is redelivered at SessionStart and the
+		// marker survives until `af improvement complete` consumes it. The identity lock is
+		// deliberately NOT released on this path, and the respawned af prime re-acquires it
+		// because the lock of a dead PID is stale. Nothing outside `if improvementFired` reads
+		// anything here: the non-fired completion path stays byte-identical.
+		if cfg, err := config.LoadStartupConfig(factoryRoot); err == nil {
+			now := time.Now()
+			reading := stepContextReading(factoryRoot, cwd, improvementAgent, cfg.Recovery, now)
+			if shouldBoundaryHandoff(reading, cfg.StepContext, gateClose, true) {
+				runBoundaryHandoff(ctx, cwd, factoryRoot, "formula "+formulaName, instanceID, reading, cfg.StepContext, true)
+			}
+		}
 	}
 
 	// Tear down a dispatched session (worktree removal + self-terminate). Skipped
@@ -392,6 +613,11 @@ func finishDispatchedSession(cwd, factoryRoot string) {
 		if agentName == "" {
 			fmt.Fprintf(os.Stderr, "warning: AF_ROLE not set, skipping worktree cleanup\n")
 		} else {
+			// Emitted before every removal branch below, so the operator reads what survived
+			// while it is still standing. stderr is the only stream this path has.
+			if line := memory.PreservedLine(factoryRoot, agentName); line != "" {
+				fmt.Fprintf(os.Stderr, "%s\n", line)
+			}
 			if isWorktreeOwner(cwd) {
 				meta, empty, err := worktree.RemoveAgent(factoryRoot, wtID, agentName)
 				if err != nil {
@@ -684,14 +910,41 @@ func selfTerminate(cwd, factoryRoot string) {
 
 	agentName, err := detectAgentName(cwd, factoryRoot)
 	if err != nil {
-		// Fallback: read .runtime/session_id which contains the tmux session ID
-		sessionIDBytes, readErr := os.ReadFile(filepath.Join(cwd, ".runtime", "session_id"))
-		if readErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: cannot detect agent for auto-terminate: %v (session_id fallback: %v)\n", err, readErr)
+		// Fallback: ask tmux which session this process is actually in.
+		//
+		// This used to read .runtime/session_id and hand it to terminateSession. That file holds
+		// the CLAUDE CODE session id — a UUID, written by persistSessionID from the SessionStart
+		// hook payload — not a tmux session name, and HasSession matches names exactly. Tmux
+		// sessions here are af-<role>, so the predicate was always false and auto-terminate
+		// silently did nothing every time the name could not be resolved (#622 LOW-3).
+		//
+		// AF_ROLE is not the repair: resolveAgentName already exhausts it before failing, so by
+		// the time this branch runs there is no role in the environment to fall back to. tmux
+		// itself is the only remaining source of the one thing needed here — a real session name.
+		//
+		// That same AF_ROLE-lessness is why the K8 kill guard had to learn isSelfTmuxSession
+		// (authority.go): without it the guard refuses this kill, and terminateSession has by then
+		// already written .runtime/last_termination — trading a silent no-op for a durable lie.
+		// isSelfSessionID, the Ledger D9 accommodation for the UUID this branch used to pass, loses
+		// its last production caller here; retiring it is an ADR-021 decision, not this phase's.
+		if os.Getenv("TMUX") == "" {
+			fmt.Fprintf(os.Stderr, "warning: cannot detect agent for auto-terminate: %v (not inside tmux)\n", err)
 			return
 		}
-		sessionID := strings.TrimSpace(string(sessionIDBytes))
-		terminateSession(sessionID, cwd)
+		name, tmuxErr := newCmdTmux().CurrentSessionName()
+		if tmuxErr != nil || name == "" {
+			fmt.Fprintf(os.Stderr, "warning: cannot detect agent for auto-terminate: %v (tmux session lookup: %v)\n", err, tmuxErr)
+			return
+		}
+		// The shape check the old code got for free by never matching anything. tmux answers with
+		// whatever session this process is in, and af done is runnable from an operator's own
+		// shell; killing that would be a strictly worse failure than the silent no-op this branch
+		// replaces. Only a factory identity is ours to end.
+		if !isAfProductionSession(name) {
+			fmt.Fprintf(os.Stderr, "warning: cannot detect agent for auto-terminate: %v (tmux session %q is not a factory session)\n", err, name)
+			return
+		}
+		terminateSession(name, cwd)
 		return
 	}
 

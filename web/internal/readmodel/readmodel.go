@@ -1,7 +1,7 @@
 // Package readmodel is the C3 honest read-model for the web module.
 //
 // It assembles an AgentView per agent from Phase 0's `af agents list --json` (whose `status`
-// is ALREADY honestly derived — internal/cmd/agents.go:249-266) plus the web module's own raw
+// is ALREADY honestly derived — internal/cmd.deriveAgentStatus) plus the web module's own raw
 // `tmux list-sessions` liveness probe. It surfaces that honest status faithfully and adds its
 // own AssembledAt stamp (the source of the Floor's "updated Ns ago" staleness clock). It never
 // reports a running-but-formula-less agent as "working", and it cross-checks liveness: a
@@ -32,9 +32,16 @@ type Liveness interface {
 	Sessions(ctx context.Context) ([]string, error)
 }
 
-// agentListItem re-implements the Phase-0 contract (internal/cmd/agents.go:70-82). It is bound
-// to the real 11-key JSON shape, including step_id (which the outline's AgentView prose omits)
-// and the deliberate is_gate(omitempty)/gate_id(no-omitempty) asymmetry.
+// agentListItem re-implements the af-core contract (internal/cmd.agentListItem), including
+// step_id (which the outline's AgentView prose omits) and the deliberate
+// is_gate(omitempty)/gate_id(no-omitempty) asymmetry. This contract is hand-mirrored and must be
+// kept in sync by hand: the web module is compiler-forbidden from importing af-core, and
+// encoding/json discards a key this struct does not declare SILENTLY and without error — which is
+// how the occupancy fields below went unread through all of Phase 4A (#596 review finding H-4).
+//
+// KNOWN UNMAPPED: af-core also emits foreign_root (K9b, #519). It is deliberately still unmapped
+// here — out of Phase 4B's scope — and is recorded so the next reader cannot mistake this mirror
+// for complete.
 type agentListItem struct {
 	Name      string            `json:"name"`
 	Type      string            `json:"type"`
@@ -47,6 +54,20 @@ type agentListItem struct {
 	IsGate    bool              `json:"is_gate,omitempty"`
 	GateID    string            `json:"gate_id"`
 	Inputs    map[string]string `json:"inputs"`
+
+	// Occupancy and recovery visibility (#596 K10-web, additive — mirrors the af-core contract).
+	// All three copy af-core's no-omitempty policy: a missing key would read as "nothing to worry
+	// about", the exact masking this exists to remove.
+	//
+	// ContextPct is -1 when there is no datum, NOT 0 — a 0 that reads as "empty context" is the
+	// 0%-reads-healthy defect. Note that an af PREDATING Phase 4A omits the key entirely and Go
+	// decodes that absence as 0, so a consumer must decide on ContextState, never on ContextPct.
+	// ContextState carries the reader's five literals verbatim (fresh|stale|dark|none|malformed);
+	// only fresh is healthy and malformed is never collapsed into none.
+	// Recovery is the breaker verdict: none|recovering|halted. None of the three feeds status.
+	ContextPct   int    `json:"context_pct"`
+	ContextState string `json:"context_state"`
+	Recovery     string `json:"recovery"`
 }
 
 // errorEnvelope is the af read-command failure shape ({"state":"error","error":"…"}).
@@ -73,6 +94,14 @@ type AgentView struct {
 	GateID      string            `json:"gate_id"`
 	Inputs      map[string]string `json:"inputs"`
 	AssembledAt time.Time         `json:"assembled_at"`
+
+	// Occupancy and recovery, passed through from af-core UNCHANGED (#596 K10-web). They are
+	// deliberately NOT folded into Status: the honesty enum keeps its three Phase-0 inputs, so a
+	// halted agent still reports "working" here and it is the UI badge, not the enum, that stops
+	// it reading as fine. See agentListItem above for the value domains and the -1-is-not-0 rule.
+	ContextPct   int    `json:"context_pct"`
+	ContextState string `json:"context_state"`
+	Recovery     string `json:"recovery"`
 }
 
 // ReadModel assembles AgentViews from the agents lister + the liveness probe.
@@ -156,6 +185,10 @@ func (rm *ReadModel) Assemble(ctx context.Context) ([]AgentView, error) {
 			GateID:      it.GateID,
 			Inputs:      it.Inputs,
 			AssembledAt: stamp,
+
+			ContextPct:   it.ContextPct,
+			ContextState: it.ContextState,
+			Recovery:     it.Recovery,
 		})
 	}
 	return views, nil

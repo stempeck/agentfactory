@@ -23,6 +23,10 @@ Produce a short written summary of what you found — affected files, the break 
 
 Do NOT fix anything. Do NOT propose solutions. Map the terrain.
 
+Write this summary to `orient-findings.md` in your working directory. That file is the
+artifact `af done` requires for this step. Cite affected files as `path:line` so the next
+step can verify each claim against the source.
+
 ## !IMPORTANT - MANDATORY Exact Step Execution
 Execute each formula step EXACTLY as written, in order, with no modifications.
 Every step produces a file artifact at a known path. `af done` is forbidden
@@ -36,11 +40,15 @@ id = "verify"
 title = "Verify findings against symptoms"
 needs = ["orient"]
 description = """
-Re-read your orient summary. For each claim you made:
+Re-read `orient-findings.md` from the orient step. For each claim you made:
 1. Cite the exact file and line that supports it
 2. If you cannot cite evidence, retract the claim
 
 If your findings do not fully explain the reported symptoms, say what is missing.
+
+Write this verification (each claim → `path:line` → verdict, plus what is missing) to
+`verify-findings.md` in your working directory. That file is the artifact `af done`
+requires for this step.
 """
 
 [[steps]]
@@ -54,5 +62,7 @@ Write a concise report with:
 - The break point or answer
 - Gotchas the implementer should know
 
-Mail the report to the dispatcher.
+Write the report to `report.md` in your working directory (the artifact `af done` requires),
+then mail it to the dispatcher, replying to the originating issue so it stays threaded:
+`af mail send dispatcher --reply-to {{issue}} -s "<subject>" -m "<report body>"`.
 """

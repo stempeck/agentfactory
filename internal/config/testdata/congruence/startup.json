@@ -1,0 +1,35 @@
+{
+  "agents": [
+    "agents[]"
+  ],
+  "quality": "on",
+  "fidelity": "off",
+  "improvement": "on",
+  "telemetry": "off",
+  "start_dispatch": true,
+  "watchdog_agents": [
+    "watchdog_agents[]"
+  ],
+  "recovery": {
+    "enabled": true,
+    "context_threshold_pct": 91,
+    "context_advisory_pct": 61,
+    "confirm_ticks": 4,
+    "staleness_secs": 240,
+    "dark_grace_secs": 780,
+    "post_recovery_progress_secs": 960,
+    "progress_backstop_secs": 7260,
+    "no_step_escalation_secs": 3660,
+    "max_attempts": 5,
+    "attempt_window_secs": 1860,
+    "rate_cap_max": 7,
+    "rate_cap_window_secs": 86460,
+    "exclude": [
+      "recovery.exclude[]"
+    ]
+  },
+  "step_context": {
+    "bound_tokens": 180000,
+    "handoff_pct": 80
+  }
+}

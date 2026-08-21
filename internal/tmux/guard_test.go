@@ -151,3 +151,21 @@ func TestGuard_ZeroProductionRealOps(t *testing.T) {
 		t.Fatalf("ProductionRealOpCount()=%d, want 0 under guard", got)
 	}
 }
+
+// TestCapturePaneJoined_GuardBenignZero pins that the joined capture honors the ADR-018 light
+// guard, exactly like CapturePane. This one matters more than most: the watchdog calls it on
+// every poll for every agent, so a missing guard branch would shell out to the operator's real
+// tmux server throughout the unit suite. tmux IS installed on developer machines and CI runners
+// are heterogeneous, so absence of tmux is not the safety net — this branch is. It lives in this
+// !integration file because it pins GUARDED behaviour: the integration build sets guardMode
+// false and would drive the real client instead.
+func TestCapturePaneJoined_GuardBenignZero(t *testing.T) {
+	tm := NewTmux()
+	got, err := tm.CapturePaneJoined("af-someagent", 50)
+	if err != nil {
+		t.Fatalf("guarded CapturePaneJoined must not error: %v", err)
+	}
+	if got != "" {
+		t.Errorf("guarded CapturePaneJoined = %q, want empty", got)
+	}
+}

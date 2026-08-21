@@ -1,4 +1,4 @@
-.PHONY: build build-webui install clean clean-venv test conformance generate test-integration check-formulas sync-formulas install-hooks check-skills sync-skills check-formula-skills check-regen
+.PHONY: build build-webui install clean clean-venv test test-web conformance generate test-integration check-formulas sync-formulas install-hooks check-skills sync-skills check-formula-skills check-regen
 
 BINARY := af
 BUILD_DIR := .
@@ -58,14 +58,30 @@ test:
 	@mkdir -p $(AF_TEST_TMPDIR)
 	TMPDIR=$(AF_TEST_TMPDIR) GOTMPDIR=$(AF_TEST_TMPDIR) CGO_ENABLED=0 go test ./...
 
+# Issue #620 Gap 7: the web console is a SEPARATE Go module (web/go.mod), invisible to the root
+# `go test ./...` above — so `make test` alone proves NOTHING about a web change, and CI has no
+# path filters, which makes a red PR the first signal. This is the EXACT command the CI web-unit
+# lane runs (.github/workflows/test.yml:86), so local dev mirrors that lane.
+# Deliberately sets no TMPDIR/GOTMPDIR/CGO_ENABLED, unlike `test` above and the web half of
+# `test-integration` below: the web module's one exec-sensitive test finds an exec-capable temp
+# dir itself (web/internal/entrypoint/guard_test.go execCapableTempDir), and any env this target
+# adds beyond the lane's would make the local run more permissive than CI — the blindness the
+# target exists to remove.
+test-web:
+	cd web && go test ./... -count=1
+
 # Conformance-test the SHIPPED formula-editor engine
 # (web/internal/web/static/scripts/toml-engine.js) against Python tomllib over the live
 # store formulas. This is the EXACT command the toml-conformance CI job runs, so
 # `make conformance` matches the CI lane byte-for-byte (local<->CI parity). Needs node +
-# python3.12 (tomllib) on PATH; it is a plain Node script, no build step.
+# python3.12 (tomllib) on PATH; it is a plain Node script, no build step. Only test-engine.js
+# needs python — the other three are node-only. Order matches the CI job's step order, so the two
+# hand-maintained lists compare by eye.
 conformance:
 	node web/conformance/test-engine.js .agentfactory/store/formulas
 	node web/conformance/test-telemetry-banner.js
+	node web/conformance/test-recovery-badge.js
+	node web/conformance/test-settings.js
 
 # The venv is rebuilt only when py/requirements.txt changes (marker file
 # guards re-install on every test run). Fails fast with a clear message if

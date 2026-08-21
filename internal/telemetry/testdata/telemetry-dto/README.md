@@ -78,7 +78,7 @@ The prefix before the first `-` is the FAMILY, and it is load-bearing rather tha
 | `status-healthy-all-green.json` | every axis healthy — the only `state: "ok"` status payload |
 | `status-error-infra.json` | the infrastructure-failure envelope, which still exits 0 |
 | `report-empty.json` | healthy with no data yet — `state: "ok"`, `rows: []`, zero stats |
-| `report-rows.json` | one closed step and one open step, with numeric durations |
+| `report-rows.json` | one closed step and one open step, with numeric durations; also the two context stories (#622 C6) — the closed row pins measured figures and both verdicts, the open row pins the shape of absence, `null` per column and `consumption_state: "unmeasurable"` |
 | `report-corrupt.json` | zero rows **and** non-zero stats — never rendered as "no records yet" |
 | `usage-ok.json` | a healthy query — both halves `ok`, token rows and metric rows present, `truncated` false; the metric row also pins the label ALLOWLIST, since the live backend returns `user_email` / `session_id` on those series and this payload reaches a browser |
 
@@ -88,7 +88,9 @@ The prefix before the first `-` is the FAMILY, and it is load-bearing rather tha
    credentials are configured, never which.
 2. **`rows` and `signals` are arrays, never `null`.** A consumer iterates them without a guard.
 3. **No key is optional.** Degradation is a value difference, never a shape difference — which is
-   what makes the schema snapshots in both lanes meaningful.
+   what makes the schema snapshots in both lanes meaningful. A column with nothing to report carries
+   an explicit `null`, and the web mirror must type it as a POINTER: decoding `null` into a plain
+   scalar re-encodes it as `0`, and "nobody measured this" is not "this was zero".
 4. **`state` is drawn from the FAMILY's enum, and each family closes its own.** `status` and
    `report` use `ok` / `degraded` / `error`. `usage` uses `ok` / `not_installed` / `backend_down` /
    `credential_rejected` / `query_failed` — disjoint beyond `ok`, because a query that failed is

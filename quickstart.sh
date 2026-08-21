@@ -847,12 +847,51 @@ model_list:
       model: openai/gpt-4o-mini
       api_key: os.environ/OPENAI_API_KEY
 
+  # Aliases for the model ids the host asks for BY NAME. A session picks its main model from the
+  # profile, but sub-agents and background calls request a CLASS, and any class key left unset falls
+  # back to the host's own built-in claude-* id — which a gateway with a closed model_list refuses,
+  # killing the spawn that asked for it. No ANTHROPIC_* key can redirect those, so only an alias
+  # answers them; `af config models check` demands one per claude-* id this factory's direct
+  # profiles name. Point the LARGE classes (opus/sonnet/fable) at the MAIN model: the host sizes
+  # their context window large by the claude- id it asked for, so aliasing them to the small backend
+  # trades an unserved-model failure for an over-window one. The haiku class routes to the small
+  # backend below — the host sizes a claude-haiku-4-5 request small, so that is safe and cheaper.
+  # Ids are enumerated one per line — LiteLLM wildcard routing is not
+  # relied on. Add a line here whenever you add a direct claude-* profile.
+  - model_name: claude-opus-5
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: claude-sonnet-5
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: claude-opus-4-8
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: claude-fable-5
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: claude-haiku-4-5       # haiku-class requests go to the small backend
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
 EOF
         log_info "Seeded .agentfactory/litellm.yaml"
     fi
 
+    # Context window: deliberately NOT seeded. CLAUDE_CODE_MAX_CONTEXT_TOKENS
+    # declares the model's real window; CLAUDE_CODE_AUTO_COMPACT_WINDOW declares
+    # the token count the host compacts at; above 200k it needs the first key
+    # or the host silently caps it. quickstart cannot know what your gateway
+    # actually serves, and a guessed value would be the unnegotiated constant
+    # issue #602 exists to remove. Operators set both per profile; the
+    # runbook for choosing values is USING_LITELLM.md.
     if ! jq -e '.models.codex' .agentfactory/models.json >/dev/null 2>&1; then
         jq --arg url "http://localhost:$LITELLM_PORT" '.models.codex = {
             "ANTHROPIC_BASE_URL": $url,

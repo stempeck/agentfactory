@@ -29,7 +29,7 @@ PR's design into an implementation plan.
 - One cross-review round, then commit + PR — the pipeline stays lean
 - The implementation plan is produced by a fresh agent dispatched off the PR
 - Event-driven coordination: the orchestrator is woken by each sub-agent's completion
-  mail (the af mail inject hook delivers it on wake). The orchestrator therefore does
+  mail (the `af mail check --inject` hook delivers it on wake). The orchestrator therefore does
   NOT poll, sleep, nudge, or send keepalives — sub-agents simply mail when done, and
   the orchestrator advances on wake. Agent liveness is the factory watchdog's job.
 
@@ -42,7 +42,7 @@ The orchestrator never busy-waits. When an action says "wait for signal X":
 1. Check your inbox once: `af mail inbox --json`.
 2. If the awaited signal(s) are present, archive them (`af mail delete`) and continue.
 3. If not present, STOP and end your turn. Do NOT sleep, loop, nudge, or keepalive.
-   When the sub-agent mails you, the af mail inject hook wakes this session and you
+   When the sub-agent mails you, the `af mail check --inject` hook wakes this session and you
    re-run the check. Unprocessed completion mails accumulate in the inbox, so on each
    wake you can tell exactly which signals have arrived.
 
@@ -282,7 +282,7 @@ PR's design into an implementation plan.
 - One cross-review round, then commit + PR — the pipeline stays lean
 - The implementation plan is produced by a fresh agent dispatched off the PR
 - Event-driven coordination: the orchestrator is woken by each sub-agent's completion
-  mail (the af mail inject hook delivers it on wake). The orchestrator therefore does
+  mail (the `af mail check --inject` hook delivers it on wake). The orchestrator therefore does
   NOT poll, sleep, nudge, or send keepalives — sub-agents simply mail when done, and
   the orchestrator advances on wake. Agent liveness is the factory watchdog's job.
 
@@ -295,7 +295,7 @@ The orchestrator never busy-waits. When an action says "wait for signal X":
 1. Check your inbox once: `af mail inbox --json`.
 2. If the awaited signal(s) are present, archive them (`af mail delete`) and continue.
 3. If not present, STOP and end your turn. Do NOT sleep, loop, nudge, or keepalive.
-   When the sub-agent mails you, the af mail inject hook wakes this session and you
+   When the sub-agent mails you, the `af mail check --inject` hook wakes this session and you
    re-run the check. Unprocessed completion mails accumulate in the inbox, so on each
    wake you can tell exactly which signals have arrived.
 
@@ -453,3 +453,13 @@ Do NOT rationalize why your approach is acceptable. Correct immediately.
 - Do not modify other agents' directories or mailboxes directly.
 - Follow the factory's established conventions and workflows.
 - Act autonomously — do not wait for user prompts between tasks.
+
+## Memory Protocol
+
+Your learnings vault at `.agentfactory/memory/rapid-soldesign-plan/` outlives this session, your worktree, and every teardown path — it is the one place durable state survives without operator archaeology.
+
+- Record a learning the moment you earn it: `af memory add -s "<subject>" -m "<what you learned>" --type gotcha` (types: `gotcha`, `model-behavior`, `ops`, `outcome`, `improvement`).
+- Read before you re-derive: `af memory list`, then `af memory show <id>` for the full note. `af memory check --inject` already serves your own notes at session start.
+- Close the loop when a learning lands somewhere durable: `af memory graduate <id> --to commit:<sha>` (also `issue#N`, `pr#N`, `doc:<path>`, `formula:<name>`). When it stops being true: `af memory expire <id>`.
+- Notes are append-only and there is no delete verb — graduating or expiring one stops it costing you context without destroying the record.
+- `af memory status` reports what the vault holds and what is due for graduation.

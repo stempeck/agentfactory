@@ -208,6 +208,20 @@ func primeAgent(ctx context.Context, out io.Writer, factoryRoot, role, workDir s
 		ev.StepID = primed.stepID
 		ev.StepSeq = primed.stepSeq
 		ev.StepTitle = primed.stepTitle
+		// #622 C4: how full the window already was when this step began. Without it the closing
+		// record's occupancy is a level with nothing to measure it against, and a step that
+		// inherited a nearly-full window is indistinguishable from one that filled it itself.
+		//
+		// A file read, never a network one: TestPrimeNoNetworkIO pins that af prime — a
+		// SessionStart hook — puts no round trip in front of a session. Frequently nil right after
+		// a handoff, because the respawned session has not rendered its first snapshot yet; that is
+		// honest, and honestly absent is the whole contract of these fields.
+		now := time.Now()
+		startupCfg, cfgErr := config.LoadStartupConfig(factoryRoot)
+		if cfgErr == nil {
+			attachStepOccupancy(&ev, stepContextReading(factoryRoot, workDir, role, startupCfg.Recovery, now),
+				factoryRoot, now)
+		}
 		appendTelemetryRecord(factoryRoot, ev)
 	}
 

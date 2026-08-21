@@ -10,7 +10,21 @@
       "started": "2026-07-27T09:15:00Z",
       "model": "claude-opus-5",
       "verb_ms": 12,
-      "instance_id": "af-580-1"
+      "instance_id": "af-580-1",
+      "ctx_tokens_start": 42000,
+      "ctx_tokens_end": 96000,
+      "ctx_tokens_total": 200000,
+      "ctx_used_pct": 48,
+      "cum_tokens_delta": 53500,
+      "ctx_bound_tokens": 120000,
+      "over_occupancy": false,
+      "over_consumption": false,
+      "consumption_state": "measured",
+      "compacted_mid_step": false,
+      "ctx_observed_stale": false,
+      "bound_exceeds_window": false,
+      "interrupted_trigger": "",
+      "interrupted_observed_pct": null
     },
     {
       "agent": "manager",
@@ -20,7 +34,21 @@
       "started": "2026-07-27T09:20:00Z",
       "model": "",
       "verb_ms": 8,
-      "instance_id": "af-580-1"
+      "instance_id": "af-580-1",
+      "ctx_tokens_start": 88000,
+      "ctx_tokens_end": null,
+      "ctx_tokens_total": null,
+      "ctx_used_pct": null,
+      "cum_tokens_delta": null,
+      "ctx_bound_tokens": null,
+      "over_occupancy": null,
+      "over_consumption": null,
+      "consumption_state": "unmeasurable",
+      "compacted_mid_step": null,
+      "ctx_observed_stale": null,
+      "bound_exceeds_window": null,
+      "interrupted_trigger": "",
+      "interrupted_observed_pct": null
     }
   ],
   "stats": {

@@ -32,9 +32,25 @@ A bare 'af up' (no positional args) is driven by .agentfactory/startup.json:
                     state unchanged (gates are set at 'af install --init' and
                     changed only via explicit 'af quality'/'af fidelity').
   start_dispatch:   true also starts the dispatcher ('af dispatch start').
-  watchdog_agents:  REQUIRED to run the watchdog; names the explicit agents to
-                    monitor. Omit/empty ⇒ the watchdog does not start (issue #408;
-                    never watches all).
+  watchdog_agents:  names the agents whose PANES the watchdog monitors for error
+                    patterns, silence and crashes. Omit/empty ⇒ that surface is
+                    inert (no pane captured, no keystrokes sent), but the watchdog
+                    still starts: its occupancy-recovery surface covers every live
+                    agent regardless (issue #596 Decision 4).
+  recovery:         tunes context-exhaustion recovery — enabled,
+                    context_threshold_pct, context_advisory_pct, confirm_ticks,
+                    staleness_secs, dark_grace_secs, post_recovery_progress_secs,
+                    progress_backstop_secs, no_step_escalation_secs, max_attempts,
+                    attempt_window_secs, rate_cap_max, rate_cap_window_secs and
+                    exclude. Run 'af watchdog --help' for each key's meaning and
+                    default.
+
+'af up' is also what DELIVERS the statusLine settings key an agent needs before
+it can be observed at all: it warns before launch about any agent whose settings
+carry no such key (those write no occupancy snapshots, so recovery is blind to
+them) and about a factory-wide statusline gate that is off. Re-running 'af up' or
+'af sling' is the remediation — 'af install --init' reprovisions factory-root
+agent dirs only.
 
 A start set larger than max_worktrees is warned about (not aborted) before launch.
 Positional 'af up <names>' ignores startup.json and starts exactly those agents.`,
@@ -69,6 +85,14 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "factory: %s\n", root)
+
+	// R1 (#515): the learnings vault is container-local and git-invisible, and ADR-019 bars
+	// closing that by requiring container recreation — so the residual stays open and this is the
+	// compensating control. Launch is the moment an operator is already thinking about the
+	// factory's lifecycle, which makes it the cheapest place to hear "you have N notes and have
+	// never backed them up". It joins the warn-to-stderr preflight cluster below and shares its
+	// contract: it returns nothing and cannot fail a launch.
+	warnVaultExportStaleness(cmd.ErrOrStderr(), root, time.Now())
 
 	t := newCmdTmux()
 	if !t.IsAvailable() {
@@ -154,6 +178,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// factory-root breadcrumb and escalate any ambiguous recovery — neither of
 	// which is visible from the per-agent stderr line under a bulk `af up`.
 	var runRecords []agentRunRecord
+	// The profile-key universe (issue #602) is factory-wide, not per-agent, so it is read once
+	// here rather than re-read inside the loop for every agent being started.
+	modelKeyUniverse := launchModelKeyUniverse(root)
 	for _, name := range agents {
 		entry, ok := agentsCfg.Agents[name]
 		if !ok {
@@ -271,6 +298,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 		if len(modelEnv) > 0 {
 			mgr.SetModelEnv(modelEnv)
 		}
+		// Profile-key universe (issue #602), wired UNCONDITIONALLY — deliberately not inside
+		// the guard above, since an agent that resolves no profile is exactly the one that
+		// must still shed a previous profile's keys. Computed once above the loop.
+		mgr.SetModelKeyUniverse(modelKeyUniverse)
 		// Telemetry env (issue #329): symmetric with af sling — gate-checked, built from the
 		// resolved model name. Gate off ⇒ nil ⇒ the session carries zero OTel vars.
 		if env := telemetryLaunchEnv(root, agentDir, name, modelName, cmd.ErrOrStderr()); env != nil {
@@ -417,9 +448,15 @@ func runUp(cmd *cobra.Command, args []string) error {
 	watchdogScope := startupCfg.WatchdogAgents
 	warnUnknownWatchdogAgents(cmd.ErrOrStderr(), watchdogScope, agentsCfg)
 
-	// Launch watchdog (best-effort). N4: pre-checks the scope and skips session
-	// creation (notice + breadcrumb) on an empty/all-unknown scope; otherwise
-	// launches a bare `af watchdog` (the watchdog self-scopes from startup.json).
+	// K20 (#596): say — before the watchdog exists to be blamed — which agents its
+	// recovery surface will be unable to observe. This is the one guaranteed operator
+	// touchpoint, and the failure it reports is otherwise completely silent.
+	warnUnobservableAgents(cmd.ErrOrStderr(), root, agentsCfg)
+
+	// Launch watchdog (best-effort). It always launches now (#596 Decision 4): an
+	// empty/all-unknown scope makes the watchdog's PANE surface inert, reported here,
+	// rather than withholding the process. The launch is a bare `af watchdog` — the
+	// watchdog self-scopes from startup.json.
 	launchWatchdog(cmd, t, root, watchdogScope, agentsCfg)
 
 	if !allOK {
@@ -522,20 +559,27 @@ func warnOmittedSinks(cmd *cobra.Command, root string, agentsCfg *config.AgentCo
 // session is given AF_ROOT (W2) so the watchdog can resolve its factory root even
 // if its own cwd is later deleted.
 func launchWatchdog(cmd *cobra.Command, t cmdTmux, root string, scope []string, agentsCfg *config.AgentConfig) {
-	// N4 (issue #408 Phase 3): pre-check the scope and skip session creation when it
-	// is empty or all-unknown — the early, observable echo of the watchdog's own
-	// authoritative refusal (resolveWatchdogScope, Phase 2). Skipping prevents the
-	// zombie-recreate loop (af up keeps recreating a session whose `af watchdog`
-	// immediately self-refuses) and leaves the SAME namespaced breadcrumb the
-	// watchdog writes, so operators have one place to look. Best-effort: the skip
-	// never sets allOK=false and never changes af up's exit code (W1).
-	if skip, reason := watchdogLaunchSkip(scope, agentsCfg); skip {
-		fmt.Fprintf(cmd.ErrOrStderr(),
-			"watchdog: not started — %s (issue #408; the watchdog never monitors all agents)\n", reason)
-		if err := writeWatchdogLastError(root, "af up: watchdog launch skipped — "+reason); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to write watchdog breadcrumb: %v\n", err)
+	// #596 Decision 4 — DELIBERATE REVISION of the issue-#408 skip. `af up` used to
+	// mirror the watchdog's own refusal by not creating the session at all on an empty
+	// or all-unknown scope. It now always launches: the empty-scope case was leaving the
+	// factory's own default configuration with no recovery process running, which is the
+	// incident this design exists to prevent. What an empty scope narrows is the PANE
+	// surface, and that narrowing is enforced inside the watchdog (resolveWatchdogScope),
+	// not by withholding the process. Best-effort throughout: nothing here sets
+	// allOK=false or changes af up's exit code (W1).
+	pane := watchdogPaneScopeState(scope, agentsCfg)
+	if pane.inert {
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"watchdog: pane monitoring inert — %s; starting in recovery-only mode "+
+				"(occupancy recovery still covers every live agent)\n", pane.reason)
+		// Only a genuine misconfiguration earns the durable breadcrumb. An omitted
+		// scope is a supported way to run, and writing an error record for the default
+		// configuration would train operators to ignore the file.
+		if pane.misconfigured {
+			if err := writeWatchdogLastError(root, "af up: watchdog pane monitoring inert — "+pane.reason); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to write watchdog breadcrumb: %v\n", err)
+			}
 		}
-		return
 	}
 
 	watchdogSession := session.WatchdogSessionName()
@@ -566,36 +610,108 @@ func launchWatchdog(cmd *cobra.Command, t cmdTmux, root string, scope []string, 
 	}
 }
 
-// watchdogLaunchSkip decides whether `af up` should skip launching the watchdog,
-// mirroring the watchdog's own refuse decision (resolveWatchdogScope, issue #408).
-// It reuses the Phase-1 buildWatchdogScope contract (blank-trimmed, non-nil empty
-// map) and the agents.json membership idiom (agentsCfg.Agents[name]). It returns
-// skip=true when the scope is empty, or when every configured name is unknown vs
-// agents.json. Transient-read guard (R1-L1): a nil agentsCfg (unreadable/absent
-// agents.json) is NOT treated as all-unknown — prefer launching the configured
-// non-empty scope over skipping on a flaky read. A successfully-parsed but EMPTY map
-// is NOT a transient read: it routes to the all-unknown skip below. (A
-// configured-but-not-running agent is still "known", so membership keys on
-// agents.json, never on a live session.)
-func watchdogLaunchSkip(scope []string, agentsCfg *config.AgentConfig) (skip bool, reason string) {
+// watchdogPaneState is what `af up` can say about the watchdog's PANE surface before
+// launching it. inert means that surface will monitor nothing; misconfigured separates the
+// two ways that happens, because they deserve different noise levels.
+type watchdogPaneState struct {
+	inert         bool
+	reason        string
+	misconfigured bool // names were configured but do not exist — an operator error, not a choice
+}
+
+// watchdogPaneScopeState predicts the watchdog's own pane-scope resolution
+// (resolveWatchdogScope) so `af up` can report it at launch time instead of leaving the
+// operator to read it out of a detached tmux session.
+//
+// It replaces watchdogLaunchSkip, whose name and contract both said "skip the launch" — a
+// decision #596 Decision 4 removed. The membership rules it encodes are unchanged: it reuses
+// the Phase-1 buildWatchdogScope contract (blank-trimmed, non-nil empty map) and the
+// agents.json membership idiom, and it keeps the transient-read guard (R1-L1) — a nil
+// agentsCfg means the read failed, so the configured scope is presumed live rather than
+// declared inert on flaky evidence. A successfully-parsed but EMPTY map is NOT a transient
+// read: every configured name really is unknown (#408/PR#410, T5).
+func watchdogPaneScopeState(scope []string, agentsCfg *config.AgentConfig) watchdogPaneState {
 	set := buildWatchdogScope(scope, "")
 	if len(set) == 0 {
-		return true, "no watchdog_agents configured in startup.json"
+		return watchdogPaneState{inert: true, reason: "no watchdog_agents configured in startup.json"}
 	}
 	if agentsCfg == nil {
-		return false, "" // membership unvalidated (transient read) ⇒ launch the configured scope
+		return watchdogPaneState{} // membership unvalidated (transient read) ⇒ presume the configured scope
 	}
-	// A successfully-parsed but EMPTY map is NOT a transient read: every configured
-	// name is unknown, so fall through to the all-unknown skip below (#408/PR#410).
 	var unknown []string
 	for name := range set {
 		if _, ok := agentsCfg.Agents[name]; ok {
-			return false, "" // ≥1 known name ⇒ launch
+			return watchdogPaneState{} // ≥1 known name ⇒ a real pane scope
 		}
 		unknown = append(unknown, name)
 	}
 	sort.Strings(unknown)
-	return true, fmt.Sprintf("none of watchdog_agents {%s} exist in agents.json", strings.Join(unknown, ", "))
+	return watchdogPaneState{
+		inert:         true,
+		misconfigured: true,
+		reason:        fmt.Sprintf("none of watchdog_agents {%s} exist in agents.json", strings.Join(unknown, ", ")),
+	}
+}
+
+// warnUnobservableAgents is the K20 provisioning pre-check: it reports, BEFORE the watchdog
+// is launched, every agent whose context occupancy the recovery engine will be unable to
+// read. Without it such an agent renders no snapshot, the reader honestly reports "none",
+// recovery correctly declines to act on absent evidence — and the operator gets no signal
+// anywhere about why recovery never fires.
+//
+// Two independent conditions produce that same silence, and both are checked:
+//
+//   - the factory-wide statusline gate is off, which short-circuits the render path before
+//     it writes any snapshot at all, blinding recovery for EVERY agent at once;
+//   - an individual agent's .claude/settings.json predates the statusLine key, which is what
+//     registers the snapshot writer for that agent's sessions.
+//
+// The remediation names `af up` / `af sling` because those are what actually deliver the
+// settings template, via worktree.SetupAgent → claude.EnsureSettings. `af install --init`
+// reprovisions factory-root agent dirs only, so it silently does nothing for an agent living
+// in a worktree — which is most of them.
+//
+// It writes to stderr and never to writeWatchdogLastError: that breadcrumb is the watchdog
+// process's own error record, and a provisioning warning appearing there would make a
+// functional launch indistinguishable from a failed one.
+func warnUnobservableAgents(w io.Writer, root string, agentsCfg *config.AgentConfig) {
+	if !statuslineFactoryEnabled(root) {
+		fmt.Fprintln(w, "warning: the statusline gate is off, so no agent writes context-occupancy "+
+			"snapshots and context-exhaustion recovery is blind for the whole factory")
+		fmt.Fprintln(w, "  remediation: run `af statusline on`")
+		return // the per-agent check below cannot add anything the gate has not already decided
+	}
+	if agentsCfg == nil {
+		return
+	}
+
+	var unobservable []string
+	for name := range agentsCfg.Agents {
+		// resolveAgentDir is worktree-aware, so this checks the settings the agent's live
+		// session actually loads rather than a factory-root copy it may never read.
+		agentDir := resolveAgentDir(root, name)
+		if _, err := os.Stat(agentDir); err != nil {
+			continue // never provisioned; the not-provisioned surface already covers that
+		}
+		if !agentSettingsHasStatusLine(agentDir) {
+			unobservable = append(unobservable, name)
+		}
+	}
+	if len(unobservable) == 0 {
+		return
+	}
+	sort.Strings(unobservable)
+
+	// The agent names are deliberately last on the line. `af up`'s tests detect
+	// "this agent was processed" with the shapes "<name>: ", "for <name>\n" and
+	// "af install <name>", and several assert an agent was NOT processed — so a warning
+	// that named agents in any of those shapes would silently break them.
+	fmt.Fprintf(w, "warning: context-exhaustion recovery cannot observe these agents — their "+
+		".claude/settings.json carries no statusLine key, so they write no occupancy snapshots: %s\n",
+		strings.Join(unobservable, ", "))
+	fmt.Fprintln(w, "  remediation: re-run `af up`, or `af sling` them — that is what installs the "+
+		"settings template. (`af install --init` reprovisions factory-root agent dirs only; agents "+
+		"in worktrees pick the key up on their next up/sling.)")
 }
 
 // recoveryResult is the per-agent outcome of reconstructHookedFormula, surfaced

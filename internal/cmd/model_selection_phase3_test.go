@@ -281,3 +281,70 @@ func TestResolveLaunchModelEnv_CorruptAttestation_FailsClosed(t *testing.T) {
 		t.Errorf("refusal must name the attest command; got %v", err)
 	}
 }
+
+// gatewayLoopbackModels is a LOOPBACK gateway on purpose: a non-loopback endpoint is refused by
+// the fitness interlock (sling.go:1070) before it ever returns an export set, so a non-loopback
+// fixture would test the interlock rather than derivation.
+func gatewayLoopbackModels() *config.ModelsConfig {
+	return &config.ModelsConfig{Models: map[string]map[string]string{
+		"codex": {
+			"ANTHROPIC_MODEL":               "gw-main-v1",
+			"ANTHROPIC_BASE_URL":            "http://localhost:4000",
+			"ANTHROPIC_AUTH_TOKEN":          "lm-studio",
+			"ANTHROPIC_DEFAULT_HAIKU_MODEL": "gw-haiku-v2",
+		},
+	}}
+}
+
+// TestResolveLaunchModelEnv_EndpointProfile_CarriesDerivedClasses pins the derivation at the cmd
+// seam. af sling (sling.go:941), af up (up.go:284) and every respawn (helpers.go:167) call this
+// one wrapper and none of them transforms the returned set, so the class set it hands back is the
+// set the factory launches with.
+func TestResolveLaunchModelEnv_EndpointProfile_CarriesDerivedClasses(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	writeValidModels(t, dir, gatewayLoopbackModels())
+
+	var warn bytes.Buffer
+	name, env, err := resolveLaunchModelEnv(dir, "manager", config.AgentDir(dir, "manager"), "codex", "", false, &warn)
+	if err != nil {
+		t.Fatalf("a loopback endpoint launch must succeed; got err: %v", err)
+	}
+	if name != "codex" || len(env) == 0 {
+		t.Fatalf("fixture must resolve through the profile branch; got name=%q env=%v", name, env)
+	}
+
+	for key, want := range map[string]string{
+		"ANTHROPIC_SMALL_FAST_MODEL":     "gw-haiku-v2",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL":   "gw-main-v1",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL": "gw-main-v1",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL":  "gw-haiku-v2",
+	} {
+		if got := modelEnvValue(env, key); got != want {
+			t.Errorf("every launch path reaches this wrapper, so the class set it returns is the one the factory launches with: %s = %q, want %q (env=%v)", key, got, want, env)
+		}
+	}
+	if got := modelEnvValue(env, "CLAUDE_CODE_SUBAGENT_MODEL"); got != "" {
+		t.Errorf("CLAUDE_CODE_SUBAGENT_MODEL must never be derived (Decision 14); got %q", got)
+	}
+	if got := modelEnvValue(env, "ANTHROPIC_BASE_URL"); got != "http://localhost:4000" {
+		t.Errorf("derivation must not disturb the key the fitness interlock reads; got %q", got)
+	}
+}
+
+// TestResolveLaunchModelEnv_DirectProfile_GainsNoDerivedClasses is the AC-4 protection one layer
+// below the resolver: the gate must still be shut when the wrapper is what asks.
+func TestResolveLaunchModelEnv_DirectProfile_GainsNoDerivedClasses(t *testing.T) {
+	dir := setupTestFactoryForDone(t, "manager")
+	writeValidModels(t, dir, &config.ModelsConfig{Models: map[string]map[string]string{
+		"opus-5": {"ANTHROPIC_MODEL": "claude-opus-5"},
+	}})
+
+	var warn bytes.Buffer
+	_, env, err := resolveLaunchModelEnv(dir, "manager", config.AgentDir(dir, "manager"), "opus-5", "", false, &warn)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(env) != 1 || env[0] != (config.EnvVar{Key: "ANTHROPIC_MODEL", Value: "claude-opus-5"}) {
+		t.Errorf("an Anthropic-direct launch must carry exactly its declared export set; got %v", env)
+	}
+}

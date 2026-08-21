@@ -28,6 +28,14 @@ set -euo pipefail
 # Environment variables (optional — will prompt if not set):
 #   GH_TOKEN or GITHUB_TOKEN    GitHub Personal Access Token
 #
+# Environment variables (optional — no prompt, no default):
+#   AF_MEMORY_HOST_DIR          Host directory to hold the agent memory vault. Mounted at
+#                               /home/dev/.af-vault and linked from the factory's vault path
+#                               after install. Applies at container CREATION only; an existing
+#                               container is never modified. Without it the vault is
+#                               container-local and `af memory export` is how it reaches the
+#                               host. Must not contain spaces.
+#
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Overridable so quickdocker-pro.sh (the registry-image wrapper) can inject a
@@ -537,12 +545,34 @@ if [[ "$PLATFORM" == "ios" ]]; then
     IOS_DOCKER_ARGS="-v ${HOST_MOUNT}:${WORKSPACE_DIR}/${REPO_NAME}"
 fi
 
+# Optional host persistence for the memory vault (#515 R1). The vault is container-local and
+# git-invisible, so removing the container takes every recorded learning with it. ADR-019 forbids
+# closing that hole by requiring container recreation, so this is opt-in and CREATION-TIME ONLY:
+# an already-running container is never modified, and `af memory export` stays the documented
+# default path for one. Initialized unconditionally because `set -u` is in force above.
+#
+# The mount target is MEMORY_MOUNT_PATH, deliberately outside the workspace, and the vault is
+# linked to it after quickstart (Step 8b). Mounting straight onto
+# ${WORKSPACE_DIR}/${REPO_NAME}/.agentfactory/memory cannot work: docker pre-creates a missing
+# container-side mount path at `docker run` time, which would leave Step 5's `gh repo clone`
+# facing a non-empty, root-owned destination and abort the whole run under `set -e`. That is why
+# IOS_DOCKER_ARGS below can mount directly — its target IS the (empty) clone destination — while
+# this one, a descendant of it, cannot.
+MEMORY_MOUNT_PATH="/home/dev/.af-vault"
+MEMORY_DOCKER_ARGS=""
+if [[ -n "${AF_MEMORY_HOST_DIR:-}" ]]; then
+    mkdir -p "$AF_MEMORY_HOST_DIR"
+    MEMORY_DOCKER_ARGS="-v ${AF_MEMORY_HOST_DIR}:${MEMORY_MOUNT_PATH}"
+    echo "  Memory vault: $AF_MEMORY_HOST_DIR -> ${WORKSPACE_DIR}/${REPO_NAME}/.agentfactory/memory"
+fi
+
 docker run -dit \
     --memory="$CONTAINER_MEMORY" \
     --memory-swap="24g" \
     --tmpfs /tmp:size=2g \
     --shm-size=256m \
     $IOS_DOCKER_ARGS \
+    $MEMORY_DOCKER_ARGS \
     --name "$CONTAINER_NAME" \
     "$BASE_IMAGE" bash --login
 
@@ -648,6 +678,31 @@ docker exec -it -u dev -w "${PROJECTS_DIR}/${AF_DIR}" "$CONTAINER_NAME" \
     ./quickstart.sh
 
 step_done
+
+# ─── Step 8b: Link the memory vault to the host mount (optional) ────────────
+# Runs after quickstart because `af install --init` is what creates .agentfactory/. Any notes
+# quickstart happened to seed are moved onto the mount rather than shadowed by it, so nothing an
+# operator can see is lost. Best-effort: the container is fully usable without the link, and the
+# vault simply stays container-local — which is the default every other container already has.
+if [[ -n "${AF_MEMORY_HOST_DIR:-}" ]]; then
+    echo ""
+    echo "  Linking the memory vault to $AF_MEMORY_HOST_DIR..."
+    docker exec "$CONTAINER_NAME" chown -R dev:dev "$MEMORY_MOUNT_PATH" >/dev/null 2>&1 || true
+    docker exec -u dev "$CONTAINER_NAME" bash -c "
+        set -e
+        vault='${WORKSPACE_DIR}/${REPO_NAME}/.agentfactory/memory'
+        mkdir -p \"\$(dirname \"\$vault\")\" '${MEMORY_MOUNT_PATH}'
+        if [ -d \"\$vault\" ] && [ ! -L \"\$vault\" ]; then
+            # Two plain commands, so set -e stops at the first. Neither a swallowed copy nor an
+            # AND-OR list would do: the first deletes a vault it failed to move, and the second
+            # leaves errexit disabled for the copy (it is not the final command of the list), so
+            # the run continues and links over a directory that is still there.
+            cp -a \"\$vault/.\" '${MEMORY_MOUNT_PATH}/'
+            rm -rf \"\$vault\"
+        fi
+        ln -sfn '${MEMORY_MOUNT_PATH}' \"\$vault\"
+    " || echo "  WARNING: could not link the vault; it stays container-local (use 'af memory export')"
+fi
 
 if [[ "$PLATFORM" == "ios" ]]; then
     echo ""

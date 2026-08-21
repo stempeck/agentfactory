@@ -5,9 +5,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/stempeck/agentfactory/internal/mail"
 )
 
@@ -151,6 +154,13 @@ func setupMailSendFixture(t *testing.T) string {
 	return factoryRoot
 }
 
+// mailSendFlagNames is the reset list resetMailSendFlags walks. It is a named
+// var, not a literal inside the loop, so TestResetMailSendFlags_CoversEverySendFlag
+// can prove it stayed complete: the helper skips names it cannot find, so a flag
+// added to `mail send` and forgotten here leaks its value into sibling tests
+// without any compile error.
+var mailSendFlagNames = []string{"from", "subject", "message", "priority", "reply-to", "report-delivery"}
+
 // resetMailSendFlags restores every `mail send` flag to its default and
 // clears Changed. Flag state persists across rootCmd.Execute() calls (see
 // the warning in install_test.go), so every Execute in this file must be
@@ -161,7 +171,7 @@ func resetMailSendFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("finding mail send command: %v", err)
 	}
-	for _, name := range []string{"from", "subject", "message", "priority", "reply-to"} {
+	for _, name := range mailSendFlagNames {
 		f := sendCmd.Flags().Lookup(name)
 		if f == nil {
 			continue
@@ -177,13 +187,21 @@ func resetMailSendFlags(t *testing.T) {
 // runInstallInDir pattern) with the mandatory flag reset afterwards.
 func execMailSend(t *testing.T, args ...string) error {
 	t.Helper()
+	_, err := execMailSendOut(t, args...)
+	return err
+}
+
+// execMailSendOut is execMailSend plus the captured output, for the tests that
+// assert on what the send actually printed.
+func execMailSendOut(t *testing.T, args ...string) (string, error) {
+	t.Helper()
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
 	rootCmd.SetErr(&buf)
 	rootCmd.SetArgs(append([]string{"mail", "send"}, args...))
 	err := rootCmd.Execute()
 	resetMailSendFlags(t)
-	return err
+	return buf.String(), err
 }
 
 // TestMailSend_FromFlag_SkipsDetectSender pins the --from contract: from the
@@ -323,5 +341,167 @@ func TestDetectSender_WorktreeAgent_AF_ROLE_Fallback(t *testing.T) {
 	}
 	if got != "solver" {
 		t.Errorf("detectSender = %q, want %q", got, "solver")
+	}
+}
+
+// TestResetMailSendFlags_CoversEverySendFlag is the interlock over Gotcha 6:
+// resetMailSendFlags looks names up and silently skips the ones it cannot find,
+// so an omission is invisible until an unrelated test starts failing for a
+// reason that has nothing to do with it.
+func TestResetMailSendFlags_CoversEverySendFlag(t *testing.T) {
+	sendCmd, _, err := rootCmd.Find([]string{"mail", "send"})
+	if err != nil {
+		t.Fatalf("finding mail send command: %v", err)
+	}
+	if len(mailSendFlagNames) == 0 {
+		t.Fatal("mailSendFlagNames is empty, so this scan would pass vacuously")
+	}
+
+	registered := map[string]bool{}
+	sendCmd.Flags().VisitAll(func(f *pflag.Flag) {
+		// cobra injects --help into the local set the first time the command
+		// runs, so whether it is present depends on test order. It carries no
+		// state worth resetting.
+		if f.Name == "help" {
+			return
+		}
+		registered[f.Name] = true
+		if !slices.Contains(mailSendFlagNames, f.Name) {
+			t.Errorf("flag --%s is registered on `mail send` but missing from mailSendFlagNames — "+
+				"its value will leak into sibling tests", f.Name)
+		}
+	})
+	for _, name := range mailSendFlagNames {
+		if !registered[name] {
+			t.Errorf("mailSendFlagNames lists --%s, which `mail send` does not register", name)
+		}
+	}
+}
+
+// TestMailSend_ReportDeliveryFlag_Registered pins the surviving delivery-report
+// flag behaviourally rather than by grep: it exists, is an opt-in boolean, and is
+// not required. (--no-wake was removed in PR #608; see TestMailSend_NoWakeFlag_Removed.)
+func TestMailSend_ReportDeliveryFlag_Registered(t *testing.T) {
+	sendCmd, _, err := rootCmd.Find([]string{"mail", "send"})
+	if err != nil {
+		t.Fatalf("finding mail send command: %v", err)
+	}
+	for _, name := range []string{"report-delivery"} {
+		f := sendCmd.Flags().Lookup(name)
+		if f == nil {
+			t.Fatalf("flag --%s is not registered on `mail send`", name)
+		}
+		if f.Value.Type() != "bool" {
+			t.Errorf("--%s has type %q, want bool", name, f.Value.Type())
+		}
+		if f.DefValue != "false" {
+			t.Errorf("--%s defaults to %q, want \"false\" (the flags are opt-in)", name, f.DefValue)
+		}
+		if f.Usage == "" {
+			t.Errorf("--%s has no usage string", name)
+		}
+		if ann := f.Annotations[cobra.BashCompOneRequiredFlag]; len(ann) > 0 && ann[0] == "true" {
+			t.Errorf("--%s is marked required; it must stay optional", name)
+		}
+	}
+}
+
+// TestMailSend_NoWakeFlag_Removed pins the owner directive on PR #608: the `--no-wake`
+// flag and its wake-suppression are gone, so `mail send` must not register the flag.
+func TestMailSend_NoWakeFlag_Removed(t *testing.T) {
+	sendCmd, _, err := rootCmd.Find([]string{"mail", "send"})
+	if err != nil {
+		t.Fatalf("finding mail send command: %v", err)
+	}
+	if f := sendCmd.Flags().Lookup("no-wake"); f != nil {
+		t.Errorf("--no-wake is still registered on `mail send`; it must be removed (PR #608): mail must always wake")
+	}
+}
+
+// TestMailSend_DefaultOutput_ByteIdentical is the phase's "no default behaviour
+// change" requirement made mechanical. Nothing else in the repo pins this line,
+// so without this test a regression in it would ship green.
+func TestMailSend_DefaultOutput_ByteIdentical(t *testing.T) {
+	factoryRoot := setupMailSendFixture(t)
+	installMemStore(t)
+	t.Chdir(factoryRoot)
+	t.Setenv("AF_ROLE", "")
+
+	out, err := execMailSendOut(t, "bob", "-s", "Subj", "-m", "Body", "--from", "alice")
+	if err != nil {
+		t.Fatalf("mail send: %v", err)
+	}
+	if out != "Sent to bob: Subj\n" {
+		t.Errorf("stdout = %q, want %q", out, "Sent to bob: Subj\n")
+	}
+}
+
+// TestMailSend_ReportDelivery_FiledForAbsentRecipient is cross-review C-1 made
+// observable at the CLI: bob has no session, so the send must report that it
+// filed the mail rather than claiming anyone was told. Reachable in the default
+// build precisely because the tmux guard guarantees the absent branch.
+func TestMailSend_ReportDelivery_FiledForAbsentRecipient(t *testing.T) {
+	factoryRoot := setupMailSendFixture(t)
+	store := installMemStore(t)
+	t.Chdir(factoryRoot)
+	t.Setenv("AF_ROLE", "")
+
+	out, err := execMailSendOut(t, "bob", "-s", "Subj", "-m", "Body", "--from", "alice", "--report-delivery")
+	if err != nil {
+		t.Fatalf("mail send --report-delivery: %v", err)
+	}
+	if !strings.Contains(out, "Filed for bob: Subj") {
+		t.Errorf("stdout = %q, want it to report the mail as filed", out)
+	}
+	for _, unwanted := range []string{"Sent to", "Notified"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("stdout = %q, must not contain %q for an absent recipient", out, unwanted)
+		}
+	}
+
+	msgs, err := mail.NewMailbox("bob", store).List(context.Background())
+	if err != nil {
+		t.Fatalf("listing bob's mailbox: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("bob's mailbox has %d messages, want 1", len(msgs))
+	}
+}
+
+// TestDeliveryLine covers both report variants. The notified variant is
+// unreachable through the cobra path in the default build (the tmux guard
+// answers every liveness probe false), so the rendering is a pure function and
+// is asserted as one; internal/mail's seam tests prove the Delivery values it
+// is handed are real.
+func TestDeliveryLine(t *testing.T) {
+	cases := []struct {
+		name string
+		d    mail.Delivery
+		want string
+	}{
+		{
+			name: "notified",
+			d:    mail.Delivery{Filed: true, Notified: true, Reason: "notified"},
+			want: "Notified bob: Subj\n",
+		},
+		{
+			name: "filed with reason",
+			d:    mail.Delivery{Filed: true, Reason: "no session"},
+			want: "Filed for bob: Subj (no session)\n",
+		},
+		{
+			// A group that resolves to nobody but the sender files nothing, so
+			// saying "filed" would claim a bead that does not exist.
+			name: "nothing filed",
+			d:    mail.Delivery{Reason: "no recipients"},
+			want: "Not delivered to bob: Subj (no recipients)\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deliveryLine("bob", "Subj", tc.d); got != tc.want {
+				t.Errorf("deliveryLine = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

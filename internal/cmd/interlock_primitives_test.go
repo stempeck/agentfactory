@@ -90,13 +90,18 @@ func TestDone_SelfTerminate_Allowed(t *testing.T) {
 	}
 }
 
-// TestDone_SelfSessionIdFallback_Allowed pins AC2 (Ledger D9): the af done FALLBACK path hands
-// a raw .runtime/session_id value (the Claude-hook UUID, which is NOT session.SessionName(
-// AF_ROLE)) to KillSession. The decorator must recognize that value as the caller's own
-// session and delegate, not wrongly refuse a legitimate self-terminate.
+// TestDone_SelfSessionIdFallback_Allowed pins AC2 (Ledger D9): a raw .runtime/session_id value
+// (the Claude-hook UUID, which is NOT session.SessionName(AF_ROLE)) reaching KillSession must be
+// recognised as the caller's own session and delegated, not wrongly refused.
+//
+// af done USED to hand that value over; #622 Phase 2 removed the caller, because passing a Claude
+// session UUID where a tmux session name belongs was the LOW-3 bug (the fallback now resolves a
+// real name — see TestDone_SelfTmuxSessionFallback_Allowed). This test is therefore no longer
+// pinning a live path: it is what keeps the isSelfSessionID permit honest until ADR-021 decides
+// whether a permit with no caller should stay in a kill guard at all.
 func TestDone_SelfSessionIdFallback_Allowed(t *testing.T) {
 	dir := t.TempDir()
-	t.Chdir(dir) // the guard reads getWd()/.runtime/session_id — the same file done.go:616 reads
+	t.Chdir(dir) // the guard reads getWd()/.runtime/session_id
 	fake, _ := setupHermeticSessions(t)
 	installGuardedSeam(t, fake)
 	t.Setenv("AF_ROLE", "manager")
@@ -113,6 +118,107 @@ func TestDone_SelfSessionIdFallback_Allowed(t *testing.T) {
 
 	if !hasOp(fake.ops, "KillSession "+rawID) {
 		t.Fatalf("D9: legit self-terminate via raw session_id must be allowed; ops=%v", fake.ops)
+	}
+}
+
+// installGuardedFake wraps a bare fakeTmux in the K8 decorator behind newCmdTmux, WITHOUT the
+// hermetic session-name override. installGuardedSeam's setupHermeticSessions makes
+// session.SessionName produce af-test-* names, and isAfProductionSession excludes those — so
+// callerAuthority reads Operator and the guard never engages at all. A guard test built on it
+// passes whether or not the permit under test exists. These two need production-shaped names, and
+// take them as literals the way authority_test.go:104 already does; the fake reaches no tmux server.
+func installGuardedFake(t *testing.T) *fakeTmux {
+	t.Helper()
+	fake := newFakeTmux()
+	orig := newCmdTmux
+	newCmdTmux = func() cmdTmux { return authKillGuard{fake} }
+	t.Cleanup(func() { newCmdTmux = orig })
+	return fake
+}
+
+// TestDone_SelfTmuxSessionFallback_Allowed pins the #622 G10 repair: the af done fallback that
+// asks tmux for its own session name must be allowed to kill it.
+//
+// This is the one permit axis with a LIVE production caller, and until this test it was the one
+// with no coverage — every other guard test in this file sets TMUX="" and so returns false from
+// isSelfTmuxSession without ever entering it. AF_ROLE is empty deliberately: that is not a
+// convenience of the fixture but the defining condition of the branch, since resolveAgentName
+// consults AF_ROLE last and detectAgentName can only have failed with it unset.
+//
+// Without the permit, callerAuthority reads Agent (signal 2, the same CurrentSessionName query),
+// isSelfSession compares against session.SessionName("") and misses, the guard refuses — and
+// terminateSession has by then already written .runtime/last_termination, so the factory carries a
+// durable record of a termination that never happened.
+func TestDone_SelfTmuxSessionFallback_Allowed(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir) // isSelfSessionID reads getWd()/.runtime/session_id; left absent so it cannot permit
+	fake := installGuardedFake(t)
+	t.Setenv("AF_ROLE", "")
+	t.Setenv("TMUX", "/tmp/tmux-501/default,12345,0")
+
+	sid := "af-" + hashName(t.Name()) // production-shaped: af-test-* would read as Operator
+	fake.currentSession = sid         // signal 2: this process is running in that session
+	fake.present[sid] = true
+
+	// Precondition, asserted rather than assumed: the guard must really be engaged, or this test
+	// would pass on a permit set that refuses nothing.
+	if callerAuthority() != AuthorityAgent {
+		t.Fatal("precondition: the guard only refuses in agent context; this fixture is not in one")
+	}
+	if isSelfSession(sid) || isSelfSessionID(sid) {
+		t.Fatal("precondition: the other two permit axes must MISS, or this proves nothing")
+	}
+
+	terminateSession(sid, dir)
+
+	if !hasOp(fake.ops, "KillSession "+sid) {
+		t.Fatalf("G10: the AF_ROLE-less self-terminate must be allowed through the decorator; ops=%v", fake.ops)
+	}
+}
+
+// TestGuard_ForeignSessionRefusedOnEveryPermitAxis is the other half: the permit added above must
+// not have widened the guard to anything that is not the caller's own session.
+//
+// Each case fails a DIFFERENT axis, because a single foreign-name case would pass even if two of
+// the three predicates had been wired to return true unconditionally.
+func TestGuard_ForeignSessionRefusedOnEveryPermitAxis(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		afRole         string
+		tmuxEnv        string
+		currentSession string
+	}{
+		{"a different live session", "", "/tmp/tmux-501/default,12345,0", "af-someone-else"},
+		{"tmux reports no session name", "manager", "/tmp/tmux-501/default,12345,0", ""},
+		{"agent context established by AF_ROLE, outside tmux", "manager", "", ""},
+		// The $TMUX gate, on its own. Without it isSelfTmuxSession asks tmux for #S from a process
+		// that is not in a tmux session, and the answer is some unrelated session's name — which
+		// this row makes equal to the target, so an ungated predicate would permit killing it.
+		// The row above cannot catch that: it clears the session name too, so the two conjuncts
+		// mask each other and the mutation survives.
+		{"outside tmux, where a #S query answers about somebody else", "manager", "", "af-victim-target"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Chdir(dir) // isSelfSessionID reads getWd()/.runtime/session_id; leave it absent
+			fake := installGuardedFake(t)
+			t.Setenv("AF_ROLE", tc.afRole)
+			t.Setenv("TMUX", tc.tmuxEnv)
+			fake.currentSession = tc.currentSession
+
+			target := "af-victim-target"
+			fake.present[target] = true
+
+			if callerAuthority() != AuthorityAgent {
+				t.Fatal("precondition: the guard only refuses in agent context")
+			}
+
+			terminateSession(target, dir)
+
+			if hasOp(fake.ops, "KillSession "+target) {
+				t.Fatalf("an agent killed a session that is not its own; ops=%v", fake.ops)
+			}
+		})
 	}
 }
 

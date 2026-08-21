@@ -1160,6 +1160,7 @@ func TestGenerateAgentTemplate_StandardSections(t *testing.T) {
 		"## Mail Protocol",
 		"## Startup Protocol",
 		"## Constraints",
+		"## Memory Protocol",
 	} {
 		if !strings.Contains(content, section) {
 			t.Errorf("template missing standard section %q", section)

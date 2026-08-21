@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -19,12 +20,18 @@ import (
 	"github.com/stempeck/agentfactory/internal/issuestore/mcpstore"
 )
 
+// findRepoRoot walks up from THIS source file's directory (not the process cwd)
+// to the module root. Deriving it from runtime.Caller keeps it correct for callers
+// that run after a t.Chdir — notably a subtest whose parent chdir'd into a temp
+// factory, where the parent's cwd is still in effect (its restore runs only after
+// the subtest returns).
 func findRepoRoot(t *testing.T) string {
 	t.Helper()
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getting cwd: %v", err)
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller could not locate the test source file")
 	}
+	dir := filepath.Dir(thisFile)
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 			return dir

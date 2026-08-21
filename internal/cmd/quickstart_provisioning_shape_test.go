@@ -1,11 +1,15 @@
 package cmd
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/stempeck/agentfactory/internal/config"
 )
 
 // shellFnsFrom extracts the named functions from quickstart.sh and prefixes the script's own shell
@@ -226,4 +230,224 @@ func TestExistingFactoryConfigIsMigrated(t *testing.T) {
 			t.Fatalf("migration returned %d for an absent config, want 1\n%s", code, out)
 		}
 	})
+}
+
+// --- #598 Phase 3b: the seeded gateway config must satisfy the gate quickstart itself runs -------
+
+// litellmSeedEntry is one `- model_name:` block of the seeded litellm.yaml: the id the gateway
+// advertises and the backend it routes to.
+type litellmSeedEntry struct {
+	name    string
+	backend string
+}
+
+// setupLitellmSource returns the body of setup_litellm() from the REAL quickstart.sh.
+//
+// extractShellFunction, not shellFnsFrom: this test READS the function, it must never execute it.
+// setup_litellm pip-installs litellm, writes secrets, launches tmux and makes billable calls.
+func setupLitellmSource(t *testing.T, moduleRoot string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(moduleRoot, "quickstart.sh"))
+	if err != nil {
+		t.Fatalf("reading quickstart.sh: %v", err)
+	}
+	setup := extractShellFunction(string(data), "setup_litellm")
+	if setup == "" {
+		t.Fatal("could not extract setup_litellm() from quickstart.sh")
+	}
+	return setup
+}
+
+// litellmSeedBlock returns the body of the litellm.yaml seed heredoc.
+//
+// Scoping matters twice over. setup_litellm() contains a SECOND heredoc — the login-shell relaunch
+// guard appended to ~/.bash_profile — so asserting over the whole function would read yaml rules out
+// of a bash fragment. And unlike the telemetry seed this one is QUOTED (<< 'EOF'), so nothing inside
+// expands: the block is literal text and the delimiter string must carry the inner single quotes.
+func litellmSeedBlock(t *testing.T, setup string) string {
+	t.Helper()
+	const seedStart = `cat > ".agentfactory/litellm.yaml" << 'EOF'`
+	i := strings.Index(setup, seedStart)
+	if i < 0 {
+		t.Fatalf("could not locate the litellm.yaml seed heredoc in setup_litellm(); expected the line %q "+
+			"(the quoting is load-bearing — an unquoted << EOF would expand $ inside the seed)", seedStart)
+	}
+	rest := setup[i+len(seedStart):]
+	j := strings.Index(rest, "\nEOF")
+	if j < 0 {
+		t.Fatal("unterminated litellm.yaml seed heredoc")
+	}
+	return rest[:j]
+}
+
+// parseLitellmSeedEntries reads the seed's model_list as (advertised id → backend) pairs.
+//
+// A line scan rather than a yaml parse: the root module ships no yaml library and ADR-013 forbids an
+// agent adding one. `^\s+model:` cannot collide with `  - model_name:` because a dash follows the
+// indent there, and the trailing `#` comments the seed carries are stripped with the value.
+func parseLitellmSeedEntries(t *testing.T, seed string) []litellmSeedEntry {
+	t.Helper()
+	nameRe := regexp.MustCompile(`^\s*-\s*model_name:\s*([^\s#]+)`)
+	backendRe := regexp.MustCompile(`^\s+model:\s*([^\s#]+)`)
+
+	var entries []litellmSeedEntry
+	for _, line := range strings.Split(seed, "\n") {
+		if m := nameRe.FindStringSubmatch(line); m != nil {
+			entries = append(entries, litellmSeedEntry{name: strings.Trim(m[1], `"'`)})
+			continue
+		}
+		if m := backendRe.FindStringSubmatch(line); m != nil {
+			if len(entries) == 0 {
+				t.Fatalf("seed declares a backend before any model_name: %q", line)
+			}
+			last := &entries[len(entries)-1]
+			if last.backend != "" {
+				t.Fatalf("model_name %q declares two backends; the second is %q", last.name, m[1])
+			}
+			last.backend = strings.Trim(m[1], `"'`)
+		}
+	}
+	if len(entries) == 0 {
+		t.Fatal("the litellm.yaml seed advertises no model_name at all")
+	}
+	return entries
+}
+
+// freshBootstrapRegistry rebuilds the models.json a fresh `./quickstart.sh --litellm` leaves behind:
+// install.go's scaffold literal plus the codex profile setup_litellm injects with jq. Both halves are
+// parsed out of the shipped sources, never copied — a hand-written registry here would assert the
+// test's own assumptions instead of the artifact's behaviour.
+func freshBootstrapRegistry(t *testing.T, moduleRoot, setup string) *config.ModelsConfig {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join(moduleRoot, "internal", "cmd", "install.go"))
+	if err != nil {
+		t.Fatalf("reading install.go: %v", err)
+	}
+	var reg config.ModelsConfig
+	literal := extractScaffoldLiteral(t, string(src), `"models.json":`)
+	if err := json.Unmarshal([]byte(literal), &reg); err != nil {
+		t.Fatalf("scaffold models.json literal is not valid JSON: %v", err)
+	}
+
+	m := regexp.MustCompile(`(?s)\.models\.codex = (\{.*?\})`).FindStringSubmatch(setup)
+	if m == nil {
+		t.Fatal("could not locate the codex jq injection in setup_litellm()")
+	}
+	// $url is a jq variable, not JSON. The port is irrelevant to coverage; loopback is what keeps the
+	// profile launchable without a fitness attestation.
+	var codex map[string]string
+	if err := json.Unmarshal([]byte(strings.Replace(m[1], "$url", `"http://localhost:4000"`, 1)), &codex); err != nil {
+		t.Fatalf("the codex jq injection is not a JSON object: %v", err)
+	}
+	reg.Models["codex"] = codex
+	return &reg
+}
+
+// TestQuickstartLitellmSeedCarriesClaudeAliases is the drift half of #598 AC-3, and the only thing
+// standing between a hardened `check` and a bootstrap that aborts on its own gate.
+//
+// Four claude-* ids on any factory are asked for by the host BY NAME — no ANTHROPIC_* key redirects
+// them — so only a gateway alias can answer them, and Phase 3a's check demands them by exact match.
+// quickstart.sh:915-919 runs that very check, so a seed missing one turns `./quickstart.sh --litellm`
+// into `exit 1`. Every Phase-3a fixture hand-writes both the profile and the served list, which is
+// exactly how the check could be hardened past the seed with `make test` fully green.
+//
+// The demanded set is therefore taken from PRODUCTION directProfileClaudeIDs over the real scaffold,
+// never from a list written here: add a claude-* id to install.go:186 and this test fails until the
+// seed follows.
+func TestQuickstartLitellmSeedCarriesClaudeAliases(t *testing.T) {
+	// Every source read happens BEFORE setupConfigFactory, which chdirs into a temp root that has no
+	// go.mod above it — findModuleRoot resolves against the working directory.
+	moduleRoot := findModuleRoot(t)
+	setup := setupLitellmSource(t, moduleRoot)
+	entries := parseLitellmSeedEntries(t, litellmSeedBlock(t, setup))
+	reg := freshBootstrapRegistry(t, moduleRoot, setup)
+
+	// Adding aliases must not turn the seed into a rewrite. The guard is what makes a rerun safe, and
+	// an operator who has tuned their gateway would lose that work silently — the seed writes no
+	// backup and says nothing.
+	if !strings.Contains(setup, `if [ ! -f ".agentfactory/litellm.yaml" ]; then`) {
+		t.Error("the seed-when-absent guard is gone from setup_litellm(); a rerun would overwrite an " +
+			"operator's edited litellm.yaml")
+	}
+
+	backendOf := map[string]string{}
+	served := make([]string, 0, len(entries))
+	for _, e := range entries {
+		backendOf[e.name] = e.backend
+		served = append(served, e.name)
+	}
+
+	// The two backends are read off the codex profile the same seed injects — the main model it puts
+	// agents on, and the small model it names for background calls. Naming them here instead would
+	// let the seed move to a different pair with this test still passing.
+	codex := reg.Models["codex"]
+	mainBackend, smallBackend := backendOf[codex["ANTHROPIC_MODEL"]], backendOf[codex["ANTHROPIC_DEFAULT_HAIKU_MODEL"]]
+	if mainBackend == "" || smallBackend == "" {
+		t.Fatalf("the seed does not advertise the models the codex profile names: main %q → %q, small %q → %q",
+			codex["ANTHROPIC_MODEL"], mainBackend, codex["ANTHROPIC_DEFAULT_HAIKU_MODEL"], smallBackend)
+	}
+
+	demanded := directProfileClaudeIDs(reg)
+	if len(demanded) == 0 {
+		t.Fatal("the fresh-bootstrap registry names no claude-* id at all, so every assertion below would " +
+			"pass on an empty set — the scaffold's direct profiles are what make the aliases necessary")
+	}
+	for _, id := range demanded {
+		backend, ok := backendOf[id]
+		if !ok {
+			t.Errorf("the seeded litellm.yaml advertises no %q alias, so a fresh `./quickstart.sh --litellm` "+
+				"fails its own `af config models check codex` gate (quickstart.sh:915-919); seed advertises %v",
+				id, served)
+			continue
+		}
+		// The host sizes its context window by the claude- id it asked for, so aliasing one of these to the
+		// small backend trades an unserved-model failure for an over-window one.
+		if backend != mainBackend {
+			t.Errorf("alias %q routes to %q, want the main backend %q — a claude-* id aliased to the small "+
+				"model creates a new over-window failure class (design-doc.md:280)", id, backend, mainBackend)
+		}
+	}
+
+	// The haiku-class entry is defence-in-depth for a host that asks for a haiku id by name. No check
+	// row can demand it — no direct profile declares a haiku id, so directProfileClaudeIDs never
+	// collects one — which makes this assertion the only thing that keeps it in the seed.
+	haiku := ""
+	for _, e := range entries {
+		if strings.HasPrefix(e.name, "claude-haiku") {
+			haiku = e.name
+			if e.backend != smallBackend {
+				t.Errorf("haiku-class alias %q routes to %q, want the small backend %q", e.name, e.backend, smallBackend)
+			}
+			// Enumerated per-id, never a glob: modelIDPresent matches exactly, so a literal wildcard would
+			// satisfy no request, and LiteLLM wildcard routing was rejected unverified (design-doc.md:293).
+			if strings.Contains(e.name, "*") {
+				t.Errorf("haiku-class alias %q is a wildcard; aliases are enumerated per-id (security.md:153)", e.name)
+			}
+		}
+	}
+	if haiku == "" {
+		t.Errorf("the seed advertises no claude-haiku* alias (integration.md:98); seed advertises %v", served)
+	}
+
+	// The fresh-bootstrap shape: the registry that bootstrap leaves behind, probed against the ids that
+	// same bootstrap's yaml advertises, through the REAL check. Nothing here is hand-written, so this
+	// passes only if the two shipped artifacts genuinely agree.
+	root := setupConfigFactory(t)
+	writeValidModels(t, root, reg)
+	writeSecretFile(t, root, ".agentfactory/secrets/litellm.key", "sk-litellm-testvalue")
+	stubModelsProbe(t, served, nil)
+
+	out, err := runModelsCmd(t, runConfigModelsCheck, "codex")
+	if err != nil {
+		t.Fatalf("a fresh --litellm bootstrap must pass the gate it runs itself (quickstart.sh:915-919): %v\n%s", err, out)
+	}
+	// A clean exit alone would also be produced by a check that stopped emitting alias rows entirely, so
+	// require each demanded id to have been reported on — the exit code and the reasoning both.
+	for _, id := range demanded {
+		if !strings.Contains(out, id) {
+			t.Errorf("the check reported no verdict for %q; a silent pass is the hole this surface exists to "+
+				"close:\n%s", id, out)
+		}
+	}
 }

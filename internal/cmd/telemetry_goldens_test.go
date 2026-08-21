@@ -315,6 +315,13 @@ func TestTelemetryReportGoldenReproducesTheEmitter(t *testing.T) {
 	// Seeded to reproduce report-rows.json exactly: one closed step and one open one, same agent,
 	// same instance, same titles, same durations. The open row's start is relative to now so it
 	// stays open — the two values that makes unreproducible are declared in shapeOnly.
+	//
+	// #622 C6 gave the golden two context stories to pin rather than one, and the pair is the point.
+	// The closed step carries every figure and one session id at both ends, so the golden holds real
+	// NUMBERS for the derivations — a delta of 53500 across the step, both verdicts decided against a
+	// 120000 bound. The open step carries a start figure and nothing else, so the golden also holds
+	// the shape of absence: explicit nulls and "unmeasurable", never zeros. A mirror that widened a
+	// nullable column to a plain scalar reproduces the first row and fails the second.
 	openedAt := time.Now().UTC().Add(-45 * time.Second).Format(telemetry.TimestampLayout)
 	for _, ev := range []telemetry.StepEvent{
 		{
@@ -322,6 +329,9 @@ func TestTelemetryReportGoldenReproducesTheEmitter(t *testing.T) {
 			TS: "2026-07-27T09:15:00.000Z", Agent: "manager", Formula: "offpath",
 			InstanceID: "af-580-1", StepID: "s-2", StepSeq: 2, StepTitle: "Phase 2 — implement",
 			Model: "claude-opus-5", ModelSource: telemetry.ModelSourceModelsJSON, Verb: "prime", VerbMS: 12,
+			SessionID: "sess-580-a", CtxUsedPct: f64p(21), CtxTokensUsed: i64p(42000),
+			CtxTokensTotal: i64p(200000), CtxObservedAt: "2026-07-27T09:15:00.000Z",
+			CumTokens: i64p(118000),
 		},
 		{
 			V: telemetry.SchemaVersion, Event: telemetry.EventStepEnd,
@@ -329,12 +339,18 @@ func TestTelemetryReportGoldenReproducesTheEmitter(t *testing.T) {
 			InstanceID: "af-580-1", StepID: "s-2", StepSeq: 2, StepTitle: "Phase 2 — implement",
 			Model: "claude-opus-5", ModelSource: telemetry.ModelSourceModelsJSON, Verb: "done", VerbMS: 12,
 			DurationMS: 6388, Status: telemetry.StatusClosed,
+			SessionID: "sess-580-a", CtxUsedPct: f64p(48), CtxTokensUsed: i64p(96000),
+			CtxTokensTotal: i64p(200000), CtxObservedAt: "2026-07-27T09:15:06.388Z",
+			CumTokens: i64p(171500), CtxTokensStart: i64p(42000), CumTokensDelta: i64p(53500),
+			CtxBoundTokens: 120000,
 		},
 		{
 			V: telemetry.SchemaVersion, Event: telemetry.EventStepStart,
 			TS: openedAt, Agent: "manager", Formula: "offpath",
 			InstanceID: "af-580-1", StepID: "s-3", StepSeq: 3, StepTitle: "Phase 3 — review",
 			ModelSource: telemetry.ModelSourceModelsJSON, Verb: "prime", VerbMS: 8,
+			SessionID: "sess-580-a", CtxUsedPct: f64p(44), CtxTokensUsed: i64p(88000),
+			CtxTokensTotal: i64p(200000), CtxObservedAt: openedAt, CumTokens: i64p(171500),
 		},
 	} {
 		if err := telemetry.AppendEvent(config.TelemetryDir(root), ev); err != nil {

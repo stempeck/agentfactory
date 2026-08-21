@@ -1,0 +1,6 @@
+Tool activity for THIS TURN ONLY (chronological, oldest first; results paired to calls):
+[turn evidence incomplete (complete=false, unmatched_results=1) — EVIDENCE IS PARTIAL]
+1. Bash(command="af mail inbox")
+   -> result[ok]: "no new mail"
+2. Read(file_path="/x/y.md")
+   -> result[error]: "file not found"

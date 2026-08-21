@@ -62,6 +62,20 @@ type telemetryStateJSON struct {
 		Signals []telemetrySignalJSON `json:"signals"`
 	} `json:"backend"`
 	UnprobedCause string `json:"unprobed_cause"`
+	// StepContext is the effective per-step context budget (#622 C7). It is carried on every
+	// payload, not only when a step_context block exists on disk, because the values are what the
+	// factory is RUNNING — an absent block means the shipped defaults are in force, which is a
+	// value, not an absence. Unlike the three axes above it does not participate in the state
+	// verdict: it describes what would be measured, never whether anything is being measured.
+	StepContext telemetryStepContextJSON `json:"step_context"`
+}
+
+// telemetryStepContextJSON mirrors config.StepContextConfig rather than embedding it, for the same
+// reason the rest of this file mirrors: the DTO's shape is a contract with the console, and a
+// config struct is free to grow keys that have no business on a status payload.
+type telemetryStepContextJSON struct {
+	BoundTokens int `json:"bound_tokens"`
+	HandoffPct  int `json:"handoff_pct"`
 }
 
 // telemetrySignalJSON reuses ProbeResult's own rendering rather than re-describing a verdict, so
@@ -100,6 +114,45 @@ type telemetryReportRowJSON struct {
 	Model      string `json:"model"`
 	VerbMS     int    `json:"verb_ms"`
 	InstanceID string `json:"instance_id"`
+
+	// #622 C6: what this step's context window held, what the step cost, and what it was judged
+	// against. Every figure is a POINTER, and none is omitempty — the two decisions are one
+	// decision. The family rule above bans omitempty so degradation stays a difference in VALUE,
+	// and a pointer is what lets that value be an explicit null. A plain int64 would spell "nobody
+	// measured this step" and "this step consumed nothing" with the same 0, which is the exact
+	// collapse #622 exists to prevent.
+	//
+	// This is the OPPOSITE convention from StepEvent (event.go:105-122), where every added field
+	// IS omitempty — deliberately, because that struct's omitempty keeps recordDigest byte-stable
+	// for the export cursor. Two structs, two rules, both load-bearing.
+	CtxTokensStart *int64   `json:"ctx_tokens_start"`
+	CtxTokensEnd   *int64   `json:"ctx_tokens_end"`
+	CtxTokensTotal *int64   `json:"ctx_tokens_total"`
+	CtxUsedPct     *float64 `json:"ctx_used_pct"`
+	CumTokensDelta *int64   `json:"cum_tokens_delta"`
+	CtxBoundTokens *int64   `json:"ctx_bound_tokens"`
+
+	// The two read-time verdicts. Null is a third answer and means "not judged" — there was no
+	// recorded bound, or no figure to compare against it. A consumer that read null as false would
+	// report every unmeasured step as inside its budget.
+	OverOccupancy   *bool `json:"over_occupancy"`
+	OverConsumption *bool `json:"over_consumption"`
+	// ConsumptionState separates the two ways over_consumption can be null, which a boolean alone
+	// cannot: "unattributable" is the HIGH-3 session gate refusing to subtract two sessions'
+	// counters, "unmeasurable" is having nothing to subtract at all.
+	ConsumptionState string `json:"consumption_state"`
+
+	// The markers that qualify the figures. Null where undecidable — a step with no start figure
+	// cannot be called uncompacted any more than it can be called compacted.
+	CompactedMidStep   *bool `json:"compacted_mid_step"`
+	CtxObservedStale   *bool `json:"ctx_observed_stale"`
+	BoundExceedsWindow *bool `json:"bound_exceeds_window"`
+
+	// #622 C10. Empty and null on every row the funnel never recycled; the trigger is carried
+	// verbatim so an unrecognised recycle class reads as itself rather than as a decoder fault
+	// (recovery.go:68-71). The occupancy is null, never 0, for the four classes that record none.
+	InterruptedTrigger     string   `json:"interrupted_trigger"`
+	InterruptedObservedPct *float64 `json:"interrupted_observed_pct"`
 }
 
 type telemetryReadStatsJSON struct {
@@ -180,6 +233,16 @@ func telemetryStateDTO(factoryRoot string) telemetryStateJSON {
 		}
 	}
 
+	// The step-context axis (#622 C7), populated unconditionally like every other axis and
+	// deliberately NOT fed into the verdict below: these are the budget a step is judged against,
+	// not a statement about whether judging is happening. An unreadable startup config leaves the
+	// zero value, which is the honest "we could not read this factory's budget" — the same
+	// degradation-is-a-value rule the rest of this file follows.
+	if startupCfg, startupErr := config.LoadStartupConfig(factoryRoot); startupErr == nil {
+		st.StepContext.BoundTokens = startupCfg.StepContext.BoundTokens
+		st.StepContext.HandoffPct = startupCfg.StepContext.HandoffPct
+	}
+
 	st.State = telemetryStateVerdict(st)
 	return st
 }
@@ -218,6 +281,10 @@ func telemetryReportDTO(factoryRoot, agentFilter, instanceFilter string, now tim
 		return out, err
 	}
 
+	// Read once, ahead of the fan-out, exactly as the table renderer does it: both members are
+	// factory-wide and a per-agent re-read could observe the funnel log mid-rotation.
+	readCtx := newReportReadContext(factoryRoot)
+
 	var stats telemetry.ReadStats
 	for _, agent := range agents {
 		records, agentStats, readErr := telemetry.ReadEvents(config.TelemetryDir(factoryRoot),
@@ -228,7 +295,7 @@ func telemetryReportDTO(factoryRoot, agentFilter, instanceFilter string, now tim
 		stats.Malformed += agentStats.Malformed
 		stats.Dropped += agentStats.Dropped
 		stats.DroppedUnexported += agentStats.DroppedUnexported
-		out.Rows = append(out.Rows, telemetryJSONRows(agent, records, now)...)
+		out.Rows = append(out.Rows, telemetryJSONRows(agent, records, now, readCtx)...)
 	}
 
 	out.Stats = telemetryReadStatsJSON{
@@ -255,10 +322,14 @@ func telemetryReportDTO(factoryRoot, agentFilter, instanceFilter string, now tim
 // identical: an unfinished step becomes an open row with elapsed-so-far rather than being dropped,
 // a re-primed step does not become a second row, and a close whose start was never recorded is
 // shown with an unknown start rather than discarded.
-func telemetryJSONRows(agent string, records []telemetry.StepEvent, now time.Time) []telemetryReportRowJSON {
+func telemetryJSONRows(agent string, records []telemetry.StepEvent, now time.Time, readCtx reportReadContext) []telemetryReportRowJSON {
 	type key struct{ instance, step string }
 	index := map[key]int{}
 	rows := make([]telemetryReportRowJSON, 0, len(records))
+	// Parallel to rows, holding the records behind each one. The same #622 G9 change the table
+	// loop makes, for the same reason: the HIGH-3 gate needs the matched step_start's SessionID
+	// and cum_tokens, and a row index carries neither.
+	pairs := make([]stepPair, 0, len(records))
 
 	for _, r := range records {
 		k := key{r.InstanceID, r.StepID}
@@ -280,6 +351,7 @@ func telemetryJSONRows(agent string, records []telemetry.StepEvent, now time.Tim
 				VerbMS:     r.VerbMS,
 				InstanceID: r.InstanceID,
 			})
+			pairs = append(pairs, stepPair{start: &r})
 		case telemetry.EventStepEnd:
 			i, seen := index[k]
 			if !seen {
@@ -292,6 +364,7 @@ func telemetryJSONRows(agent string, records []telemetry.StepEvent, now time.Tim
 					Step:       telemetryStepLabel(r),
 					InstanceID: r.InstanceID,
 				})
+				pairs = append(pairs, stepPair{})
 			}
 			rows[i].Status = r.Status
 			if rows[i].Status == "" {
@@ -302,9 +375,50 @@ func telemetryJSONRows(agent string, records []telemetry.StepEvent, now time.Tim
 				rows[i].Model = r.Model
 			}
 			rows[i].VerbMS = r.VerbMS
+			pairs[i].end = &r
 		}
 	}
+
+	for i := range rows {
+		attachStepContextJSON(&rows[i], pairs[i], readCtx)
+	}
 	return rows
+}
+
+// attachStepContextJSON projects the same derived facts the table renders, as comparable numbers.
+//
+// The two surfaces share deriveStepContext and diverge only in spelling, which is the exact
+// separation this file's pairing comment states: display strings there, numbers here. A dash never
+// crosses over — it is a thing to print, not a thing to parse — so absence is `null` on this side
+// and "-" on that one, from one nil pointer.
+func attachStepContextJSON(row *telemetryReportRowJSON, pair stepPair, readCtx reportReadContext) {
+	facts := deriveStepContext(pair, readCtx.stalenessSecs)
+
+	if pair.end == nil && pair.start != nil {
+		if entry, ok := interruptedBy(readCtx.recoveries, row.Agent, row.InstanceID, pair.start.TS); ok {
+			applyInterruption(&facts, entry)
+			// The same DERIVED status the table shows. It is not added to telemetry's Status enum
+			// for the reason the neighbouring comment gives about "open": the record schema knows
+			// only closed, skipped and gate-waiting, and a read-time verdict must never be
+			// mistakable for a recorded fact.
+			row.Status = statusInterrupted
+		}
+	}
+
+	row.CtxTokensStart = facts.ctxTokensStart
+	row.CtxTokensEnd = facts.ctxTokensEnd
+	row.CtxTokensTotal = facts.ctxTokensTotal
+	row.CtxUsedPct = facts.ctxUsedPct
+	row.CumTokensDelta = facts.cumTokensDelta
+	row.CtxBoundTokens = facts.ctxBoundTokens
+	row.OverOccupancy = facts.overOccupancy
+	row.OverConsumption = facts.overConsumption
+	row.ConsumptionState = facts.consumptionState
+	row.CompactedMidStep = facts.compacted
+	row.CtxObservedStale = facts.stale
+	row.BoundExceedsWindow = facts.boundDrift
+	row.InterruptedTrigger = facts.interruptedTrigger
+	row.InterruptedObservedPct = facts.interruptedPct
 }
 
 // elapsedMSSinceRecord degrades to zero rather than to a sentinel, because this field is a

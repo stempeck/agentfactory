@@ -383,13 +383,19 @@ func parseRecordFile(path string) ([]StepEvent, int, error) {
 	}
 }
 
-// readRecordLine returns one newline-terminated line, reporting rather than hiding a line that
-// exceeds the record ceiling. The remainder of an over-long line is consumed so the read
-// resumes cleanly at the next record instead of treating the tail as a fresh one.
-func readRecordLine(r *bufio.Reader) (line []byte, tooLong bool, err error) {
+// ReadBoundedLine returns one newline-terminated line from r, reporting rather than hiding a line
+// that exceeds maxBytes. The remainder of an over-long line is consumed so the read resumes cleanly
+// at the next line instead of treating that line's tail as a fresh one. That resume is why this
+// loops over ReadSlice/ErrBufferFull and does NOT reach for a bufio.Scanner: a Scanner stops at the
+// first over-long line and would discard every line after it.
+//
+// It is the one bounded-line reader the record store (readRecordLine) and the recovery funnel
+// (cmd.readFunnelLine) both delegate to. Each caller keeps its own independent ceiling constant and
+// passes it as maxBytes, so the two ceilings can diverge without coupling.
+func ReadBoundedLine(r *bufio.Reader, maxBytes int) (line []byte, tooLong bool, err error) {
 	for {
 		chunk, rerr := r.ReadSlice('\n')
-		if len(line)+len(chunk) <= maxRecordBytes {
+		if len(line)+len(chunk) <= maxBytes {
 			line = append(line, chunk...)
 		} else {
 			tooLong = true
@@ -402,6 +408,11 @@ func readRecordLine(r *bufio.Reader) (line []byte, tooLong bool, err error) {
 		}
 		return line, tooLong, rerr
 	}
+}
+
+// readRecordLine reads one line under the record store's own ceiling. See ReadBoundedLine.
+func readRecordLine(r *bufio.Reader) (line []byte, tooLong bool, err error) {
+	return ReadBoundedLine(r, maxRecordBytes)
 }
 
 func readCursor(telemetryDir, agent string) (cursorState, error) {

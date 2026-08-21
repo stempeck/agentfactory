@@ -87,8 +87,6 @@ func TestRenderRole_AllFieldsSubstituted(t *testing.T) {
 	}
 }
 
-
-
 func TestManagerTemplate_HasBehavioralSections(t *testing.T) {
 	tmpl := New()
 	data := RoleData{
@@ -508,5 +506,73 @@ func TestHasRole(t *testing.T) {
 	}
 	if tmpl.HasRole("nonexistent") {
 		t.Error("HasRole should return false for nonexistent role")
+	}
+}
+
+// TestEveryRoleTemplateCarriesMemoryProtocol holds the uniformity clause of AC-626-5: the memory
+// protocol reaches EVERY role, not the roles someone remembered.
+//
+// Enumerated by glob over the embedded FS rather than checked against a list of 42 names, because
+// a roster pinned by name or by count is a roster that silently stops covering the next role
+// added. A new template inherits this guarantee by existing, and if it was authored without the
+// section, the first `make test` after it lands says so.
+//
+// Contains-the-whole-block rather than contains-the-heading: the heading alone would pass on a
+// template that kept the title and rewrote the body, which is the drift most likely to happen and
+// the one that matters — 42 roles reading 42 different versions of the same protocol is the state
+// this test exists to prevent.
+//
+// Checked against MemoryProtocolSection rather than a copy of it, so this is not a text-vs-text
+// tautology: the const is what the generator EMITS and the .md.tmpl files are what agents READ.
+// Editing the const without regenerating leaves those two out of step, and that is exactly the
+// state this reds on.
+func TestEveryRoleTemplateCarriesMemoryProtocol(t *testing.T) {
+	entries, err := templateFS.ReadDir("roles")
+	if err != nil {
+		t.Fatalf("read embedded roles dir: %v", err)
+	}
+
+	var checked int
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md.tmpl") {
+			continue
+		}
+		data, err := templateFS.ReadFile("roles/" + e.Name())
+		if err != nil {
+			t.Fatalf("read embedded template %s: %v", e.Name(), err)
+		}
+		checked++
+		if !strings.Contains(string(data), MemoryProtocolSection) {
+			t.Errorf("%s does not carry MemoryProtocolSection verbatim; regenerate it with "+
+				"`af formula agent-gen`, or if it is a hand-authored built-in (manager, "+
+				"supervisor), re-mirror the const into it byte for byte", e.Name())
+		}
+	}
+
+	// Without this the test passes loudly on an empty enumeration, which is the exact way a
+	// glob-driven sweep dies. No larger floor: the roster size is a per-factory fact, not a contract.
+	if checked == 0 {
+		t.Fatal("swept zero role templates; the embed glob is not seeing the roster")
+	}
+}
+
+// The section is rendered, not just stored, so the vault path an agent reads names that agent.
+// A literal placeholder here would have been a fifth thing telling agents about a directory they
+// then have to translate themselves.
+func TestMemoryProtocolRendersTheAgentsOwnVaultPath(t *testing.T) {
+	output, err := New().RenderRole("supervisor", RoleData{
+		Role:        "supervisor",
+		Description: "test",
+		RootDir:     "/tmp/factory",
+		WorkDir:     "/tmp/factory",
+	})
+	if err != nil {
+		t.Fatalf("RenderRole failed: %v", err)
+	}
+	if !strings.Contains(output, ".agentfactory/memory/supervisor/") {
+		t.Error("rendered Memory Protocol should name the agent's own vault path")
+	}
+	if strings.Contains(output, "{{ .Role }}") {
+		t.Error("rendered template still contains an unexpanded {{ .Role }} action")
 	}
 }

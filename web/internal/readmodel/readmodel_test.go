@@ -26,7 +26,8 @@ var _ Liveness = fakeLiveness{}
 
 // AC4 — Honest status: a running af-x with step_state "no_formula" renders Idle, not Working.
 func TestReadModel_HonestStatus(t *testing.T) {
-	// The exact Phase-0 11-key shape (agents.go:70-82); status already honestly "idle".
+	// A Phase-0 row (af-core has since added keys; the decode ignores what it does not declare).
+	// Status is already honestly "idle".
 	js := `[
 	  {"name":"x","type":"autonomous","formula":"","running":true,"status":"idle",
 	   "step_id":"","step_title":"","step_state":"no_formula","gate_id":"","inputs":{}}

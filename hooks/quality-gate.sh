@@ -14,7 +14,8 @@ AGENT_RUNTIME="$(pwd)/.runtime"
 # fails the gate open every turn (ADR-007 never-block) — becomes visible instead of
 # silent. Idempotent via a .runtime marker (the fidelity-gate per-agent-state idiom),
 # so it is one mail per cause, not a per-turn storm. Sent to the agent's own inbox
-# (ADR-007: no fire-and-forget escalation into a possibly-absent recipient).
+# (ADR-007: no fire-and-forget escalation into a possibly-absent recipient). The mail
+# wakes the agent so it sees and acts on the notice.
 notify_grader_unavailable() {
     cause="$1"
     marker="$AGENT_RUNTIME/grader_notice_$cause"
@@ -82,52 +83,48 @@ if [ -z "$MESSAGE" ] || [ "$MESSAGE" = "null" ]; then
     exit 0
 fi
 
-# Extract tool call and result summary from transcript (recent turns)
-TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
-TOOL_CONTEXT=""
-if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-    # Reverse lines: tac on Linux, tail -r on macOS
-    if command -v tac &>/dev/null; then
-        REVERSE="tac"
-    else
-        REVERSE="tail -r"
-    fi
-    # Extract recent tool calls (name + inputs)
-    TOOL_CALLS=$($REVERSE "$TRANSCRIPT" \
-        | jq -c 'select(.message.content[]?.type == "tool_use") | [.message.content[] | select(.type == "tool_use") | {tool: .name, input: .input}]' 2>/dev/null \
-        | head -5 \
-        | jq -rs 'add // [] | .[] | "- \(.tool): \(.input | to_entries | map("\(.key)=\(.value | tostring)") | join(", "))"' 2>/dev/null)
-    # Extract recent tool results (outputs)
-    TOOL_RESULTS=$($REVERSE "$TRANSCRIPT" \
-        | jq -c 'select(.message.content[]?.type == "tool_result") | [.message.content[] | select(.type == "tool_result") | .content]' 2>/dev/null \
-        | head -5 \
-        | jq -rs 'add // [] | .[] | "  > \(. | tostring | .[0:300])"' 2>/dev/null)
-    # Combine calls and results
-    if [ -n "$TOOL_CALLS" ] || [ -n "$TOOL_RESULTS" ]; then
-        TOOL_CONTEXT="Tool calls executed:
-${TOOL_CALLS}
+# This gate has always called `af` (af root above, af mail send below) without ever checking that
+# it exists. It sits here, after the lock block, rather than at the top: the lock's contention and
+# stale-recovery paths must still reach the debug log on a machine that has no af on PATH.
+if ! command -v af &>/dev/null; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT6: no_af_binary" >> "$AGENT_RUNTIME/quality_debug.log" 2>/dev/null
+    echo '{"ok": true}'
+    exit 0
+fi
 
-Tool outputs received:
-${TOOL_RESULTS}"
-    fi
+# Tool evidence comes from `af turn evidence` (internal/cmd/turn.go): one turn, oldest-first, each
+# result paired to the call that produced it by tool_use_id. It replaces an inline construct that
+# reversed the whole transcript, took five JSONL lines, and sliced calls and results in two
+# independent passes — so the judge was shown calls and results from different turns, newest
+# first, joined to nothing. The fidelity gate derives its evidence from the same call, so both
+# gates now present the same evidence derived the same way.
+#
+# Every transcript-side failure rides in that command's OUTPUT and still exits 0 (ADR-007), so the
+# only failure this has to absorb is a binary that predates the subcommand: that writes to stderr,
+# prints nothing, and exits 1. Empty stdout is therefore the single "no evidence" signal.
+EVIDENCE_UNAVAILABLE="[tool evidence unavailable this turn]"
+TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
+TOOL_CONTEXT=$(af turn evidence --transcript "$TRANSCRIPT" 2>/dev/null)
+if [ -z "$TOOL_CONTEXT" ]; then
+    TOOL_CONTEXT="$EVIDENCE_UNAVAILABLE"
 fi
 
 # Check claude CLI is available
 if ! command -v claude &>/dev/null; then
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT6: no_claude_binary" >> "$AGENT_RUNTIME/quality_debug.log" 2>/dev/null
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT7: no_claude_binary" >> "$AGENT_RUNTIME/quality_debug.log" 2>/dev/null
     notify_grader_unavailable "no_claude_binary"
     echo '{"ok": true}'
     exit 0
 fi
 
-# Build evaluation input: assistant text + tool call evidence
-EVAL_INPUT="Assistant response: $MESSAGE"
-if [ -n "$TOOL_CONTEXT" ]; then
-    EVAL_INPUT="$EVAL_INPUT
+# Build evaluation input: assistant text + this turn's tool evidence. The evidence section is
+# unconditional — an empty turn and an unreadable transcript are distinct states the judge has
+# rules for, and omitting the section would hide exactly the markers those rules key on.
+EVAL_INPUT="Assistant response: $MESSAGE
 
-Tool calls executed in this turn (from transcript):
+---
+
 $TOOL_CONTEXT"
-fi
 
 # Run evaluation via haiku. Forward the OTel telemetry family through the env -i
 # allowlist using conditional expansion — nothing is added when a var is unset, so
@@ -143,7 +140,7 @@ VERDICT=$(env -i HOME="$HOME" PATH="$PATH" \
     ${OTEL_EXPORTER_OTLP_HEADERS:+OTEL_EXPORTER_OTLP_HEADERS="$OTEL_EXPORTER_OTLP_HEADERS"} \
     ${OTEL_RESOURCE_ATTRIBUTES:+OTEL_RESOURCE_ATTRIBUTES="$OTEL_RESOURCE_ATTRIBUTES,af.overhead=grader"} \
     claude -p --model haiku --max-turns 1 \
-    --system-prompt "You are a JSON-only quality gate. You receive an assistant's response along with the tool calls it executed. Evaluate the response considering BOTH the text AND the tool evidence. Respond with ONLY valid JSON, nothing else. $(cat "$PROMPT_FILE")" \
+    --system-prompt "You are a JSON-only quality gate. You receive an assistant's response along with the tool activity of the turn that just ended. Evaluate the response considering BOTH the text AND the tool evidence, under the evidence rules below. Respond with ONLY valid JSON, nothing else. $(cat "$PROMPT_FILE")" \
     "$EVAL_INPUT" 2>/dev/null)
 
 # Strip markdown code fences if present
@@ -155,11 +152,12 @@ if [ -z "$VERDICT" ]; then
     notify_grader_unavailable "empty_verdict"
 fi
 
-# Mail verdict to self only on failure
+# Mail the verdict to self only on failure. The mail wakes the agent so it reads the
+# verdict about the turn that just ended and acts on it (PR #608: mail always wakes).
 if [ -n "$VERDICT" ] && echo "$VERDICT" | jq -e '.ok == false' &>/dev/null; then
     af mail send "$ROLE" -s "QUALITY_GATE" -m "$VERDICT" 2>/dev/null
 fi
 
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT7: normal_completion" >> "$AGENT_RUNTIME/quality_debug.log" 2>/dev/null
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) EXIT8: normal_completion" >> "$AGENT_RUNTIME/quality_debug.log" 2>/dev/null
 echo '{"ok": true}'
 exit 0

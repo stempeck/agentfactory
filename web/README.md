@@ -176,6 +176,18 @@ the socket on loopback at both ends.
 
 ---
 
+## Settings — what a save actually writes
+
+This document covers how you *reach* the console. Once you are in the Settings view, the behaviour
+worth knowing before your first save is written up separately in
+[`docs/operations/web-console-settings.md`](../docs/operations/web-console-settings.md): which config
+files the console shows and which it will let you edit (and why the rest are excluded), what af-core
+normalizes and which defaults it materializes into a file on your first save, when a saved change
+actually takes effect, what the version-skew banner means, and how to test a console change locally
+(`make test-web` + `make conformance` — the root `make test` covers the root module only).
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

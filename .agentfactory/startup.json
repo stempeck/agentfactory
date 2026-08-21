@@ -3,22 +3,42 @@
     "manager"
   ],
   "quality": "default",
-  "fidelity": "default",
-  "improvement": "default",
-  "telemetry": "default",
+  "fidelity": "on",
+  "improvement": "on",
+  "telemetry": "on",
   "start_dispatch": true,
   "watchdog_agents": [
     "mergepatrol",
     "design-plan-impl",
     "rootcause-all",
+    "gpt-rootcause-all",
     "investigate",
     "rapid-soldesign-plan",
     "design-v7",
     "fable-implement",
     "fable-increment",
     "fable-review",
-    "rapid-implement",
-    "rapid-increment",
+    "gpt-fable-review",
     "ultra-review"
-  ]
+  ],
+  "recovery": {
+    "enabled": true,
+    "context_threshold_pct": 85,
+    "context_advisory_pct": 70,
+    "confirm_ticks": 2,
+    "staleness_secs": 180,
+    "dark_grace_secs": 600,
+    "post_recovery_progress_secs": 900,
+    "progress_backstop_secs": 7200,
+    "no_step_escalation_secs": 3600,
+    "max_attempts": 3,
+    "attempt_window_secs": 1800,
+    "rate_cap_max": 6,
+    "rate_cap_window_secs": 86400,
+    "exclude": []
+  },
+  "step_context": {
+    "bound_tokens": 200000,
+    "handoff_pct": 75
+  }
 }

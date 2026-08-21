@@ -1,0 +1,28 @@
+{
+  "session_id": "sess-Golden_01",
+  "cwd": "/home/dev/fallback/cwd",
+  "model": { "id": "claude-opus-4-8", "display_name": "Opus 4.8" },
+  "workspace": {
+    "current_dir": "/home/dev/project/current",
+    "project_dir": "/home/dev/project/root",
+    "added_dirs": [],
+    "git_worktree": ""
+  },
+  "version": "2.1.212",
+  "context_window": {
+    "total_input_tokens": 340000,
+    "total_output_tokens": 12000,
+    "context_window_size": 1000000,
+    "used_percentage": 35.2,
+    "remaining_percentage": 64.8
+  },
+  "cost": {
+    "total_cost_usd": 12.34,
+    "total_duration_ms": 125000,
+    "total_api_duration_ms": 90000,
+    "total_lines_added": 210,
+    "total_lines_removed": 47
+  },
+  "exceeds_200k_tokens": true,
+  "fast_mode": false
+}

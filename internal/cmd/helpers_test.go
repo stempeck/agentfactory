@@ -170,7 +170,7 @@ func (m *mockTmux) RespawnPane(pane, command string) error {
 func TestRespawnSession_CallsFullSequence(t *testing.T) {
 	mock := &mockTmux{}
 	opts := RespawnOptions{
-		FactoryRoot: "/tmp/factory",
+		FactoryRoot: t.TempDir(),
 		AgentName:   "test-agent",
 		AgentEntry:  config.AgentEntry{Type: "autonomous"},
 		PaneID:      "%5",
@@ -199,7 +199,7 @@ func TestRespawnSession_CallsFullSequence(t *testing.T) {
 func TestRespawnSession_PrependsCommandPrefix(t *testing.T) {
 	mock := &mockTmux{}
 	opts := RespawnOptions{
-		FactoryRoot: "/tmp/factory",
+		FactoryRoot: t.TempDir(),
 		AgentName:   "test-agent",
 		AgentEntry:  config.AgentEntry{Type: "autonomous"},
 		PaneID:      "%0",
@@ -223,12 +223,13 @@ func TestRespawnSession_PrependsCommandPrefix(t *testing.T) {
 
 func TestRespawnSession_SetsWorktreeWhenPathProvided(t *testing.T) {
 	mock := &mockTmux{}
+	root := t.TempDir()
 	opts := RespawnOptions{
-		FactoryRoot:  "/tmp/factory",
+		FactoryRoot:  root,
 		AgentName:    "test-agent",
 		AgentEntry:   config.AgentEntry{Type: "autonomous"},
 		PaneID:       "%0",
-		WorktreePath: "/tmp/factory/.agentfactory/worktrees/wt-abc",
+		WorktreePath: filepath.Join(root, ".agentfactory", "worktrees", "wt-abc"),
 		WorktreeID:   "wt-abc",
 		Tx:           mock,
 	}
@@ -247,7 +248,7 @@ func TestRespawnSession_SetsWorktreeWhenPathProvided(t *testing.T) {
 func TestRespawnSession_SkipsWorktreeWhenPathEmpty(t *testing.T) {
 	mock := &mockTmux{}
 	opts := RespawnOptions{
-		FactoryRoot: "/tmp/factory",
+		FactoryRoot: t.TempDir(),
 		AgentName:   "test-agent",
 		AgentEntry:  config.AgentEntry{Type: "autonomous"},
 		PaneID:      "%0",
@@ -268,7 +269,7 @@ func TestRespawnSession_SkipsWorktreeWhenPathEmpty(t *testing.T) {
 func TestRespawnSession_ReturnsRespawnPaneError(t *testing.T) {
 	mock := &mockTmux{respawnErr: fmt.Errorf("tmux respawn failed")}
 	opts := RespawnOptions{
-		FactoryRoot: "/tmp/factory",
+		FactoryRoot: t.TempDir(),
 		AgentName:   "test-agent",
 		AgentEntry:  config.AgentEntry{Type: "autonomous"},
 		PaneID:      "%0",

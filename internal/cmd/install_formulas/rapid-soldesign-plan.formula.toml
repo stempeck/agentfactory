@@ -26,7 +26,7 @@ PR's design into an implementation plan.
 - One cross-review round, then commit + PR — the pipeline stays lean
 - The implementation plan is produced by a fresh agent dispatched off the PR
 - Event-driven coordination: the orchestrator is woken by each sub-agent's completion
-  mail (the af mail inject hook delivers it on wake). The orchestrator therefore does
+  mail (the `af mail check --inject` hook delivers it on wake). The orchestrator therefore does
   NOT poll, sleep, nudge, or send keepalives — sub-agents simply mail when done, and
   the orchestrator advances on wake. Agent liveness is the factory watchdog's job.
 
@@ -39,7 +39,7 @@ The orchestrator never busy-waits. When an action says "wait for signal X":
 1. Check your inbox once: `af mail inbox --json`.
 2. If the awaited signal(s) are present, archive them (`af mail delete`) and continue.
 3. If not present, STOP and end your turn. Do NOT sleep, loop, nudge, or keepalive.
-   When the sub-agent mails you, the af mail inject hook wakes this session and you
+   When the sub-agent mails you, the `af mail check --inject` hook wakes this session and you
    re-run the check. Unprocessed completion mails accumulate in the inbox, so on each
    wake you can tell exactly which signals have arrived.
 
@@ -249,12 +249,27 @@ description = """
    }
    ```
 
-2. **Fetch GitHub issue content:**
+2. **Fetch GitHub issue content (handles one OR several issues):**
+   `issue_uri` usually names one issue, but it MAY name several related issues joined
+   by " AND ", whitespace, or commas (observed: three issue URLs — #626/#323/#515 —
+   passed as one agent-memory design problem). A bare `gh issue view "{{issue_uri}}"`
+   FAILS on a multi-URL string, so normalize first: fetch every issue named and combine
+   them into one problem input. A single URL/number falls through the loop unchanged, so
+   the common case is untouched.
    ```bash
-   ISSUE_JSON=$(gh issue view "{{issue_uri}}" --json number,title,body,labels)
-   ISSUE_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.number')
-   ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
-   ISSUE_BODY=$(echo "$ISSUE_JSON" | jq -r '.body')
+   ISSUE_URIS=$(printf '%s' "{{issue_uri}}" | grep -oE 'https?://[^ ,]+/issues/[0-9]+')
+   [ -n "$ISSUE_URIS" ] || ISSUE_URIS="{{issue_uri}}"   # bare number / single value
+   ISSUE_NUMBER=$(basename "{{issue_uri}}")             # deterministic id — every step derives it identically
+   ISSUE_TITLE=""; ISSUE_BODY=""; N_ISSUES=0
+   for u in $ISSUE_URIS; do
+     J=$(gh issue view "$u" --json number,title,body 2>/dev/null)
+     [ -n "$J" ] || { echo "ERROR: could not fetch GitHub issue at $u"; exit 1; }
+     N=$(echo "$J" | jq -r '.number'); T=$(echo "$J" | jq -r '.title'); B=$(echo "$J" | jq -r '.body')
+     N_ISSUES=$((N_ISSUES + 1))
+     ISSUE_TITLE="${ISSUE_TITLE:+$ISSUE_TITLE; }#$N $T"
+     ISSUE_BODY="${ISSUE_BODY}$(printf '\\n\\n## Issue #%s — %s (%s)\\n\\n%s' "$N" "$T" "$u" "$B")"
+   done
+   [ "$N_ISSUES" -gt 1 ] && ISSUE_TITLE="Combined design: $ISSUE_TITLE"
    ```
 
 3. **Truncate issue body to 50000 characters to prevent context exhaustion:**
@@ -290,6 +305,12 @@ description = """
    mkdir -p "$(dirname "$VARS")"
    grep -q '^problem_summary=' "$VARS" 2>/dev/null || \\
      printf 'problem_summary="%s"\\n' "$PROBLEM_SUMMARY" >> "$VARS"
+   # Persist the id/dir/title too. Downstream steps (commit-and-pr, finalize) otherwise
+   # re-derive the title with `gh issue view "{{issue_uri}}"`, which returns EMPTY when
+   # issue_uri names several issues — reading it back from the ledger is multi-issue-safe.
+   grep -q '^issue_id=' "$VARS" 2>/dev/null || printf 'issue_id="%s"\\n' "$ISSUE_NUMBER" >> "$VARS"
+   grep -q '^design_dir=' "$VARS" 2>/dev/null || printf 'design_dir="%s"\\n' "$DESIGN_DIR" >> "$VARS"
+   grep -q '^issue_title=' "$VARS" 2>/dev/null || printf 'issue_title="%s"\\n' "$ISSUE_TITLE" >> "$VARS"
    [ -s "$PROBLEM_SUMMARY" ] || { echo "VERIFICATION FAILED: problem summary is empty or missing at $PROBLEM_SUMMARY"; exit 1; }
    ```
 
@@ -808,7 +829,11 @@ Event-driven throughout. Do NOT poll, sleep, nudge, or keepalive.
    # artifacts never reach the PR and the step still appears to succeed.
    ISSUE_ID=$(basename "{{issue_uri}}")
    DESIGN_DIR=".designs/$ISSUE_ID/"
-   ISSUE_TITLE=$(gh issue view "{{issue_uri}}" --json title --jq '.title' 2>/dev/null)
+   # Prefer the title parse-issue recorded in the ledger; `gh issue view "{{issue_uri}}"`
+   # returns EMPTY when issue_uri names several issues, blanking the commit subject.
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   [ -f "$VARS" ] && . "$VARS"
+   ISSUE_TITLE="${issue_title:-$(gh issue view "{{issue_uri}}" --json title --jq '.title' 2>/dev/null)}"
 
    cd "${AF_WORKTREE:-$AF_ROOT}"
    git add "$DESIGN_DIR"
@@ -857,7 +882,10 @@ Event-driven throughout. Do NOT poll, sleep, nudge, or keepalive.
    # Observed: the whole cross-review write-up silently absent from the PR.
    ISSUE_ID=$(basename "{{issue_uri}}")
    DESIGN_DIR=".designs/$ISSUE_ID/"
-   ISSUE_TITLE=$(gh issue view "{{issue_uri}}" --json title --jq '.title' 2>/dev/null)
+   # Prefer the ledger title (multi-issue-safe); fall back to gh for a single issue.
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   [ -f "$VARS" ] && . "$VARS"
+   ISSUE_TITLE="${issue_title:-$(gh issue view "{{issue_uri}}" --json title --jq '.title' 2>/dev/null)}"
    cd "${AF_WORKTREE:-$AF_ROOT}"
    BRANCH=$(git rev-parse --abbrev-ref HEAD)
    PR_URL=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null)
@@ -883,8 +911,11 @@ Event-driven throughout. Do NOT poll, sleep, nudge, or keepalive.
          printf '\\n\\n</details>\\n'
        } >> "$BODY_FILE"
      fi
+     # Render the title from shell vars — {{issue_title}}/{{issue_id}} are deferred and
+     # would ship as literal placeholders in the PR title on this reuse path (the create
+     # path above already uses $ISSUE_TITLE/$ISSUE_ID).
      gh pr edit "$PR_NUM" \
-       --title "design: {{issue_title}} (#{{issue_id}}) — cross-reviewed" \
+       --title "design: $ISSUE_TITLE (#$ISSUE_ID) — cross-reviewed" \
        --body-file "$BODY_FILE"
    fi
    echo "PR_URL=$PR_URL"
@@ -902,6 +933,20 @@ Event-driven throughout. Do NOT poll, sleep, nudge, or keepalive.
    VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
    mkdir -p "$(dirname "$VARS")"
    grep -q '^pr_url=' "$VARS" 2>/dev/null || printf 'pr_url="%s"\\n' "$PR_URL" >> "$VARS"
+   # Durability: pr-body.md is written in THIS action — AFTER action 4's `git add
+   # "$DESIGN_DIR"` commit — and NO later action stages it (action 8 commits only the
+   # progress file). Left uncommitted it dies at the next sub-agent's cleanup step, the
+   # same working-tree-discard trap the "Progress File Durability" preamble documents:
+   # observed on a full run, where pr-body.md had to be committed by hand before the
+   # agents were released in action 7. Commit it LOCALLY now — action 8's push carries it.
+   # A committed file survives cleanup, and a persisted pr-body.md also stops the reused-PR
+   # `--body-file` branch from re-reading an empty body on a mid-step session resume.
+   ROOT="${AF_WORKTREE:-$AF_ROOT}"
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   git -C "$ROOT" add "${DESIGN_DIR}cross-review/pr-body.md" 2>/dev/null || true
+   git -C "$ROOT" reset HEAD -- .agentfactory/ 2>/dev/null || true
+   git -C "$ROOT" diff --cached --quiet || git -C "$ROOT" commit -q -m "rapid-soldesign-plan: PR body for #$ISSUE_ID"
    ```
 
 6. **Close orchestrator-held gate bead (allows analyst bead to close):**
@@ -956,6 +1001,9 @@ Event-driven throughout. Do NOT poll, sleep, nudge, or keepalive.
 - PR created, OR existing PR reused with its title and body UPDATED to the composed
   pr-body.md (a reused PR must not keep a pre-cross-review description); {{pr_url}}
   recorded (non-empty URL)
+- pr-body.md committed locally in action 5 so it survives the sub-agent cleanup that
+  action 7 triggers (action 8's push carries the commit); an uncommitted pr-body.md is
+  discarded and a mid-step resume then reads an empty PR body
 - Gate bead closed (analyst bead can now close)
 - Both analyst and designer sent DONE signals, ran af done, and were af down'd
 - Progress file updated with PR link
@@ -1086,7 +1134,13 @@ description = """
      echo "WARNING: implementation_plan_outline.md not found on PR branch."
      af mail send {{orchestrator}} -s "WARNING: implementation_plan_outline.md missing after implementation-plan agent" \
        -m "{{impl_name}} completed (WORK_DONE) but no implementation_plan_outline.md is on the PR branch. Manual review recommended."
-   elif ! echo "$OUTLINE_BODY" | grep -qE '^## Phase [0-9]+[a-z]?:'; then
+   # Accept letter-suffixed phase headings in EITHER case. {{impl_name}} emits sub-phase
+   # headings like "## Phase 0A:" / "## Phase 0B:" (uppercase); the prior [a-z]? class
+   # silently skipped those, so an outline written with only letter-suffixed phases would
+   # trip a false "missing phase headings" WARNING while the plan is present and correct —
+   # the same false-negative class the DESIGN_DIR note above guards against. [A-Za-z]*
+   # also tolerates multi-letter and no-suffix forms ("Phase 0", "Phase 10").
+   elif ! echo "$OUTLINE_BODY" | grep -qE '^## Phase [0-9]+[A-Za-z]*:'; then
      echo "WARNING: implementation_plan_outline.md missing '## Phase N:' headings."
      af mail send {{orchestrator}} -s "WARNING: Plan outline missing phase headings" \
        -m "The implementation_plan_outline.md does not have ## Phase N: headings. Manual review recommended."
@@ -1120,24 +1174,44 @@ description = """
    ```
 
 4. **Send completion mail to {{orchestrator}} with PR link:**
+   This mail is the formula's ONE human touchpoint, so it must RENDER — never ship
+   `{{...}}` literals. `{{issue_id}}`, `{{issue_title}}`, and `{{design_dir}}` are
+   deferred (they arrive as those exact characters — see "Deferred Variable Substitution"),
+   so DERIVE them here exactly as action 1 does before composing the body. This action
+   previously embedded the deferred vars raw and mailed the operator "complete for
+   {{issue_title}} … {{design_dir}}design-doc.md" — the literal placeholders, not values.
+   Re-resolve the outline's REAL path too: {{impl_name}} writes it into a subdirectory
+   (observed: `.designs/<id>/implementation-plan/implementation_plan_outline.md`), so a
+   bare `implementation_plan_outline.md` sends the operator to a path that does not exist
+   — reuse the same `ls-tree` resolution action 1 uses.
    ```bash
    cd "${AF_WORKTREE:-$AF_ROOT}"
    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+   ISSUE_ID=$(basename "{{issue_uri}}")                 # {{issue_id}} does NOT render — derive it
+   DESIGN_DIR=".designs/$ISSUE_ID/"                     # {{design_dir}} does NOT render — derive it
+   # {{issue_title}} does NOT render; prefer the ledger (gh issue view "{{issue_uri}}"
+   # returns EMPTY on a multi-issue URI), fall back to gh for a single issue.
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   [ -f "$VARS" ] && . "$VARS"
+   ISSUE_TITLE="${issue_title:-$(gh issue view "{{issue_uri}}" --json title --jq '.title' 2>/dev/null)}"
    PR_URL="{{pr_url}}"
    case "$PR_URL" in
      https://*) : ;;
      *) PR_URL=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null) ;;
    esac
-   af mail send {{orchestrator}} -s "RAPIDSOL: COMPLETE [{{issue_id}}]" -m "
-   Rapid design refinement complete for {{issue_title}}.
+   git fetch origin "$BRANCH" 2>/dev/null || true      # self-contained: action 1 may have run in a prior session
+   OUTLINE_PATH=$(git -C "${AF_WORKTREE:-$AF_ROOT}" ls-tree -r --name-only "origin/$BRANCH" 2>/dev/null | grep -E "^${DESIGN_DIR}.*implementation_plan_outline\\.md$" | head -1)
+   [ -n "$OUTLINE_PATH" ] || OUTLINE_PATH="${DESIGN_DIR}implementation_plan_outline.md"
+   af mail send {{orchestrator}} -s "RAPIDSOL: COMPLETE [$ISSUE_ID]" -m "
+   Rapid design refinement complete for $ISSUE_TITLE.
 
    ## PR
    $PR_URL
 
    ## Output
-   - Design document: {{design_dir}}design-doc.md
-   - Implementation plan: implementation_plan_outline.md (pushed to the PR branch by {{impl_name}})
-   - Cross-review artifacts: {{design_dir}}cross-review/
+   - Design document: ${DESIGN_DIR}design-doc.md
+   - Implementation plan: $OUTLINE_PATH (pushed to the PR branch by {{impl_name}})
+   - Cross-review artifacts: ${DESIGN_DIR}cross-review/
 
    ## Next Step
    Hand the implementation_plan_outline.md to your implementation workflow to begin
@@ -1150,7 +1224,9 @@ description = """
 - {{impl_name}} agent released (af down)
 - Progress file updated to COMPLETE **and committed + pushed** (an uncommitted final
   status never reaches the PR)
-- RAPIDSOL: COMPLETE mail sent to {{orchestrator}} with PR link
+- RAPIDSOL: COMPLETE mail sent to {{orchestrator}} with the PR link, the issue id and
+  title RENDERED (no `{{...}}` literals in subject or body), and the implementation plan
+  named by its RESOLVED path (the real subdirectory location, not a bare filename)
 """
 
 [vars]

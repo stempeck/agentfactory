@@ -225,3 +225,69 @@ func TestModelsConfigPath(t *testing.T) {
 		t.Errorf("ModelsConfigPath: got %q, want %q", got, want)
 	}
 }
+
+func TestStatuslineConfigPath(t *testing.T) {
+	got := StatuslineConfigPath("/tmp/myproject")
+	want := filepath.Join("/tmp/myproject", ".agentfactory", "statusline.json")
+	if got != want {
+		t.Errorf("StatuslineConfigPath: got %q, want %q", got, want)
+	}
+}
+
+func TestStatuslineDir(t *testing.T) {
+	got := StatuslineDir("/tmp/myproject")
+	want := filepath.Join("/tmp/myproject", ".agentfactory", "statusline")
+	if got != want {
+		t.Errorf("StatuslineDir: got %q, want %q", got, want)
+	}
+}
+
+// The want string is composed BY HAND, never from the constructor under test — a test that
+// derived its expectation from StatuslineSessionsDir could not detect a fault inside it
+// (the FormulaStorePath rule, paths.go).
+func TestStatuslineSessionsDir(t *testing.T) {
+	got := StatuslineSessionsDir("/tmp/myproject")
+	want := filepath.Join("/tmp/myproject", ".agentfactory", "statusline", "sessions")
+	if got != want {
+		t.Errorf("StatuslineSessionsDir: got %q, want %q", got, want)
+	}
+}
+
+func TestMemoryDir(t *testing.T) {
+	got := MemoryDir("/tmp/myproject")
+	want := filepath.Join("/tmp/myproject", ".agentfactory", "memory")
+	if got != want {
+		t.Errorf("MemoryDir: got %q, want %q", got, want)
+	}
+}
+
+// The want string is composed BY HAND and deliberately does NOT call MemoryDir: a test that
+// derived its expectation from the constructor under test could not detect a fault inside it.
+func TestAgentMemoryDir(t *testing.T) {
+	got := AgentMemoryDir("/tmp/myproject", "manager")
+	want := filepath.Join("/tmp/myproject", ".agentfactory", "memory", "manager")
+	if got != want {
+		t.Errorf("AgentMemoryDir: got %q, want %q", got, want)
+	}
+}
+
+// TestMemoryDirIsOutsideEveryDirectoryThatGetsDestroyed guards the placement, not the spelling.
+// The vault's whole promise is that a learning outlives the run that recorded it, and that is
+// delivered structurally: worktrees/ is what teardown destroys and agents/ is what af install
+// rewrites, so a vault inside either would be erased by a routine operation while every path
+// helper still read correctly. Git visibility is deliberately NOT the invariant here — both
+// placements are git-ignored, so an assertion about .gitignore would pass either way.
+func TestMemoryDirIsOutsideEveryDirectoryThatGetsDestroyed(t *testing.T) {
+	memory := MemoryDir("/tmp/myproject")
+	for _, owned := range []string{
+		filepath.Join("/tmp/myproject", ".agentfactory", "agents"),
+		filepath.Join("/tmp/myproject", ".agentfactory", "worktrees"),
+	} {
+		if strings.HasPrefix(memory, owned+string(filepath.Separator)) {
+			t.Errorf("MemoryDir %q is inside %q, which a routine operation destroys", memory, owned)
+		}
+	}
+	if got, want := AgentMemoryDir("/tmp/myproject", "manager"), filepath.Join(memory, "manager"); got != want {
+		t.Errorf("AgentMemoryDir escaped MemoryDir: got %q, want %q", got, want)
+	}
+}

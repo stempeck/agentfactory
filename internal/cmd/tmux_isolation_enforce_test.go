@@ -47,7 +47,7 @@ var destructiveTmuxPattern = regexp.MustCompile(`exec\.Command\("tmux",\s*"(new-
 // seamReassignPattern matches a test reassigning one of the package-global
 // session seams. Such a test mutates global state, so it MUST NOT run with
 // t.Parallel (Round-1/Round-2 LOW-3): parallel seam-mutating tests race.
-var seamReassignPattern = regexp.MustCompile(`\b(sessionPrefixFn|newManagerTmux|newCmdTmux)\s*=[^=]`)
+var seamReassignPattern = regexp.MustCompile(`\b(sessionPrefixFn|newManagerTmux|newCmdTmux|newRouterTmux)\s*=[^=]`)
 
 // integrationTagPattern matches a NON-NEGATED `integration` term inside a
 // //go:build constraint expression. The leading alternation `(^|[\s&|(])`

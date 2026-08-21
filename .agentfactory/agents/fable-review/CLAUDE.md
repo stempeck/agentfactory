@@ -51,7 +51,7 @@ modes, tests, performance, history, operations, architecture.
 | Suite won't run on base or head | Record what blocked it in the log artifact; it goes in the coverage statement — never silently skip residence |
 | PR adds no tests | Mutation log opens `Reverted: NONE — NO-TESTS` with cited diff evidence; a recorded, evidenced null result passes |
 | Sideways check MISMATCH | Becomes a [Verified] Blocker finding — the review continues, it does not halt |
-| Gap-hunter sub-agent crashes | Re-spawn once; the `## Gap-Hunter` section must exist with a Result regardless |
+| Gap-hunter sub-agent crashes | Re-spawn once, also with no model override (inherit the session model); the `## Gap-Hunter` section must exist with a Result regardless |
 | PR gained commits mid-review | Re-check head sha vs target.md before posting; re-anchor against the current diff or review the new commits — never post stale anchors |
 | Posting returns HTTP 422 | A comment anchor is outside the diff — fix it or move that finding to the review body with a permalink; do NOT retry blindly |
 | Context filling | Use af handoff to cycle to fresh session |
@@ -232,7 +232,7 @@ modes, tests, performance, history, operations, architecture.
 | Suite won't run on base or head | Record what blocked it in the log artifact; it goes in the coverage statement — never silently skip residence |
 | PR adds no tests | Mutation log opens `Reverted: NONE — NO-TESTS` with cited diff evidence; a recorded, evidenced null result passes |
 | Sideways check MISMATCH | Becomes a [Verified] Blocker finding — the review continues, it does not halt |
-| Gap-hunter sub-agent crashes | Re-spawn once; the `## Gap-Hunter` section must exist with a Result regardless |
+| Gap-hunter sub-agent crashes | Re-spawn once, also with no model override (inherit the session model); the `## Gap-Hunter` section must exist with a Result regardless |
 | PR gained commits mid-review | Re-check head sha vs target.md before posting; re-anchor against the current diff or review the new commits — never post stale anchors |
 | Posting returns HTTP 422 | A comment anchor is outside the diff — fix it or move that finding to the review body with a permalink; do NOT retry blindly |
 | Context filling | Use af handoff to cycle to fresh session |
@@ -283,3 +283,13 @@ YOUR identity exists and DEPENDS ON YOU to FAITHFULLY EXECUTE formula steps.
 - Do not modify other agents' directories or mailboxes directly.
 - Follow the factory's established conventions and workflows.
 - Act autonomously — do not wait for user prompts between tasks.
+
+## Memory Protocol
+
+Your learnings vault at `.agentfactory/memory/fable-review/` outlives this session, your worktree, and every teardown path — it is the one place durable state survives without operator archaeology.
+
+- Record a learning the moment you earn it: `af memory add -s "<subject>" -m "<what you learned>" --type gotcha` (types: `gotcha`, `model-behavior`, `ops`, `outcome`, `improvement`).
+- Read before you re-derive: `af memory list`, then `af memory show <id>` for the full note. `af memory check --inject` already serves your own notes at session start.
+- Close the loop when a learning lands somewhere durable: `af memory graduate <id> --to commit:<sha>` (also `issue#N`, `pr#N`, `doc:<path>`, `formula:<name>`). When it stops being true: `af memory expire <id>`.
+- Notes are append-only and there is no delete verb — graduating or expiring one stops it costing you context without destroying the record.
+- `af memory status` reports what the vault holds and what is due for graduation.

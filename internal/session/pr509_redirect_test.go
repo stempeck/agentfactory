@@ -95,6 +95,10 @@ func TestBuildStartupCommand_ProfileSwitch_ClearsAllStaleRedirectVars(t *testing
 		"ANTHROPIC_DEFAULT_OPUS_MODEL=''",
 		"ANTHROPIC_DEFAULT_SONNET_MODEL=''",
 		"ANTHROPIC_DEFAULT_HAIKU_MODEL=''",
+		// ANTHROPIC_DEFAULT_FABLE_MODEL joined the family for issue #598: an ambient value
+		// inherited from an operator's shell rc was cleared by no hygiene pass at all, so it
+		// would silently redirect fable-class requests on every profile.
+		"ANTHROPIC_DEFAULT_FABLE_MODEL=''",
 		"CLAUDE_CODE_SUBAGENT_MODEL=''",
 	} {
 		if !strings.Contains(cmd, want) {

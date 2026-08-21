@@ -512,6 +512,21 @@ func (t *Tmux) CapturePane(session string, lines int) (string, error) {
 	return t.run("capture-pane", "-p", "-t", session, "-S", fmt.Sprintf("-%d", lines))
 }
 
+// CapturePaneJoined captures a pane with wrapped lines rejoined (-J), so one logical line that
+// tmux wrapped across several physical rows arrives as a single string. The watchdog's silence
+// hash needs this: it drops sentinel-marked statusline lines before hashing, and tmux marks only
+// the FIRST physical row of a wrapped line, so without -J a continuation fragment carrying a
+// ticking figure survives the strip and keeps the hash moving.
+//
+// Deliberately a sibling of CapturePane rather than a flag on it: every other caller wants the
+// physical-row view, and -J also preserves trailing spaces, which changes the bytes a caller sees.
+func (t *Tmux) CapturePaneJoined(session string, lines int) (string, error) {
+	if t.guard {
+		return "", nil // read-only probe: benign zero-value, no real exec
+	}
+	return t.run("capture-pane", "-p", "-J", "-t", session, "-S", fmt.Sprintf("-%d", lines))
+}
+
 // ClearHistory clears the scrollback history for a pane.
 func (t *Tmux) ClearHistory(pane string) error {
 	if t.guardOp("clear-history", pane) {

@@ -253,7 +253,15 @@ speculative surface area.
 ### GAP-13 — `session` package orphans
 
 **What (cited in `subsystems/session.md#gaps`):**
-- `IsAvailable`, `ClearHistory`, `RespawnPane` appear unreferenced.
+- ~~`IsAvailable`, `ClearHistory`, `RespawnPane` appear unreferenced.~~
+  **Closed 2026-08-05 (#596).** All three have production callers, so the
+  orphan observation no longer holds: `ClearHistory` (`tmux.go:516`) and
+  `RespawnPane` (`tmux.go:525`) are called by `respawnSession`
+  (`helpers.go:192`, `:196`) — the single funnel every pane recycle passes
+  through, and the anchor point for the #596 recovery log write and recycle
+  fence (`helpers.go:197`); `IsAvailable` (`tmux.go:202`) is called by the
+  pre-launch availability checks at `up.go:90` and `sling.go:909`. The mirror
+  of this claim in `subsystems/session.md` needs the same correction.
 - `SetEnvironment` errors silently discarded at `session.go:116`.
 - Hardcoded 5s sleep in `AcceptBypassPermissionsWarning` — anchor
   unknown.
@@ -399,6 +407,173 @@ trade-offs of the ADR-007 inform-not-block posture. The only operator follow-up
 is (e): reprovision (`af install --init`) then recycle the affected sessions so
 the hook is actually live for them. Residuals (a)/(f)/(g) are out-of-scope
 hardening, not open bugs.
+
+---
+
+### GAP-19 — Context-exhaustion recovery is bounded autonomous recovery, not a guarantee (#596 Practical Ceiling / accepted residual)
+
+**What:** Issue #596 gives the factory a way to observe that an agent's model
+context window has filled up and to act on it — the occupancy channel
+(`statusline.WriteSnapshot` / `ReadObservations`, `observation.go:305`), the
+trigger (`evaluateExhaustion`, `recovery.go:769`), the sweep (`pollOccupancy`,
+`recovery.go:861`), the executor (`recoverExhausted`, `recovery.go:1420`) and
+the durable breaker. What it is **not** is a guarantee that a wedged agent
+always recovers. Four constraints are irreducible, and all four are **accepted
+residuals**, not open defects:
+
+- **(a) The root of the supervision tree is unsupervised.** Occupancy recovery
+  is hosted by `af watchdog`. If the watchdog itself dies, nothing recycles
+  anything until the next `af up`. The residual is bounded by making the
+  observer's own absence loud rather than self-healing: each tick touches
+  `.runtime/watchdog_heartbeat`, and its staleness is surfaced. The last
+  supervisor is always unsupervised; the design chooses visible absence over a
+  second supervisor with the same problem one level up.
+- **(b) A context-reducing recycle is lossy by construction.** The in-session
+  conversation does not survive — a lossless context-reducing recycle is a
+  contradiction in terms. The loss is bounded to work since the last natural
+  artifact (commit, checkpoint note, mail, closed step) and named explicitly in
+  the persistent-session contract table in `USING_AGENTFACTORY.md`. The K14 soft
+  advisory at `context_advisory_pct` raises what gets externalized while the
+  session is still capable of acting, which shrinks the residual but cannot
+  remove it.
+- **(c) The telemetry is volunteered by a host the factory does not control.**
+  Occupancy is whatever Claude Code reports through the statusline payload. A
+  gateway profile that under-reports payload accounting can keep an agent below
+  `context_threshold_pct` while it is in fact wedged. The backstop
+  (`backstopFires`, `recovery.go:1145`) bounds this for agents holding an open
+  step, and `escalateNoStep` (`recovery.go:1239`) bounds the post-formula
+  persistent class — but neither can perfectly separate "a legitimately long
+  step" from "no useful output", so the window is a trade-off, not a decision
+  procedure. The reader compensates where it can: it exports no
+  healthy-without-a-datum constructor, so a suppressed channel reads `dark`,
+  never healthy.
+- **(d) CI cannot prove a real model resumes real work.** The end-to-end lane
+  (`recovery_e2e_integration_test.go`) drives the real store, the real
+  `pollOccupancy`, the real `recoverExhausted` and the real `respawnSession`
+  funnel, and asserts the respawned pane's startup command carries `af prime`
+  and that `af prime` re-prints the seeded step. The final `tmux respawn-pane`
+  hop is substituted at the `doRespawn` seam (`recovery.go:1505`) because CI has
+  no model credentials — the boundary is **declared in that file's doc comment**
+  rather than hidden, which is the residual's mitigation: the seam asserts on
+  the command that would have run instead of no-oping silently.
+
+A fifth, milder residual: the terminal escalation state is durably discoverable
+(breaker file, `RECOVERY HALTED` mail, `.runtime/recovery_halt_undelivered`
+breadcrumb, `recovery` field on `af agents list --json`), but human
+acknowledgment is unprovable from inside the factory. `escalation_sent` and
+`recipient_session_live` are recorded separately so that a send whose outcome is
+unknown is never counted as arrival — the ceiling is a discoverable,
+recycling-blocking terminal state, not a confirmed read.
+
+**Anchors:** `internal/cmd/recovery.go` (trigger `evaluateExhaustion:769`; fence
+`recycleFenceBlocks:576`; sweep `pollOccupancy:861`; executor
+`recoverExhausted:1420`; backstop `backstopFires:1145`; no-step escalation
+`escalateNoStep:1239`; halt `haltRecovery:1356`; funnel seam `doRespawn:1505`);
+`internal/cmd/helpers.go:148-199` (the `respawnSession` funnel — `af prime` at
+`:150`, `ClearHistory`/`RespawnPane` at `:192`/`:196`, recovery-log write and
+fence arm at `:197`); `internal/statusline/observation.go:305`
+(`ReadObservations`, the three-state reader); `internal/config/startup.go:44-59`
+(the 14-key `recovery` block); `internal/cmd/up.go:662`
+(`warnUnobservableAgents`, the provisioning pre-check);
+`internal/cmd/recovery_e2e_integration_test.go` (the declared substitution
+boundary); `.designs/596/design-doc.md` (AC-9; Practical Ceiling; Six-Sigma
+Caveats Gap 11); `USING_AGENTFACTORY.md` § "Context exhaustion recovery".
+
+**Why it matters:** the surrounding machinery reads as a guarantee — a durable
+breaker, an append-only event log, an automatic recycle — and a future
+self-referential or six-sigma pass could mistake "recovery exists" for "an
+exhausted agent always recovers" and try to close (a)–(d) as bugs. They are the
+shape of the problem, not defects in the solution: (a) is the halting nature of
+supervision trees, (b) is definitional, (c) is a trust boundary the factory does
+not own, and (d) is a property of CI. Recording them here keeps the ceiling
+legible so the residuals are read as designed.
+
+**Recommended resolution:** None at the architecture level. Two follow-ups are
+recorded rather than done: the longer-window occupancy-delta / mail-activity
+backstop for the no-step persistent class (a wider net for (c)), and the
+"single health chokepoint" endgame for the occupancy reader once the additive
+`context_state` / `recovery` fields have more consumers. The only operator
+follow-up is provisioning: agents whose settings carry no `statusLine` key write
+no snapshots and are invisible to this surface — `af up` warns about them, and
+`af up` / `af sling` (**not** `af install --init`, which reprovisions
+factory-root agent dirs only) is what delivers the key.
+
+---
+
+### GAP-20 — The memory vault is durable against teardown, not against the container (#515 R1 / accepted residual)
+
+**What:** Issue #515 gives agents a learnings vault that outlives a worktree:
+plain Markdown under `<factory-root>/.agentfactory/memory/<agent>/`, written
+through `af memory add`, sliced into a bounded block at session start, and sited
+outside every directory a teardown reaches. The durability claim is now held by
+a test matrix rather than by prose — `TestMemoryDurability_NoteSurvivesEveryTeardownPath`
+drives a real CLI write from a worktree cwd through all seven destruction paths
+and reads the note back through the SessionStart verb. What the vault is **not**
+is durable against the container that hosts it, and three residuals are
+**accepted**, not open defects:
+
+- **(a) The vault is container-local and git-invisible.** It is gitignored by
+  design (`data.md:86-93`): notes are agent-authored, high-churn and often
+  wrong, and committing them would put unreviewed model output into the
+  project's history. The consequence is that `docker rm` takes every recorded
+  learning with it, and nothing inside the factory can observe that it is about
+  to happen. ADR-019 forbids closing the hole by requiring container recreation,
+  so the compensating control is loudness plus an exit: `af up` and factory-wide
+  `af down --all` print the note count and the age of the last export
+  (`warnVaultExportStaleness`, `memory_export.go`), and `af memory export` /
+  `af memory import` move the vault across a container boundary with no mount.
+  The `AF_MEMORY_HOST_DIR` bind mount in `quickdocker.sh` removes the residual
+  for containers **created** with it and is deliberately unavailable to
+  containers that already exist.
+- **(b) Delivery of a note into a session is not confirmable.** `af memory check
+  --inject` emits the slice on the SessionStart hook's stdout and is
+  contractually silent and exit-0 on every failure path (ADR-007), because a
+  hook that errors is a session that starts wrong. That contract means an
+  injection that was truncated, dropped by the host, or never read by the model
+  is indistinguishable from one that landed. The bound is that the slice is
+  reconstructible on demand — `af memory check` without `--inject` reports what
+  *would* be served, and `af memory list` is always available to the agent — so
+  a suspected miss is diagnosable even though it is not detectable.
+- **(c) Capture is voluntary, so absence proves nothing.** Nothing compels an
+  agent to record a learning, and the identity on a note is claimed rather than
+  proven (derived from cwd or `AF_ROLE`, design R12). An empty vault therefore
+  cannot be read as "nothing was learned", and a note's `agent:` cannot be read
+  as an authenticated attribution. The mitigation is that every note carries its
+  own provenance into the injected block, framed as a recorded observation
+  rather than an instruction (security.md T4), which is what makes an anomalous
+  note visible to the operator curating the vault.
+
+**Anchors:** `internal/cmd/memory.go` (the nine-verb surface; the
+resolveInvokerRoot rule at `:1-21`; `runMemoryCheck`'s silent-and-exit-0
+contract); `internal/cmd/memory_export.go` (`writeVaultTarball`,
+`warnVaultExportStaleness`, the `.runtime/memory_export.json` marker);
+`internal/memory/` (`store.go`, `codec.go`, `slice.go`, `report.go` — the
+library-only core that refuses to derive a root); `internal/cmd/up.go` /
+`internal/cmd/down.go` (the two staleness chokepoints);
+`internal/cmd/memory_durability_test.go` (the seven-path matrix and its
+non-vacuity guards); `quickdocker.sh` (`AF_MEMORY_HOST_DIR`, creation-time
+only); `docs/architecture/adrs/ADR-019-no-container-recreation.md`;
+`.designs/515/design-doc.md` (Risk Registry R1); `.designs/515/data.md:86-93`
+(why the vault is git-invisible); `USING_AGENTFACTORY.md` § "The memory vault".
+
+**Why it matters:** the subsystem reads as durable storage — a mark-only
+lifecycle, an index, an export verb, teardown paths that announce what they
+preserved — and a later pass could mistake "the vault survives teardown" for
+"the vault survives everything" and either trust it as a system of record or try
+to close (a) as a bug by committing the vault or mandating a mount. (a) is a
+deliberate trade against putting unreviewed model output in git, bounded by
+ADR-019; (b) is the price of a hook contract that must never darken a session;
+and (c) is definitional for a channel agents opt into. Recording them keeps the
+boundary legible: the vault is a durable *aid to recall*, not an authoritative
+record.
+
+**Recommended resolution:** None at the architecture level. Two follow-ups are
+recorded rather than done: a periodic host-side export (a scheduled
+`af memory export` on the host, which needs no factory change), and, if the
+vault ever becomes an input to an automated decision rather than to an agent's
+own reading, a proven-identity attribution to replace the claimed one in (c).
+The only operator follow-up is cadence: export before removing a container, and
+treat the `af up` staleness line as the reminder it exists to be.
 
 ---
 

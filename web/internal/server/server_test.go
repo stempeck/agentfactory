@@ -179,14 +179,18 @@ type fakeSettings struct {
 	writeRes  exec.Result // lets a test simulate af's exit code (non-zero ⇒ validation rejection)
 	lastFile  string
 	lastBytes []byte
+	lastHash  string // the X-AF-If-Content-Hash the handler forwarded ("" when the client sent none)
+	writes    int    // #620 Phase 2: a rejected request must reach the service ZERO times
 }
 
 func (f *fakeSettings) Read(ctx context.Context) (config.Settings, error) {
 	return f.view, f.readErr
 }
-func (f *fakeSettings) Write(ctx context.Context, file string, payload []byte) (exec.Result, error) {
+func (f *fakeSettings) Write(ctx context.Context, file string, payload []byte, ifContentHash string) (exec.Result, error) {
+	f.writes++
 	f.lastFile = file
 	f.lastBytes = append([]byte(nil), payload...)
+	f.lastHash = ifContentHash
 	return f.writeRes, f.writeErr
 }
 
@@ -784,11 +788,25 @@ func TestDispatchView_ErrorEnvelope(t *testing.T) {
 // GET /api/settings returns the curated read; PUT /api/settings/{file} routes the RAW body to the
 // settings service; factory.json is read-only (no write path).
 func TestSettings_HandlerRoutes(t *testing.T) {
+	// #620 Phase 2: the payload is the tier table plus opaque documents. The doc for dispatch carries
+	// a key NO web-side type declares — that is the whole point of the raw tier, and asserting it
+	// survives to the wire is what makes this a frame-lift test rather than a shape test.
 	fs := &fakeSettings{view: config.Settings{
-		Dispatch: config.Dispatch{Repos: []string{"o/r"}, TriggerLabel: "go", Mappings: []config.DispatchMapping{{Labels: []string{"bug"}, Agent: "rootcause"}}},
-		Startup:  config.Startup{Quality: "default", Fidelity: "default"},
-		Factory:  config.Factory{Type: "factory", Name: "demo", Version: 1},
-		Agents:   []config.AgentSummary{{Name: "rootcause", Type: "specialist"}},
+		Files: map[string]config.FileView{
+			"dispatch": {
+				Doc:           json.RawMessage(`{"repos":["o/r"],"trigger_label":"go","a_key_no_web_type_declares":42}`),
+				Tier:          "raw",
+				Writable:      true,
+				Reason:        "editable — routed through `af config dispatch set`",
+				EffectiveWhen: "next dispatcher cycle",
+				Fingerprint:   "4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c",
+			},
+			"factory": {Doc: json.RawMessage(`{"type":"factory","name":"demo","version":1}`), Tier: "raw", Reason: "read-only"},
+			"agents":  {Tier: "projected", Reason: "secret-free summary only"},
+		},
+		Agents:            []config.AgentSummary{{Name: "rootcause", Type: "specialist"}},
+		Profiles:          []string{"loopback"},
+		SchemaFingerprint: "ec6c06c4912bfc7fb482c2771295cd0433dc386f1313294967982b6d53d26281",
 	}}
 	s := New(&fakeMutator{}, fakeAssembler{}, nil, WithSettings(fs))
 
@@ -801,11 +819,20 @@ func TestSettings_HandlerRoutes(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "auth_token") || strings.Contains(rec.Body.String(), "base_url") {
 		t.Fatalf("settings response must never contain a secret field: %s", rec.Body.String())
 	}
+	for _, want := range []string{"schema_fingerprint", "ec6c06c4912bfc", "a_key_no_web_type_declares", `"tier":"raw"`, "effective_when"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("GET /api/settings body is missing %q — the handler is re-shaping the payload it was given:\n%s", want, rec.Body.String())
+		}
+	}
 
-	// PUT dispatch — the RAW body is handed straight to Write (no in-UI typed decode).
+	// PUT dispatch — the RAW body is handed straight to Write (no in-UI typed decode), along with the
+	// fingerprint the client echoed back.
 	body := `{"repos":["o/r"],"trigger_label":"go","mappings":[{"labels":["bug"],"agent":"rootcause"}]}`
+	const clientHash = "4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c"
 	rec = httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, loopbackPUT("/api/settings/dispatch", body))
+	req := loopbackPUT("/api/settings/dispatch", body)
+	req.Header.Set(settingsIfContentHashHeader, clientHash)
+	s.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT /api/settings/dispatch: code = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -814,6 +841,16 @@ func TestSettings_HandlerRoutes(t *testing.T) {
 	}
 	if string(fs.lastBytes) != body {
 		t.Fatalf("Write payload = %q, want the raw body %q", fs.lastBytes, body)
+	}
+	if fs.lastHash != clientHash {
+		t.Fatalf("Write if-content-hash = %q, want the %s header verbatim %q", fs.lastHash, settingsIfContentHashHeader, clientHash)
+	}
+
+	// No header ⇒ an unconditional write, not a fabricated precondition.
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, loopbackPUT("/api/settings/dispatch", body))
+	if rec.Code != http.StatusOK || fs.lastHash != "" {
+		t.Fatalf("headerless PUT: code=%d hash=%q, want 200 and an empty precondition", rec.Code, fs.lastHash)
 	}
 
 	// af RAN and rejected the config (non-zero child exit) → 422 with the friendly message surfaced.
@@ -1384,6 +1421,11 @@ func TestRouteTableTokenTierEnumeration(t *testing.T) {
 		{http.MethodGet, "/api/agents", "", false},
 		{http.MethodGet, "/api/dispatch", "", false},
 		{http.MethodGet, "/api/settings", "", false},
+		// #620 Phase 2 kept this route on s.guard rather than promoting it to s.guardWrite: it is an
+		// existing mutation surface inheriting its tier unchanged, and widening the file allowlist
+		// creates no unauthenticated path that dispatch/startup did not already have
+		// (security.md:154-156). Enumerated here so the decision is pinned rather than assumed.
+		{http.MethodPut, "/api/settings/dispatch", `{"repos":["o/r"]}`, false},
 		{http.MethodPost, "/api/factory/up", "", false},
 		{http.MethodPost, "/api/factory/down", `{}`, false},
 		{http.MethodGet, "/api/telemetry", "", false},

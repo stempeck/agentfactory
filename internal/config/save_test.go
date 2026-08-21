@@ -123,9 +123,119 @@ func TestSaveStartupConfig_Atomic(t *testing.T) {
 		t.Errorf("round-trip mismatch: loaded=%+v", loaded)
 	}
 
-	// An invalid gate enum is rejected before any write.
+	// An invalid gate enum is rejected before any write. The struct also carries a
+	// zero-value Recovery, which the fill makes valid, so this proves only that a bad
+	// gate still reaches the enum loop — NOT the check ordering. That is
+	// TestSaveStartupConfig_GateEnumRejectedBeforeRecoveryRelations below.
 	bad := &StartupConfig{Quality: "bogus"}
-	if err := SaveStartupConfig(StartupConfigPath(dir), bad); err == nil {
+	err = SaveStartupConfig(StartupConfigPath(dir), bad)
+	if err == nil {
 		t.Error("SaveStartupConfig accepted an invalid quality enum")
+	} else if !strings.Contains(err.Error(), "quality") {
+		t.Errorf("a bad quality enum must fail on the QUALITY gate; got %v", err)
+	}
+}
+
+// Pins the check ordering: the gate-enum loop must fire AHEAD of the K3 relation
+// checks. A zero-value Recovery cannot pin this — fillRecoveryDefaults makes that
+// block valid before the relations ever run, so both orderings would return the
+// quality error. Only a document that violates BOTH discriminates, and getting it
+// backwards tells the operator about the wrong field.
+func TestSaveStartupConfig_GateEnumRejectedBeforeRecoveryRelations(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".agentfactory"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	bad := &StartupConfig{Quality: "bogus", Recovery: RecoveryConfig{ContextThresholdPct: 100}}
+	err := SaveStartupConfig(StartupConfigPath(dir), bad)
+	if err == nil {
+		t.Fatal("SaveStartupConfig accepted a config with both a bad gate and a bad relation")
+	}
+	if !strings.Contains(err.Error(), "quality") {
+		t.Errorf("the gate-enum loop must fire ahead of the recovery relations; got %v", err)
+	}
+}
+
+// The af config startup set write path (config_set.go:134-141) decodes stdin into a
+// FRESH StartupConfig, so a document omitting "recovery" — i.e. every document any
+// operator has today — reaches SaveStartupConfig with an all-zero block. Only the
+// validate-fill keeps that write path open.
+func TestSaveStartupConfig_MissingRecoveryFillsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".agentfactory"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	cfg := &StartupConfig{Quality: "on"} // caller-built literal, no Recovery
+	if err := SaveStartupConfig(StartupConfigPath(dir), cfg); err != nil {
+		t.Fatalf("a literal with no Recovery must save, got %v", err)
+	}
+
+	loaded, err := LoadStartupConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadStartupConfig: %v", err)
+	}
+	if loaded.Recovery.ContextThresholdPct != 85 {
+		t.Errorf("Recovery.context_threshold_pct = %d, want the 85 default", loaded.Recovery.ContextThresholdPct)
+	}
+	if !loaded.Recovery.IsEnabled() {
+		t.Error("a written-then-reloaded config must have recovery enabled by default")
+	}
+}
+
+// The af config startup set write path decodes stdin into a FRESH StartupConfig, so a document
+// omitting "step_context" — i.e. every document any operator has today — reaches SaveStartupConfig
+// with an all-zero block. Only the validate-fill keeps that write path open.
+//
+// It also pins the accepted residual of the plain-int design (#622 C1): validateStartupConfig fills
+// in place and SaveStartupConfig marshals the MUTATED struct, so the derived handoff_pct is
+// materialised onto disk as an explicit key. The recovery block has behaved this way since K3, so
+// the two are consistent; the consequence is recorded here rather than discovered later.
+func TestSaveStartupConfig_MissingStepContextFillsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".agentfactory"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	cfg := &StartupConfig{Quality: "on"} // caller-built literal, no StepContext
+	if err := SaveStartupConfig(StartupConfigPath(dir), cfg); err != nil {
+		t.Fatalf("a literal with no StepContext must save, got %v", err)
+	}
+
+	raw, err := os.ReadFile(StartupConfigPath(dir))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !strings.Contains(string(raw), `"step_context"`) {
+		t.Errorf("the written file must carry the filled block, got %s", raw)
+	}
+
+	loaded, err := LoadStartupConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadStartupConfig: %v", err)
+	}
+	if loaded.StepContext.BoundTokens != 200000 || loaded.StepContext.HandoffPct != 75 {
+		t.Errorf("StepContext = %+v, want {200000 75}", loaded.StepContext)
+	}
+}
+
+// Pins that the gate-enum loop still fires ahead of the step_context ladder, the same ordering
+// property TestSaveStartupConfig_GateEnumRejectedBeforeRecoveryRelations pins for K3. Only a
+// document violating BOTH discriminates, and getting it backwards tells the operator about the
+// wrong field.
+func TestSaveStartupConfig_GateEnumRejectedBeforeStepContextRelations(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".agentfactory"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	bad := &StartupConfig{Quality: "bogus", StepContext: StepContextConfig{HandoffPct: 90}}
+	err := SaveStartupConfig(StartupConfigPath(dir), bad)
+	if err == nil {
+		t.Fatal("SaveStartupConfig accepted a config with both a bad gate and a bad relation")
+	}
+	if !strings.Contains(err.Error(), "quality") {
+		t.Errorf("the gate-enum loop must fire ahead of the step_context relations; got %v", err)
 	}
 }

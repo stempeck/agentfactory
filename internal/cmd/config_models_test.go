@@ -69,6 +69,9 @@ func TestConfigModelsShow_RedactsLiteralToken(t *testing.T) {
 
 func TestConfigModelsCheck_UsesHTTPProbeSeam(t *testing.T) {
 	root := setupConfigFactory(t)
+	// The fable profile is part of a PASSING registry, not decoration: the Fable class has no env
+	// key, so check demands a gateway alias for the id the registry names — and with no fable id
+	// named anywhere it has nothing to demand and reports the class unverifiable (issue #598).
 	writeValidModels(t, root, &config.ModelsConfig{
 		Models: map[string]map[string]string{
 			"codex": {
@@ -76,6 +79,7 @@ func TestConfigModelsCheck_UsesHTTPProbeSeam(t *testing.T) {
 				"ANTHROPIC_BASE_URL":   "https://gw.example:4000",
 				"ANTHROPIC_AUTH_TOKEN": "file:secrets/codex.key",
 			},
+			"fable-5": {"ANTHROPIC_MODEL": "claude-fable-5"},
 		},
 	})
 	writeSecretFile(t, root, "secrets/codex.key", "sk-real-value")
@@ -84,7 +88,7 @@ func TestConfigModelsCheck_UsesHTTPProbeSeam(t *testing.T) {
 	called := false
 	httpProbe = func(baseURL, authToken string) ([]string, error) {
 		called = true
-		return []string{"gpt-5.3-codex"}, nil // model present
+		return []string{"gpt-5.3-codex", "claude-fable-5"}, nil // model + fable alias present
 	}
 	t.Cleanup(func() { httpProbe = orig })
 
@@ -122,9 +126,19 @@ func TestConfigModelsCheck_ModelAbsent_Warns(t *testing.T) {
 	}
 	t.Cleanup(func() { httpProbe = orig })
 
-	out, _ := runModelsCmd(t, runConfigModelsCheck, "codex")
+	out, err := runModelsCmd(t, runConfigModelsCheck, "codex")
 	if !strings.Contains(out, "not in GET /v1/models response") {
 		t.Errorf("a model id absent from the gateway must warn (not block); out=%q", out)
+	}
+	// The main-model line stays a warning — a gateway may route an id it does not advertise — but
+	// this fixture also leaves every derived class pointing at that same absent id, and an unserved
+	// CLASS is hard. Asserting the exit code keeps the two verdicts from being conflated: were the
+	// class rows to go missing, or the main-model warning to harden, this test would notice.
+	if err == nil {
+		t.Fatalf("classes deriving from an id the gateway does not serve must fail non-zero; out=%q", out)
+	}
+	if !strings.Contains(out, "NOT SERVED") {
+		t.Errorf("the unserved classes must be reported alongside the soft main-model warning; out=%q", out)
 	}
 }
 
