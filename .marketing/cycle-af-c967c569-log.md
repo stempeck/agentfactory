@@ -98,3 +98,45 @@ occurrences corrected. Other code refs verified to exist: recoverybadge_test.go,
 formschema/reader.go, web/static/index.html.
 
 GATE-3 VERDICT: PASS
+
+## SELF-REVIEW (step 14, 2026-08-23)
+
+Reviewed `git diff origin/main...HEAD` — 3 Tier A commits + the Phase 4 artifact commit, 16
+files: README / CHANGELOG / docs/recovery-model.md plus every `cycle-af-c967c569-*` artifact.
+
+Findings and fixes:
+
+1. **New README command block — all five commands verified to exist on this binary.**
+   `af recovery reset`, `af memory`, `af statusline`, `af fidelity`, `af config fingerprint` each
+   return help. `af memory export` (listed in the CHANGELOG memory line) also exists. No fix
+   needed — no invented command shipped.
+2. **Stale roadmap claim NOT reintroduced.** The "formula authoring in the browser" future item
+   (it ships, and it is a flagship screen this cycle) was correctly removed from the Roadmap and
+   replaced with "deeper agent detail and richer per-screen views."
+3. **Links resolve.** README added-line link `[Observability](#observability)` targets
+   `## Observability` (README:325). recovery-model.md relative links `agent-lifecycle.md` and
+   `formulas.md` both resolve to real files. No broken links.
+4. **No cruft.** TODO/FIXME/XXX/console.log/debug grep over the Tier A doc diff returns nothing.
+   The eight `screen-*.png` are the flagship article's real console screenshots (committed mode),
+   not stray debug captures.
+5. **Flagship hard numbers re-verified against source:** 24 formulas in `.agentfactory/store/formulas/`,
+   26 agents from `af agents list --json` — both land exactly as written in the medium draft.
+6. **recovery-model.md `af recovery reset` parenthetical matches the command's own contract**
+   ("operator-only; clears the breaker, does not relaunch — `af up` does").
+
+Privacy mode: **COMMITTED** (runbook Privacy-Decision). `git diff --stat origin/main...HEAD`
+shows `.marketing/` cycle artifacts appearing alongside the doc changes — correct for committed
+mode; no accidental exclusion, no artifact stranded uncommitted.
+
+Watch items (not defects — reconcile downstream, no fix now):
+
+- **CHANGELOG heading `## v0.3.0 — 2026-08-23` pre-commits a version + date ahead of the
+  operator's release decision (Step 17).** Standard for a release PR, but if the operator
+  declines to cut v0.3.0 on merge, flip the heading to `## Unreleased` at PR time.
+- **GATE 4 (operator draft approval) substance is still PENDING.** Both Tier B drafts are
+  committed as WIP cycle records with blank Decision forms; operator notified on issue #106.
+  Committing the draft FILES is Tier A (repo records) and publishes NOTHING off-GitHub — the
+  publish HOLD at Step 18 stands until the operator writes READY/EDITED/SKIP, and any EDITED
+  draft gets mechanics-only voice-law reconciliation before anything is published.
+
+SELF-REVIEW VERDICT: PASS
