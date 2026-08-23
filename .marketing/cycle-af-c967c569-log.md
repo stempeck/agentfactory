@@ -206,3 +206,31 @@ Deviation summary: one open HOLD (Tier B operator draft approval, #106) — the 
 at this point, not a self-introduced contract violation. All Tier A outputs verified correct.
 
 SELF-VERIFY VERDICT: PASS
+
+## PHASE 5–6 — publish support & verification (2026-08-23)
+
+**Tier A PR #107 MERGED** by the operator (he admin-merged past the CLA bot, which couldn't match
+the `agentfactory` commit-author identity to a GitHub user). Main now carries the doc refresh.
+
+**Medium PUBLISHED by the operator** (he raced ahead of Phase 5, publishing from the HTML vehicle):
+https://medium.com/@glennstempeck/in-my-factory-of-ai-agents-last-time-i-cracked-the-door-heres-every-room-a04f14babef0
+
+Phase-6 verification of the live page (headless chromium screenshot + DOM dump — WebFetch 403s on
+Medium):
+- 8 `<figure>` elements present → all screenshots survived the paste.
+- 9 section headings (8 screens + closer), rendered as real H2.
+- Raw-markdown leak check = 0 (no literal `##`, `**`, code fences, or raw md links) — the rich-text
+  vehicle did its job; the cycle-1 raw-markdown disaster did not recur.
+- Title/subtitle sit in Medium's title/subtitle fields (not as body paragraphs).
+- His QA calls: took fix #1 (CONTEXT 22%→23%, now matches the shot); declined fix #2 (kept "26
+  specialist agents sit dark") — his deliberate published wording, not re-raised.
+- His edits captured as the new voice-calibration source (see medium.md `## PUBLISHED` section).
+
+**Repo homepage** pointed at the live article (`gh repo edit --homepage`), URL host validated
+against the runbook `homepage-allowlist` (https://medium.com) before writing.
+
+**Open operator items (HOLD):**
+1. LinkedIn short-form — draft ready (footer URL filled), tracked on issue #108; operator posts + records URL, or SKIP.
+2. Release decision — `v0.3.0` YES (cut tag) / NO (flip CHANGELOG heading to Unreleased), asked on PR #107.
+
+PHASE-5-6 STATUS: Medium live + verified, homepage set; holding on LinkedIn + release decision.
