@@ -56,7 +56,7 @@ re-injects identity and step context automatically. Deeper reading:
 
 | | Workflow definition | Execution substrate | Crash / context-loss recovery |
 |---|---|---|---|
-| **agentfactory** | Declarative TOML DAGs, separate from personas | Claude Code sessions in tmux — inspectable, attachable | First-class: checkpoints + `af prime` re-injection |
+| **agentfactory** | Declarative TOML DAGs, separate from personas | Claude Code sessions in tmux — inspectable, attachable | First-class: checkpoints, `af prime` re-injection, and automatic context-exhaustion recovery |
 | **LangGraph** | Graphs built in Python/JS application code | Your app process calling model APIs | Checkpointing available; you build the harness |
 | **CrewAI** | Role/task definitions in Python code | Your app process calling model APIs | Not a core concern; retries at task level |
 | **Claude Code subagents** | Prompts inside one session | In-session fan-out | None — subagent state dies with the session |
@@ -264,11 +264,12 @@ Ten skills are embedded and written to `.claude/skills/` during `af install`:
 ## Web Console (optional)
 
 Agentfactory ships an **optional** web console for managing the factory — the **Floor view** (a
-live skyline where every running agent is a lit sign showing its honest status), slinging tasks,
-dispatch status, browser **formula authoring**, agent detail with operator mail, design
-prototypes, settings, and a **Telemetry** view (per-step timing plus token and cost usage; see
-[Observability](#observability)). It is a separate Go module under `web/` and is **not** required
-to run `af`.
+live skyline where every running agent is a lit sign showing its honest status, now including a
+context-fill bar and recovery badges so an exhausted or self-recovering agent is visibly distinct
+from a healthy one), slinging tasks, dispatch status, browser **formula authoring**, agent detail
+with operator mail, design prototypes, settings, and a **Telemetry** view (per-step timing plus
+token and cost usage; see [Observability](#observability)). It is a separate Go module under `web/`
+and is **not** required to run `af`.
 
 **Build and install (best-effort):**
 
@@ -399,6 +400,16 @@ af telemetry report [--agent N|--instance I]  # per-step latency table (local re
 af telemetry usage [--json]                   # token usage + session metrics (backend)
 af improvement on|off [--agent <name>]        # continuous-improvement hook (AND-gated, off by default)
 af config models show                         # model registry for multi-provider agents (secrets redacted)
+af config fingerprint --json                  # digest of the config schema this binary speaks (detect skew)
+```
+
+### Recovery, memory & session health
+
+```bash
+af recovery reset <agent>                     # clear an agent's context-exhaustion recovery breaker (operator-only)
+af memory add|list|show|status                # durable learning vault; survives teardown, reset, worktree removal
+af statusline on|off|status|render            # session statusline: model, branch, context-fill bar, spend
+af fidelity on|off|status [--agent <name>]    # per-agent or factory-wide quality-gate toggle (every write logged)
 ```
 
 ## Roadmap
@@ -407,7 +418,7 @@ af config models show                         # model registry for multi-provide
 - **Richer shipped formula library** — more turnkey specialist agents out of the box
 - **Gate quality improvements** — reduce fidelity-gate false positives on passive steps ([#75](https://github.com/stempeck/agentfactory/issues/75))
 - **Default dispatch workflow** included with the factory ([#73](https://github.com/stempeck/agentfactory/issues/73))
-- **Web console growth** — deeper agent detail, formula authoring in the browser
+- **Web console growth** — deeper agent detail and richer per-screen views
 
 Have a use case these don't cover? [Open an issue](https://github.com/stempeck/agentfactory/issues/new/choose).
 
