@@ -160,3 +160,36 @@ Learn it, Live it, Share it!
   "ALL READY. APPROVE AS WRITTEN." No text changed — voice preserved verbatim, nothing smoothed.
   Operator additionally requested a paste-ready Medium HTML with embedded images; delivered as
   publish support (`cycle-af-c967c569-medium.html`, 8 screenshots embedded as data URIs).
+
+## PUBLISHED — operator's version is canonical (2026-08-23)
+
+**Live:** https://medium.com/@glennstempeck/in-my-factory-of-ai-agents-last-time-i-cracked-the-door-heres-every-room-a04f14babef0
+
+Verified via headless render + DOM dump: 8 figures present (all screenshots survived the paste),
+9 section headings, ZERO raw-markdown leaks (no literal `##`/`**`/fences/links) — the rich-text
+vehicle worked. The operator published with a "minor modification"; his published text now
+SUPERSEDES the draft body above and is the new voice-calibration source. His edits, enumerated:
+
+- **Title:** "I run a factory of AI agents. Last time I cracked the door - here's every room." →
+  **"In my factory of AI agents, last time I cracked the door - here's every room."** (two
+  sentences merged into one flowing line; "I run" → "In my").
+- **Subtitle:** "...web console - every screen a human uses to run autonomous Claude Code agents,
+  and the feature sitting behind each one" → **"...web console used to run autonomous Claude Code
+  agents, and the latest features sitting behind them"** (tighter; "latest features" plural).
+- Intro: "asked the obvious question" → "wondered the obvious".
+- "So this time = the whole thing. Every screen, what a human actually uses it for, and the new
+  feature sitting behind it." → "So this time I'll share every screen, what I actually use it for,
+  and some new features sitting behind it." (dropped the `=` shorthand here).
+- "Then you walk in." → "Then you navigate your factory."
+- "it tells you the truth" → "it tells you the **operational** truth".
+- Section closer heading "The thread" → **"Back to the factory floor"**.
+- Section-heading separators " - " render as em-dash " — " (Medium editor auto-conversion).
+- **QA fix #1 TAKEN:** "CONTEXT 22%" → "CONTEXT 23%" (now matches the Floor screenshot).
+- **QA fix #2 DECLINED:** kept "26 specialist agents sit dark" (he saw the flag — took #1, left
+  #2 — so this is his deliberate published wording; not re-raised).
+- **Topics (his own 5):** Claude Code, AI Agent, Multi Agent Systems, Agentic Ai, Agentic
+  Architecture (differs from the runbook's default topic formula — record, don't override).
+
+Calibration takeaway for next cycle: he tightens subtitles, merges title clauses into one line,
+and trims some `=` shorthand out of body prose while keeping it elsewhere. The live URL is the
+authoritative text; the draft body above is the pre-publish version, retained for the diff.

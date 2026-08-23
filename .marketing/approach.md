@@ -217,6 +217,21 @@ gate fails any undeclared file):
 - social-preview.png (committed — repo social-preview image source)
 - social-preview.svg (committed — editable source for the above)
 - architecture-diagram.png (committed — cycle-1 diagram export, predates cycle-N-diagram.png naming)
+- cycle-af-c967c569-screen-agentdetail.png (committed — cycle-3 console-tour screenshot)
+- cycle-af-c967c569-screen-dispatch.png (committed — cycle-3 console-tour screenshot)
+- cycle-af-c967c569-screen-floor.png (committed — cycle-3 console-tour screenshot)
+- cycle-af-c967c569-screen-formulas.png (committed — cycle-3 console-tour screenshot)
+- cycle-af-c967c569-screen-prototypes.png (committed — cycle-3 console-tour screenshot)
+- cycle-af-c967c569-screen-settings.png (committed — cycle-3 console-tour screenshot)
+- cycle-af-c967c569-screen-sling.png (committed — cycle-3 console-tour screenshot)
+- cycle-af-c967c569-screen-telemetry.png (committed — cycle-3 console-tour screenshot)
+  <!-- The 8 cycle-3 screenshots are real Playwright captures produced by Phase 4/6 (operator
+       directed actual screens, #105) and embedded in the live Medium article; they're declared
+       here only because the cleanup manifest gate's cycle-image pattern recognizes
+       `cycle-*-diagram.png` but not the `-screen-*.png` naming this cycle used. Formula-improvement
+       filed: teach the gate a `cycle-*-screen-*.png` (or general `cycle-*.png`) pattern so future
+       console-tour cycles don't accrete per-cycle screenshot lines here. -->
+
 
 ## Sign-off
 Blank the line below to force re-approval of this runbook before the next cycle.
