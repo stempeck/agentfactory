@@ -11,13 +11,22 @@ history but absent here are the untold backlog.
 | agentfactory web console + Run telemetry (observability: the Floor view, per-step timing + per-run token/cost, honest degradation banner) | Medium article "I run a factory of AI agents. Here's the window into it." | 2026-08-03 | https://medium.com/@glennstempeck/i-run-a-factory-of-ai-agents-heres-the-window-into-it-ad0321bfce9f |
 | Same story, short form (web console = the control room; telemetry; continuous improvement loop) | LinkedIn post (Glenn's edited short version) | 2026-08-03 | https://www.linkedin.com/posts/glenn-stempeck_i-run-a-factory-of-ai-agents-heres-the-share-7490182070434951168-Jwbi/ |
 | v0.2.0 release: Run telemetry, multi-provider agents (OpenAI via gateway + gpt-* formulas), operator-only factory teardown, reliable improvement self-edits, web console Telemetry view, +5 formulas (24 total), +7 skills documented (10 total) | GitHub release + README/CHANGELOG refresh (PR #95) | 2026-08-03 | https://github.com/stempeck/agentfactory/releases/tag/v0.2.0 |
+| Guided tour of the web console — every `--web` screen (Floor, Agent detail, Sling, Dispatch, Formulas, Telemetry, Settings, Prototypes), each tied to a #104-wave feature: self-recovering agents (Floor recovery badges), browser formula authoring (Formulas — was Roadmap "future"), honest telemetry (not-measured≠zero), trustworthy config (unknown keys ride through). 8 real Playwright screenshots. | Medium article "I run a factory of AI agents. Last time I cracked the door — here's every room." | 2026-08-23 | https://medium.com/@glennstempeck/in-my-factory-of-ai-agents-last-time-i-cracked-the-door-heres-every-room-a04f14babef0 |
+| v0.3.0 release: self-recovery, durable memory & honest surfaces — README five new command families (`af memory`/`af statusline`/`af recovery`/`af fidelity`/`af config fingerprint`), Roadmap "browser formula authoring" corrected to shipped, `docs/recovery-model.md` context-exhaustion section, CHANGELOG v0.3.0 (PR #107) | GitHub release + README/CHANGELOG/docs refresh (PR #107) | 2026-08-23 | https://github.com/stempeck/agentfactory/releases/tag/v0.3.0 |
 
-## Untold backlog (updated cycle-2, top candidates)
-Now told (cycle-2): web console (Floor view) + telemetry, multi-provider agents, operator-only
-teardown, self-improving agents (mentioned). Still untold:
+*LinkedIn (short-form) was **SKIPPED** this cycle by operator decision (#108: "I'll post the next
+one to LinkedIn. Not this one."). The draft `cycle-af-c967c569-linkedin.md` stays ready with the
+live Medium URL in its footer for reuse next cycle — no row is claimed because nothing was posted.*
+
+## Untold backlog (updated cycle-3, top candidates)
+Now told (cycle-3): the full web console screen tour (all 8 `--web` screens); self-recovering
+agents (surfaced via the Floor screen only, not head-on); browser formula authoring (told as the
+Formulas screen + Roadmap line corrected); honest telemetry/config as framing. Still untold:
+- **Self-recovering agents, head-on** (context-exhaustion recycle → resume on the open step) — only shown obliquely via the Floor screen this cycle; the strongest ranked candidate, never its own story
+- **Durable memory vault** (agents remember across teardowns) — never told; pairs naturally with self-recovery ("recover AND remember")
 - Fable agent family: fable-implement / fable-increment / fable-review / fable-secure (#83) — named in the formula table only, never a story
-- Autonomous dispatch pipeline: label matching, issue→PR handoff, cycle locking, phase advancement (#38, #79)
+- Autonomous dispatch pipeline: label matching, issue→PR handoff, cycle locking, phase advancement (#38, #79) — got a first visual via the Dispatch screen, never told head-on
+- Multi-provider agents (`gpt-*` formulas + gateway) — documented cycle-2, never its own story
 - Per-agent model selection + in-session gate continuation (`af done --phase-complete --gate`) (#81)
-- Browser formula authoring in the web console (#83) — mentioned in the cycle-2 article's tour, never its own story
-- Marketing-cycle itself (the dogfooding story — an agent that markets its own repo; surfaced obliquely in the cycle-2 article but never told head-on)
+- Marketing-cycle itself (the dogfooding story — an agent that markets its own repo; surfaced obliquely, never told head-on)
 - Machine-readable JSON contracts (`af agents/dispatch/formula ... --json`), `af handoff`, `af watchdog`

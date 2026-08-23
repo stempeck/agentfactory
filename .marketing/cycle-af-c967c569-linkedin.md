@@ -20,7 +20,7 @@ And the Floor now shows each agent's context filling up - because an agent that 
 
 Do you have a control room for your agents, or are you closing the laptop and hoping? Happy to help.
 
-Read more: <MEDIUM ARTICLE URL — paste after publishing the Medium piece> | Get it: github.com/stempeck/agentfactory
+Read more: https://medium.com/@glennstempeck/in-my-factory-of-ai-agents-last-time-i-cracked-the-door-heres-every-room-a04f14babef0 | Get it: github.com/stempeck/agentfactory
 
 ---
 
