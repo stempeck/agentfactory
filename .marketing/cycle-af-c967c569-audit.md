@@ -82,7 +82,7 @@ Each verified present against source this cycle.
    files stay absent instead of being materialized with invented defaults. The Floor now shows
    context-fill and recovery badges, so an exhausted or halted agent is visibly distinct from a
    healthy one. **Verified:** web module tests (`web/internal/server/settings_write_test.go`,
-   formula-write audit line at `server.go:1229`). (Refines the already-told console story.)
+   formula-write audit line at `server.go:1237`). (Refines the already-told console story.)
 
 8. **Sharper formulas, docs, and CI** — no more literal `{{placeholder}}` text in operator mail
    / PR titles; artifacts survive to the PR; an unavailable review sub-agent is recorded as
@@ -106,7 +106,7 @@ Each verified present against source this cycle.
    authoring in the browser**" as a *future* item, but browser formula authoring is SHIPPED:
    README line 270 already describes it in present tense, and the web console exposes a
    `PUT /api/formulas/<name>` write path (`web/internal/formschema/reader.go`, audit line
-   `web/internal/server/server.go:1229`).
+   `web/internal/server/server.go:1237`).
    **FIX:** drop "formula authoring in the browser" from the Roadmap line; keep "deeper agent
    detail." (Tier A, this branch.)
 

@@ -12,7 +12,7 @@ verification commands behind it.
   browser" as future, while README line 270 already ships it and the web console exposes
   `PUT /api/formulas/<name>` — evidence: `web/internal/server/server_test.go` +
   `settings_write_test.go` reference `/api/formulas/foo`, formula-write audit line
-  `web/internal/server/server.go:1229`, backend `web/internal/formschema/reader.go`. (grep verified)
+  `web/internal/server/server.go:1237`, backend `web/internal/formschema/reader.go`. (grep verified)
 - STALE #2 (CHANGELOG missing #104): `head CHANGELOG.md` → top section is `## v0.2.0 — 2026-08-03`;
   no #104 / v0.3.0 section exists. (command output)
 - STALE #3 (recovery-model.md incomplete): full read of `docs/recovery-model.md` — its "recovery
@@ -66,3 +66,35 @@ STALE #5 (soft, roadmap #75): left untouched — #75 is still OPEN; #104 made re
 **Issue-filing:** none warranted. No code bugs surfaced; the only gaps found were doc gaps, fixed in this PR. Filing busywork issues would violate the "never manufacture activity" rule.
 
 **Release decision (NOTED for deliver-tier-a, not executed):** #104 IS a meaningful boundary — a large multi-feature merged wave. Proposed release **v0.3.0** (title e.g. "self-recovery & honesty"), cut only AFTER the Tier A PR merges and only on green main (main is green now). The CHANGELOG entry is dated 2026-08-23; adjust the date/version at step 17 if the operator's release call differs.
+
+## GATE-3 — Public-claim verification (pre-draft)
+
+Checked the full branch diff `git diff origin/main...HEAD`. Evidence 2026-08-23.
+
+**1. Commands/flags/subcommands not proven this session — NONE.**
+Every `af` command in the docs diff was verified against `--help`/source this session:
+`af config fingerprint`, `af config models`, `af fidelity on|off|status [--agent]`,
+`af memory add|list|check|status|export|show`, `af recovery reset <agent>`,
+`af statusline on|off|status|render`, `af statusline status`, `af prime`. (The grep hit
+"af up does" is prose in recovery-model.md, not a command claim; `af up` is a real command.)
+
+**2. Counts not recounted — NONE.** The diff asserts no new counts. Existing counts re-verified
+from the filesystem this cycle: 24 formulas (`ls internal/cmd/install_formulas/*.toml`),
+10 skills (`ls -d .claude/skills/*/`).
+
+**3. URLs not fetched/constructed from a verified pattern — NONE.** The only URL added anywhere
+in the diff is `https://github.com/stempeck/agentfactory/issues/105`, which this agent created
+this session. (#104/#105 shorthands are issue/PR references, not URLs; #104 is verified merged.)
+
+**4. Unshipped promises outside a Roadmap section — NONE.** Grep for
+"coming soon|will ship|planned|not yet|todo" in the docs diff returns nothing. The CHANGELOG
+v0.3.0 entry, README command block, and recovery-model section all describe shipped #104
+behavior; future items live only in the README Roadmap section.
+
+**Correction applied during this gate:** the audit/story/log cited the formula-write audit line
+as `server.go:1229` (copied from a stale test comment); the actual line is
+`web/internal/server/server.go:1237` (`log.Printf("audit: formula write …")`). All four
+occurrences corrected. Other code refs verified to exist: recoverybadge_test.go, sling_test.go,
+formschema/reader.go, web/static/index.html.
+
+GATE-3 VERDICT: PASS

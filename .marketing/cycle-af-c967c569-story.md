@@ -37,7 +37,7 @@ editor. Each row: screen → what a human uses it for → the feature it showcas
 | **Agent detail** (from Floor) | Drill into one agent: status, activity, operator mail | Honest read-model (Phase-0 status + tmux liveness); operator↔agent mail from the browser |
 | **Sling** (`sling`) | Dispatch a task to an agent from the browser | The one-command dispatch path (`af sling`) with a UI (`sling_test.go`) |
 | **Dispatch** (`dispatch`) | Watch dispatch status + history | The autonomous dispatch pipeline surfaced (still-untold backlog gets a first visual) |
-| **Formulas** (`formulas`) | Author/edit formula TOML in the browser | **Browser formula authoring** — the shipped feature the README Roadmap still lists as "future"; per-panel save with write precondition + audit line (`server.go:1229`) |
+| **Formulas** (`formulas`) | Author/edit formula TOML in the browser | **Browser formula authoring** — the shipped feature the README Roadmap still lists as "future"; per-panel save with write precondition + audit line (`server.go:1237`) |
 | **Telemetry** (`telemetry`) | Per-step timing + per-run token/cost | **Honest telemetry:** "not measured" is rendered distinct from "zero"; a banner reports backend degradation as data, never an invented number |
 | **Settings** (`settings`) | Edit factory config (messaging, statusline, model pins, …) | **Trustworthy config:** unknown keys ride through untouched instead of being silently erased; per-panel saves with preconditions + an audit line; absent files stay absent |
 | **Prototypes** (`prototypes`) | Browse design prototypes (`.designs/`) | The design-review surface (proto server) — a screen never shown before |
