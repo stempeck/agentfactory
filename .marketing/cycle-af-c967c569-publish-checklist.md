@@ -27,12 +27,14 @@ Medium link is already filled with the live URL.
 - lnkd.in shortening on the links is fine (your habit).
 - After you post, paste the URL below (or write SKIP).
 
-- Post URL: ______
-  (paste the live LinkedIn post URL, or SKIP to drop the short-form this cycle)
+- Post URL: SKIP
+  (Operator on issue #108, 2026-08-23: "I'll post the next one to LinkedIn. Not this one." —
+  short-form deferred to next cycle. The draft `cycle-af-c967c569-linkedin.md` stays ready with the
+  live Medium URL already in its footer, so it can be reused or refreshed next cycle.)
 
 ## Notes
 - The Medium paste vehicle (`cycle-af-c967c569-medium.html`) is regenerable scaffolding and gets
   DELETED in phase 6 cleanup — it has served its purpose now that the article is live.
-- Separate open item (not a publish step): the **release decision** for `v0.3.0` is still pending
-  on PR #107 — `release: YES` (I cut the tag) or `release: NO` (I flip the CHANGELOG heading to
-  `Unreleased`).
+- Release decision: **`release: YES`** (operator, #108). **`v0.3.0` cut** against `main`:
+  https://github.com/stempeck/agentfactory/releases/tag/v0.3.0 — the CHANGELOG heading is now
+  backed by a real GitHub Release + tag.
