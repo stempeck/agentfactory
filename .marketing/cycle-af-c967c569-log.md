@@ -140,3 +140,19 @@ Watch items (not defects — reconcile downstream, no fix now):
   draft gets mechanics-only voice-law reconciliation before anything is published.
 
 SELF-REVIEW VERDICT: PASS
+
+## TESTS & BUILD (step 15, 2026-08-23)
+
+Runbook Claim Verification Map commands, run on this branch:
+
+- `go build ./...` → clean, exit 0.
+- `make test` (`CGO_ENABLED=0 go test ./...`, root module) → all packages `ok`, exit 0
+  (internal/cmd 19.5s; rest cached or sub-second). No failures.
+
+This cycle changed docs + `.marketing/` artifacts only — no Go code and no `web/` changes — so
+no behavior is under test that this branch could regress; the run confirms the tree still builds
+and the suite is green before the merge that publish sequencing depends on. The `web/` module is
+a separate `go.mod` not covered by root `make test` (CI's `web-unit` job covers it); untouched
+this cycle. `make test-integration` intentionally NOT run locally (runbook).
+
+TESTS-BUILD VERDICT: PASS
