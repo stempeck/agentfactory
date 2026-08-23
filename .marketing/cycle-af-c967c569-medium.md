@@ -153,7 +153,10 @@ Learn it, Live it, Share it!
      - "One loopback tab runs my whole factory of AI agents. Here's every screen." -->
 
 ## Operator Decision
-- Decision: ______
+- Decision: READY
   (READY to approve for publishing; EDITED — I changed the text, re-check mechanics only;
    SKIP to drop this piece this cycle.)
-- Resolution: ______
+- Resolution: Operator (stempeck) approved BOTH drafts AS WRITTEN on issue #106 (2026-08-23):
+  "ALL READY. APPROVE AS WRITTEN." No text changed — voice preserved verbatim, nothing smoothed.
+  Operator additionally requested a paste-ready Medium HTML with embedded images; delivered as
+  publish support (`cycle-af-c967c569-medium.html`, 8 screenshots embedded as data URIs).

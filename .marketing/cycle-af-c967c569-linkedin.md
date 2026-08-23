@@ -25,7 +25,10 @@ Read more: <MEDIUM ARTICLE URL — paste after publishing the Medium piece> | Ge
 ---
 
 ## Operator Decision
-- Decision: ______
+- Decision: READY
   (READY to approve for publishing; EDITED — I changed the text, re-check mechanics only;
    SKIP to drop this piece this cycle.)
-- Resolution: ______
+- Resolution: Operator (stempeck) approved BOTH drafts AS WRITTEN on issue #106 (2026-08-23):
+  "ALL READY. APPROVE AS WRITTEN." No text changed — voice preserved verbatim. Plain-text body
+  ready to paste into LinkedIn; the Medium-article URL in the footer is filled after the Medium
+  piece is published (Phase 5 sequences Medium first, then LinkedIn's footer link).
