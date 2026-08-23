@@ -234,3 +234,34 @@ against the runbook `homepage-allowlist` (https://medium.com) before writing.
 2. Release decision — `v0.3.0` YES (cut tag) / NO (flip CHANGELOG heading to Unreleased), asked on PR #107.
 
 PHASE-5-6 STATUS: Medium live + verified, homepage set; holding on LinkedIn + release decision.
+
+## PHASE-6 — verify every published page (2026-08-23)
+
+Verification capability: screenshots available (drove the cached Playwright chromium headless
+directly — the MCP server's `chrome` channel is absent on Arm64 — plus a `--dump-dom` text pass;
+WebFetch 403s on Medium, so screenshot + DOM dump are the evidence).
+
+**Recorded URLs this cycle:** Medium (published) · LinkedIn = **SKIP** (operator deferred to next
+cycle, #108) → only the Medium URL requires verification.
+
+**Medium** — https://medium.com/@glennstempeck/in-my-factory-of-ai-agents-last-time-i-cracked-the-door-heres-every-room-a04f14babef0
+1. Literal `##` / `**` / backtick fences / raw `[text](url)` visible? **none** (DOM leak scan = 0 for
+   all four patterns).
+2. Missing / duplicated / placeholder images, stray alt-text paragraphs? **none** (8 `<figure>`
+   elements = all 8 console screenshots survived the paste; screenshot confirms the Floor image
+   renders; no alt-text stray blocks).
+3. Subtitle as a body paragraph, or a stray leading `# `? **none** (title is the H1/title field;
+   subtitle sits in Medium's italic subtitle field; body starts at the first real paragraph).
+4. Repo checks: **none amiss** — `homepageUrl` = the live article; repo `topics` contain all four
+   Positioning topics (claude-code, ai-agents, multi-agent-systems, agentic-ai); repo is indexed
+   under `topic:claude-code` and `topic:multi-agent-systems` (search lists `stempeck/agentfactory`).
+
+No "search for / replace with" fixes needed — every item returned "none". (The operator's own
+edits, incl. taking the 22%→23% fix and keeping "26 agents", are his canonical published text,
+recorded in medium.md `## PUBLISHED`.)
+
+Diagnostics: verification screenshots + DOM dump live in the session scratchpad (outside the repo
+tree). The Medium paste vehicle `cycle-af-c967c569-medium.html` is removed from the tree in this
+step (it was committed via #107; the follow-up PR deletes it from main).
+
+PHASE-6 VERDICT: PASS
