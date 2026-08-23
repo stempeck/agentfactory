@@ -70,6 +70,47 @@ Crash recovery therefore never requires manually deleting lock files.
 whose Claude process died is killed and recreated. See
 [agent lifecycle](agent-lifecycle.md).
 
+## Automatic context-exhaustion recovery
+
+The chain above keeps an agent's state safe across a session boundary. Context-exhaustion
+recovery is the factory *crossing that boundary for you* when an agent fills its window.
+Previously an agent whose context filled would keep trying to act on a window too full to hold
+another instruction — wedged, and burning tokens indefinitely. Now the watchdog treats a full
+context as a recoverable fault, not a dead end.
+
+### The watchdog watches occupancy, not just liveness
+
+The always-on watchdog tracks every agent's **context occupancy** alongside its liveness.
+Default-configured factories are no longer unsupervised, and the watchdog writes a heartbeat
+file that proves it is itself alive — so a hung watchdog is detectable rather than silently
+absent, even while a busy statusline is rendering.
+
+### An exhausted agent is recycled with its state checkpointed
+
+When occupancy crosses the exhaustion threshold, the watchdog recycles the agent: the session
+ends cleanly (its checkpoint written, above) and a fresh one starts, priming itself back to the
+current step with the same authoritative context as the first. A step that ends with a nearly-full
+window hands off cooperatively to a fresh session, so the next step starts clean instead of
+inheriting exhaustion. The context window is a cache; recycling empties it without losing the plan.
+
+### A durable breaker stops recycle loops
+
+Recovery that never gives up is its own failure mode: an agent that re-stalls immediately after
+every recycle would loop forever. A **durable circuit breaker** latches when recovery fails
+repeatedly (or hits a recycle-rate cap) and does not expire on its own — a self-clearing breaker
+is a breaker that never stops anything. A latched breaker **halts** the agent and escalates to the
+operator (a `RECOVERY HALTED` notice) instead of destroying work over and over. After you
+investigate, re-arm it explicitly:
+
+```bash
+af recovery reset <agent>   # operator-only; clears the breaker, does not relaunch (af up does)
+```
+
+This is the supported way to clear the breaker, and it is the command the escalation names.
+`af statusline status` additionally warns about config drift that would mis-aim recovery — for
+example a live agent whose declared context window disagrees with the host's — so the watchdog
+aims at the right threshold.
+
 ## The operator's view
 
 Recovery is invisible in the normal case: restart the agent and it resumes.

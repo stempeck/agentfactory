@@ -3,6 +3,72 @@
 Notable changes to agentfactory. The project began 2026-05-01; snapshot tags `V001`–`V012`
 mark pre-release checkpoints. `v0.1.0` is the first formal release.
 
+## v0.3.0 — 2026-08-23
+
+Self-recovery, durable memory, and honest surfaces. The factory now recovers from context
+exhaustion on its own, keeps what its agents learn across teardowns, and tells the operator
+the truth on every surface — including when it has no data. (#104)
+
+### Self-recovering agents
+
+- Automatic context-exhaustion recovery: the watchdog watches every agent's context
+  occupancy and recycles an exhausted agent with its state checkpointed, so a filled window
+  no longer wedges the agent burning tokens indefinitely (#104)
+- A durable recovery breaker halts repeated re-stall loops and escalates to the operator
+  instead of destroying work over and over; `af recovery reset <agent>` re-arms it after you
+  investigate (#104)
+- Supervision is always on: default factories are no longer unsupervised, a heartbeat file
+  proves the watchdog itself is alive, and steps ending near a full window hand off to a
+  fresh session cooperatively (#104)
+
+### Durable memory
+
+- A memory vault (`af memory add|list|check|status|export`) survives step close, teardown,
+  reset, and worktree removal; learnings are re-injected (bounded) at session start; and
+  `quickdocker.sh` can bind the vault to a host directory so `docker rm` can't take it (#104)
+
+### Live statuslines
+
+- `af statusline` renders model, directory, git branch, diff size, elapsed time, a
+  context-fill bar, and session/daily spend with accurate token accounting; `af statusline
+  status` self-diagnoses its pipeline and warns about config drift (#104)
+
+### Config integrity
+
+- Config setters reject unknown keys instead of silently erasing them on write-back,
+  validate agent-name references across files, and accept an optional `--if-content-hash`
+  compare-and-set precondition so concurrent edits conflict instead of clobbering; new
+  setters for messaging and statusline config (#104)
+- `af config fingerprint` reports a digest of the config schema this binary speaks, so any
+  consumer can detect schema skew before writing; `af config models check` verifies per-class
+  model coverage before a dead sub-agent does (#104)
+
+### Fair quality gates
+
+- Gate judges now see exactly the turn being graded — calls paired with their results,
+  sub-agent noise excluded — and block only on contradiction, never on absence of proof;
+  `af fidelity off --agent <name>` exempts one misfiring agent instead of the whole factory,
+  every toggle is recorded in a provenance log, and agents can no longer disable their own
+  grader (#104)
+
+### Honest observability
+
+- Telemetry step records carry context occupancy, consumption, and budget verdicts;
+  interrupted steps show as INTERRUPTED instead of vanishing; and "not measured" is always
+  distinct from "zero" in the table, the JSON, and the web console (#104)
+- The web console Settings surface covers messaging, statusline, and model-profile pins
+  without silently erasing keys it doesn't understand, saves per panel with write
+  preconditions and an audit line, and leaves absent files absent instead of inventing
+  defaults; the Floor shows context-fill and recovery badges (#104)
+
+### Formulas, docs & CI
+
+- Formula fixes: no literal `{{placeholder}}` text in operator mail or PR titles, artifacts
+  survive to the PR, and an unavailable review sub-agent is recorded as unavailable rather
+  than as a clean pass (#104)
+- CI now runs the web module, client-JS conformance lanes, and the hook end-to-end tests it
+  was silently skipping (#104)
+
 ## v0.2.0 — 2026-08-03
 
 Observability and multi-provider agents.
