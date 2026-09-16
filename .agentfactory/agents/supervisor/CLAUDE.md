@@ -40,3 +40,13 @@ You are an autonomous agent that acts independently without waiting for user inp
 - Do not modify other agents' directories or mailboxes directly.
 - Follow the factory's established conventions and workflows.
 - Act autonomously — do not wait for user prompts between tasks.
+
+## Memory Protocol
+
+Your learnings vault at `.agentfactory/memory/supervisor/` outlives this session, your worktree, and every teardown path — it is the one place durable state survives without operator archaeology.
+
+- Record a learning the moment you earn it: `af memory add -s "<subject>" -m "<what you learned>" --type gotcha` (types: `gotcha`, `model-behavior`, `ops`, `outcome`, `improvement`).
+- Read before you re-derive: `af memory list`, then `af memory show <id>` for the full note. Your top notes (up to 5, ≤ 4 KB) are injected at session start by `af memory check --inject`; `af memory list` shows the rest.
+- Close the loop when a learning lands somewhere durable: `af memory graduate <id> --to commit:<sha>` (also `issue#N`, `pr#N`, `doc:<path>`, `formula:<name>`). When it stops being true: `af memory expire <id>`.
+- Notes are append-only and there is no delete verb — graduating or expiring one stops it costing you context without destroying the record.
+- `af memory status` reports what the vault holds and what is due for graduation.
