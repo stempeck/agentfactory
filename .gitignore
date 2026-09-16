@@ -126,6 +126,8 @@ test_results.txt
 !.claude/skills/improve-agent/**
 !.claude/skills/improve-solution/
 !.claude/skills/improve-solution/**
+!.claude/skills/perfeval-agent/
+!.claude/skills/perfeval-agent/**
 !.claude/skills/plan-review/
 !.claude/skills/plan-review/**
 !.claude/skills/plan-work/
