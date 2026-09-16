@@ -11,10 +11,10 @@
 | Command | RunE anchor | One-line contract |
 |---------|-------------|-------------------|
 | `af root` | `internal/cmd/root_cmd.go:13` | Prints the factory root (walks cwd upward for `.agentfactory/`) |
-| `af prime [--hook]` | `internal/cmd/prime.go:38` | Emits role context, formula step, mail injection; `--hook` parses `session_id` JSON on stdin (`internal/cmd/prime.go:64-68`) |
+| `af prime [--hook]` | `internal/cmd/prime.go:42` | Hook mode emits session header, worktree block, startup directive, formula step, checkpoint and the economics/advisory blocks — and **no identity**, which the harness loads from the agent's own `CLAUDE.md` (#675); plain prime also renders the role template, but only while #678's re-prime reduction leaves it alone (`internal/cmd/prime.go:269-271,287`). `--hook` parses `session_id` JSON on stdin (`internal/cmd/prime.go:82-90`). Hook output is truncated by the harness at an observed ~10,000 characters, so the formula step is the one unbounded writer (ADR-023) |
 | `af install --init` / `af install <role>` | `internal/cmd/install.go:44` | Bootstraps factory or provisions an agent; `--init` hard-fails if Python != 3.12 (C-16, `internal/cmd/install.go:60-66`) |
 | `af up [agents…]` | `internal/cmd/up.go:27` | Starts tmux sessions; calls `worktree.ResolveOrCreate` + `SetWorktree` before `mgr.Start()` (R-ENF-1 guard, commit `b78e24f`) |
-| `af down [agents…] [--all]` | `internal/cmd/down.go:30` | Stops tmux sessions; `cleanupAgentWorktree` removes owned worktrees (R-INT-3, `internal/cmd/down.go:95`); `--all` pkills orphaned claude processes (`internal/cmd/down.go:120`) |
+| `af down [agents…] [--all]` | `internal/cmd/down.go:30` | Stops tmux sessions; `cleanupAgentWorktree` removes owned worktrees (R-INT-3, `internal/cmd/down.go:229`, called at `:131,151`); `--all` pkills orphaned claude processes (`internal/cmd/down.go:182`) |
 | `af attach <agent>` | `internal/cmd/attach.go:24` | `switch-client` inside tmux, `attach-session` otherwise (`internal/cmd/attach.go:61-64`) |
 | `af done [--phase-complete --gate <id>]` | `internal/cmd/done.go:48` | Closes current ready step, advances or mails WORK_DONE + auto-terminates dispatched sessions (`internal/cmd/done.go:229-232`) |
 | `af sling --formula <name>` / `af sling --agent <name> "task"` | `internal/cmd/sling.go:71` | Instantiates formula (parent epic + step tasks + DAG) and optionally launches; specialist-dispatch path in `dispatchToSpecialist` (`internal/cmd/sling.go:114`) |
@@ -36,7 +36,7 @@
 | `internal/issuestore` + `mcpstore` | OUT | `issuestore.Store` obtained only through `newIssueStore(wd, beadsDir, actor)` seam; production returns `mcpstore.New(factoryRoot, actor)` — the Python MCP server is lazy-started on first call | `internal/cmd/helpers.go:17-24`; commit `c93f9ef` ("Phase 6: wire mcpstore into production seams"); `install.go:126` is the ONE documented bypass, required to print the bootstrap banner |
 | `internal/mail` | OUT | `mail.NewMailbox(sender, store)`, `mail.NewRouter(wd, store)`, `mail.NewMessage`, `mail.NewReplyMessage`, `mail.ParsePriority` | `internal/cmd/mail.go:113-141`; `newMailboxForSender` / `storeForMail` at `internal/cmd/mail.go:412-428` |
 | `internal/session` | OUT | `session.Manager` (`NewManager`, `Start`, `Stop`, `SetWorktree`, `SetInitialPrompt`, `BuildStartupCommand`); errors `ErrAlreadyRunning`, `ErrNotRunning`, `ErrNotProvisioned` | `internal/cmd/up.go:83-95`; `internal/cmd/sling.go:124-126,633-646`; `internal/cmd/handoff.go:106-108` |
-| `internal/worktree` | OUT | `ResolveOrCreate`, `SetupAgent`, `FindByOwner`, `Remove`, `RemoveAgent` — `af up`/`af sling` call the resolve pair BEFORE `session.Start` (R-ENF-1, commit `b78e24f`) | `internal/cmd/up.go:69-76`; `internal/cmd/sling.go:158-177,271-283`; `internal/cmd/down.go:95-118` |
+| `internal/worktree` | OUT | `ResolveOrCreate`, `SetupAgent`, `FindByOwner`, `Remove`, `RemoveAgent` — `af up`/`af sling` call the resolve pair BEFORE `session.Start` (R-ENF-1, commit `b78e24f`) | `internal/cmd/up.go:69-76`; `internal/cmd/sling.go:158-177,271-283`; `internal/cmd/down.go:229-267` |
 | `internal/lock` | OUT | `lock.New(workDir).Acquire(sessionID)`, `.Release()` — acquired in `primeAgent` (best-effort), released in `sendWorkDoneAndCleanup` | `internal/cmd/prime.go:273-278`; `internal/cmd/done.go:196` |
 | `internal/checkpoint` | OUT | `Capture`, `Read`, `Write`, `Remove`, `IsStale`, `Age`, `WithFormula`, `WithHookedBead`, `WithNotes` | `internal/cmd/prime.go:465-502`; `internal/cmd/done.go:191`; `internal/cmd/handoff.go:126-148` |
 | `internal/formula` | OUT | `FindFormulaFile`, `ParseFile`, `ResolveVars`, `MergeInputsToVars`, `ExpandTemplateVars`, `TopologicalSort`, `ResolveContext`, types `Formula/Step/Leg/Template/Aspect/Var/Input` | `internal/cmd/sling.go:303-400`; `internal/cmd/formula.go:84-92` |
@@ -45,10 +45,10 @@
 | `internal/tmux` | OUT | `tmux.NewTmux()`, `IsAvailable`, `HasSession`, `KillSession`, `NewSession`, `SendKeys`, `AttachSession`, `SwitchClient`, `ClearHistory`, `RespawnPane`, `IsInsideTmux` | `internal/cmd/attach.go:49-64`; `internal/cmd/handoff.go:55,118-122`; `internal/cmd/sling.go:151-155` |
 | `internal/fsutil` | (none) | cmd does not import fsutil directly; atomic writes (e.g. dispatch state) are done inline via temp-file + rename (`internal/cmd/dispatch.go:283-298`) | — |
 | Subprocess: `python3` | OUT-exec | `python3 --version` version gate in `checkPython312` | `internal/cmd/install.go:281` |
-| Subprocess: `git` | OUT-exec | Current branch detection and working-tree dirtiness checks | `internal/cmd/prime.go:507`; `internal/cmd/formula.go:311` |
+| Subprocess: `git` | OUT-exec | Current branch detection and working-tree dirtiness checks | `internal/cmd/prime.go:987`; `internal/cmd/formula.go:401` |
 | Subprocess: `gh` | OUT-exec | `gh auth status`, `gh issue list --json` for dispatcher | `internal/cmd/dispatch.go:209,214` |
-| Subprocess: `pgrep`/`pkill` | OUT-exec | Orphan-claude reaper under `af down --all` | `internal/cmd/down.go:126,132` |
-| Subprocess: self `af` | OUT-exec | `af mail send` from `af done` and `af handoff`; `af mail check --inject` from `af prime`; `af sling` from `af dispatch`; `af dispatch` from `af dispatch start` loop. Guarded by `isTestBinary()` fork-bomb check (`internal/cmd/prime.go:307`, commit `392717f`) | `internal/cmd/done.go:262`; `internal/cmd/handoff.go:165`; `internal/cmd/prime.go:334`; `internal/cmd/dispatch.go:257,402` |
+| Subprocess: `pgrep`/`pkill` | OUT-exec | Orphan-claude reaper under `af down --all` | `internal/cmd/down.go:332,335` |
+| Subprocess: self `af` | OUT-exec | `af mail send` from `af done` and `af handoff`; `af sling` from `af dispatch`; `af dispatch` from `af dispatch start` loop. `af prime` self-execs nothing — #675 made mail its own `SessionStart` hook entry and deleted the shell-out. Guarded by `isTestBinary()` fork-bomb check (`internal/cmd/prime.go:665`, commit `392717f`) | `internal/cmd/done.go:995,1036,1065,1130`; `internal/cmd/handoff.go:148`; `internal/cmd/dispatch.go:524,577,1124,1977` |
 
 ## Formative commits
 
@@ -82,6 +82,7 @@
 | `4123f8d`/`f959234` | 2026-04-14/16 | Issue #98: env-var library isolation (PR #104, Phase 3) | Actor scoping is a `Store.actor` field via `NewWithActor`; no os.Setenv from tests |
 | `c93f9ef` | 2026-04-16 | Phase 6 — wire `mcpstore` into production seams | `newIssueStore` now takes `actor` as third arg; 13 call sites updated; `checkPython312` gate added |
 | `7acd617` | 2026-04-17 | Phase 7 — delete `internal/issuestore/bdstore/` | Strips last `BD_ACTOR` fallbacks; `mcpstore` is sole production adapter |
+| #675 (PR #681), Phase 1 at `6a0770d8` | 2026-09-13 | SessionStart context surface: per-session mail delivered-state; three independent hook entries replacing one `&&` chain; identity gated out of hook mode and re-rendered into every agent's `CLAUDE.md` | `af prime` stopped being the single carrier. Each writer now owns its own hook entry and its own budget, so one writer cannot crowd out another under the harness's per-string cap — the reason `runMailCheckInject` and prime's self-exec were deleted rather than resized. Rationale, evidence and re-verification rule in [ADR-023](../adrs/ADR-023-sessionstart-context-surface.md) |
 
 ## Load-bearing invariants (this subsystem's contribution)
 
@@ -149,7 +150,6 @@ Every cmd file that needs agent config does: `config.LoadAgentConfig(config.Agen
 
 ## Gaps
 
-- **Why `runMailCheckInject` uses a 5-second timeout (`internal/cmd/prime.go:331-335`).** Commit `7153843` says "add 5s context timeout to runMailCheckInject to prevent hangs" but does not name the hang mode. unknown — needs review.
 - **Why `af dispatch` uses a 24h TTL + `retry_after_seconds` on top (`internal/cmd/dispatch.go:300-308,158-171`).** Two overlapping retry mechanisms; commit `2d214d3` states "State tracking prevents re-dispatching the same issue within a 24-hour TTL window" without reconciling the two. unknown — needs review.
 - **Why `af prime` acquires the identity lock best-effort (warn, do not fail) (`internal/cmd/prime.go:273-278`).** No commit-message rationale found for the soft-failure mode. unknown — needs review.
 - **Why `--formula` flag on `af prime` is kept as a hidden deprecated flag rather than removed (`internal/cmd/prime.go:33-34`).** Commit `9278bfd` made context injection unconditional but the flag still parses. unknown — needs review.

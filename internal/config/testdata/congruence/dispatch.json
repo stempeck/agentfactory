@@ -24,5 +24,16 @@
         "mappings[].labels[]"
       ]
     }
+  ],
+  "crons": [
+    {
+      "name": "crons[].name",
+      "agent": "crons[].agent",
+      "every": "1h",
+      "vars": {
+        "repo": "crons[].vars{}"
+      },
+      "model": "crons[].model"
+    }
   ]
 }

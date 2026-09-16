@@ -3,8 +3,10 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,6 +46,83 @@ const (
 // the same quantity the host reports back as context_window_size. Exported so the statusline drift
 // advisory reads this one doc-cited source of truth instead of a private copy (issue #602 F3).
 const EnvMaxContextTokens = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+
+// EnvBackendPoolTokens is the operator's declaration of a SHARED backend's total context pool — the
+// capacity the dispatch-admit gate divides among the live sessions on one backend (#669 THREAD-2). It
+// is deliberately distinct from EnvMaxContextTokens, the PER-REQUEST window: one backend can serve many
+// concurrent sessions out of a single pool, and letting the per-request window double as the pool was
+// correct only by numeric coincidence. Absent ⇒ the gate is inert for that backend. It rides the
+// free-form profile env map — no schema field, no strict-decode change.
+const EnvBackendPoolTokens = "AF_BACKEND_POOL_TOKENS"
+
+// EnvBackendChildFloorTokens is the operator's per-profile override of the child-footprint FLOOR: the
+// minimum free pool a launch must leave behind so the next child still has room to seat (#669 F1/BAD-4).
+// It rides the same free-form profile env map beside AF_BACKEND_POOL_TOKENS. Unlike the pool, an ABSENT
+// floor is NOT inert — it falls back to defaultBackendChildFloorTokens, because a declared pool with no
+// footprint floor is the exact near-ceiling admit-then-starve the thread reports (reservationTokens
+// shrinks toward zero as Σ nears the ceiling and would let a launch through that leaves no room for the
+// next). A declared value must be a positive decimal, never zero: a zero floor would silently disable
+// the gate the pool still arms.
+const EnvBackendChildFloorTokens = "AF_BACKEND_CHILD_FLOOR_TOKENS"
+
+// EnvDisableParallelSubagents is the operator's HARD CAP on sub-agent concurrency for a backend: set to
+// "1", the dispatch gate stops treating concurrency as an arithmetic question and enforces a strict
+// semaphore of one — a second sub-agent is refused while any sibling is still running, however much pool
+// the math believes is free. It exists because on a fixed local backend (#672) parallel sub-agents
+// oversubscribe the one shared KV pool no matter how the tokens divide, and the token arithmetic — being
+// blind to in-process children that write no occupancy snapshot, and admitting from a lean launcher — can
+// green-light a fan-out the pool cannot serve. The only safe policy there is one at a time. Absent, or any
+// value other than "1", leaves the arithmetic path unchanged (fail-safe toward existing behavior).
+const EnvDisableParallelSubagents = "AF_DISABLE_PARALLEL_SUBAGENTS"
+
+// EnvEffortLevel is how hard the host is asked to think (#668 D16). Exported because the cmd layer
+// needs the same spelling twice: to drop the key from a relaunch when the experiment's arm is off,
+// and to record which arm the relaunch ran.
+//
+// It is deliberately in NEITHER EndpointClassKeys NOR session.redirectFamilyVars. The second is the
+// live one: that family is cleared unconditionally on every launch, quickstart.sh:567 exports this
+// key into every operator shell, and nothing re-derives an effort level the way
+// CompleteEndpointProfile re-derives the family's other members — so membership would silently
+// downshift every agent in every existing factory. The #602 profile-key universe does the same
+// hygiene without the collateral, because it only unsets keys some profile actually declares.
+// internal/session/effort_hygiene_test.go states all three halves.
+//
+// Source: https://code.claude.com/docs/en/env-vars, observed 2026-08-30 against claude 2.1.224.
+const EnvEffortLevel = "CLAUDE_CODE_EFFORT_LEVEL"
+
+// effortLevels is the host's vocabulary, and an unrecognised value is DROPPED in favour of the
+// host's default rather than rejected. That is why this is validated at the write boundary and not
+// merely documented: a profile saved with "maximum" would run at the host's full effort while the
+// operator's file and this feature's own records both claimed the arm was reduced — the experiment
+// D16 exists to run, silently comparing a thing against itself. Same rule and same pinned source as
+// the compaction-window bounds above.
+var effortLevels = []string{"low", "medium", "high", "xhigh", "max", "auto"}
+
+// IsEffortLevel reports whether a value is in the host's vocabulary. Exported for the cmd layer,
+// which reads the level out of the launch environment to record which arm a session or step ran
+// under (#678 K1) and must not put an unrecognised string on a record: the host would have dropped
+// such a value in favour of its default, so recording it would attest to an arm that never ran. The
+// validation rule stays declared once, here, beside the vocabulary it validates against.
+func IsEffortLevel(v string) bool { return slices.Contains(effortLevels, v) }
+
+// EffortLevelAuto is the one member of the vocabulary above that names no depth of its own.
+const EffortLevelAuto = "auto"
+
+// EffortRank orders the GRADED members of the vocabulary — low < medium < high < xhigh < max — so a
+// caller holding a ceiling can compare two levels. The vocabulary above is declared in that
+// ascending order with auto appended last, so the index is the rank.
+//
+// It returns -1 for auto and for anything outside the vocabulary, and that refusal is the point.
+// Auto is the HOST's own default, and the host does not publish where that default sits in this
+// order; a rank invented for it would let a comparison claim a reduction it cannot prove, which is
+// the same silent self-comparison IsEffortLevel's doc above exists to prevent. A caller decides what
+// an unranked level means for its own decision rather than being handed a number for it.
+func EffortRank(level string) int {
+	if level == EffortLevelAuto {
+		return -1
+	}
+	return slices.Index(effortLevels, level)
+}
 
 // The host derives a real context window for its own models but has to assume one for any
 // other gateway's, and it tells them apart by this prefix alone — so the prefix decides
@@ -207,6 +286,32 @@ func validateModelProfile(name string, profile map[string]string) error {
 			return fmt.Errorf("%w: model %q sets %s to %q; must be a positive decimal token count or \"\"", ErrInvalidType, name, EnvMaxContextTokens, val)
 		}
 	}
+	if val := profile[EnvBackendPoolTokens]; val != "" {
+		if n, ok := DecimalTokenCount(val); !ok || n == 0 {
+			return fmt.Errorf("%w: model %q sets %s to %q; must be a positive decimal token count or \"\"", ErrInvalidType, name, EnvBackendPoolTokens, val)
+		}
+	}
+	// Same numeric rule as the pool key, and for the sharper reason: "never zero" is enforced HERE, at
+	// load, so a hand-edited "0" is a loud LOAD ERROR rather than a floor the accessor silently defaults
+	// away — the two layers agree that a declared floor is a positive fact or it is absent.
+	if val := profile[EnvBackendChildFloorTokens]; val != "" {
+		if n, ok := DecimalTokenCount(val); !ok || n == 0 {
+			return fmt.Errorf("%w: model %q sets %s to %q; must be a positive decimal token count or \"\"", ErrInvalidType, name, EnvBackendChildFloorTokens, val)
+		}
+	}
+	// The hard cap is a boolean the accessor reads as exact-"1"; reject any other non-empty value at
+	// load with the pool/floor clauses' shape, so a typo (AF_DISABLE_PARALLEL_SUBAGENTS="true") is a
+	// loud LOAD ERROR rather than a cap the operator believes is armed but the accessor silently ignores (#669 F6).
+	if val := profile[EnvDisableParallelSubagents]; val != "" && val != "0" && val != "1" {
+		return fmt.Errorf("%w: model %q sets %s to %q; must be \"0\", \"1\" or \"\"", ErrInvalidType, name, EnvDisableParallelSubagents, val)
+	}
+	// Read directly and compared verbatim, for the same two reasons the keys above are: map
+	// iteration is random-order, and trimming or case-folding would save a value the host then
+	// reads differently. "" defers to the host, exactly as it does for ANTHROPIC_API_KEY.
+	if val := profile[EnvEffortLevel]; val != "" && !IsEffortLevel(val) {
+		return fmt.Errorf("%w: model %q sets %s to %q; must be one of %s or \"\"",
+			ErrInvalidType, name, EnvEffortLevel, val, strings.Join(effortLevels, ", "))
+	}
 
 	return checkEndpointComplete(name, profile)
 }
@@ -225,8 +330,10 @@ func DecimalTokenCount(val string) (uint64, bool) {
 // and `unset` segments (issue #602), so a name carrying a space or a shell metacharacter would
 // corrupt — or inject into — that command. It is scanned by hand rather than with a regexp for
 // the same reason DecimalTokenCount uses ParseUint: an explicit rule with no dependency. Shared
-// by the write-boundary reject (validateModelProfile) and the cleanup-side filter
-// (session.staleUniverseKeys) so the two can never disagree about which names are safe to emit.
+// by the write-boundary reject (validateModelProfile), the cleanup-side filter
+// (session.staleUniverseKeys), and the cron var-key reject (validateCrons, issue #610 — those keys
+// ride raw into `--var k=v` argv, the same join hazard) so the three can never disagree about which
+// names are safe to emit.
 func IsValidEnvKeyName(name string) bool {
 	if name == "" {
 		return false
@@ -247,6 +354,132 @@ func IsValidEnvKeyName(name string) bool {
 	return true
 }
 
+// Provenance of the number ResolveContextWindow returned. A window figure alone cannot be
+// argued with — "200000" is indistinguishable from a real measurement, a stale declaration, and
+// a guess — so the source travels with it and a caller can say WHY it divided by what it did.
+const (
+	WindowSourceDeclared = "declared"
+	WindowSourceHost     = "host"
+	WindowSourceFallback = "fallback"
+)
+
+// ResolveContextWindow answers "how large is this agent's context window", which is the
+// denominator every occupancy fraction is taken against. Precedence is declaration, then the
+// host's report, then the assumption the host itself makes (#668 K1/D7):
+//
+//   - The operator's CLAUDE_CODE_MAX_CONTEXT_TOKENS is first because it is the only operand
+//     that can be RIGHT about a gateway the host does not recognise. The host reports what it
+//     ASSUMES for a foreign model id; the operator reports what the backend actually has.
+//   - The host's report is next, and it is authoritative for the host's own models.
+//   - foreignModelWindow last, because a wrong denominator still beats no denominator: every
+//     consumer of this divides, and there is no sensible behavior for zero.
+//
+// It is pure, like PairingLintProfile above and for the same reason (ADR-004). The temptation
+// here is sharper than usual — the first operand's name IS an environment variable — but the
+// window resolves PER AGENT at read time while a process environment is one value for the whole
+// process, so reading it here would give every agent the launching shell's answer. The caller
+// knows which agent it is asking about and supplies that agent's profile map and the host
+// reading it already took.
+//
+// Nothing factory-global participates. In particular startup.json's bound_tokens does not: it is
+// a telemetry annotation (see StepContextConfig) and routing it here would collapse a per-agent
+// quantity into one number for the whole factory, which is exactly what D7 forbids.
+func ResolveContextWindow(profile map[string]string, hostReported int64) (window int64, source string) {
+	// DecimalTokenCount accepts the full unsigned range, so the narrowing is the hazard: a
+	// declaration above MaxInt64 would wrap to a NEGATIVE window, and a negative denominator is
+	// worse than an assumed one. Out-of-range is treated as undeclared.
+	if declared, ok := DecimalTokenCount(profile[EnvMaxContextTokens]); ok && declared > 0 && declared <= math.MaxInt64 {
+		return int64(declared), WindowSourceDeclared
+	}
+	if hostReported > 0 {
+		return hostReported, WindowSourceHost
+	}
+	return foreignModelWindow, WindowSourceFallback
+}
+
+// BackendPoolTokens returns the operator-declared shared pool for a profile and whether one is
+// declared. It mirrors ResolveContextWindow's narrowing guard — a value above MaxInt64 would wrap to a
+// negative pool, worse than an undeclared one, so out-of-range is treated as undeclared — but unlike
+// the window it has NO host-reported fallback: a pool is an operator fact or it is absent, and an
+// absent pool leaves the dispatch gate inert by construction rather than dividing by a guess.
+func BackendPoolTokens(profile map[string]string) (tokens int64, declared bool) {
+	if n, ok := DecimalTokenCount(profile[EnvBackendPoolTokens]); ok && n > 0 && n <= math.MaxInt64 {
+		return int64(n), true
+	}
+	return 0, false
+}
+
+// defaultBackendChildFloorTokens is the conservative child-footprint floor applied when a profile
+// declares a pool but no AF_BACKEND_CHILD_FLOOR_TOKENS override (#669 F1/BAD-4). It is a pinned constant
+// like the compaction-window bounds above so the one doc-cited number lives in exactly one place.
+const defaultBackendChildFloorTokens int64 = 50_000
+
+// BackendChildFloorTokens returns the child-footprint floor for a profile: the operator's declared
+// AF_BACKEND_CHILD_FLOOR_TOKENS when it is a positive in-range decimal, otherwise
+// defaultBackendChildFloorTokens. It mirrors BackendPoolTokens' narrowing guard but its contract is the
+// OPPOSITE at the boundary — where an absent pool leaves the gate inert, an absent floor DEFAULTS,
+// because a declared pool with no footprint floor is the near-ceiling admit-then-starve #669 reports, and
+// an inert floor would be the proportionality knob the doctrine forbids. Never zero: a hand-edited "0"
+// (already rejected at load by validateModelsConfig) falls back to the default here as defense in depth.
+func BackendChildFloorTokens(profile map[string]string) int64 {
+	if n, ok := DecimalTokenCount(profile[EnvBackendChildFloorTokens]); ok && n > 0 && n <= math.MaxInt64 {
+		return int64(n)
+	}
+	return defaultBackendChildFloorTokens
+}
+
+// ParallelSubagentsDisabled reports whether the profile hard-caps sub-agent concurrency at one (#672).
+// Only the exact value "1" enables it; absent or anything else leaves the arithmetic path in force, so a
+// typo fails safe toward existing behavior rather than silently disabling parallelism.
+func ParallelSubagentsDisabled(profile map[string]string) bool {
+	return profile[EnvDisableParallelSubagents] == "1"
+}
+
+// CapacityLintProfile reports the capacity declarations the loader ACCEPTS and the runtime then
+// ignores — the shapes that leave an operator believing a cap is armed when it is not (#673
+// CONFIG-LINT). It is the third member of this file's lint family and follows their contract exactly:
+// pure (ADR-004), warn-only, and called after the write so it changes no return value and no exit code.
+//
+// Its band is narrow ON PURPOSE, because validateModelProfile already turns most capacity typos into
+// loud LOAD ERRORS. AF_DISABLE_PARALLEL_SUBAGENTS="true" and a non-numeric AF_BACKEND_POOL_TOKENS are
+// both rejected at load, so linting them would be unreachable code that reads like coverage. What
+// survives validation is exactly what is warned about here:
+//
+//   - "0" — a legal value that arms nothing. ParallelSubagentsDisabled is exact-"1" by design, so
+//     "0" is indistinguishable from absent at runtime while looking, in the file, like a decision.
+//   - a pool below the child-footprint floor — numeric, positive, and therefore valid, but it refuses
+//     the FIRST child of every launch forever. The gate would be doing exactly what it was told; the
+//     operator would see a factory that cannot dispatch and no reason why.
+//
+// The strict runtime predicates are untouched: this reports, it never reinterprets.
+func CapacityLintProfile(name string, profile map[string]string) (warning string, hasWarning bool) {
+	if profile[EnvDisableParallelSubagents] == "0" {
+		return fmt.Sprintf("model %q sets %s to \"0\", which arms nothing — only the exact value \"1\" caps sub-agents at one; remove the key or set it to \"1\"",
+			name, EnvDisableParallelSubagents), true
+	}
+	pool, declared := BackendPoolTokens(profile)
+	if !declared {
+		return "", false
+	}
+	// Asked through the same accessor the gate uses, so an operator-set floor moves the warning with
+	// it and a lint that disagreed with the runtime is not representable.
+	floor := BackendChildFloorTokens(profile)
+	if pool >= floor {
+		return "", false
+	}
+	// The consequence differs by profile shape and the message has to say which, or its remedy is
+	// wrong. The dispatch gate resolves a backend from ANTHROPIC_BASE_URL and is inert without one, so
+	// on a profile that declares no endpoint a below-floor pool refuses nothing — the pool itself is
+	// the inert declaration, and telling that operator to "raise the pool" would have them change a
+	// number that was never read.
+	if profile[envBaseURL] == "" {
+		return fmt.Sprintf("model %q sets %s to %d, below the %d-token child footprint floor, but declares no %s — the dispatch gate resolves a backend from that key and is inert without it, so this pool is never read; remove it or declare the endpoint it belongs to",
+			name, EnvBackendPoolTokens, pool, floor, envBaseURL), true
+	}
+	return fmt.Sprintf("model %q sets %s to %d, below the %d-token child footprint floor, so every sub-agent launch on this backend will be refused; raise the pool or lower %s",
+		name, EnvBackendPoolTokens, pool, floor, EnvBackendChildFloorTokens), true
+}
+
 // PairingLintProfile reports the one profile shape that is legal but incoherent: a model id
 // the host does not recognise as its own, declaring an auto-compact window larger than the
 // window the host will assume for it, with no CLAUDE_CODE_MAX_CONTEXT_TOKENS to raise that
@@ -258,15 +491,20 @@ func PairingLintProfile(name string, profile map[string]string) (warning string,
 	if model == "" || strings.HasPrefix(model, claudeModelPrefix) {
 		return "", false
 	}
+	// The cap this lint warns about IS the resolver's fallback — one host assumption, asked for
+	// once rather than open-coded twice, so the two cannot drift. The silencing rule stays the
+	// lint's own: any non-empty companion silences, because the write boundary (:205-209) has
+	// already refused every companion value except "" and a positive decimal count.
+	assumed, _ := ResolveContextWindow(nil, 0)
 	declared, ok := DecimalTokenCount(profile[envCompactWindow])
-	if !ok || declared <= foreignModelWindow {
+	if !ok || declared <= uint64(assumed) {
 		return "", false
 	}
 	if profile[EnvMaxContextTokens] != "" {
 		return "", false
 	}
 	return fmt.Sprintf("model %q sets %s to %s for model id %q, which the host caps at %d; set %s to the model's real context window to raise it",
-		name, envCompactWindow, profile[envCompactWindow], model, foreignModelWindow, EnvMaxContextTokens), true
+		name, envCompactWindow, profile[envCompactWindow], model, assumed, EnvMaxContextTokens), true
 }
 
 // EndpointClassKeys is the inventory of requestable-model-class env keys an endpoint profile has to

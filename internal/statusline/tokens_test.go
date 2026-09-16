@@ -370,3 +370,23 @@ func TestTokenCounter_PartialTrailingLineNotConsumed(t *testing.T) {
 		t.Fatalf("offset %d ran past the bytes actually supplied (%d)", cur.Offset, len(truncated))
 	}
 }
+
+// Spend and Occupancy are two different questions about the same message and the difference between
+// them is exactly the cache split. That exclusion is a DESIGN decision (design-doc.md:420), not an
+// accident of which fields ScanUsage happens to decode — and until #668 nothing pinned it: because
+// usageRecord leaves both cache fields zero, folding them into Spend() moved no number and reddened
+// no test. The type is now shared with internal/cmd's step-close reader, which DOES fill all four,
+// so a later widening of usageRecord would turn that dormant mutation into a live jump in the
+// statusline's headline figure. This asserts the contract at the type, where it cannot go dormant.
+func TestMessageUsageSpendExcludesCacheOccupancyIncludesIt(t *testing.T) {
+	m := MessageUsage{InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 50_000, CacheCreationTokens: 3_000}
+
+	if got := m.Spend(); got != 1200 {
+		t.Errorf("Spend() = %d, want 1200 (input + output only); %d means the cache splits were folded in",
+			got, 1000+200+50_000+3_000)
+	}
+	if got := m.Occupancy(); got != 54_200 {
+		t.Errorf("Occupancy() = %d, want 54200; a cache-read token occupies the window exactly as an "+
+			"uncached one does — it is only cheaper", got)
+	}
+}

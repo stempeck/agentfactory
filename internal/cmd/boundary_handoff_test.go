@@ -15,6 +15,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/issuestore/memstore"
 	"github.com/stempeck/agentfactory/internal/statusline"
 	"github.com/stempeck/agentfactory/internal/telemetry"
+	"github.com/stempeck/agentfactory/internal/tokenomics"
 )
 
 // These tests do not run in parallel: TestBoundaryMatrix reassigns the boundaryHandoffExec
@@ -143,7 +144,14 @@ func TestShouldBoundaryHandoff(t *testing.T) {
 					// The ONLY cells that fire: a fresh, session-matched reading at or above
 					// the threshold on a non-gate close that has work following it.
 					want := st == "fresh" && lv.pct >= 75 && !kd.gateClose && kd.workFollows
-					got := shouldBoundaryHandoff(reading(st, lv.pct), cfg, kd.gateClose, kd.workFollows)
+					// Both pressure operands are false, which is the neutral value: #668 K7 OR's a
+					// no-fit verdict into the terminal comparison and #678 K6 OR's an efficiency
+					// relaunch in beside it, so every cell of the #622 matrix is unchanged by a
+					// factory whose admission mechanism is off, cold, or admitting and whose
+					// efficiency arm warrants nothing. TestBoundaryAdmission owns the true-operand
+					// half for admission; TestRepurposedMechanismFiresWithoutPressure owns it for
+					// efficiency.
+					got := shouldBoundaryHandoff(reading(st, lv.pct), cfg, kd.gateClose, kd.workFollows, false, false)
 					if got != want {
 						t.Errorf("shouldBoundaryHandoff(%s) = %v, want %v", name, got, want)
 					}
@@ -160,7 +168,7 @@ func TestShouldBoundaryHandoff_UnconfiguredThresholdNeverFires(t *testing.T) {
 	root := t.TempDir()
 	fresh := plantSessionSnapshot(t, root, "manager", "sessa", 99, 1000, now.Add(-10*time.Second), now)
 
-	if shouldBoundaryHandoff(fresh, config.StepContextConfig{}, false, true) {
+	if shouldBoundaryHandoff(fresh, config.StepContextConfig{}, false, true, false, false) {
 		t.Error("an unconfigured step_context fired the boundary; a zero threshold must be inert")
 	}
 }
@@ -205,7 +213,7 @@ func seedTwoStepBeads(t *testing.T, fx lifecycleFixture) (issuestore.Issue, issu
 	epic, step := seedFormulaBeads(t, fx)
 	if _, err := fx.mem.Create(t.Context(), issuestore.CreateParams{
 		Title: "Step 2", Parent: epic.ID, Type: issuestore.TypeTask,
-		Labels: []string{"formula-step"}, Assignee: fx.agent, Description: "Second",
+		Labels: []string{"formula-step", stepIDLabelPrefix + "step-2"}, Assignee: fx.agent, Description: "Second",
 	}); err != nil {
 		t.Fatalf("seed second step: %v", err)
 	}
@@ -553,16 +561,78 @@ func lastStepEnd(t *testing.T, root, agent string) telemetry.StepEvent {
 // the reader to run af prime for the next step — the formula is complete and the improvement
 // session inherits (marker + urgent self-mail). The mid-workflow message is unchanged.
 func TestBoundaryHandoffMessage(t *testing.T) {
-	mid := boundaryHandoffMessage(82, "step s1", false)
+	mid := boundaryHandoffMessage(82, "step s1", false, admission{}, efficiencyRelaunch{})
 	if !strings.Contains(mid, "run af prime for the next step") {
 		t.Errorf("mid-workflow handoff must point at the next step, got %q", mid)
 	}
+	if !strings.Contains(mid, "Context at 82%") {
+		t.Errorf("an occupancy-driven handoff must report the occupancy that drove it, got %q", mid)
+	}
 
-	final := boundaryHandoffMessage(82, "formula fx", true)
+	final := boundaryHandoffMessage(82, "formula fx", true, admission{}, efficiencyRelaunch{})
 	if strings.Contains(final, "run af prime for the next step") {
 		t.Errorf("final-step handoff must NOT say 'run af prime for the next step' (no next step), got %q", final)
 	}
 	if !strings.Contains(final, "af improvement complete") {
 		t.Errorf("final-step handoff must name the improvement-session inheritance, got %q", final)
+	}
+
+	// #668 K7: the projection can fire the boundary at an occupancy BELOW the configured bound, so
+	// the two causes must not be reported in the same words. Told "Context at 60%" against a 75%
+	// threshold, an operator reads a bug in the mechanism rather than a decision by it.
+	byAdmission := boundaryHandoffMessage(60, "step s1", false, admission{
+		decision:  tokenomics.Decision{Verdict: tokenomics.VerdictNoFit, ProjectedPct: 94, HeadroomPct: 85},
+		freshFits: true,
+	}, efficiencyRelaunch{})
+	if !strings.Contains(byAdmission, "projected at 94%") || !strings.Contains(byAdmission, "94% of the window against a 85% ceiling") {
+		t.Errorf("an admission-driven handoff must report the PROJECTION that drove it, got %q", byAdmission)
+	}
+	if strings.HasPrefix(byAdmission, "Context at 60%") {
+		t.Errorf("an admission-driven handoff must not be reported as an occupancy handoff, got %q", byAdmission)
+	}
+	if !strings.Contains(byAdmission, "from 60% after step s1") {
+		t.Errorf("the occupancy the projection was taken from is still worth reporting, got %q", byAdmission)
+	}
+
+	// #678 K6 adds a THIRD cause, and it needs its own words for the same reason the projection did:
+	// an efficiency relaunch fires at a healthy occupancy, so reporting it as "Context at 12%" tells
+	// an operator the boundary fired for no reason. Both shapes are covered — a level change names the
+	// level it is switching to, and a clean start (no level) names the multi-session history instead.
+	// Neither may report an occupancy or a projection: there is no window operand behind either.
+	admLearned := admission{stepLabel: "gate-a-verification", efficiency: tokenomics.EfficiencyPlan{
+		Inputs: tokenomics.EfficiencyInputs{PriorRuns: 4, ThinkingSharePct: 91, SessionsPerStep: 3},
+	}}
+	byLevel := boundaryHandoffMessage(12, "step s1", false, admLearned,
+		efficiencyRelaunch{mechanism: tokenomics.MechanismEffort, level: "medium", warranted: true})
+	for _, want := range []string{"gate-a-verification", "effort medium", "91 %", "4 runs"} {
+		if !strings.Contains(byLevel, want) {
+			t.Errorf("an effort-driven efficiency handoff must report %q, got %q", want, byLevel)
+		}
+	}
+	if strings.HasPrefix(byLevel, "Context at 12%") {
+		t.Errorf("an efficiency handoff must not be reported as an occupancy handoff, got %q", byLevel)
+	}
+
+	byCleanStart := boundaryHandoffMessage(12, "step s1", false, admLearned,
+		efficiencyRelaunch{mechanism: tokenomics.MechanismInterview, warranted: true})
+	for _, want := range []string{"gate-a-verification", "3 sessions", "4 runs"} {
+		if !strings.Contains(byCleanStart, want) {
+			t.Errorf("a clean-start efficiency handoff must report %q, got %q", want, byCleanStart)
+		}
+	}
+	if strings.Contains(byCleanStart, "effort") {
+		t.Errorf("a clean start applies no level and must not claim one, got %q", byCleanStart)
+	}
+
+	// The capacity clause wins when both fire. Not arbitrary precedence: a step that fits no session
+	// is the more urgent fact and the one that changes what the agent should do next, and reporting
+	// the efficiency reason instead would hide it.
+	both := boundaryHandoffMessage(60, "step s1", false, admission{
+		stepLabel: "gate-a-verification",
+		decision:  tokenomics.Decision{Verdict: tokenomics.VerdictNoFit, ProjectedPct: 94, HeadroomPct: 85},
+		freshFits: true,
+	}, efficiencyRelaunch{mechanism: tokenomics.MechanismEffort, level: "medium", warranted: true})
+	if !strings.Contains(both, "projected at 94%") {
+		t.Errorf("with both causes live the capacity clause must be reported, got %q", both)
 	}
 }

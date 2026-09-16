@@ -1,0 +1,11 @@
+{
+  "fixture": "dispatch_completion_enqueue",
+  "v": 1,
+  "cli_version": "2.1.224 (Claude Code)",
+  "provenance": "captured",
+  "captured_at": "2026-08-22",
+  "capture_method": "A parent session transcript's queue-operation/enqueue line written by real claude 2.1.224 (container run) when a background Agent child stopped with no live descendants, 14ms after the child's last sidechain write. Supplied by the design owner in PR #677 review thread PRRT_kwDORt0n_M6gDaCx comment 3 (databaseId 3953835355), redacted the way PAYLOAD-CAPTURE redacts: <output-file>, <result> and <usage> stripped, envelope and tags untouched. tool_use_id equals the launching Agent tool_use id; task_id equals the agent-<id>.jsonl sidechain name. ids are the run's own and identify nothing.",
+  "tool_use_id": "toolu_0199dpxpF3u3YfZne7BucC6s",
+  "task_id": "a58c907693140c74d",
+  "record": "{\"type\": \"queue-operation\", \"operation\": \"enqueue\", \"timestamp\": \"2026-08-22T22:06:20.191Z\", \"sessionId\": \"819a833c-9186-49a2-805a-0415b2c4d4bb\", \"content\": \"<task-notification>\\n<task-id>a58c907693140c74d</task-id>\\n<tool-use-id>toolu_0199dpxpF3u3YfZne7BucC6s</tool-use-id>\\n<output-file>REDACTED</output-file>\\n<status>completed</status>\\n<summary>Agent \\\"Verify Claude Code scheduler semantics\\\" finished</summary>\\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\\n<result>REDACTED (free text, stripped per PAYLOAD-CAPTURE's rule)</result>\\n<usage>REDACTED</usage>\\n</task-notification>\"}"
+}

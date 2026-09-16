@@ -136,7 +136,7 @@ func TestDetectRole_NestedDir(t *testing.T) {
 
 func TestReadHookSessionID_ValidJSON(t *testing.T) {
 	input := strings.NewReader(`{"session_id":"abc-123","source":"startup"}`)
-	id := readHookSessionID(input)
+	id := readHookPayload(input).SessionID
 	if id != "abc-123" {
 		t.Errorf("expected abc-123, got %s", id)
 	}
@@ -144,7 +144,7 @@ func TestReadHookSessionID_ValidJSON(t *testing.T) {
 
 func TestReadHookSessionID_EmptyInput(t *testing.T) {
 	input := strings.NewReader("")
-	id := readHookSessionID(input)
+	id := readHookPayload(input).SessionID
 	if id != "" {
 		t.Errorf("expected empty string, got %s", id)
 	}
@@ -152,7 +152,7 @@ func TestReadHookSessionID_EmptyInput(t *testing.T) {
 
 func TestReadHookSessionID_InvalidJSON(t *testing.T) {
 	input := strings.NewReader("not json at all")
-	id := readHookSessionID(input)
+	id := readHookPayload(input).SessionID
 	if id != "" {
 		t.Errorf("expected empty string for invalid JSON, got %s", id)
 	}
@@ -234,7 +234,7 @@ func TestPrimeAgent_SingleAgent(t *testing.T) {
 	var buf strings.Builder
 
 	agentDir := filepath.Join(root, ".agentfactory", "agents", "manager")
-	err := primeAgent(t.Context(), &buf, root, "manager", agentDir)
+	_, err := primeAgent(t.Context(), &buf, root, "manager", agentDir)
 	if err != nil {
 		t.Fatalf("primeAgent failed: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestPrimeAgent_UnknownAgent(t *testing.T) {
 	var buf strings.Builder
 
 	agentDir := filepath.Join(root, ".agentfactory", "agents", "nonexistent")
-	err := primeAgent(t.Context(), &buf, root, "nonexistent", agentDir)
+	_, err := primeAgent(t.Context(), &buf, root, "nonexistent", agentDir)
 	if err == nil {
 		t.Fatal("primeAgent should fail for unknown agent")
 	}
@@ -272,7 +272,15 @@ func TestPrimeAgent_UnknownAgent(t *testing.T) {
 // worktree.EnsureWorktreeLinks rather than hand-making a file, and then EXECUTES the rendered
 // instruction from the agent's own working directory. String-matching a path would prove the
 // anchor while saying nothing about reachability, and reachability is the whole point.
-func TestPrimeAgent_ManagerCatalogReference_ResolvesThroughWorktreeLocalRoot(t *testing.T) {
+// TestPrimeAgent_ManagerCatalogReference_ResolvesAtFactoryRoot pins #675 K2's one-RootDir rule for
+// prime's plain-prime identity render: a worktree agent's rendered catalog reference points at the
+// FACTORY root, not its worktree-local root. #575's commit 4c87f9b5 anchored the reference to the
+// worktree root; #681 T9 (F-contract-2) drops prime's FindLocalRoot override so every provisioning
+// site -- prime included -- renders the same factory-root RootDir the deployed CLAUDE.md carries,
+// making the two identity carriers K2 wants byte-identical actually agree. AGENTS.md is symlinked
+// into worktrees, so the factory-root read resolves the same live catalog with no functional loss;
+// the execution check below proves the rendered instruction still returns it.
+func TestPrimeAgent_ManagerCatalogReference_ResolvesAtFactoryRoot(t *testing.T) {
 	factoryRoot := setupTestFactoryForPrime(t)
 	catalogSentinel := "## BEGIN AgentFactory Agents\n| `manager` | interactive | Factory coordinator |\n"
 	if err := os.WriteFile(config.AgentsMdPath(factoryRoot), []byte(catalogSentinel), 0o644); err != nil {
@@ -281,7 +289,7 @@ func TestPrimeAgent_ManagerCatalogReference_ResolvesThroughWorktreeLocalRoot(t *
 
 	// A worktree nested under the factory root, carrying its OWN .factory-root marker -- exactly
 	// what config.FindLocalRoot detects and stops at, per its doc comment ("the worktree root for
-	// worktree agents").
+	// worktree agents"). The render must ignore it under K2.
 	worktreeRoot := filepath.Join(factoryRoot, ".agentfactory", "worktrees", "wt-real")
 	if err := os.MkdirAll(filepath.Join(worktreeRoot, ".agentfactory"), 0o755); err != nil {
 		t.Fatalf("mkdir worktree: %v", err)
@@ -300,23 +308,24 @@ func TestPrimeAgent_ManagerCatalogReference_ResolvesThroughWorktreeLocalRoot(t *
 	}
 
 	// Sanity-check the test's own premise: FindLocalRoot must actually diverge from factoryRoot
-	// here, or this test would pass vacuously regardless of the fix.
+	// here, or asserting the render points at the factory root (and NOT this worktree root) would
+	// pass vacuously regardless of the dropped override.
 	if lr, err := config.FindLocalRoot(agentDir); err != nil || lr != worktreeRoot {
 		t.Fatalf("test setup bug: FindLocalRoot(agentDir) = (%q, %v), want (%q, nil) -- the worktree-vs-factory-root divergence this test depends on isn't present", lr, err, worktreeRoot)
 	}
 
 	var buf strings.Builder
-	if err := primeAgent(t.Context(), &buf, factoryRoot, "manager", agentDir); err != nil {
+	if _, err := primeAgent(t.Context(), &buf, factoryRoot, "manager", agentDir); err != nil {
 		t.Fatalf("primeAgent failed: %v", err)
 	}
 	output := buf.String()
 
-	wantCmd := `cat "` + worktreeRoot + `/.agentfactory/AGENTS.md"`
+	wantCmd := `cat "` + factoryRoot + `/.agentfactory/AGENTS.md"`
 	if !strings.Contains(output, wantCmd) {
-		t.Errorf("primeAgent output should instruct reading the catalog at the agent's own local root (%q), got:\n%s", wantCmd, output)
+		t.Errorf("primeAgent output should instruct reading the catalog at the factory root (%q) per K2's one-RootDir rule, got:\n%s", wantCmd, output)
 	}
-	if strings.Contains(output, `cat "`+factoryRoot+`/.agentfactory/AGENTS.md"`) {
-		t.Errorf("primeAgent output reaches outside the worktree to the shared factory root -- agents should be pointed at the tree they work in, got:\n%s", output)
+	if strings.Contains(output, `cat "`+worktreeRoot+`/.agentfactory/AGENTS.md"`) {
+		t.Errorf("primeAgent output still anchors the catalog to the worktree-local root -- #681 T9 drops that override so prime renders the factory root every other site uses, got:\n%s", output)
 	}
 
 	// Run the actual extracted instruction from the agent's real working directory, proving it is
@@ -344,7 +353,10 @@ func TestPrimeAgent_ManagerCatalogReference_ResolvesThroughWorktreeLocalRoot(t *
 // rendered root must be ABSOLUTE, so every path derived from it works from any cwd. The original
 // bug was a bare cwd-relative reference, and it would return unnoticed if RootDir ever rendered
 // empty or relative -- an empty anchor still yields an absolute-LOOKING "/.agentfactory/..." path,
-// which is why this asserts the rendered root itself, in both production shapes.
+// which is why this asserts the rendered root itself, in both production shapes. Under #675 K2 /
+// #681 T9 that absolute root is the FACTORY root for both shapes: prime's FindLocalRoot override is
+// gone, so a worktree agent no longer renders its worktree-local root (the two identity carriers K2
+// wants byte-identical). Absoluteness -- the #575 fix -- is preserved either way.
 func TestPrimeAgent_RootDirIsAbsolute(t *testing.T) {
 	factoryRoot := setupTestFactoryForPrime(t)
 
@@ -357,7 +369,7 @@ func TestPrimeAgent_RootDirIsAbsolute(t *testing.T) {
 	}
 
 	for _, tc := range []struct{ name, agentDir, wantRoot string }{
-		{"worktree_agent", filepath.Join(worktreeRoot, ".agentfactory", "agents", "manager"), worktreeRoot},
+		{"worktree_agent", filepath.Join(worktreeRoot, ".agentfactory", "agents", "manager"), factoryRoot},
 		{"factory_agent", config.AgentDir(factoryRoot, "manager"), factoryRoot},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -365,7 +377,7 @@ func TestPrimeAgent_RootDirIsAbsolute(t *testing.T) {
 				t.Fatalf("mkdir agent dir: %v", err)
 			}
 			var buf strings.Builder
-			if err := primeAgent(t.Context(), &buf, factoryRoot, "manager", tc.agentDir); err != nil {
+			if _, err := primeAgent(t.Context(), &buf, factoryRoot, "manager", tc.agentDir); err != nil {
 				t.Fatalf("primeAgent failed: %v", err)
 			}
 			want := "- **Factory root**: `" + tc.wantRoot + "`"
@@ -494,7 +506,7 @@ func TestIsTestBinary_AllowsRealBinary(t *testing.T) {
 		{"af", false},
 		{"/usr/local/bin/af", false},
 		{"af-factory", false},
-		{"test", false},      // "test" without dot prefix is not a Go test binary
+		{"test", false},       // "test" without dot prefix is not a Go test binary
 		{"my.testing", false}, // not .test suffix
 	}
 	for _, tc := range testCases {
@@ -502,16 +514,6 @@ func TestIsTestBinary_AllowsRealBinary(t *testing.T) {
 		if got != tc.ok {
 			t.Errorf("suffix check for %q: got %v, want %v", tc.name, got, tc.ok)
 		}
-	}
-}
-
-// Scenario: runMailCheckInject is no-op under go test
-func TestRunMailCheckInject_NoOpUnderGoTest(t *testing.T) {
-	var buf strings.Builder
-	// Under go test, isTestBinary() returns true, so this should be a no-op
-	runMailCheckInject(&buf)
-	if buf.Len() != 0 {
-		t.Errorf("runMailCheckInject() should produce no output under go test, got %d bytes", buf.Len())
 	}
 }
 

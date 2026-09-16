@@ -24,7 +24,14 @@
       "ctx_observed_stale": false,
       "bound_exceeds_window": false,
       "interrupted_trigger": "",
-      "interrupted_observed_pct": null
+      "interrupted_observed_pct": null,
+      "out_tokens": 12400,
+      "think_tokens_est": 9300,
+      "thinking_share": 0.75,
+      "peak_ctx_tokens": 98500,
+      "subagent_tokens": 21000,
+      "repeat_reads": null,
+      "sessions": 1
     },
     {
       "agent": "manager",
@@ -48,7 +55,14 @@
       "ctx_observed_stale": null,
       "bound_exceeds_window": null,
       "interrupted_trigger": "",
-      "interrupted_observed_pct": null
+      "interrupted_observed_pct": null,
+      "out_tokens": null,
+      "think_tokens_est": null,
+      "thinking_share": null,
+      "peak_ctx_tokens": null,
+      "subagent_tokens": null,
+      "repeat_reads": null,
+      "sessions": null
     }
   ],
   "stats": {

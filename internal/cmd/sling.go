@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -40,6 +41,8 @@ var (
 	slingPersistent  bool
 	slingModel       string
 	slingSkipFitness bool
+	slingBare        bool
+	slingInputDigest string
 )
 
 // InstantiateParams contains parameters for formula instantiation.
@@ -59,6 +62,12 @@ type InstantiateParams struct {
 	// package global because the marker on disk is not written until session launch, i.e.
 	// after instantiation records what model the run began with.
 	Model string
+
+	// InputDigest is the caller's attestation of what this run was based on (#678 K1), threaded
+	// like CLIVars rather than read from the global so instantiation stays a function of its
+	// arguments — a record field whose value depended on the previously-run test's leftovers would
+	// be exactly the kind of unattributable figure this family exists to eliminate.
+	InputDigest string
 }
 
 var slingCmd = &cobra.Command{
@@ -77,7 +86,8 @@ Succession" for details.
 
 Examples:
   af sling --formula my-workflow --var issue=bd-42 --agent manager
-  af sling --agent ultraimplement "implement issue #42"`,
+  af sling --agent my-agent "implement issue #42"
+  af sling --agent my-agent --bare`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runSling,
 }
@@ -96,13 +106,24 @@ func init() {
 	slingCmd.Flags().BoolVar(&slingPersistent, "persistent", false, "Keep session alive after formula completion (do not auto-terminate). !IMPORTANT! ONLY used in formulas instructions, not ad-hoc specialist dispatch. Use with caution: the session will not auto-terminate on formula completion.")
 	slingCmd.Flags().StringVar(&slingModel, "model", "", "Per-agent model profile (or raw model id) from models.json — overrides the per-agent default for this launch")
 	slingCmd.Flags().BoolVar(&slingSkipFitness, "skip-fitness", false, "Launch a non-loopback model profile without a fitness attestation (loud override; see `af config models attest`)")
+	slingCmd.Flags().BoolVar(&slingBare, "bare", false, "Sling an --agent with no task, for a recurring or scheduled re-sling (creates no assignment bead)")
+	slingCmd.Flags().StringVar(&slingInputDigest, "input-digest", "", "SHA-256 (64 lowercase hex) of the frozen inputs this run is based on, recorded on the instance_start record")
 	rootCmd.AddCommand(slingCmd)
 }
 
 func runSling(cmd *cobra.Command, args []string) error {
 	start := time.Now()
 
-	if err := validateSlingArgs(slingFormulaName, slingAgent, args); err != nil {
+	if err := validateSlingArgs(slingFormulaName, slingAgent, args, slingBare); err != nil {
+		return err
+	}
+
+	// Rejected here, before anything is created, and REJECTED rather than ignored (#678 K1). This
+	// value is an attestation: it says the run was based on inputs whose content hashes to exactly
+	// this. A malformed digest accepted and recorded would be an attestation to nothing, and the
+	// records carrying it would be indistinguishable from records carrying a real one — so the
+	// failure has to happen while it is still the caller's problem.
+	if err := validateInputDigest(slingInputDigest); err != nil {
 		return err
 	}
 
@@ -129,7 +150,15 @@ func runSling(cmd *cobra.Command, args []string) error {
 
 	// Specialist dispatch: --agent without --formula
 	if slingFormulaName == "" && slingAgent != "" {
-		return dispatchToSpecialist(cmd, root, wd, slingAgent, args[0])
+		// A bare sling reaches here with no positional argument at all, so the task is read
+		// defensively rather than indexed. Downstream, an empty task is the signal for every
+		// task-conditional behaviour: no assignment bead, no positional-text bridge, no synthetic
+		// task var.
+		task := ""
+		if len(args) > 0 {
+			task = args[0]
+		}
+		return dispatchToSpecialist(cmd, root, wd, slingAgent, task)
 	}
 
 	// Formula instantiation path (existing behavior)
@@ -137,17 +166,53 @@ func runSling(cmd *cobra.Command, args []string) error {
 }
 
 // validateSlingArgs checks that the flag/arg combination is valid.
-func validateSlingArgs(formulaName, agent string, args []string) error {
+//
+// bare is threaded as a parameter rather than read from the package global so this stays a pure
+// predicate: sling_web_argv_contract_test.go asserts the web console's argv against it directly,
+// and a global read would make that cross-module contract depend on whatever the previously-run
+// test left behind. It follows the precedent --skip-fitness set, which was likewise threaded
+// through its call sites instead of reaching for the flag variable.
+func validateSlingArgs(formulaName, agent string, args []string, bare bool) error {
 	if formulaName == "" && agent == "" {
 		return fmt.Errorf("--formula is required unless --agent is provided with a task")
 	}
-	if formulaName == "" && agent != "" {
-		// Specialist dispatch requires a task string
+	if formulaName == "" && agent != "" && !bare {
+		// Specialist dispatch requires a task string. --bare waives exactly this rule and nothing
+		// else: a recurring schedule has no triggering item to describe (issue #610), so the
+		// dispatcher's fire argv carries no positional task at all. Every taskless invocation that
+		// does not opt in stays rejected with this message byte-for-byte.
 		if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
 			return fmt.Errorf("task description required: af sling --agent %s \"<task>\"", agent)
 		}
 	}
 	return nil
+}
+
+// inputDigestPattern is the shape of a SHA-256 hex digest and nothing else. Lowercase only, because
+// a digest is compared for equality by every consumer that will ever read it and two spellings of
+// the same hash would compare unequal — the check exists to make "same inputs" mean same inputs.
+var inputDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// inputDigestAnyCasePattern exists only to tell the caller WHICH rule it broke; it is never a
+// gate. Nothing is accepted through it.
+var inputDigestAnyCasePattern = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+
+// validateInputDigest accepts an absent digest and rejects a malformed one. The error NAMES the rule
+// rather than reporting a bad value, because the caller is a script that computed the hash and needs
+// to know which property it failed, not that its own argument came back.
+//
+// A correct-length digest is reported on its case rather than its length. `sha256sum | tr a-f A-F`,
+// or any of the several hashers that emit uppercase, produces exactly 64 characters, and telling
+// that caller "got 64 characters" describes the one property of its argument that was right.
+func validateInputDigest(digest string) error {
+	if digest == "" || inputDigestPattern.MatchString(digest) {
+		return nil
+	}
+	const rule = "--input-digest must be 64 lowercase hexadecimal characters (a SHA-256 digest)"
+	if inputDigestAnyCasePattern.MatchString(digest) {
+		return fmt.Errorf("%s, got uppercase hexadecimal", rule)
+	}
+	return fmt.Errorf("%s, got %d characters", rule, len(digest))
 }
 
 // dispatchToSpecialist instantiates the specialist agent's formula and launches
@@ -199,7 +264,7 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 				return requireOperatorTeardown("af sling --reset")
 			}
 		}
-		if err := mgr.Stop(); err != nil && err != session.ErrNotRunning {
+		if err := mgr.Stop(); err != nil && err != session.ErrNotRunning { //af:teardown:gated
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to stop %s: %v\n", agentName, err)
 		}
 		if err := resetAgentState(cmd.Context(), cmd.OutOrStdout(), root, agentName, config.CloseReasonResetSling); err != nil {
@@ -285,13 +350,14 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 	params := InstantiateParams{
 		Ctx:             cmd.Context(),
 		FormulaName:     entry.Formula,
-		CLIVars:         append(slingVars, fmt.Sprintf("task=%s", task)),
+		CLIVars:         buildSpecialistCLIVars(slingVars, task),
 		AgentName:       agentName,
 		Root:            root,
 		WorkDir:         agentDir,
 		TaskDescription: task,
 		CallerIdentity:  callerIdentity,
 		Model:           slingModel,
+		InputDigest:     slingInputDigest,
 	}
 
 	if _, _, _, err := instantiateFormulaWorkflow(params, cmd.OutOrStdout()); err != nil {
@@ -314,6 +380,27 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 	}
 
 	return launchAgentSession(cmd, root, agentName, worktreePath, worktreeID, slingModel, slingSkipFitness)
+}
+
+// buildSpecialistCLIVars appends the synthetic task var to the operator's --var list, and only
+// when there is a task to carry.
+//
+// The synthetic element goes on LAST and parseCLIVars is last-wins, so appending it
+// unconditionally would let an empty task blank out a caller's own `--var task=...`. That is not
+// hypothetical: a bare sling is precisely the taskless case, and a recurring schedule's standing
+// vars are the one place a `task` key is likely to be set deliberately. A bare sling therefore
+// carries no task var at all — matching the design's "no auto-bead, no task var" — while a
+// task-bearing dispatch is byte-identical to before.
+//
+// The input slice is copied rather than appended to in place: slingVars is a package global backed
+// by a shared array, and two dispatches in one process must not see each other's synthetic var.
+func buildSpecialistCLIVars(vars []string, task string) []string {
+	out := make([]string, len(vars), len(vars)+1)
+	copy(out, vars)
+	if task == "" {
+		return out
+	}
+	return append(out, fmt.Sprintf("task=%s", task))
 }
 
 // resolveSpecialistAgent loads agents.json and validates that the named agent
@@ -378,6 +465,7 @@ func runFormulaInstantiation(cmd *cobra.Command, root, wd string, args []string)
 		Root:        root,
 		WorkDir:     wd,
 		Model:       slingModel,
+		InputDigest: slingInputDigest,
 	}
 
 	_, _, agentName, err := instantiateFormulaWorkflow(params, cmd.OutOrStdout())
@@ -609,6 +697,29 @@ func instantiateFormulaWorkflow(params InstantiateParams, w io.Writer) (string, 
 		ev := telemetryRecordFor(ctx, params.Root, params.WorkDir, agentName, instanceID, params.Model)
 		ev.Event = telemetry.EventInstanceStart
 		ev.Formula = telemetryFormulaName(f.Name)
+		// formulaPath and not f: expandStepVars has already rewritten this run's --var values into
+		// the parsed formula above, so hashing f would give one file as many identities as it had
+		// invocations. Inside the gate because a digest with no record to ride on has nowhere to
+		// go, and a telemetry-off sling should pay no extra read — which is also why the read sits
+		// here rather than beside FindFormulaFile: nothing rewrites the file in between, so the
+		// only thing moving it earlier would buy is a read that a telemetry-off sling still paid.
+		//
+		// The error is dropped deliberately. An unreadable formula file yields "", and an omitempty
+		// empty string is "nobody recorded this" — the honest answer on a lifecycle path where
+		// observability never blocks work.
+		ev.FormulaDigest, _ = formulaSHA256(formulaPath)
+
+		// #678 K1: what binary, on what tree, under what posture, from what inputs. Settled once, at
+		// instantiation, and deliberately not echoed onto the step records — a per-step copy of a
+		// per-run fact invites a reader to believe a step whose value differed had observed
+		// something, when all it could ever be is a re-read of the same state.
+		//
+		// No effort_level: that is a property of a SESSION, and at this point in a formula launch no
+		// session exists to have one. The record kind that carries it is session_start.
+		ev.AFVersion, ev.AFCommit = Version, Commit
+		ev.TokenomicsState = tokenomicsState(params.Root)
+		ev.CheckoutCommit = checkoutCommit(params.WorkDir)
+		ev.SlingDigest = params.InputDigest
 		appendTelemetryRecord(params.Root, ev)
 	}
 
@@ -752,7 +863,7 @@ func instantiateFormula(ctx context.Context, store issuestore.Store, f *formula.
 			Title:       fmt.Sprintf("Step: %s", title),
 			Description: desc,
 			Assignee:    assigneeForStep(f, stepID, slingAgent),
-			Labels:      []string{"formula-step", fmt.Sprintf("step-id:%s", stepID)},
+			Labels:      []string{"formula-step", stepIDLabelPrefix + stepID},
 		})
 		if err != nil {
 			return instanceID, stepIDs, fmt.Errorf("creating step bead for %q: %w", stepID, err)
@@ -943,7 +1054,8 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 		return modelErr
 	}
 	if len(modelEnv) > 0 {
-		mgr.SetModelEnv(modelEnv)
+		nextStep, formula := nextReadyStep(cmd.Context(), root, agentDir)
+		mgr.SetModelEnv(withEffortLevel(root, agentDir, modelEnv, nextStep, formula))
 	}
 	// Profile-key universe (issue #602), wired UNCONDITIONALLY — deliberately not inside the
 	// guard above. A launch that resolves no profile is exactly the case that must still clear

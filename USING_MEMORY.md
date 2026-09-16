@@ -60,6 +60,15 @@ including a `status:` you change by hand to retire a note. A file that already c
 frontmatter keeps its fields on import; a plain Claude Code memory file is stamped with fresh
 frontmatter, so a later triage can tell a seeded note from one an agent observed itself.
 
+**The vault reaches the agent on its own.** `af memory check --inject` is registered as its own
+`SessionStart` hook entry — not chained behind `af prime` — so an agent opens every session already
+holding its top notes (up to 5, ≤ 4 KB of note bodies; **4,736 B** including the framing text). Being
+its own entry is what makes that budget meaningful: it is spent independently of the identity file
+and of mail, so a large formula step or a full mailbox cannot crowd the vault out, and an empty vault
+costs nothing at all. Everything past the top 5 stays one `af memory list` away. That is also why
+subject lines are worth writing well — the injected block is the first thing the agent reads, and a
+note that does not earn its place in the top 5 is only found by an agent that goes looking.
+
 **`import` seeds; it does not merge.** Every imported file is recorded as a *new* note, so
 importing an export back into the container it came from duplicates every note rather than
 updating it — and a note you retired on the host lands as a second, expired copy while the

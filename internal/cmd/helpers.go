@@ -73,7 +73,7 @@ type cmdTmux interface {
 	IsAvailable() bool
 	HasSession(name string) (bool, error)
 	NewSession(name, workDir string) error
-	KillSession(name string) error
+	KillSession(name string) error //af:teardown:decl
 	SendKeys(session, keys string) error
 	SendKeysDelayed(session, keys string, delayMs int) error
 	GetPaneCommand(session string) (string, error)
@@ -103,12 +103,12 @@ type authKillGuard struct{ cmdTmux }
 // It emits the AC-6 refusal directly rather than via requireOperatorTeardown, which would
 // double-write the K4 forensic breadcrumb. No recursion: callerAuthority short-circuits on
 // AF_ROLE, else its CurrentSessionName query delegates straight through the embed.
-func (g authKillGuard) KillSession(name string) error {
+func (g authKillGuard) KillSession(name string) error { //af:teardown:decl
 	if callerAuthority() == AuthorityAgent &&
 		!isSelfSession(name) && !isSelfTmuxSession(name) && !isSelfSessionID(name) {
 		return errors.New(teardownRefusal("KillSession " + name))
 	}
-	return g.cmdTmux.KillSession(name)
+	return g.cmdTmux.KillSession(name) //af:teardown:self
 }
 
 // newCmdTmux is the seam tests override to inject a fake tmux client into the cmd-layer
@@ -134,7 +134,7 @@ type RespawnOptions struct {
 	// agent dir here to make the respawn marker-read match the launch marker-write.
 	AgentWorkDir string
 	Tx           respawnTmux
-	// Trigger names which class of recycle this is — one of the eight trigger constants in
+	// Trigger names which class of recycle this is — one of the ten trigger constants in
 	// recovery.go. No existing field can carry it: FactoryRoot/AgentName/PaneID identify WHO is
 	// being recycled, never WHY, and the four call sites reach the funnel from causes that share
 	// no other distinguishing state (a crash and an agent-invoked handoff differ in nothing else
@@ -170,7 +170,13 @@ func respawnSession(opts RespawnOptions) error {
 	// rather than failing. Emission is structural: BuildStartupCommand() re-emits the
 	// set, so no second emission path is added here (handoff_test transitivity guard).
 	if _, env, _ := resolveRespawnModelEnv(opts.FactoryRoot, opts.AgentName, respawnAgentDir(opts), opts.AgentEntry.Model, os.Stderr); len(env) > 0 {
-		mgr.SetModelEnv(env)
+		// #678 K5: context.Background() because a respawn is not a request. This function takes no
+		// ctx — every one of its four callers reaches it from a recycle decision rather than from a
+		// cobra invocation — and adding one would change a signature four call sites share for a
+		// cancellation nothing here can honour: the pane is replaced by the last statement below.
+		agentDir := respawnAgentDir(opts)
+		nextStep, formula := nextReadyStep(context.Background(), opts.FactoryRoot, agentDir)
+		mgr.SetModelEnv(withEffortLevel(opts.FactoryRoot, agentDir, env, nextStep, formula))
 	}
 
 	// Profile-key universe across respawns (issue #602), wired UNCONDITIONALLY — NOT inside
@@ -197,10 +203,14 @@ func respawnSession(opts RespawnOptions) error {
 	// the audit trail is anchored HERE rather than in the occupancy executor: crash, error_pattern,
 	// compact_handoff, self_handoff and step_boundary_handoff never touch that executor, and
 	// logging there would have left every one of them unrecorded and unfenced while appearing to
-	// satisfy AC-6's "every factory-initiated recovery". Both helpers live in recovery.go so this
-	// file needs no new import: teardown_scanner_enforce_test.go pins helpers.go:76/:106/:111 by
-	// line number, and one added import would fail that unrelated conformance test.
+	// satisfy AC-6's "every factory-initiated recovery". The anchor's reach ends where the phrase
+	// does: a session the FACTORY did not recycle never arrives here, which is why #668 H-R3's two
+	// classes are recorded by the evaluator that notices them instead. Both helpers live in
+	// recovery.go, which is a placement convenience rather than a constraint:
+	// teardown_scanner_enforce_test.go keys its allowlist on //af:teardown sentinels, not on line
+	// numbers, so moving code within this file or adding an import to it is free.
 	provisionRecycleSettings(opts)
+	provisionIdentity(opts)
 	_ = tx.ClearHistory(opts.PaneID)
 	// The respawn error is captured, recorded, then returned UNCHANGED. Letting the log write
 	// decide the return value would both mask a real respawn failure and break this function's
@@ -288,6 +298,20 @@ func captureCheckpointWithFormula(ctx context.Context, cwd, notes string, mutate
 			if len(result.Steps) > 0 {
 				cp.WithFormula(formulaID, result.Steps[0].ID, result.Steps[0].Title)
 			}
+			// #668 K8. Every recycle leg that preserves context comes through here, so the
+			// interview is conducted here too — one enrichment reaching the cooperative boundary,
+			// the self handoff and the PreCompact intercept at once. The involuntary watchdog kill
+			// is not on this path and gets no brief, which is honest: a killed session conducted
+			// no interview.
+			//
+			// STATED DEVIATION — this file is on the phase plan's READ ONLY list. AC-2 wants the
+			// brief on all three legs and Gotcha 9 names this function as the only place all three
+			// meet, so the alternatives were enriching at each call site (three copies, and one of
+			// them in compact_handoff.go, which the plan's file list does not contain either) or
+			// leaving a leg without a brief. The deviation is held to one call: the interview
+			// itself lives in handoff.go, and no import was added here, so the three line-pinned
+			// teardown sites above are unmoved.
+			conductResumeInterview(ctx, store, cp, formulaID, result)
 		}
 	}
 

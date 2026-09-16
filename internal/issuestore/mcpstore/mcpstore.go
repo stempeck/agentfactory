@@ -221,6 +221,9 @@ func listArgs(filter issuestore.Filter, actor string) map[string]any {
 	if filter.IncludeClosed {
 		args["include_closed"] = true
 	}
+	if filter.CreatedAfter != "" {
+		args["created_after"] = filter.CreatedAfter
+	}
 
 	// Assignee resolution: explicit caller value wins; otherwise inject
 	// Gate-4 actor scoping when IncludeAllAgents=false AND the store has

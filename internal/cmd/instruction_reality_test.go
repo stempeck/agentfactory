@@ -223,9 +223,14 @@ func shippedInstructionRefs(t *testing.T) []afRef {
 
 // renderedImprovementInstruction substitutes the template exactly as improvementInstruction does,
 // with a formula name and an absolute store path standing in for a real one.
+//
+// The #678 K10 clause is appended here too, and this gate must scan the LONGEST form the agent can
+// receive. Scanning only the template would leave the clause permanently outside the resolver: a
+// future edit could name an af command there that does not exist and nothing would say so.
 func renderedImprovementInstruction() string {
 	return fmt.Sprintf(improvementInstructionTemplate,
-		"example", "/factory/.agentfactory/store/formulas/example.formula.toml", "example", "example")
+		"example", "/factory/.agentfactory/store/formulas/example.formula.toml", "example", "example") +
+		improvementEfficiencyClause
 }
 
 // scaffoldDirectiveText reads the REAL seeded agents.json literal out of install.go rather than a

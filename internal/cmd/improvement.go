@@ -18,6 +18,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/formula"
 	"github.com/stempeck/agentfactory/internal/lock"
+	"github.com/stempeck/agentfactory/internal/telemetry"
 )
 
 var improvementCmd = &cobra.Command{
@@ -138,6 +139,20 @@ type improvementMarker struct {
 	TerminateOnComplete bool   `json:"terminate_on_complete"`
 	FormulaSHA256       string `json:"formula_sha256"`
 	FiredAt             string `json:"fired_at"`
+
+	// #678 K10. TokenomicsState is the umbrella as tokenomicsState() resolved it at fire time —
+	// the same function and the same closed vocabulary the instance_start record uses, so the
+	// marker and the record can never disagree about a run's posture.
+	//
+	// Semantics is the pre-edit fingerprint the completion verb's lint counts against. It is
+	// captured here because there is nowhere else it could come from: the store copy IS the edit
+	// target, so by completion the "before" has been overwritten; FormulaSHA256 says whether the
+	// file moved but is not invertible; and install_formulas/ is the PROMOTION source (see the
+	// package comment above), equal to the store copy only immediately after an install. nil means
+	// no baseline — an older binary's marker, or a formula that would not parse at fire time — and
+	// the lint then says nothing rather than inventing a delta.
+	TokenomicsState string                `json:"tokenomics_state,omitempty"`
+	Semantics       *improvementSemantics `json:"semantics,omitempty"`
 }
 
 // writeImprovementMarker writes the JSON marker to the resolved agent dir
@@ -239,6 +254,20 @@ af memory add --type improvement --formula %s --subject "<what you learned>"
 Skip this if the whole learning is already in the diff. When finished, run:
 af improvement complete`
 
+// improvementEfficiencyClause is the one sentence #678 K10 adds, appended only when the tokenomics
+// umbrella is on. Umbrella off ⇒ the instruction is byte-identical to what #483 shipped.
+//
+// A separate const rather than a fifth verb in the template above, for two reasons. The template's
+// four verbs are already spoken for by name/path/name/name, and a fifth would break every existing
+// render site including the T-REALITY gate's (instruction_reality_test.go:226-228). The reason that
+// matters more: a formatting verb is the ONLY way task-derived text could reach this string. There
+// is none here, so there is none possible, and the template's trust boundary is unchanged rather
+// than merely unviolated.
+const improvementEfficiencyClause = "\n\n" +
+	"This factory is optimising token efficiency: before Phase 2, run the skill's Efficiency " +
+	"Review (Phase 1.5b) and prefer edits that remove re-reads, re-verification and re-priming " +
+	"while keeping every gate, verbatim-capture directive and exit criterion intact."
+
 // The verification command takes the bare NAME, so `af formula show` resolves it through
 // formula.FindFormulaFile, which falls back to the home store (discover.go:34-36) while the
 // completion verdict joins the factory root directly with no fallback. The two therefore
@@ -259,7 +288,11 @@ type improvementFormula struct {
 // (agents.go:161 idiom), resolves the formula file under FormulasDir, exists-guards
 // it, and returns the STATIC instruction text. ok==false when the name is empty or
 // the file is absent (the "resolved formula file exists" fire conjunct).
-func improvementInstruction(root, formulaTitle string) (string, improvementFormula, bool) {
+//
+// tokenomicsOn is passed in rather than re-resolved from root, so the clause the agent receives
+// and the posture the marker records come from ONE reading of the umbrella. Re-reading here would
+// let a toggle flipped between the two reads ship an instruction the marker denies.
+func improvementInstruction(root, formulaTitle string, tokenomicsOn bool) (string, improvementFormula, bool) {
 	name := strings.TrimPrefix(formulaTitle, "Formula: ")
 	if name == "" {
 		return "", improvementFormula{}, false
@@ -271,11 +304,19 @@ func improvementInstruction(root, formulaTitle string) (string, improvementFormu
 	if _, err := os.Stat(f.AbsPath); err != nil {
 		return "", improvementFormula{}, false
 	}
-	return fmt.Sprintf(improvementInstructionTemplate, name, f.AbsPath, name, name), f, true
+	instruction := fmt.Sprintf(improvementInstructionTemplate, name, f.AbsPath, name, name)
+	if tokenomicsOn {
+		instruction += improvementEfficiencyClause
+	}
+	return instruction, f, true
 }
 
-// formulaSHA256 returns the full-hex sha256 of the formula file's bytes, recorded in
-// the marker at fire time so the completion verb can report changed/unchanged.
+// formulaSHA256 returns the full-hex sha256 of the formula file's bytes. Two callers want the
+// same fact about a formula from two ends of the lifecycle: the improvement marker records it at
+// fire time so the completion verb can report changed/unchanged, and af sling records it on the
+// instantiation telemetry so "were these two runs the same formula" is answerable from the record
+// log alone. Both need the RAW file and never the parsed Formula, whose --var substitutions would
+// give one file a new identity per invocation.
 func formulaSHA256(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -295,7 +336,11 @@ func formulaSHA256(path string) (string, error) {
 // no marker pre-exists, and the marker was written. When fired==false and reason!="",
 // the caller records a skip and warns; reason=="" is a silent, non-error no-fire (the
 // agent opted out, or a marker already exists).
-func evaluateImprovementFire(cwd, factoryRoot, instanceID, caller, formulaTitle string, terminateOnComplete bool) (fired bool, agent, instruction, reason string) {
+//
+// tokenomicsOn (#678 K10) is the resolved umbrella, read ONCE by the caller and used here for both
+// of the things that depend on it — whether the instruction carries the efficiency clause, and what
+// posture the marker records. Two reads could disagree; one cannot.
+func evaluateImprovementFire(cwd, factoryRoot, instanceID, caller, formulaTitle string, terminateOnComplete, tokenomicsOn bool) (fired bool, agent, instruction, reason string) {
 	agent, err := detectAgentName(cwd, factoryRoot)
 	if err != nil {
 		return false, "", "", fmt.Sprintf("agent name unresolved: %v", err)
@@ -311,13 +356,17 @@ func evaluateImprovementFire(cwd, factoryRoot, instanceID, caller, formulaTitle 
 	if _, exists := readImprovementPending(factoryRoot, agent); exists {
 		return false, agent, "", "" // idempotence: a marker already exists
 	}
-	instruction, formula, ok := improvementInstruction(factoryRoot, formulaTitle)
+	instruction, formula, ok := improvementInstruction(factoryRoot, formulaTitle, tokenomicsOn)
 	if !ok {
 		return false, agent, "", fmt.Sprintf("formula file not found for %q", formulaTitle)
 	}
 	sha, err := formulaSHA256(formula.AbsPath)
 	if err != nil {
 		return false, agent, "", fmt.Sprintf("formula sha256: %v", err)
+	}
+	state := telemetry.TokenomicsStateOff
+	if tokenomicsOn {
+		state = telemetry.TokenomicsStateOn
 	}
 	marker := improvementMarker{
 		InstanceID:          instanceID,
@@ -327,6 +376,10 @@ func evaluateImprovementFire(cwd, factoryRoot, instanceID, caller, formulaTitle 
 		TerminateOnComplete: terminateOnComplete,
 		FormulaSHA256:       sha,
 		FiredAt:             time.Now().UTC().Format(time.RFC3339),
+		TokenomicsState:     state,
+		// A formula that will not parse is not a fire failure — #483's hook exists precisely to
+		// let an agent repair one — so an absent fingerprint degrades the lint rather than the run.
+		Semantics: improvementSemanticsOf(formula.AbsPath),
 	}
 	if err := writeImprovementMarker(factoryRoot, agent, marker); err != nil {
 		return false, agent, "", fmt.Sprintf("write marker: %v", err)
@@ -572,8 +625,16 @@ func runImprovementCompleteCore(agentDir, factoryRoot string, reap bool, note st
 
 	// In-process validation (ADR-014-safe; formula.ParseFile is pure Go). Branch on
 	// the RETURNED error, NOT `af formula show`'s exit code (which is always 0).
-	_, valErr := formula.ParseFile(absFormula)
+	parsed, valErr := formula.ParseFile(absFormula)
 	validationPassed := valErr == nil
+
+	// The post-edit half of the semantics lint (#678 K10). Nil when the edit left the formula
+	// unparseable, which the verdict already reports as validation FAILED — a lint that counted
+	// against half a parse would add a second, less legible way of saying the same thing.
+	var after *improvementSemantics
+	if validationPassed {
+		after = semanticsOfFormula(parsed)
+	}
 
 	// sha256 changed/unchanged verdict against the marker's recorded hash.
 	// A recompute error ⇒ treat as changed (the safe, visible verdict).
@@ -591,7 +652,10 @@ func runImprovementCompleteCore(agentDir, factoryRoot string, reap bool, note st
 	// does when they showed nothing. Read in-process (below) rather than shelled: this file's exec
 	// seams all no-op under isTestBinary().
 	contextNote := improvementContextNote(factoryRoot, marker.InstanceID, time.Now().UTC())
-	subject, body := improvementOutcomeMessage(marker.Formula, absFormula, changed, validationPassed, reap, note, contextNote)
+	semanticsNote := improvementSemanticsNote(marker.Semantics, after)
+	wasteNote := improvementWasteNote(factoryRoot, marker.InstanceID, marker.Semantics, after)
+	subject, body := improvementOutcomeMessage(marker.Formula, absFormula, changed, validationPassed, reap, note,
+		contextNote, semanticsNote, wasteNote)
 	// Print the body too, not just the subject: the subject carries no path, and the mail
 	// below goes to marker.Caller (an agent) or supervisor (an agent). Without this the
 	// formula path reaches no surface a human reads, so "from the verdict alone the
@@ -601,6 +665,11 @@ func runImprovementCompleteCore(agentDir, factoryRoot string, reap bool, note st
 	if err := sendImprovementOutcomeMail(recipient, subject, body); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: improvement outcome mail to %s failed: %v\n", recipient, err)
 	}
+
+	// LAST, and deliberately after the body above is composed: improvementContextNote and
+	// improvementWasteNote both read this run's own records in-process, so a record appended any
+	// earlier would be counted as evidence about itself.
+	recordImprovementSession(factoryRoot, agentDir, marker)
 
 	// Release the identity lock af done deferred (PID-agnostic file removal).
 	_ = lock.New(agentDir).Release()
@@ -734,11 +803,17 @@ func improvementContextEvidence(factoryRoot, instanceID string, now time.Time) (
 // note ⇒ the body is byte-identical to what #483 shipped, so adding the flag changes nothing for
 // every caller that does not pass it.
 //
-// contextNote (#622 HIGH-4) is appended to the BODY only, never the subject. The subject is a
-// fixed four-part label an asserter can prefix-match (TestImprovementComplete_ReapRelabelsOutcomeMail,
-// improvement_test.go:635), and the context review is a property of the run's evidence rather than
-// of the self-edit the subject labels. Empty means the note has nothing to add.
-func improvementOutcomeMessage(formulaName, formulaPath string, changed, validationPassed, reap bool, note, contextNote string) (subject, body string) {
+// bodyNotes are appended to the BODY only, never the subject. The subject is a fixed four-part
+// label an asserter can prefix-match (TestImprovementComplete_ReapRelabelsOutcomeMail,
+// improvement_test.go:635), and each of these is a property of the run's evidence rather than of
+// the self-edit the subject labels: the context review (#622 HIGH-4), then the semantics lint and
+// the waste ranking (#678 K10). Each is empty when it has nothing to add, which is what keeps the
+// no-notes body byte-identical to what #483 shipped.
+//
+// Variadic rather than three more positional strings: they are one kind of thing — a sentence this
+// verb learned and the operator should see — and spelling them as five trailing string parameters
+// would make the call site a row of quotes whose order only a reader of this signature could check.
+func improvementOutcomeMessage(formulaName, formulaPath string, changed, validationPassed, reap bool, note string, bodyNotes ...string) (subject, body string) {
 	changeWord := "unchanged"
 	if changed {
 		changeWord = "changed"
@@ -761,7 +836,9 @@ func improvementOutcomeMessage(formulaName, formulaPath string, changed, validat
 	if trimmed := strings.TrimSpace(note); trimmed != "" {
 		body += "\n\nAgent's note: " + trimmed
 	}
-	body += contextNote
+	for _, n := range bodyNotes {
+		body += n
+	}
 	return subject, body
 }
 

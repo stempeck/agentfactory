@@ -401,19 +401,24 @@ func TestPrimeNoNetworkIO(t *testing.T) {
 
 	t.Run("prime.go reaches no network package", func(t *testing.T) {
 		// A package-wide check is impossible: config_models.go already imports net/http. The
-		// scan is scoped to the file whose zero-network-I/O contract is being pinned.
-		fset := token.NewFileSet()
-		file, err := parser.ParseFile(fset, filepath.Join(".", "prime.go"), nil, parser.ImportsOnly)
-		if err != nil {
-			t.Fatalf("parsing prime.go: %v", err)
-		}
-		for _, imp := range file.Imports {
-			path, uerr := strconv.Unquote(imp.Path.Value)
-			if uerr != nil {
-				continue
+		// scan is scoped to the files whose zero-network-I/O contract is being pinned — which is
+		// every file af prime's own body reaches into, not just prime.go. #668 K7/K16 moved the
+		// economics and admission blocks into their own files; a guard that still parsed prime.go
+		// alone would keep passing while the contract moved out from under it.
+		for _, name := range []string{"prime.go", "prime_economics.go", "tokenomics_admission.go"} {
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, filepath.Join(".", name), nil, parser.ImportsOnly)
+			if err != nil {
+				t.Fatalf("parsing %s: %v", name, err)
 			}
-			if path == "net" || strings.HasPrefix(path, "net/") || path == "crypto/tls" {
-				t.Errorf("prime.go imports %q; af prime must perform zero network I/O", path)
+			for _, imp := range file.Imports {
+				path, uerr := strconv.Unquote(imp.Path.Value)
+				if uerr != nil {
+					continue
+				}
+				if path == "net" || strings.HasPrefix(path, "net/") || path == "crypto/tls" {
+					t.Errorf("%s imports %q; af prime must perform zero network I/O", name, path)
+				}
 			}
 		}
 	})
@@ -444,7 +449,7 @@ func seedFormulaBeads(t *testing.T, fx lifecycleFixture) (issuestore.Issue, issu
 	}
 	step, err := fx.mem.Create(ctx, issuestore.CreateParams{
 		Title: "Step 1", Parent: epic.ID, Type: issuestore.TypeTask,
-		Labels: []string{"formula-step"}, Assignee: fx.agent, Description: "First",
+		Labels: []string{"formula-step", stepIDLabelPrefix + "step-1"}, Assignee: fx.agent, Description: "First",
 	})
 	if err != nil {
 		t.Fatalf("seed step: %v", err)
@@ -843,16 +848,20 @@ func resetReportFlags(t *testing.T) {
 			t.Fatalf("reset --%s: %v", name, err)
 		}
 	}
-	set("instance", "")
-	set("agent", "")
-	set("export", "false")
-	set("json", "false")
-	t.Cleanup(func() {
+	clear := func() {
 		set("instance", "")
 		set("agent", "")
 		set("export", "false")
 		set("json", "false")
-	})
+		set("formula", "")
+		set("surface", "")
+		set("before", "")
+		set("after", "")
+		set("verify-input-digest", "")
+		set("fidelity", "")
+	}
+	clear()
+	t.Cleanup(clear)
 }
 
 func lineContaining(t *testing.T, out, needle string) string {

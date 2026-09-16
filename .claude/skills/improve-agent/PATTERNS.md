@@ -163,3 +163,40 @@ Verification examples by type:
 - **PR must be created**: `gh pr list --head "$BRANCH" --json url | jq -e '.[0]'`
 
 **Key principle**: Every agent claim of "done" gets mechanical verification. Trust but verify. The verification should check the ARTIFACT, not the agent's word.
+
+---
+
+## Authoring-Artifact Waste
+
+**When**: A step generates far more tokens than its output justifies — high `out_tokens` or `subagent_tokens` in `af telemetry report --instance <id> --json`, `"direction":"above"` in `af telemetry band --instance <id> --json` — and reading the step text shows it re-reading, re-copying or re-deriving something the run has already produced. Selected in Phase 1.5b.
+
+**Root cause**: The formula asks the agent to carry a whole artifact through the context window when it needs a fact ABOUT that artifact. Four spellings of the same mistake: a top-to-bottom re-read of a file an earlier step wrote, a re-verification sub-agent that re-derives an established fact, a re-copy table that reproduces content already on disk, and a sub-agent prompt handed a large file when a section would do.
+
+**Fix pattern — Extract once, carry the answer**:
+
+```bash
+# BEFORE: the step re-reads the whole artifact to answer one question about it,
+# and pays for the whole artifact every time it does.
+#   "Read reports/analysis.md top to bottom and confirm every section is present."
+
+# AFTER: extract mechanically, once, and carry only the answer forward.
+SECTIONS=$(grep -c '^## ' reports/analysis.md)
+if [ "$SECTIONS" -lt 5 ]; then
+  echo "GATE FAILED: reports/analysis.md has $SECTIONS sections, expected 5"
+  exit 1
+fi
+
+# A re-copy table becomes a digest check: the guarantee is that the content did
+# not drift, and a digest proves that without reproducing one byte of it.
+sha256sum -c reports/analysis.md.sha256 || exit 1
+
+# A sub-agent gets a SECTION, not the file. The prompt names what to read and
+# where it stops, so the sub-agent's window holds the work and not the archive.
+af sling --agent reviewer "Read only the '## Findings' section of reports/analysis.md \
+(lines $(grep -n '^## Findings' reports/analysis.md | cut -d: -f1) onward, up to the next '## ') \
+and list every finding that names no owner."
+```
+
+**Do not buy tokens with semantics.** The cheapest way to make a step generate less is to delete its gate, its `Verbatim` capture directive, or the artifact path it names — and that is not a saving, it is a regression that happens to be fast. `af improvement complete` counts the step-id set, the gate steps, the artifact paths named in step text and the protected directives before and after the edit, and reports the delta in the outcome mail. Phase 7's SEMANTICS PRESERVED check is the same test, run before you ship rather than after.
+
+**Key principle**: A step should pay for what it needs to KNOW, not for what it needs to know ABOUT. Replace a read with an extraction, a re-copy with a digest, and a whole-file sub-agent prompt with a scoped one — and change nothing the formula declares while doing it.

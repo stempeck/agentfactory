@@ -31,5 +31,21 @@
   "step_context": {
     "bound_tokens": 180000,
     "handoff_pct": 80
+  },
+  "tokenomics": {
+    "enabled": "on",
+    "budget": "on",
+    "thrift": "off",
+    "dispatch": "default",
+    "interview": "on",
+    "effort": "off",
+    "escalate": "off",
+    "efficiency": "off",
+    "efficiency_effort_level": "high",
+    "efficiency_thinking_share_pct": 55,
+    "efficiency_repeat_read_floor": 3,
+    "efficiency_max_relaunches": 2,
+    "admission_margin_pct": 25,
+    "learned_min_runs": 7
   }
 }

@@ -14,8 +14,6 @@ import (
 	"github.com/stempeck/agentfactory/internal/issuestore/memstore"
 )
 
-
-
 // setupTestFactoryForStep creates a minimal factory layout sufficient for
 // step.go's runStepCurrent: .agentfactory/factory.json at the tempdir root,
 // plus .agentfactory/store/ so config.StoreDir(factoryRoot) resolves. Returns

@@ -321,6 +321,46 @@ func RunStoreContract(t *testing.T, factory func(actor string) Store, setStatus 
 		}
 	})
 
+	t.Run("Filter_CreatedAfter_bounds_by_creation_time", func(t *testing.T) {
+		// Pins the store-level lower bound both adapters must honor so a
+		// whole-history read (mail's ListAll) does not grow without limit as an
+		// agent lives (#679/T7). memstore-only would leave production unbounded —
+		// the named partial-fix trap — so this runs against every backend.
+		ctx := context.Background()
+		store := factory("")
+
+		if _, err := store.Create(ctx, CreateParams{
+			Title: "created-after-early", Type: TypeTask, Assignee: "AF_ACTOR",
+		}); err != nil {
+			t.Fatalf("Create early: %v", err)
+		}
+		// A boundary captured strictly between the two creations, with margin on
+		// both sides so millisecond clock granularity cannot straddle it.
+		time.Sleep(5 * time.Millisecond)
+		boundary := time.Now().UTC()
+		time.Sleep(5 * time.Millisecond)
+		if _, err := store.Create(ctx, CreateParams{
+			Title: "created-after-late", Type: TypeTask, Assignee: "AF_ACTOR",
+		}); err != nil {
+			t.Fatalf("Create late: %v", err)
+		}
+
+		got, err := store.List(ctx, Filter{
+			IncludeAllAgents: true,
+			CreatedAfter:     boundary.Format("2006-01-02T15:04:05.000000Z"),
+		})
+		if err != nil {
+			t.Fatalf("List CreatedAfter: %v", err)
+		}
+		titles := titlesOf(got)
+		if !contains(titles, "created-after-late") {
+			t.Errorf("CreatedAfter dropped the issue created after the bound; got %v", titles)
+		}
+		if contains(titles, "created-after-early") {
+			t.Errorf("CreatedAfter returned the issue created before the bound; got %v", titles)
+		}
+	})
+
 	t.Run("Filter_IncludeAllAgents_admits_other_agents", func(t *testing.T) {
 		ctx := context.Background()
 		store := factory("")

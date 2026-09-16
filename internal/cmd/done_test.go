@@ -17,6 +17,8 @@ import (
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/issuestore/memstore"
+	"github.com/stempeck/agentfactory/internal/telemetry"
+	"github.com/stempeck/agentfactory/internal/tokenomics"
 )
 
 // errOnListStore wraps an issuestore.Store and returns a configured error
@@ -2207,5 +2209,175 @@ func writeRuntimeFile(t *testing.T, dir, name, value string) {
 	os.MkdirAll(runtimeDir, 0o755)
 	if err := os.WriteFile(filepath.Join(runtimeDir, name), []byte(value), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// efficiencyHandoffRecords counts the intervention records that attribute an ENFORCEMENT relaunch to the
+// efficiency arm — Action=Handoff with Objective=efficiency — across both mechanisms that can warrant one
+// (the level-driven effort arm and the clean-start interview arm). It is the count a DECLINED boundary
+// must leave at zero: a relaunch that never happened must file no record claiming it did.
+func efficiencyHandoffRecords(t *testing.T, root, agent string) int {
+	t.Helper()
+	byMech := interventionsByMechanism(t, root, agent)
+	n := 0
+	for _, mech := range []string{string(tokenomics.MechanismEffort), string(tokenomics.MechanismInterview)} {
+		for _, r := range byMech[mech] {
+			if r.Action == telemetry.ActionHandoff && r.Objective == telemetry.ObjectiveEfficiency {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// TestDeclinedStepBoundaryFilesNoEfficiencyRecord pins the STEP leg: an efficiency relaunch's enforcement
+// record is written only when the boundary actually relaunches, not before. A boundary that DECLINES down
+// its no-tmux-pane path files NO handoff record — the AC-4 join holds on the SUCCESS path and does not
+// require writing on the decline path; a phantom record would credit the arm with a firing Phase 7 would
+// measure and cannot see was refused.
+//
+// Same no-pane decline fixture as TestDeclinedBoundaryDoesNotBumpCap (which pins the relaunch cap on the
+// same path), but asserting on the RECORD rather than the cap. The record is enforcement, so it is written
+// whatever the telemetry toggle says — no gateOn is needed and its absence proves nothing.
+//
+// These tests do not run in parallel, for boundary_handoff_test.go:21-22's reason.
+func TestDeclinedStepBoundaryFilesNoEfficiencyRecord(t *testing.T) {
+	now := boundaryTestNow()
+	fx := newLifecycleFixture(t)
+
+	step := armBoundaryFixture(t, fx)
+	instanceID := readHookedFormulaID(fx.workDir)
+	if instanceID == "" {
+		t.Fatal("fixture did not persist .runtime/hooked_formula")
+	}
+
+	declareWindow(t, fx.root, roomyWindowTokens)
+	armEfficiency(t, fx.root, nil)
+	model, _ := resolveRecordModel(fx.root, fx.workDir, fx.agent, "")
+
+	// A clean-start-warranting history for the next ready step, so efficiency is warranted and — at an
+	// occupancy below the handoff threshold — is the SOLE cause of the boundary (efficiencyCausedBoundary
+	// is true), which is the exact case that reaches the enforcement record.
+	a := reducibleAggregate()
+	a.SessionsPerStep = 3
+	seedEfficiency(t, fx.root, "offpath", "step-2", model, a)
+
+	writeRuntimeFile(t, fx.workDir, "session_id", "sessa")
+	plantSessionSnapshot(t, fx.root, fx.agent, "sessa", 60, 1000, now.Add(-10*time.Second), now)
+
+	// No pane: runBoundaryHandoff declines (done.go's no-TMUX_PANE gate).
+	t.Setenv("TMUX", "")
+	t.Setenv("TMUX_PANE", "")
+
+	if err := runDoneCore(t.Context(), fx.workDir, false, ""); err != nil {
+		t.Fatalf("af done: %v", err)
+	}
+
+	if got := efficiencyHandoffRecords(t, fx.root, fx.agent); got != 0 {
+		t.Errorf("efficiency handoff records after a DECLINED step boundary = %d, want 0 — the record is "+
+			"written before the decline, so a relaunch that never happened is reported as one and Phase 7 "+
+			"counts a firing that was refused (step %s)", got, step.ID)
+	}
+}
+
+// TestDeclinedFormulaBoundaryFilesNoEfficiencyRecord pins the FORMULA/improvement sibling leg — a
+// PROTECTIVE guard. This leg's efficiency handoff record is unreachable by construction:
+// sendWorkDoneAndCleanup assembles the boundary admission with an empty step key, so
+// boundaryEfficiencyRelaunch warrants nothing (no learned aggregate under an empty key ⇒ CleanStart
+// false; an empty planned level ⇒ reducesEffort false) and efficiencyCaused is false. The reachable RED
+// lives on the step leg above. This drives the real improvement-firing all-complete boundary with
+// efficiency armed and no pane, and pins that the leg files no efficiency handoff record — the guard that
+// the symmetric move of BOTH legs' record-writes past the decline gates does not accidentally begin
+// writing one on the declined formula path.
+func TestDeclinedFormulaBoundaryFilesNoEfficiencyRecord(t *testing.T) {
+	t.Setenv("AF_ROLE", "alpha")
+	root := setupImprovementFiringFactory(t)
+	cwd := root
+	writeRuntimeFile(t, cwd, "formula_caller", "supervisor")
+
+	// startup.json + the tokenomics gate, so LoadStartupConfig succeeds (the leg is entered only when it
+	// does) and the efficiency arm is fully armed — the shape that would file a record if the leg's
+	// admission ever carried a warranted relaunch.
+	armEfficiency(t, root, nil)
+
+	mem := memstore.New()
+	instanceID := seedCompletedFormula(t, mem, "Formula: widget")
+
+	origMail := sendWorkDoneMail
+	sendWorkDoneMail = func(caller, instanceID, formulaName string, stepCount int) error { return nil }
+	defer func() { sendWorkDoneMail = origMail }()
+
+	// No pane: any boundary this path did reach would DECLINE.
+	t.Setenv("TMUX", "")
+	t.Setenv("TMUX_PANE", "")
+
+	captureOutErr(t, func() {
+		if err := sendWorkDoneAndCleanup(t.Context(), mem, cwd, root, instanceID, false); err != nil {
+			t.Fatalf("sendWorkDoneAndCleanup: %v", err)
+		}
+	})
+
+	if got := efficiencyHandoffRecords(t, root, "alpha"); got != 0 {
+		t.Errorf("efficiency handoff records after a DECLINED formula/improvement boundary = %d, want 0 — "+
+			"the formula sibling leg must file no efficiency record on the decline path", got)
+	}
+}
+
+// TestDeclinedBoundaryDoesNotBumpCap pins that the efficiency-relaunch cap is spent only when a relaunch
+// actually happens. done.go bumps the cap (bumpEfficiencyRelaunches) before it attempts the boundary
+// handoff, and runBoundaryHandoff returns down its decline paths (no tmux pane, an unresolvable role, a
+// failed respawn) without relaunching — so a boundary that DECLINES must leave the cap unchanged; a
+// decline that consumes a slot disarms the actuator early for a step it would have acted on.
+//
+// This drives the real af done entry point down the no-TMUX_PANE decline path with a boundary that fires
+// SOLELY for an efficiency reason (occupancy below the handoff threshold, a roomy window that admits, a
+// warranted clean-start relaunch).
+//
+// These tests do not run in parallel, for boundary_handoff_test.go:21-22's reason.
+func TestDeclinedBoundaryDoesNotBumpCap(t *testing.T) {
+	now := boundaryTestNow()
+	fx := newLifecycleFixture(t)
+
+	// A two-step formula in the more-steps position with step-1 primed; step-2 is the one the
+	// launching session would pick up and the one the boundary plan is resolved for.
+	step := armBoundaryFixture(t, fx)
+	instanceID := readHookedFormulaID(fx.workDir)
+	if instanceID == "" {
+		t.Fatal("fixture did not persist .runtime/hooked_formula")
+	}
+
+	declareWindow(t, fx.root, roomyWindowTokens)
+	armEfficiency(t, fx.root, nil)
+	model, _ := resolveRecordModel(fx.root, fx.workDir, fx.agent, "")
+
+	// A history that warrants a CLEAN START (SessionsPerStep 3), so boundaryEfficiencyRelaunch is
+	// warranted under the interview arm, which is on by default. Keyed on the formula the epic title
+	// resolves to ("offpath") and the next ready step's stable label ("step-2").
+	a := reducibleAggregate()
+	a.SessionsPerStep = 3
+	seedEfficiency(t, fx.root, "offpath", "step-2", model, a)
+
+	// A fresh reading BELOW the 75% handoff default: occupancy alone cannot fire the boundary, so
+	// efficiency is the sole cause and efficiencyCausedBoundary is true — the exact case that reaches
+	// bumpEfficiencyRelaunches.
+	writeRuntimeFile(t, fx.workDir, "session_id", "sessa")
+	plantSessionSnapshot(t, fx.root, fx.agent, "sessa", 60, 1000, now.Add(-10*time.Second), now)
+
+	if got := loadEfficiencyRelaunches(fx.workDir, instanceID); got != 0 {
+		t.Fatalf("the fixture already shows %d relaunches; the assertion below proves nothing", got)
+	}
+
+	// No pane: runBoundaryHandoff declines at tokenomics_admission handoff (done.go's no-TMUX_PANE gate).
+	t.Setenv("TMUX", "")
+	t.Setenv("TMUX_PANE", "")
+
+	if err := runDoneCore(t.Context(), fx.workDir, false, ""); err != nil {
+		t.Fatalf("af done: %v", err)
+	}
+
+	if got := loadEfficiencyRelaunches(fx.workDir, instanceID); got != 0 {
+		t.Errorf("efficiency-relaunch cap = %d after a boundary that DECLINED (no tmux pane), want 0 — "+
+			"the cap must be spent only when a relaunch actually happens, or a decline disarms the "+
+			"actuator early for step %s", got, step.ID)
 	}
 }

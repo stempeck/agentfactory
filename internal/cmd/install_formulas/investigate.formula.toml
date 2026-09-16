@@ -63,6 +63,8 @@ Write a concise report with:
 - Gotchas the implementer should know
 
 Write the report to `report.md` in your working directory (the artifact `af done` requires),
-then mail it to the dispatcher, replying to the originating issue so it stays threaded:
-`af mail send dispatcher --reply-to {{issue}} -s "<subject>" -m "<report body>"`.
+then mail it to the orchestrator that dispatched this work, replying to the originating issue
+so it stays threaded. `{{orchestrator}}` resolves to the dispatching agent (e.g. `manager`);
+do NOT send to a literal `dispatcher` — no such agent exists in the roster:
+`af mail send {{orchestrator}} --reply-to {{issue}} -s "<subject>" -m "<report body>"`.
 """

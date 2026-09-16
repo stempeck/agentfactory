@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/session"
+	"github.com/stempeck/agentfactory/internal/tokenomics"
 )
 
 func TestErrNotProvisioned_IsDetectable(t *testing.T) {
@@ -343,5 +345,58 @@ func TestUp_LaunchEcho_UsesResolvedModel(t *testing.T) {
 	out := runUpStartCapture(t, `{"type":"autonomous","description":"e"}`, "raw-model-x")
 	if !strings.Contains(out, "model: raw-model-x") {
 		t.Errorf("af up launch echo must show the RESOLVED model name even when entry.Model is empty; out=%q", out)
+	}
+}
+
+// TestRunUp_RelaunchClearsRefusalBreadcrumb pins BODY-4/F6: the af up relaunch cleanup must
+// sweep the dispatch_admit_last_refusal.json breadcrumb at the agent dir, exactly as formula
+// completion does (done.go:1064, guarded by TestDispatchRefusalBreadcrumb/"formula completion
+// clears the refusal"). Before the fix, up.go's relaunch block removes `dispatched` and
+// `dispatch_owner` and clears the reservation ledger, but leaves the refusal breadcrumb — so a
+// refusal earned in the last minutes of a session that died abnormally survives into the fresh
+// relaunched session and the observer relays it against a step that never earned it.
+//
+// This drives the same hermetic af up path as runUpStartCapture (AF_ROLE=caller reusing root as
+// its worktree), whose "Started" echo is emitted AFTER the relaunch cleanup block, so reaching
+// it proves the cleanup ran. RED before fix: readLastRefusal still returns ok. GREEN after.
+func TestRunUp_RelaunchClearsRefusalBreadcrumb(t *testing.T) {
+	const agentName = "echoagent"
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	setupHermeticSessions(t)
+
+	afDir := filepath.Join(root, ".agentfactory")
+	os.MkdirAll(afDir, 0o755)
+	os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{"type":"factory","version":1,"name":"test"}`), 0o644)
+	os.WriteFile(filepath.Join(afDir, "agents.json"),
+		[]byte(`{"agents":{"`+agentName+`":{"type":"autonomous","description":"e","model":"legacy-m"},"caller":{"type":"autonomous","description":"c","formula":"noop"},"manager":{"type":"interactive","description":"orchestrator"}}}`), 0o644)
+
+	agentDir := config.AgentDir(root, agentName)
+	os.MkdirAll(agentDir, 0o755)
+	writeLastRefusal(agentDir, "http://127.0.0.1:1234",
+		tokenomics.BackendVerdict{Verdict: tokenomics.VerdictNoFit, PoolTokens: 400000, SummedTokens: 380000}, time.Now())
+	if _, ok := readLastRefusal(agentDir); !ok {
+		t.Fatal("fixture: the refusal breadcrumb did not land before runUp")
+	}
+
+	t.Setenv("AF_WORKTREE", root)
+	t.Setenv("AF_WORKTREE_ID", "wt-mgr000")
+	t.Setenv("AF_ROLE", "caller")
+	t.Chdir(filepath.Join(afDir, "agents"))
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	err := runUp(cmd, []string{agentName})
+	out := buf.String()
+	if !strings.Contains(out, "Started "+session.SessionName(agentName)) {
+		t.Fatalf("agent must reach the Started launch echo (relaunch cleanup runs before it); err=%v out=%q", err, out)
+	}
+
+	if _, ok := readLastRefusal(agentDir); ok {
+		t.Error("af up relaunch carried the refusal breadcrumb into the fresh session; the observer " +
+			"would relay a dead session's refusal against a step that never earned it")
 	}
 }

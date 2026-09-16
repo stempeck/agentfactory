@@ -181,6 +181,25 @@ type ReportRowDTO struct {
 	// trigger classes that record none.
 	InterruptedTrigger     string   `json:"interrupted_trigger"`
 	InterruptedObservedPct *float64 `json:"interrupted_observed_pct"`
+
+	// #668 K10: what the step generated, as opposed to what its window held. Pointers for the
+	// reason stated above — only a closed step is scanned, so every one of these is `null` on an
+	// open row, and a plain int64 would re-encode that absence as a step that generated nothing.
+	//
+	// ThinkingShare is derived CLI-side rather than here. The console must not compute it: the
+	// guard against dividing by an uncounted generation is a rule, and two implementations of one
+	// rule is how a console comes to disagree with the CLI about the same step.
+	OutTokens      *int64   `json:"out_tokens"`
+	ThinkTokensEst *int64   `json:"think_tokens_est"`
+	ThinkingShare  *float64 `json:"thinking_share"`
+	PeakCtxTokens  *int64   `json:"peak_ctx_tokens"`
+	SubagentTokens *int64   `json:"subagent_tokens"`
+
+	// #679 F7: the two authoring-waste signals K10 ranks steps by. Pointers for the reason stated
+	// above — RepeatReads is `null` on a row that recorded none and on every open row, and Sessions
+	// is `null` where no closed window spanned the step; a plain int64 would re-encode both as 0.
+	RepeatReads *int64 `json:"repeat_reads"`
+	Sessions    *int64 `json:"sessions"`
 }
 
 // ReadStatsDTO mirrors internal/cmd/telemetry_json.go telemetryReadStatsJSON.

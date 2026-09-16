@@ -263,7 +263,7 @@ func (t *Tmux) HasSession(name string) (bool, error) {
 }
 
 // KillSession terminates a tmux session.
-func (t *Tmux) KillSession(name string) error {
+func (t *Tmux) KillSession(name string) error { //af:teardown:decl
 	if t.guardOp("kill-session", name) {
 		return nil
 	}

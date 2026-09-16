@@ -36,6 +36,7 @@ anchored to file:line or commit SHA.
 | [019](ADR-019-no-container-recreation.md) | af changes must never require recreating or destroying an existing factory container | Accepted | `quickdocker.sh:325-337,486-493`; `.designs/425` Rev-2; issue #428 |
 | [020](ADR-020-explicit-agent-installation.md) | Agent installation is explicit and customer-owned | Accepted | `internal/cmd/install.go:161`; `todos/stempeck_publish_oss.sh:208-213` |
 | [022](ADR-022-memory-vault-holds-durable-cross-task-learnings.md) | Memory vault holds durable cross-task learnings; ephemeral per-task/handoff state stays in mail and checkpoints | Accepted | `internal/memory/note.go:15-24`; `.designs/515/design-doc.md:16,19,66` |
+| [023](ADR-023-sessionstart-context-surface.md) | SessionStart context is three independent writers, one hook entry each; identity is delivered by every carrier except that hook | Accepted | `internal/claude/config/settings-autonomous.json:49-67`; `internal/cmd/prime.go:287`; `internal/cmd/identity_parity_test.go:49`; `.designs/675/design-doc.md:126,172` |
 
 ---
 

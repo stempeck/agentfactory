@@ -173,6 +173,61 @@ func TestStatuslineStatus_FirstLineGrepContract(t *testing.T) {
 	}
 }
 
+// TestStatuslineStatus_AlertsBlockNamesAgentClassReasonAndTheVerbThatClearsIt is the loud twin of
+// the pane token (#673 item 2). The pane has room for `⚠ HALT worker` and nothing else; an operator
+// who sees it needs to be told, in one place, which agent, which class, on what documented cause,
+// and what act clears it. It runs with the gate OFF deliberately: a factory whose statusline is
+// switched off is exactly the one where the pane cannot alarm, so the status verb must.
+func TestStatuslineStatus_AlertsBlockNamesAgentClassReasonAndTheVerbThatClearsIt(t *testing.T) {
+	root := setupConfigFactory(t)
+	if err := os.WriteFile(statuslineGateFile(root), []byte("off\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveRecoveryState(root, "worker",
+		recoveryState{Halted: true, HaltReason: haltReasonMaxAttempts, Attempts: 3}); err != nil {
+		t.Fatalf("plant breaker: %v", err)
+	}
+
+	out := statusStdout(t)
+
+	// Restated locally so this test fails BEFORE TestStatuslineStatus_FirstLineGrepContract does,
+	// and names the alerts block as the cause.
+	if first := strings.SplitN(out, "\n", 2)[0]; first != "statusline: off" {
+		t.Fatalf("the alerts block displaced the first-line grep contract: %q", first)
+	}
+	if !strings.Contains(out, "alerts:") {
+		t.Errorf("no alerts block in a factory with a halted breaker:\n%s", out)
+	}
+	if line := findLineWith(out, "worker", "HALT", haltReasonMaxAttempts); line == "" {
+		t.Errorf("no line names the agent, its class and the closed-vocabulary reason:\n%s", out)
+	}
+	if line := findLineWith(out, "af recovery reset worker"); line == "" {
+		t.Errorf("the block does not say what clears the alarm:\n%s", out)
+	}
+}
+
+// TestStatuslineStatus_AlertsBlockIsQuietAboutAQuietFactory is the negative twin: an alerts block
+// that enumerated the roster rather than the raised alarms would pass the test above and turn every
+// healthy factory's status into noise.
+func TestStatuslineStatus_AlertsBlockIsQuietAboutAQuietFactory(t *testing.T) {
+	root := setupConfigFactory(t)
+	if err := os.WriteFile(statuslineGateFile(root), []byte("on\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveRecoveryState(root, "worker", recoveryState{Attempts: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	out := statusStdout(t)
+
+	if strings.Contains(out, "HALT") || strings.Contains(out, "DARK") {
+		t.Errorf("a factory with no raised alarm reported one:\n%s", out)
+	}
+	if line := findLineWith(out, "worker"); line != "" {
+		t.Errorf("an agent with no raised alarm was named: %q", line)
+	}
+}
+
 // TestStatuslineOnOff_WritesExactGateBytes proves on/off write the gate the exact bytes.
 func TestStatuslineOnOff_WritesExactGateBytes(t *testing.T) {
 	root := setupConfigFactory(t)

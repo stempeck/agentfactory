@@ -29,17 +29,25 @@ Agent                      MergePatrol                    Git / GitHub
    │                    (run tests)                       │
    │                          │                           │
    │                    (if pass)                         │
-   │                          │ merge & push              │
+   │                          │ gh pr merge               │
    │                          │──────────────────────────>│
+   │                          │                           │
+   │                          │ verify mergedAt           │
+   │                          │<──────────────────────────│
    │                          │                           │
    │ MERGED (if agent known)  │  remove merge_ready label │
    │<─────────────────────────│──────────────────────────>│
    │                          │                           │
 ```
 
-After successful merge, MergePatrol sends MERGED mail back to the agent (if an agent
-name is associated with the PR) so it can complete cleanup. For label-only PRs with
-no associated agent, the label is removed and the PR is closed without MERGED mail.
+MergePatrol lands every PR through GitHub with `gh pr merge`, never by pushing content to the
+default branch itself. It then verifies that GitHub recorded the merge — `state` MERGED and a
+non-null `mergedAt` — before anything irreversible happens. That record is the single authority
+for "merged"; local git state may decide whether to attempt a merge, but never licenses a
+lifecycle action. After the merge is verified, MergePatrol sends MERGED mail back to the agent
+(if an agent name is associated with the PR) so it can complete cleanup. For label-only PRs with
+no associated agent, the label is removed after verification and no MERGED mail is sent.
+mergepatrol never closes PRs — unrecoverable cases are escalated with a bead.
 
 ## !IMPORTANT - MANDATORY Exact Step Execution
 Execute each formula step EXACTLY as written, in order, with no modifications.
@@ -60,7 +68,7 @@ your FIRST action is to ensure a formula instance is live:
   formula. The formula IS the patrol loop; looping lives in burn-or-loop, not outside it.
 """
 formula = "mergepatrol"
-version = 5
+version = 6
 
 [[steps]]
 id = "inbox-check"
@@ -89,22 +97,29 @@ An agent's work is ready for merge. Extract details and track for processing.
 # - Branch name
 # - Issue ID
 # - Agent name (REQUIRED for MERGED notification)
-# - PR URL (REQUIRED for closing after merge)
+# - PR URL (REQUIRED for merging via GitHub)
 ```
 
 **IMPORTANT**: You MUST track the agent name, PR URL, AND message ID - you will need them
-in merge-push step to send MERGED notification, close the PR, and delete the mail.
+in merge-push step to merge the PR on GitHub, send the MERGED notification, and delete the mail.
 
 Mark as read. The work will be processed in queue-scan/process-branch.
 **Do NOT delete yet** - delete after merge/reject decision in merge-push step.
 
 **Merge verification (REQUIRED before deleting in any later step)**:
-Before deleting any MERGE_READY message, you MUST verify the merge landed on main:
+Before deleting any MERGE_READY message, you MUST verify GitHub records the PR as merged.
+When a PR URL is known — the normal case — that record is the only authority:
 ```bash
-git log {{default_branch}} --oneline -10  # Confirm merge commit for this branch exists
-git diff --name-only {{default_branch}}...<branch>  # Should be empty if content is on main
+gh pr view <pr-url> --json state,mergedAt   # Require state MERGED and a non-null mergedAt
 ```
-Only delete after merge-push step confirms the merge landed.
+Only when no PR reference exists at all, fall back to the local content check below — and treat it
+as weak evidence, never as a licence to delete. A rebase reproduces commit messages verbatim, so
+local content can look right for a PR GitHub never recorded as merged:
+```bash
+git log {{default_branch}} --oneline -10  # Confirm the branch's work appears
+git diff --name-only {{default_branch}}...<branch>  # Should be empty if the content landed
+```
+Only delete after merge-push confirms the merge landed.
 
 **PATROL: Wake up**:
 MergePatrol detected PRs waiting but mergepatrol idle. Acknowledge and delete:
@@ -147,20 +162,85 @@ The MERGE_READY messages from inbox-check are one source for pending merges.
 **Source 2: GitHub label-based discovery**
 Scan for open PRs with the `merge_ready` label:
 ```bash
-gh pr list --label merge_ready --state open --json number,title,url,headRefName
+gh pr list --label merge_ready --state open --json number,title,url,headRefName,baseRefName,isCrossRepository
 ```
 
 For each label-discovered PR:
 - Extract branch name from `headRefName`
 - Extract PR URL from `url`
 - Extract PR number from `number`
+- Triage on `isCrossRepository`, then `baseRefName`, BEFORE queueing (see below)
 - Add to processing queue with source marked as "label"
+
+**Triage: two kinds of PR must never enter the merge path**
+
+Classify on `isCrossRepository` FIRST and on `baseRefName` only if that is false. A fork PR that
+also targets a non-default base is still a fork PR, and only the fork case carries a label action.
+
+Both escalations file a bead and NOTHING else. Do not run `af done` or `af prime` here — you are
+mid-scan and still have the rest of the queue to triage. And both escalate exactly ONCE: an
+untriageable PR stays untriageable, so an undeduplicated bead would be re-filed every single cycle.
+Dedup on an exact title before filing, substituting the real PR number in every command below:
+```bash
+af bead list --all --json | jq -r '.[] | select(.title == "untriageable merge_ready PR #<pr-number>") | .id' | head -1
+```
+`--all` is required: without it a previously filed and since-closed bead is invisible and you
+re-file forever. If that returns an id, skip the bead — but still carry out whatever label action
+the matching cause below calls for. The bead only records the diagnosis; the label removal is what
+stops the rediscovery loop, so skipping it on a repeat sighting would leave the PR circling forever.
+A repeat sighting means someone re-labelled a PR you already triaged, and removing that label again
+silently would look like the label never took. Do not file a second bead for it — note it in the
+cycle summary instead, naming the PR and that the label was removed for the second time.
+If it returns nothing, file exactly one bead:
+```bash
+af bead create --type task --priority 1 \
+  --title "untriageable merge_ready PR #<pr-number>" \
+  --description="## merge_ready PR cannot enter the merge path
+
+PR: <pr-url>
+Cause: <cross-repository fork, or non-default base>
+Observed baseRefName: <the baseRefName from the query above>
+Observed isCrossRepository: <true or false>
+Label: <removed by mergepatrol, or left as found>
+
+## Instructions
+1. Confirm the current record before acting — the lines above are a snapshot:
+   gh pr view <pr-url> --json baseRefName,isCrossRepository,state
+2. Retargeting the PR, or landing a fork PR by hand, is an operator decision."
+```
+
+1. **Cross-repository (fork) PR** — if `isCrossRepository` is true, the head branch lives in a fork,
+   so `<agent-branch>` does not exist on origin and this patrol can neither rebuild nor push it. Do
+   NOT queue it. Handle the bead as above, then remove the label so the next cycle does not silently
+   rediscover it forever:
+```bash
+gh pr edit <pr-number> --remove-label merge_ready
+```
+   State in the bead that the label was removed and why, so re-labelling is a deliberate act.
+
+2. **Non-default base** — if `isCrossRepository` is false but `baseRefName` is not
+   `{{default_branch}}`, this PR targets a different branch. Merging it here would land it onto the
+   wrong branch. Do NOT queue it. Handle the bead as above, and leave the PR and its label exactly
+   as found — retargeting a PR is an operator decision.
+
+Apply the same triage to mail-sourced entries whenever a PR URL is available.
 
 **Deduplication**: If a PR appears in both mail AND label sources (same branch name
 already queued from MERGE_READY mail), skip the duplicate. Deduplicate by branch name
 to prevent double-processing.
 
-If no MERGE_READY messages were found AND no label-discovered PRs exist, skip to context-check step.
+If no MERGE_READY messages were found AND no label-discovered PRs exist, the queue is
+empty for this cycle. This formula is a linear DAG — there is no jump, so "skip to
+context-check" means closing every intervening work step with an EXPLICIT skip reason,
+then re-priming, until `af prime` reports `Step: Check own context limit`:
+```bash
+# Six closes: process-branch, run-tests, handle-failures, merge-push, loop-check,
+# generate-summary. Repeat this pair until af prime shows the context-check step.
+af done --skip "Queue empty: no branch to process this cycle."
+af prime
+```
+NEVER close a skipped step with a bare `af done` — that falsely records work as
+performed. `af done --skip "<reason>"` records the truth: no work was done.
 
 For each queued branch, verify it still exists:
 ```bash
@@ -180,11 +260,43 @@ needs = ["queue-scan"]
 description = """
 Pick next branch from queue. Attempt mechanical rebase on current main.
 
-**Step 1: Checkout and attempt rebase**
+**Step 1: Capture the tested head, then checkout and attempt rebase**
+
+Capture the PR head SHA you are about to test BEFORE `temp` diverges from it. merge-push binds the
+GitHub merge to this exact SHA, so a force-push landing between here and the merge fails the merge
+rather than silently landing commits nobody tested. Capture it here, once: this point is after
+queue-scan's fetch and before `temp` exists, so it covers BOTH paths below — the clean rebase and
+the conflict-fallback, which rebuild `temp` from the same head.
+`-B` (not `-b`) so this is idempotent: you re-run these commands whenever a fix lands on the PR
+head branch, and `temp` will already exist from the previous attempt.
+Fetch the branch first. `origin/<agent-branch>` is a local tracking ref, and the only full fetch is
+queue-scan's — so without this the capture re-reads whatever the ref said at scan time. That is
+wrong twice over: it records a head you may not have, and on a re-entry after a head-mismatch abort
+it would hand merge-push the identical stale SHA and fail identically.
+
+If the fetch itself fails, STOP — do not fall through to the capture. A failed fetch usually means
+the branch was deleted from origin, and the stale tracking ref survives, so everything below would
+silently proceed against a head that no longer exists. Treat it as handle-failures does a
+branch-caused failure: file a bead naming the PR and the fetch error, and skip this branch.
 ```bash
-git checkout -b temp origin/<agent-branch>
+git fetch origin <agent-branch>
+TESTED_HEAD_OID=$(git rev-parse origin/<agent-branch>)
+echo "TESTED_HEAD_OID=$TESTED_HEAD_OID"
+git checkout -B temp origin/<agent-branch>
 git rebase origin/{{default_branch}}
 ```
+**Write the echoed SHA down** in this step's artifact and carry the literal value to merge-push.
+The shell variable does NOT outlive the shell that set it — every command invocation is its own
+shell, so the value is already gone by your next invocation in this step, let alone across the step
+boundary or a burn/respawn. merge-push substitutes the recorded SHA the same way it substitutes
+`<pr-url>` and `<agent-branch>`. Do NOT re-read the head there: the whole point is to detect a head
+that moved after you tested it.
+
+**Re-entering this step**: if handle-failures pushes a fix to the PR head branch, or merge-push
+aborts on a head mismatch, re-run this step **in place** from Step 1 — including Steps 2 and 3, so
+a rebase that now conflicts is still routed to the conflict-fallback rather than left half-done —
+and then re-run `go test ./...` before continuing. That is a re-execution, not a DAG jump —
+`af done` only ever advances, so do NOT try to move the formula cursor backwards.
 
 **Step 2: Check rebase result**
 
@@ -223,9 +335,10 @@ git diff --name-only --diff-filter=U   # lists conflicted files, empty if merge 
 ```
 
 3. **If the merge SUCCEEDED** (MERGE_RC=0 and no unmerged files):
-This was a FALSE-POSITIVE rebase conflict. `temp` now holds main + the branch's work as a
-merge commit and is still a fast-forward from main, so merge-push's `git merge --ff-only temp`
-works unchanged. Proceed to run-tests — the PR is mergeable.
+This was a FALSE-POSITIVE rebase conflict. `temp` now holds `{{default_branch}}` plus the branch's
+work as a merge commit and is still a fast-forward from it, so merge-push's count guard passes and
+`gh pr merge <pr-url> --merge` applies — the server-side twin of the merge commit you just built
+and are about to test. Proceed to run-tests — the PR is mergeable.
 
 4. **If the merge ALSO conflicted** (unmerged files present): this is a TRUE conflict
 requiring human resolution.
@@ -268,14 +381,23 @@ The PR will be re-queued for processing after conflicts are resolved."
    d. **Skip this PR** (do NOT delete branch):
 - Leave branch intact for conflict resolution
 - Leave PR open (will be re-processed after resolution)
-- Continue to loop-check for next branch
+- Continue to loop-check. This linear DAG has no jump: close each intervening step
+  with an explicit skip reason until `af prime` reports `Step: Check for more work`:
+```bash
+# Three closes: run-tests, handle-failures, merge-push. Repeat until loop-check.
+af done --skip "True conflict: resolution task filed, branch preserved."
+af prime
+```
+  Use `--skip` with a reason every time; NEVER a bare `af done` (it falsely logs work).
 
 **CRITICAL**: Never delete a branch that has conflicts. The branch contains
 the original work and must be preserved for conflict resolution.
 A rebase conflict alone is NOT a true conflict — only skip after the MERGE check in
 sub-step 2 also fails.
 
-Track: rebase result (success/conflict), conflict task ID if created."""
+Track: `TESTED_HEAD_OID`, rebase result (success/conflict) and which path was taken (clean rebase
+vs conflict-fallback — merge-push needs it to pick `--rebase` or `--merge`), conflict task ID if
+created."""
 
 [[steps]]
 id = "run-tests"
@@ -300,71 +422,209 @@ description = """
 If tests PASSED: This step auto-completes. Proceed to merge.
 
 If tests FAILED:
-1. Diagnose: Is this a branch regression or pre-existing on main?
+1. Diagnose: Is this a branch regression or pre-existing on `{{default_branch}}`?
 2. If branch caused it:
    - Abort merge
    - Notify agent: "Tests failing. Please fix and resubmit."
-   - Skip to loop-check
-3. If pre-existing on main:
-   - Option A: Fix it yourself (you're the Engineer!)
-   - Option B: File a bead: af bead create --type bug --priority 1 --title "..."
+   - Skip to loop-check. This linear DAG has no jump: close the intervening merge-push
+     step with an explicit skip reason until `af prime` reports `Step: Check for more work`:
+```bash
+af done --skip "Tests failed on branch: agent notified, merge aborted."
+af prime
+```
+     Use `--skip` with a reason; NEVER a bare `af done` (it falsely logs work).
+3. If pre-existing on `{{default_branch}}`:
+   - File a bead. This is mandatory, not one of two options:
+     `af bead create --type bug --priority 1 --title "Pre-existing test failure: <description>"`
+   - A fix for a pre-existing `{{default_branch}}` failure CANNOT ride this PR's merge. GitHub
+     merges the PR head; a fix that is not in the PR head does not land with it. Route that fix
+     through its own PR — pushing it out of band would recreate the very abstraction this formula
+     removed.
+
+**WHERE A FIX YOU AUTHOR MUST LAND**
+
+`temp` is a local test rig and is never pushed. A fix committed to `temp` alone would make your
+tests pass WITH the fix while GitHub merges the PR head WITHOUT it — green local evidence, broken
+`{{default_branch}}`. That is exactly the tested-is-not-landed failure this formula exists to prevent.
+
+So if you author a fix for a branch-caused failure, it MUST land on the PR head branch:
+```bash
+git checkout -B fixwork origin/<agent-branch>
+# make the fix on fixwork, then:
+git add -A
+git commit -m "fix: <what you fixed>"
+git push origin HEAD:<agent-branch>
+```
+Stage with `git add -A`. The `-a` shorthand only stages files git already tracks, so a fix that
+adds a new file would commit without it and the push would land an incomplete fix.
+
+Then **re-enter process-branch**: re-run it in place from its Step 1 against the new head, so
+`TESTED_HEAD_OID` is re-captured and `temp` is rebuilt — and follow its Steps 2 and 3, because the
+new head may now conflict — then re-run the tests. That is a re-execution of a step you already
+passed, not a DAG jump — `af done` only ever advances, so do NOT try to move the formula cursor
+backwards. process-branch's `git checkout -B temp` puts you back on
+`temp` and leaves `fixwork` behind as a stale pointer; delete it so the next cycle starts clean:
+```bash
+git branch -D fixwork
+```
+Tested and landed stay identical because the fix is now part of the head GitHub will merge.
+
+**Committing a fix to `temp` only is BANNED.** It is not a shortcut; it is an untested landing.
 
 **GATE REQUIREMENT**: You CANNOT proceed to merge-push without:
 - Tests passing, OR
-- Fix committed, OR
+- Fix pushed to the PR head branch AND process-branch re-entered and re-run, OR
 - Bead filed for the failure
 
 This is non-negotiable. Never disavow. Never "note and proceed." """
 
 [[steps]]
 id = "merge-push"
-title = "Merge and push to the default branch"
+title = "Merge the PR on GitHub"
 needs = ["handle-failures"]
 description = """
-Merge to the default branch and push. CRITICAL: Notifications come IMMEDIATELY after push.
+Land the PR through GitHub, then verify GitHub recorded it as merged. CRITICAL: every
+notification, label change, mail deletion and branch deletion happens AFTER that verification,
+never before.
 
-**Step 1: Merge and Push**
+**Step 1: Merge the PR on GitHub**
+Do NOT land content out of band. `temp` is the local test rig, not the landing vehicle — it is
+never pushed anywhere. GitHub must be both the executor and the recorder of the merge, so that
+content arriving on `{{default_branch}}` and the PR's merged record are the same event and cannot
+disagree. A local rebase-and-push rewrites every commit SHA, which leaves the PR's own head commit
+permanently unreachable from the base — and reachability is the one condition under which GitHub
+sets `mergedAt`. Content would land while the PR reads "closed with unmerged commits".
+
+The count guard in the block below is the base-race mitigation: it confirms the base you tested
+against is still the base GitHub will merge onto, keeping the divergence window seconds wide. It sits
+IMMEDIATELY before the merge, in the same block, so nothing can slip in between the check and the
+landing. If the base moved, do NOT merge — re-rebase in process-branch and retry.
+
+**Bind the merge to the head you tested.** `TESTED_HEAD_OID` is the SHA process-branch echoed and
+recorded. Substitute that recorded literal exactly as you substitute `<pr-url>` and `<agent-branch>`.
+Never re-derive it from `origin/<agent-branch>`: that would read a head which may have moved since
+testing and bind the merge to commits nobody ran tests against.
+
+**Strategy selection (explicit — choose by how process-branch built `temp`):** `<merge-strategy>`
+below is a placeholder you substitute exactly like `<pr-url>`, and it has exactly two legal values.
+If process-branch rebased cleanly, the happy path is
+`gh pr merge <pr-url> --rebase --match-head-commit "$TESTED_HEAD_OID"`, so substitute `--rebase`.
+If process-branch took the conflict-fallback (sub-step 3, where `temp` is `{{default_branch}}` plus
+a true merge commit), the landing is
+`gh pr merge <pr-url> --merge --match-head-commit "$TESTED_HEAD_OID"`, so substitute `--merge`.
+Neither form is ever run without the head binding. process-branch tracked which path it took; if you
+cannot establish which, re-run process-branch rather than guessing. Never run both — the second
+would report the PR already merged and be misread as a merge failure.
+
+Run the base guard, the head assignment, its guard and the merge as **ONE block in ONE shell**. A
+shell variable does not outlive the shell that set it — not across a step boundary, and not across
+two separate command invocations inside this step — and an empty `--match-head-commit` is
+indistinguishable from omitting the flag, so a split block would merge whatever head is current and
+silently reopen the force-push window this binding exists to close. Splitting it would also reopen
+the base-race window the count guard closes.
 ```bash
-git checkout {{default_branch}}
-git merge --ff-only temp
-git rev-parse --verify origin/{{default_branch}} || { echo "ERROR: origin/{{default_branch}} not found — aborting push"; exit 1; }
-git push origin {{default_branch}}
+git fetch origin {{default_branch}}
+git rev-parse --verify origin/{{default_branch}} || { echo "ERROR: origin/{{default_branch}} not found — aborting merge"; exit 1; }
+test "$(git rev-list --count temp..origin/{{default_branch}})" = "0" || { echo "ERROR: origin/{{default_branch}} moved under temp — re-rebase required, aborting"; exit 1; }
+
+TESTED_HEAD_OID=<the SHA process-branch recorded>
+test -n "$TESTED_HEAD_OID" || { echo "ERROR: tested head not carried from process-branch — aborting merge"; exit 1; }
+gh pr merge <pr-url> <merge-strategy> --match-head-commit "$TESTED_HEAD_OID"
+```
+A non-zero `gh pr merge` exit has exactly two dispositions. Read the error text and decide which
+before you do anything else — they are not interchangeable:
+
+1. **The head did not match** (gh rejects the merge because the PR head is not the SHA you passed).
+   This is the binding working, not a failure: the branch was written to after you tested it. Re-run
+   process-branch in place from its Step 1 (it is idempotent, and its Steps 2-3 route a rebase that
+   now conflicts), re-run the tests, and return here with a freshly recorded `TESTED_HEAD_OID`.
+   Do this at most ONCE per cycle. If the head moves a second time, the branch is being written
+   faster than the patrol can land it — stop retrying and take disposition 2.
+2. **Every other non-zero exit** — GitHub reports a conflict, the strategy is not allowed,
+   permission is denied, the network fails, or the head moved a second time. Escalate. Do NOT
+   perform any notification, deletion or cleanup action below. Jump straight to Step 2's escalation
+   block — the bead, the mail and the skip — and nothing else:
+```bash
+echo "MERGE FAILED for <pr-url>: gh exited non-zero. PR left OPEN, branch left intact, label left in place. Filing investigation bead — do NOT delete anything."
 ```
 
-⚠️ **STOP HERE - DO NOT PROCEED UNTIL STEPS 2-3 COMPLETE**
+Under both dispositions nothing destructive has happened: the PR is still open, and the branch, the
+label and the MERGE_READY mail are exactly as you found them.
 
-**Step 2: Send MERGED Notification (REQUIRED if agent is known)**
+**Step 2: Verify GitHub recorded the merge (THE GATE — this licenses everything below)**
+
+GitHub's PR record is the sole authority for "merged". Local git content state is a precondition
+only: it may gate whether you attempt a merge (the count guard above), but it can never license a
+lifecycle action.
+```bash
+gh pr view <pr-url> --json state,mergedAt
+```
+Require BOTH: `state` is MERGED **and** `mergedAt` is non-null. GitHub closing the PR as MERGED is
+the ONLY success signal. Never infer a merge from a commit-message grep or from spotting a SHA on
+`{{default_branch}}` — a rebase reproduces commit messages verbatim, so that check returns true in
+precisely the case that failed.
+
+**Retry logic (max 3 attempts, 5s apart):** if the first read is not yet MERGED, wait and re-read.
+```bash
+sleep 5
+gh pr view <pr-url> --json state,mergedAt
+```
+
+On exhaustion — 3 attempts and still not MERGED — treat it as a FAILURE, not a delay:
+- Leave the PR OPEN. Leave the branch intact. Leave the merge_ready label in place.
+- Leave the MERGE_READY mail undeleted. Do NOT send MERGED mail.
+- File an investigation bead, escalate, then close this step with an explicit skip reason.
+```bash
+OBSERVED=$(gh pr view <pr-url> --json state,mergedAt)
+af bead create --type task --priority 1 \
+  --title "Merge verification failed: <pr-url>" \
+  --description="## Merge Verification Failed
+
+PR: <pr-url>
+Branch: <agent-branch>
+Issue: <issue-id>
+Observed GitHub state after 3 attempts: ${OBSERVED}
+
+GitHub does not record this PR as merged. Nothing was deleted: the PR is open, the branch and the
+merge_ready label are intact, and the MERGE_READY mail was not deleted.
+
+## Instructions
+1. Re-read the current record before acting — the line above is a snapshot taken at failure time,
+   not ground truth:
+   gh pr view <pr-url> --json state,mergedAt,mergeCommit
+2. If GitHub now reports MERGED, run merge-push Steps 3, 4, 4b and 5 by hand.
+3. If it does not, diagnose why the merge was refused. Disposition of the PR is an operator decision."
+af mail send manager -s "ESCALATION: merge verification failed for <pr-url>" -m "mergepatrol could not confirm GitHub recorded the merge.
+PR: <pr-url>
+Branch: <agent-branch>
+Nothing was deleted; PR, branch, label and mail are intact. Investigation bead filed."
+af done --skip "Merge not confirmed by GitHub: bead filed, PR and branch left intact."
+af prime
+```
+
+⚠️ **STOP HERE - DO NOT PROCEED UNTIL STEP 2's GATE HAS PASSED**
+
+**Step 3: Send MERGED Notification (REQUIRED if agent is known)**
 
 If this PR was discovered via mail (an agent sent MERGE_READY), send MERGED mail:
 
 ```bash
+MERGE_OID=$(gh pr view <pr-url> --json mergeCommit -q .mergeCommit.oid)
 af mail send <agent-name> -s "MERGED <agent-name>" -m "Branch: <branch>
 Issue: <issue-id>
+Merge-Commit: ${MERGE_OID}
 Merged-At: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
+
+Any SHA you quote comes from the authority's own record via `--json mergeCommit -q .mergeCommit.oid`,
+never from `git rev-parse HEAD`. GitHub re-creates commits when it merges, so local `temp`'s SHAs
+are not what landed. Do not claim the landed SHAs equal the SHAs you tested.
 
 This signals the agent that its work has landed. WITHOUT THIS NOTIFICATION,
 agent worktrees accumulate indefinitely and the lifecycle breaks.
 
 If this PR was discovered via label only (no agent name available — e.g., submitted
 by a human from GitHub UI), skip the MERGED notification. No agent to notify.
-
-**Step 3: Close the PR (REQUIRED - DO THIS IMMEDIATELY)**
-
-⚠️ **VERIFICATION BEFORE CLOSING**: Confirm the work is actually on main:
-```bash
-# Get the commit message/issue from the branch
-git log origin/{{default_branch}} --oneline | grep "<issue-id>"
-# OR verify the commit SHA is on main:
-git branch --contains <commit-sha> | grep {{default_branch}}
-```
-
-If work is NOT on main, DO NOT close the PR. Investigate first.
-
-The PR was merged via fast-forward, so close it:
-```bash
-gh pr close <pr-url> --comment "Merged to main at $(git rev-parse --short HEAD)"
-```
 
 **Step 4: Delete the MERGE_READY mail (REQUIRED if mail-sourced)**
 ```bash
@@ -374,28 +634,39 @@ The message ID was tracked when you processed inbox-check.
 Skip this step if the PR was discovered via label only (no mail to delete).
 
 **Step 4b: Remove merge_ready label (REQUIRED if label-sourced)**
-If the PR was discovered via the merge_ready label, remove it after merge:
+If the PR was discovered via the merge_ready label, remove it once the merge is verified:
 ```bash
 gh pr edit <pr-number> --remove-label merge_ready
 ```
 This prevents re-discovery on the next patrol cycle.
 
-**Step 5: Cleanup (only after Steps 2-4 confirmed)**
+**Step 5: Cleanup (ONLY after Step 2's gate passed and Steps 3-4b are done)**
+You never occupied `{{default_branch}}` — nothing was pushed to it from here — so you are still on
+`temp`. Step off it the worktree-safe way first: a detached checkout of origin/{{default_branch}}
+never contends for the branch the primary worktree holds.
+
+Delete `temp` with `-D`, not `-d`. GitHub re-created the commits when it merged, so local `temp` is
+not an ancestor of the new `{{default_branch}}` and `-d`'s "fully merged" check would refuse to
+delete it. This is a different reason from process-branch's `-D`, which force-removes a throwaway
+after an aborted merge — both are deliberate, neither is a copy of the other.
+
+Deleting the remote branch is irreversible, so it comes last, and only because Step 2 passed:
 ```bash
-git branch -d temp
+git checkout --detach origin/{{default_branch}}
+git branch -D temp
 git push origin --delete <agent-branch>
 ```
 
 **VERIFICATION GATE**: You CANNOT proceed to loop-check without:
-- [x] MERGED mail sent to agent (if agent known; skip for label-only PRs)
-- [x] PR closed
-- [x] MERGE_READY mail deleted (if mail-sourced)
-- [x] merge_ready label removed (if label-sourced)
-- [x] Branch deleted from origin (git push origin --delete <agent-branch>)
+- [ ] `mergedAt` non-null verified via gh (state MERGED — nothing below is licensed without it)
+- [ ] MERGED mail sent to agent (if agent known; skip for label-only PRs)
+- [ ] MERGE_READY mail deleted (if mail-sourced)
+- [ ] merge_ready label removed (if label-sourced)
+- [ ] Branch deleted from origin (ONLY after mergedAt verified)
 
 If you skipped any of these steps, GO BACK AND DO THEM NOW.
 
-Main has moved. Any remaining branches need rebasing on new baseline."""
+`{{default_branch}}` has moved. Any remaining branches need rebasing on new baseline."""
 
 [[steps]]
 id = "loop-check"
@@ -427,7 +698,7 @@ Summarize this patrol cycle.
 
 **VERIFICATION**: Before generating summary, confirm for each merged branch:
 - [ ] MERGED mail was sent to agent
-- [ ] PR was closed
+- [ ] PR shows MERGED on GitHub (mergedAt non-null)
 - [ ] MERGE_READY mail deleted
 
 If any notifications or deletions were missed, do them now!
@@ -435,7 +706,7 @@ If any notifications or deletions were missed, do them now!
 Include in summary:
 - Branches merged (count, names)
 - MERGED mails sent (count - should match branches merged)
-- PRs closed (count - should match branches merged)
+- PRs merged on GitHub (count - should match branches merged)
 - MERGE_READY mails deleted (count - should match branches merged)
 - Test results (pass/fail)
 - Branches with conflicts (count, names)
@@ -443,8 +714,13 @@ Include in summary:
 - Issues filed (if any)
 - Any escalations sent
 
+**SHA provenance**: if you quote a landed SHA, take it from the authority's own record —
+`gh pr view <pr-url> --json mergeCommit -q .mergeCommit.oid` — never from `git rev-parse HEAD`.
+GitHub re-creates commits when it merges, so local `temp`'s SHAs are not what landed. Do not write
+a summary that promises the landed SHAs equal the SHAs you tested; they will not.
+
 **Conflict tracking is important** for monitoring queue health. If many branches
-conflict, it may indicate main is moving too fast or branches are too stale.
+conflict, it may indicate {{default_branch}} is moving too fast or branches are too stale.
 
 This becomes the digest when the patrol is squashed."""
 
@@ -483,33 +759,114 @@ Inbox should contain ONLY:
 Look for messages that were processed but not deleted:
 - PATROL: Wake up that was acknowledged → delete
 - HELP/Blocked that was handled → delete
-- MERGE_READY where merge completed but deletion was missed:
-  **VERIFY before deleting** — do NOT assume the merge completed:
-  1. Parse Branch from message body
-  2. Verify merge landed: `git log {{default_branch}} --oneline | grep <branch-or-issue>`
-  3. If merged (commit found on main): delete the message
-  4. If NOT merged: DO NOT delete. This represents unfinished work.
-     Leave for next patrol cycle.
+- MERGE_READY where the merge completed but deletion was missed:
+  **VERIFY before deleting** — do NOT assume the merge completed, and do NOT ask local git.
+  A commit-message grep is satisfied by a rebase that never made the PR mergeable, so it would
+  delete a live work item on a false positive. Ask the authority instead:
+  1. Parse Branch and PR URL from the message body
+  2. Read GitHub's record: `gh pr view <pr-url> --json state,mergedAt`
+  3. If `state` is MERGED and `mergedAt` is non-null: delete the message
+  4. If it is anything else: DO NOT delete. The work item is still pending.
+     Leave it for the next patrol cycle.
+  5. If the message carries no PR URL, leave it and note it in the summary — with no PR
+     reference there is no authority to consult, and a guess is how work items get lost.
 
 ```bash
-# For each stale message found:
+# For each stale message confirmed MERGED:
 af mail delete <message-id>
 ```
 
 **Step 3: Check for orphaned PRs**
 
-Look for open PRs with no corresponding branch:
+An orphan is an open PR whose head branch no longer exists on origin. A PR whose branch is still
+present is ordinary in-flight work — most open PRs are — and this step must leave it untouched.
+The missing branch IS the predicate; without it every healthy PR in the repo looks like a defect.
+Set `--limit` explicitly here for the same reason Step 4 does: the default is 30, and a repo with
+more open PRs than that would silently hide the orphans this sweep exists to find.
 ```bash
-gh pr list --state open
+gh pr list --state open --json number,url,headRefName,isCrossRepository --limit 100
 ```
 
 For each open PR:
-1. Check if branch exists: `git ls-remote origin refs/heads/<branch>`
-2. If branch gone, verify work is on main: `git log origin/{{default_branch}} --oneline | grep "<issue>"`
-3. If work on main → close PR with comment "Merged (verified on main)"
-4. If work NOT on main → investigate before closing
+1. If `isCrossRepository` is true, skip it. A fork's head branch never exists on origin, so it
+   would fail the check below for a reason that is not a defect. queue-scan already triages forks.
+2. Check whether its head branch still exists: `git ls-remote origin refs/heads/<branch>`
+3. If that printed a ref, the PR is NOT orphaned. Skip it and take no further action on it.
+4. Only when the branch is gone, ask GitHub for the PR's state:
+   `gh pr view <pr-url> --json state,mergedAt`
+5. If MERGED with a non-null `mergedAt` → nothing to do; the record is already correct
+6. If still open and unmerged → escalate and leave the PR and any label exactly as found
 
-**NEVER close a PR without verifying the work landed or is unrecoverable.**
+The escalation is a bead and nothing else — no `af done`, no `af prime`; Step 4 below still has to
+run this cycle. Escalate ONCE, deduplicating on an exact title (substitute the real PR number in
+both commands, and note that `--all` is required or a since-closed bead is invisible):
+```bash
+af bead list --all --json | jq -r '.[] | select(.title == "orphaned PR #<pr-number>") | .id' | head -1
+```
+If that returns an id, it is already recorded — move on. Otherwise:
+```bash
+af bead create --type task --priority 1 \
+  --title "orphaned PR #<pr-number>" \
+  --description="## Orphaned PR detected
+
+PR: <pr-url>
+Head branch: <branch> (no longer present on origin)
+Observed: state OPEN, mergedAt null
+
+The head branch is gone, so this PR can no longer be rebuilt or merged by the patrol.
+
+## Instructions
+1. Re-read the current record before acting:
+   gh pr view <pr-url> --json state,mergedAt,mergeCommit
+2. Determine whether the PR content is present on {{default_branch}}
+3. Decide disposition. Restoring the branch, re-landing or closing the PR is an operator decision."
+```
+
+**mergepatrol never closes PRs; unrecoverable cases are escalated with a bead — closing is an
+operator decision.**
+
+**Step 4: Audit for closed-unmerged PRs**
+
+A PR that GitHub records as CLOSED with a null `mergedAt` is the failure this formula exists to
+prevent: content may have landed while the PR's own record says it never merged. Audit for them
+every cycle, windowed to the **last 7 days** so the audit stays bounded and cannot flood.
+
+`--state closed` INCLUDES merged PRs, so the query MUST exclude them with `-is:merged` or it will
+report every successful merge as a defect. Set `--limit` explicitly too: the default is 30, and a
+busy week would silently truncate the rows you actually need.
+```bash
+gh pr list --state closed --search "closed:>=$(date -u -d '7 days ago' +%Y-%m-%d) -is:merged" --json number,url,closedAt,mergedAt --limit 100
+```
+
+For each PR returned, dedup before filing — one bead per PR, ever. Substitute the actual PR number
+for `<pr-number>` in BOTH commands below, and match the title **exactly**: a substring match would
+let an existing bead for PR #64 silently suppress the bead for PR #6.
+```bash
+af bead list --all --json | jq -r '.[] | select(.title == "closed-unmerged PR #<pr-number>") | .id' | head -1
+```
+`--all` is required. Without it the listing is scoped to your own open beads, a previously filed
+and since-closed bead is invisible, and you would re-file the same investigation every cycle.
+
+If that returns an id, skip this PR — it is already recorded. Otherwise file exactly one bead:
+```bash
+af bead create --type task --priority 1 \
+  --title "closed-unmerged PR #<pr-number>" \
+  --description="## Closed-unmerged PR detected
+
+PR: <pr-url>
+Closed at: <closedAt from the query above>
+Observed: state CLOSED, mergedAt null
+
+GitHub does not record this PR as merged. Its content may or may not have landed.
+
+## Instructions
+1. Re-read the current record before acting — the line above is a snapshot, not ground truth:
+   gh pr view <pr-url> --json state,mergedAt,mergeCommit
+2. Determine whether the PR content is present on {{default_branch}}
+3. Decide disposition. Reopening, re-landing or closing the PR is an operator decision."
+```
+
+Beads are the existing record store — do not introduce a new state file for this audit.
 
 **Goal**: Inbox should have ≤3 active messages at end of cycle.
 Keep only: pending PRs in queue."""

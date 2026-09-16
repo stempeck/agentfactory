@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -63,6 +64,43 @@ func TestRoleTypeFor_Default(t *testing.T) {
 	}
 }
 
+// sessionStartWriters are the three SessionStart context writers, in the order the settings declare
+// them — NOT the order they run in, which is unordered because matching hooks run in parallel
+// (ADR-023 E6); no writer may depend on another having run. One entry per writer is the contract
+// (#675 K3): the harness budgets each hook's stdout separately, so a chained `a && b && c` made the
+// first writer's byte count a tax on the other two and truncated whatever was left. Declaration
+// order is asserted anyway, because it is what an operator reads in the manual and in the file.
+var sessionStartWriters = []string{
+	"af prime --hook",
+	"af mail check --inject",
+	"af memory check --inject",
+}
+
+func assertSessionStartWriters(t *testing.T, hooks map[string]interface{}, roleName string) {
+	t.Helper()
+	sessionStart, ok := hooks["SessionStart"].([]interface{})
+	if !ok || len(sessionStart) != 1 {
+		t.Fatalf("%s settings.json SessionStart should hold exactly one matcher entry, got %v", roleName, hooks["SessionStart"])
+	}
+	hooksList := sessionStart[0].(map[string]interface{})["hooks"].([]interface{})
+	if len(hooksList) != len(sessionStartWriters) {
+		t.Fatalf("%s SessionStart has %d hook entries, want %d — one per writer, never chained with &&",
+			roleName, len(hooksList), len(sessionStartWriters))
+	}
+	for i, want := range sessionStartWriters {
+		cmd := hooksList[i].(map[string]interface{})["command"].(string)
+		if !strings.HasSuffix(cmd, want) {
+			t.Errorf("%s SessionStart entry %d should end in %q, got: %s", roleName, i, want, cmd)
+		}
+		if strings.Contains(cmd, "--inject &&") || strings.Contains(cmd, "--hook &&") {
+			t.Errorf("%s SessionStart entry %d chains a second writer onto %q: %s", roleName, i, want, cmd)
+		}
+		if !strings.HasPrefix(cmd, "export PATH=") {
+			t.Errorf("%s SessionStart entry %d must carry the PATH export every hook needs, got: %s", roleName, i, cmd)
+		}
+	}
+}
+
 func TestEnsureSettings_Autonomous(t *testing.T) {
 	dir := t.TempDir()
 
@@ -85,26 +123,11 @@ func TestEnsureSettings_Autonomous(t *testing.T) {
 
 	content := string(data)
 
-	// Autonomous SessionStart MUST have both prime AND mail check
-	if !strings.Contains(content, "af prime --hook && af mail check --inject") {
-		t.Error("autonomous settings.json SessionStart missing 'af prime --hook && af mail check --inject'")
-	}
-
-	// Parse and check the SessionStart hook command specifically. Asserting on the parsed command
+	// Parse and check the SessionStart hook commands specifically. Asserting on the parsed entries
 	// rather than the whole file is what stops the UserPromptSubmit occurrence of a verb from
 	// satisfying a SessionStart claim (issue #515 Phase 3: injection is SessionStart-only).
 	hooks := parsed["hooks"].(map[string]interface{})
-	sessionStart := hooks["SessionStart"].([]interface{})
-	firstEntry := sessionStart[0].(map[string]interface{})
-	hooksList := firstEntry["hooks"].([]interface{})
-	firstHook := hooksList[0].(map[string]interface{})
-	cmd := firstHook["command"].(string)
-	if !strings.Contains(cmd, "af memory check --inject") {
-		t.Errorf("autonomous SessionStart missing 'af memory check --inject', got: %s", cmd)
-	}
-	if !strings.Contains(cmd, "af prime --hook && af mail check --inject") {
-		t.Errorf("autonomous SessionStart must keep 'af prime --hook && af mail check --inject' contiguous, got: %s", cmd)
-	}
+	assertSessionStartWriters(t, hooks, "autonomous")
 
 	// Stop hook must reference quality-gate.sh
 	if !strings.Contains(content, "quality-gate.sh") {
@@ -149,27 +172,11 @@ func TestEnsureSettings_Interactive(t *testing.T) {
 
 	content := string(data)
 
-	// Interactive SessionStart should have prime but NOT mail check
-	if !strings.Contains(content, "af prime --hook") {
-		t.Error("interactive settings.json SessionStart missing 'af prime --hook'")
-	}
-
-	// Parse and check SessionStart hook command specifically
+	// Parse and check the SessionStart hook commands specifically. Interactive now carries the mail
+	// writer too: with one entry per writer, mail no longer costs prime or memory any of its budget,
+	// and the reason interactive withheld it was that cost (#675 K3).
 	hooks := parsed["hooks"].(map[string]interface{})
-	sessionStart := hooks["SessionStart"].([]interface{})
-	firstEntry := sessionStart[0].(map[string]interface{})
-	hooksList := firstEntry["hooks"].([]interface{})
-	firstHook := hooksList[0].(map[string]interface{})
-	cmd := firstHook["command"].(string)
-	if strings.Contains(cmd, "af mail check") {
-		t.Error("interactive SessionStart should NOT contain 'af mail check --inject'")
-	}
-	// Interactive gets memory injection too — it is the only hook that delivers it (issue #515
-	// Phase 3). Asserted on the parsed command, not the whole file, so UserPromptSubmit's own
-	// clause cannot satisfy it.
-	if !strings.Contains(cmd, "af memory check --inject") {
-		t.Errorf("interactive SessionStart missing 'af memory check --inject', got: %s", cmd)
-	}
+	assertSessionStartWriters(t, hooks, "interactive")
 
 	// Stop hook must reference quality-gate.sh
 	if !strings.Contains(content, "quality-gate.sh") {
@@ -369,6 +376,79 @@ func TestEnsureSettings_PreToolUseContainment(t *testing.T) {
 	}
 }
 
+// TestEnsureSettings_PreToolUseTaskCapacity is the #672 sibling of the containment test above: the
+// deterministic sub-agent-dispatch capacity-admission owner is a NEW PreToolUse hook matched on the
+// sub-agent tool, running `af dispatch-admit` — the first hook in the tree that may emit a blocking
+// permissionDecision:"deny", under the ADR-007 (2026-08-31) enumerated exemption. It must be a
+// SEPARATE PreToolUse array entry (not merged into the Bash|Write|Edit containment entry, which keeps
+// never-blocking), present for BOTH role types, PATH-export-prefixed like every direct-af hook. The
+// containment entry stays at index 0 (TestEnsureSettings_PreToolUseContainment pins that), so this
+// selects the entry by its command rather than a fixed index, and asserts its matcher fires on BOTH
+// sub-agent tool names — "Agent" (current Claude Code) and "Task" (older builds) — per #669 BROKEN-0.
+func TestEnsureSettings_PreToolUseTaskCapacity(t *testing.T) {
+	cases := []struct {
+		name     string
+		roleType RoleType
+	}{
+		{"Interactive", Interactive},
+		{"Autonomous", Autonomous},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := EnsureSettings(dir, tc.roleType); err != nil {
+				t.Fatalf("EnsureSettings(%s) error: %v", tc.name, err)
+			}
+
+			data, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+			if err != nil {
+				t.Fatalf("reading settings.json: %v", err)
+			}
+			var parsed map[string]interface{}
+			if err := json.Unmarshal(data, &parsed); err != nil {
+				t.Fatalf("settings.json is not valid JSON: %v", err)
+			}
+
+			hooks := parsed["hooks"].(map[string]interface{})
+			preToolUse, ok := hooks["PreToolUse"].([]interface{})
+			if !ok || len(preToolUse) == 0 {
+				t.Fatalf("%s settings.json has no hooks.PreToolUse entries", tc.name)
+			}
+
+			var dispatchCmd, dispatchMatcher string
+			for _, raw := range preToolUse {
+				entry := raw.(map[string]interface{})
+				hooksList, _ := entry["hooks"].([]interface{})
+				for _, h := range hooksList {
+					cmd, _ := h.(map[string]interface{})["command"].(string)
+					if strings.Contains(cmd, "af dispatch-admit") {
+						dispatchCmd = cmd
+						dispatchMatcher, _ = entry["matcher"].(string)
+					}
+				}
+			}
+
+			if dispatchCmd == "" {
+				t.Fatalf("%s settings.json has no PreToolUse hook running 'af dispatch-admit' (the #672 capacity owner)", tc.name)
+			}
+			re, err := regexp.Compile(dispatchMatcher)
+			if err != nil {
+				t.Fatalf("%s PreToolUse dispatch-admit matcher %q is not a valid regexp: %v", tc.name, dispatchMatcher, err)
+			}
+			for _, tool := range []string{"Task", "Agent"} {
+				if !re.MatchString(tool) {
+					t.Errorf("%s PreToolUse dispatch-admit matcher %q must fire on the %q sub-agent tool; the platform "+
+						"tool is named \"Agent\" on current Claude Code (#669 BROKEN-0)", tc.name, dispatchMatcher, tool)
+				}
+			}
+			if !strings.Contains(dispatchCmd, `export PATH="$HOME/go/bin:`) {
+				t.Errorf("%s PreToolUse dispatch-admit command should carry the export PATH= prefix, got: %s", tc.name, dispatchCmd)
+			}
+		})
+	}
+}
+
 // TestSettingsTemplates_StatusLineKeyPinned pins the K6 contract (issue #591): BOTH embedded
 // templates carry a top-level statusLine block, their subtrees are byte-identical, and the
 // command is the frozen string. It compares ONLY the statusLine subtree, never the whole file:
@@ -471,6 +551,86 @@ func TestEnsureSettings_ProvisionedContentHasKey(t *testing.T) {
 			// (issue #596 K1).
 			if got, _ := sl["refreshInterval"].(float64); got != float64(frozenStatusLineRefresh) {
 				t.Errorf("%s statusLine.refreshInterval = %v, want %d", tc.name, sl["refreshInterval"], frozenStatusLineRefresh)
+			}
+		})
+	}
+}
+
+// TestEnsureSettings_PostToolUseSubagentObserver is #668 K18's deployment interlock, and it is the
+// STRUCTURAL half only — the observer's behaviour (counsel once per episode, never block, silent
+// when the mechanism is off) is proven in internal/cmd. It exists because every one of those
+// behavioural tests passes against a verb no session ever invokes: PostToolUse/Task is the only
+// event that fires when a sub-agent has finished, and if the templates do not carry it the whole
+// mechanism is inert with nothing to say so.
+func TestEnsureSettings_PostToolUseSubagentObserver(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		roleType RoleType
+	}{
+		{"Interactive", Interactive},
+		{"Autonomous", Autonomous},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := EnsureSettings(dir, tc.roleType); err != nil {
+				t.Fatalf("EnsureSettings(%s) error: %v", tc.name, err)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+			if err != nil {
+				t.Fatalf("reading settings.json: %v", err)
+			}
+
+			var parsed struct {
+				Hooks map[string][]struct {
+					Matcher string `json:"matcher"`
+					Hooks   []struct {
+						Type    string `json:"type"`
+						Command string `json:"command"`
+					} `json:"hooks"`
+				} `json:"hooks"`
+			}
+			if err := json.Unmarshal(data, &parsed); err != nil {
+				t.Fatalf("settings.json is not valid JSON: %v", err)
+			}
+
+			groups, ok := parsed.Hooks["PostToolUse"]
+			if !ok {
+				t.Fatalf("%s settings.json missing top-level hooks.PostToolUse entry", tc.name)
+			}
+			var found bool
+			for _, g := range groups {
+				for _, h := range g.Hooks {
+					if !strings.Contains(h.Command, "af subagent-observe") {
+						continue
+					}
+					found = true
+					// The matcher must fire on BOTH sub-agent tool names — "Agent" (current Claude
+					// Code) and "Task" (older builds), #669 BROKEN-0 — yet stay non-empty: a
+					// PostToolUse hook with an empty matcher runs after EVERY tool call, which for a
+					// per-turn verb is a subprocess on every Read the agent does (the D-8 rule).
+					if g.Matcher == "" {
+						t.Errorf("%s PostToolUse subagent-observe matcher must not be empty (would run on every tool call)", tc.name)
+					}
+					re, err := regexp.Compile(g.Matcher)
+					if err != nil {
+						t.Errorf("%s PostToolUse subagent-observe matcher %q is not a valid regexp: %v", tc.name, g.Matcher, err)
+					} else {
+						for _, tool := range []string{"Task", "Agent"} {
+							if !re.MatchString(tool) {
+								t.Errorf("%s PostToolUse subagent-observe matcher %q must fire on the %q sub-agent tool", tc.name, g.Matcher, tool)
+							}
+						}
+					}
+					if !strings.Contains(h.Command, `export PATH="$HOME/go/bin:`) {
+						t.Errorf("%s PostToolUse command should carry the export PATH= prefix, got: %s", tc.name, h.Command)
+					}
+					if h.Type != "command" {
+						t.Errorf("%s PostToolUse hook type = %q, want \"command\"", tc.name, h.Type)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("%s has no PostToolUse hook running 'af subagent-observe'", tc.name)
 			}
 		})
 	}

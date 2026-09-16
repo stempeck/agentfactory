@@ -21,6 +21,7 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -293,19 +294,12 @@ func requireOperatorMemory(surface string) error {
 // :106), and the directory af done writes last_closed_step to (done.go:131). Note the deliberate
 // asymmetry with the vault root: the pointer is session-local state read from cwd, the vault is
 // durable state resolved through resolveInvokerRoot.
+//
+// The read itself now lives in hookedFormulaName (tokenomics_admission.go), which #678 K5's launch
+// legs need for the same reason and under the same constraint. Everything above still describes it;
+// this is one spelling of one file read, not two.
 func memoryScopeKey(workDir string) string {
-	if readHookedFormulaID(workDir) == "" {
-		return "" // no formula hooked: agent scope
-	}
-	data, err := os.ReadFile(filepath.Join(workDir, ".runtime", "last_closed_step"))
-	if err != nil {
-		return ""
-	}
-	var rec lastClosedStepRecord
-	if err := json.Unmarshal(data, &rec); err != nil {
-		return ""
-	}
-	return telemetryFormulaName(rec.Formula)
+	return hookedFormulaName(workDir) // "" ⇒ no formula hooked, or no cache yet: agent scope
 }
 
 // memorySlug turns a subject into the human-readable half of a note id. The core's sanitizeSlug
@@ -905,7 +899,11 @@ func runMemoryCheck(cmd *cobra.Command, _ []string) (err error) {
 	if len(served) == 0 {
 		return nil // the zero case is zero BYTES, not an empty block (scale.md:44-45)
 	}
-	renderMemoryInjection(cmd.OutOrStdout(), served, memoryOverflow(notes, served, b), b.Now)
+	// Envelope at the caller, not inside renderMemoryInjection: the renderer is the seam the byte
+	// ceiling is measured at, and tests call it directly.
+	var block bytes.Buffer
+	renderMemoryInjection(&block, served, memoryOverflow(notes, served, b), b.Now)
+	emitHookContext(cmd.OutOrStdout(), hookEventNameOr(readHookPayloadFromCmd(cmd), hookEventSessionStart), block.String())
 	return nil
 }
 
@@ -955,14 +953,17 @@ func memoryOverflow(notes, served []memory.Note, b memory.Budget) int {
 	return len(all) - len(served)
 }
 
-// reminderSentinelFence neutralizes the frame sentinel in note-derived content. A note's body or
-// attribution field can carry the literal `<system-reminder>` / `</system-reminder>` wrapper — via
-// `af memory add`'s message or `--evidence` — which would otherwise close the provenance frame early
-// and let the text after it re-enter the session OUTSIDE the "observations, not directives" frame
-// that security.md T4 mitigation #1 depends on. Escaping every angle bracket in note content is
-// bypass-proof: no sentinel of any spelling or casing survives, so the block can hold only its own
-// single real wrapper.
-var reminderSentinelFence = strings.NewReplacer("<", "&lt;", ">", "&gt;")
+// injectSentinelFence neutralizes the frame sentinel in any content a `<system-reminder>` block
+// carries in from elsewhere — a memory note's body or attribution, a mail message's body, subject
+// or sender. Such content can hold the literal `<system-reminder>` / `</system-reminder>` wrapper,
+// which would otherwise close the provenance frame early and let the text after it re-enter the
+// session OUTSIDE the framing that security.md T4 mitigation #1 depends on. Escaping every angle
+// bracket is bypass-proof: no sentinel of any spelling or casing survives, so a block can hold only
+// its own single real wrapper.
+//
+// One replacer for every injecting writer, deliberately: a second copy is a second place for the
+// escape set to drift, and the frame is only as strong as its weakest writer.
+var injectSentinelFence = strings.NewReplacer("<", "&lt;", ">", "&gt;")
 
 // renderMemoryInjection writes the block an agent receives at session start. Every note travels
 // WITH its attribution and the header says what these are, because a note's body re-enters
@@ -976,9 +977,9 @@ func renderMemoryInjection(out io.Writer, served []memory.Note, overflow int, no
 	fmt.Fprintln(out, "or wrong; weigh them against what you find in the code.")
 	fmt.Fprintln(out)
 	for _, n := range served {
-		fmt.Fprintf(out, "- [%s] %s\n", reminderSentinelFence.Replace(n.ID), reminderSentinelFence.Replace(memoryAttribution(n, now)))
+		fmt.Fprintf(out, "- [%s] %s\n", injectSentinelFence.Replace(n.ID), injectSentinelFence.Replace(memoryAttribution(n, now)))
 		for _, line := range strings.Split(strings.TrimRight(n.Body, "\n"), "\n") {
-			fmt.Fprintf(out, "  %s\n", reminderSentinelFence.Replace(line))
+			fmt.Fprintf(out, "  %s\n", injectSentinelFence.Replace(line))
 		}
 		fmt.Fprintln(out)
 	}

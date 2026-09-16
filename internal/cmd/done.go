@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/checkpoint"
 	"github.com/stempeck/agentfactory/internal/config"
+	"github.com/stempeck/agentfactory/internal/formula"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/lock"
 	"github.com/stempeck/agentfactory/internal/memory"
@@ -25,6 +26,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/statusline"
 	"github.com/stempeck/agentfactory/internal/telemetry"
 	"github.com/stempeck/agentfactory/internal/tmux"
+	"github.com/stempeck/agentfactory/internal/tokenomics"
 	"github.com/stempeck/agentfactory/internal/worktree"
 )
 
@@ -182,16 +184,36 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 	startupCfg, startupErr := config.LoadStartupConfig(factoryRoot)
 	closeReading := statusline.NoReading()
 	var stepCtx config.StepContextConfig
+	// #668 K7's policy operand travels beside the bound so both come from one load. Note which
+	// conjunct protects an unreadable factory, because it is NOT this one: a zero TokenomicsConfig
+	// leaves Enabled as "", which satisfies the umbrella's `!= "off"` test, and ResolvePolicy reads
+	// an unwritten mechanism as its default — budget's default is on. What refuses here is the pair
+	// above: stepCtx stays zero so HandoffPct is 0, and closeReading stays NoReading so the channel
+	// is unhealthy, and shouldBoundaryHandoff short-circuits on either one long before the operand
+	// is consulted. A factory whose config cannot be read is inert by the bound, not by the policy.
+	var tokCfg config.TokenomicsConfig
+	// The breaker threshold travels beside tokCfg through the same guarded load: on an unreadable
+	// factory it stays 0, which EffectiveAdmissionCeilingPct reads as "not injected" and leaves the
+	// ceiling unclamped — the pre-clamp behavior, not a nil dereference through the (nil, err) startupCfg.
+	ctxThresholdPct := 0
 	if startupErr == nil {
 		closeReading = stepContextReading(factoryRoot, cwd, agentName, startupCfg.Recovery, boundaryNow)
 		stepCtx = startupCfg.StepContext
+		tokCfg = startupCfg.Tokenomics
+		ctxThresholdPct = startupCfg.Recovery.ContextThresholdPct
 	}
 
+	// The closing record's own step sequence, kept for the intervention record a fired mechanism
+	// writes further down. AC-4's join is between two records, so the second one has to carry the
+	// same seq as the first — and step_seq has exactly one derivation (telemetryStepSpan reads it
+	// back from what af prime wrote), so it is carried rather than derived a second time.
+	closeStepSeq := 0
 	if vt := verbTelemetryFrom(ctx); vt.enabled {
 		ev := telemetryRecordFor(ctx, factoryRoot, cwd, vt.agent, instanceID, "")
 		ev.Event = telemetry.EventStepEnd
 		ev.Formula = telemetryFormulaName(closed.Formula)
 		ev.StepID = step.ID
+		ev.StepLabel = stepLabelOf(step)
 		ev.StepTitle = step.Title
 		ev.Status = telemetry.StatusClosed
 		if phaseComplete {
@@ -199,6 +221,7 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 		}
 		span := telemetryStepSpan(factoryRoot, vt.agent, instanceID, step.ID, ev.TS)
 		ev.StepSeq, ev.DurationMS = span.seq, span.durationMS
+		closeStepSeq = ev.StepSeq
 		// A gate close records its occupancy like any other close (cross-review HIGH-2). The gate
 		// contract excludes it from the HANDOFF, not from the measurement — a step that filled its
 		// window and then hit a gate is exactly the step the improvement loop needs to see.
@@ -206,7 +229,17 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 		ev.CtxTokensStart = span.ctxTokensStart
 		ev.CtxBoundTokens = int64(stepCtx.BoundTokens)
 		ev.CumTokensDelta = stepCumTokensDelta(span, ev)
+		attachGenerationScalars(&ev, span, cwd)
+		// #678 K1. effort_level is echoed from the launch env rather than re-derived: the level a
+		// step ran AT is the level its session was started with, and asking the plan again here
+		// would record what the NEXT step should get on the record for the one that just finished.
+		ev.EffortLevel = launchEffortLevel()
+		ev.GateFlags = gateFlagsInWindow(ctx, store, vt.agent, span.startTS, ev.TS)
 		appendTelemetryRecord(factoryRoot, ev)
+		// #668 K6: the record just written is a sample the learned-data cache is built from, so the
+		// cache is refreshed here, after the append and inside the same gate. Nothing reads it yet —
+		// this phase makes the flywheel turn, a later one puts a decision on the far end of it.
+		updateLearnedDigest(factoryRoot, ev)
 	}
 
 	// 4. Gate handling
@@ -238,12 +271,98 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 			fmt.Println("Remaining steps are blocked. Waiting for dependencies.")
 		}
 
+		// #668 K7 close-time. The question is about the step that is ABOUT TO START, so the key is
+		// the next ready step's — the closing step's own appetite is history, and asking about it
+		// here would predict the cost of work already paid for. A branch with no next step (all
+		// remaining steps blocked) leaves the key empty, which learnedAppetite reports as unknown
+		// and Admit turns into an observation: a boundary that cannot predict does not fire.
+		// The key is the next step's STABLE label, resolved from its bead so it matches what
+		// samplesFrom filed the learned side under; a bead id would find nothing a prior run wrote.
+		nextStepLabel := ""
+		if nextErr == nil && len(nextResult.Steps) > 0 {
+			nextStepLabel = stepLabelOf(nextResult.Steps[0])
+		}
+		adm := stepAdmission(factoryRoot, cwd, agentName, telemetryFormulaName(closed.Formula),
+			nextStepLabel, closeReading, tokCfg, ctxThresholdPct)
+
+		// #678 K6. Asked from the plan the admission above already resolved, so the efficiency reason
+		// and the capacity verdict describe one digest read.
+		eff := boundaryEfficiencyRelaunch(cwd, instanceID, adm)
+		if eff.atCap {
+			// Written BEFORE the boundary, and independent of whether it fires: the fact recorded is
+			// that the bound refused a relaunch history warranted, which is true whatever the boundary
+			// then decides — and a record written after a handoff would be written in a pane that no
+			// longer exists. Observe, not an action, so tokenomicsFirings does not count it as a firing
+			// (tokenomics.go:597-600): nothing happened, and a mechanism that reported this as an act
+			// would report its own bound as work.
+			recordIntervention(ctx, factoryRoot, cwd, agentName, instanceID, func(ev *telemetry.StepEvent) {
+				ev.Formula = telemetryFormulaName(closed.Formula)
+				ev.StepID = step.ID
+				ev.StepSeq = closeStepSeq
+				ev.StepTitle = step.Title
+				ev.Mechanism = string(eff.mechanism)
+				ev.Action = telemetry.ActionObserve
+				ev.Objective = telemetry.ObjectiveEfficiency
+				attachStepOccupancy(ev, closeReading, factoryRoot, boundaryNow)
+			})
+		}
+
 		// #622 C5: the cooperative step boundary. LAST statement on this branch, because a
 		// successful respawn replaces the pane this process is running in and nothing after it
 		// would run. The step is already closed and its record already written, so there is no
 		// in-flight work to lose — the boundary only ever recycles a session between steps.
-		if shouldBoundaryHandoff(closeReading, stepCtx, phaseComplete, true) {
-			runBoundaryHandoff(ctx, cwd, factoryRoot, "step "+step.ID, instanceID, closeReading, stepCtx, false)
+		if shouldBoundaryHandoff(closeReading, stepCtx, phaseComplete, true, adm.handoffHelps(), eff.warranted) {
+			// Written BEFORE the handoff, because the handoff may replace this pane and never
+			// return. A mechanism that fired and left no record is indistinguishable from one that
+			// never fired, which is the whole thing AC-4 exists to make impossible.
+			if adm.handoffHelps() {
+				// #672 AC-3: the forced boundary handoff is an ENFORCEMENT act — it recycles the session
+				// rather than merely advising — so its record must survive the telemetry toggle
+				// (recordEnforcement, not recordIntervention).
+				recordEnforcement(ctx, factoryRoot, cwd, agentName, instanceID, func(ev *telemetry.StepEvent) {
+					ev.Formula = telemetryFormulaName(closed.Formula)
+					ev.StepID = step.ID
+					ev.StepSeq = closeStepSeq
+					ev.StepTitle = step.Title
+					ev.Mechanism = string(tokenomics.MechanismBudget)
+					ev.Action = telemetry.ActionHandoff
+					attachStepOccupancy(ev, closeReading, factoryRoot, boundaryNow)
+				})
+			}
+			// #678 K6: the efficiency relaunch's own record. Enforcement, for the same reason the
+			// capacity handoff above it is — a recycle is an act, not counsel, and #672 AC-3 makes an
+			// act's record independent of the measurement toggle. Filed under the mechanism that
+			// warranted it, NEVER budget: a budget record claims the window would not fit, and this
+			// fires with the window nearly empty, which is the mislabelling that would make the
+			// actuator read as capacity pressure in every read surface downstream.
+			//
+			// Gated on efficiency having CAUSED this handoff, not merely having warranted one. The
+			// boundary is a disjunction, so a plain occupancy handoff can coincide with a warranted
+			// relaunch — and charging that recycle to the efficiency arm would both credit the arm with
+			// capacity's work and spend a BOUNDED budget on a respawn that was going to happen anyway,
+			// disarming the actuator early for steps it never acted on. Nothing is lost by declining:
+			// the relaunch still carries the level, and the session it starts records its own
+			// effort/reduce_effort at prime time, which is where the treatment is actually applied.
+			//
+			// #679 F11/T4: the write is a CLOSURE handed to runBoundaryHandoff and invoked past its
+			// decline gates, beside the cap charge — so a boundary that declines (no pane) files no
+			// phantom record. AC-4's join still survives a respawn, because the write leads the respawn
+			// at that commit point exactly as the cap charge does.
+			efficiencyCaused := eff.warranted && efficiencyCausedBoundary(closeReading, stepCtx, phaseComplete, adm)
+			recordStepRelaunch := func() {
+				recordEnforcement(ctx, factoryRoot, cwd, agentName, instanceID, func(ev *telemetry.StepEvent) {
+					ev.Formula = telemetryFormulaName(closed.Formula)
+					ev.StepID = step.ID
+					ev.StepSeq = closeStepSeq
+					ev.StepTitle = step.Title
+					ev.Mechanism = string(eff.mechanism)
+					ev.Action = telemetry.ActionHandoff
+					ev.Objective = telemetry.ObjectiveEfficiency
+					ev.EffortLevel = eff.level
+					attachStepOccupancy(ev, closeReading, factoryRoot, boundaryNow)
+				})
+			}
+			runBoundaryHandoff(ctx, cwd, factoryRoot, "step "+step.ID, instanceID, closeReading, stepCtx, false, adm, eff, efficiencyCaused, recordStepRelaunch)
 		}
 		return nil
 	}
@@ -280,7 +399,8 @@ func stepCumTokensDelta(span stepSpan, ev telemetry.StepEvent) *int64 {
 //
 // Pure — no clock, no filesystem, no environment — so every cell of the decision matrix is
 // exercisable directly. Five conditions must ALL hold, and each rules out a way this could fire
-// when it should not:
+// when it should not. A sixth, admissionNoFit, is the only one that can fire it the other way —
+// see below:
 //
 //   - FRESH. A stale, dark, malformed or absent channel is not evidence of high occupancy; it is
 //     evidence of nothing. Absence must never be able to trigger an action (Gap 3).
@@ -302,7 +422,38 @@ func stepCumTokensDelta(span stepSpan, ev telemetry.StepEvent) *int64 {
 //     site has to pass a value that reads as a lie.
 //
 // A zero handoff_pct means nobody configured this, not "hand off at 0%".
-func shouldBoundaryHandoff(reading statusline.ChannelReading, cfg config.StepContextConfig, gateClose, workFollows bool) bool {
+//
+// admissionNoFit is #668 K7's close-time operand: the next step's learned appetite will not fit
+// beside what this session is already carrying, and WOULD fit a fresh one. It is a predictive
+// input, never a second owner of the recycle decision (D7) — which is why it enters at the
+// terminal comparison and nowhere else. Every refusal above it still outranks it: a gate close, a
+// close with nothing following, an unconfigured factory and an unhealthy channel are all reasons
+// this must not fire whatever admission predicts, and the last of those matters most — a no-fit
+// verdict computed from an absent occupancy reading is Observe by construction, so it cannot even
+// reach here, but a caller passing true off a stale one still gets nothing.
+//
+// What it adds is the case occupancy alone cannot see: a session sitting comfortably at 60% about
+// to start a step that has historically needed more than the 40% left. Before this, that step ran
+// until the window filled and the watchdog killed it mid-step; the measured Phase-1 baseline did
+// that four times in one run. The boundary is the cheap version of the same recycle, taken one
+// instant earlier, while there is nothing in flight to lose.
+//
+// efficiencyRelaunch is #678 K6's operand, and it joins admissionNoFit at the same terminal
+// comparison for the same reason: this function stays the boundary's SINGLE owner (D7), and a second
+// owner is what an early return for an efficiency reason would create. Every refusal above it is
+// unchanged and still outranks it — a gate close with a warranted relaunch must still refuse, because
+// the gate contract already ends the session and a handoff there would resurrect an ended session into
+// a blocked step.
+//
+// It differs from admissionNoFit in what it is derived FROM, and that difference is the whole issue.
+// admissionNoFit divides the next step's appetite by a resolved window, so a 1M-token profile cannot
+// trip it. efficiencyRelaunch comes from a predicate that never learns the window exists, so it fires
+// on a nearly-empty window as readily as on a full one — which is why the reading is still required
+// above: not as evidence of pressure, but because a boundary that cannot see the session it is
+// recycling has no business recycling it.
+func shouldBoundaryHandoff(reading statusline.ChannelReading, cfg config.StepContextConfig,
+	gateClose, workFollows, admissionNoFit, efficiencyRelaunch bool) bool {
+
 	if gateClose || !workFollows {
 		return false
 	}
@@ -317,18 +468,69 @@ func shouldBoundaryHandoff(reading statusline.ChannelReading, cfg config.StepCon
 		// A false with a 0 is "no reading", never "empty context".
 		return false
 	}
-	return pct >= float64(cfg.HandoffPct)
+	return admissionNoFit || efficiencyRelaunch || pct >= float64(cfg.HandoffPct)
+}
+
+// efficiencyCausedBoundary answers whether the efficiency operand is what MADE this boundary fire, as
+// opposed to having merely been true while capacity or occupancy fired it.
+//
+// Asked by re-running the single boundary owner with the efficiency operand off. That is the exact
+// counterfactual, it costs one arithmetic evaluation, and it keeps the answer derived from the owner
+// rather than from a second copy of its rules that would drift the first time one of them changed.
+//
+// The distinction only matters because the efficiency relaunch is BOUNDED. An unbounded mechanism can
+// afford to claim a shared cause; a mechanism with six relaunches per formula cannot, because every
+// claim it makes for a recycle it did not cause is a recycle it will not be able to make later.
+func efficiencyCausedBoundary(reading statusline.ChannelReading, cfg config.StepContextConfig,
+	gateClose bool, adm admission) bool {
+
+	return !shouldBoundaryHandoff(reading, cfg, gateClose, true, adm.handoffHelps(), false)
+}
+
+// boundaryHandoffCause is the clause that says WHY this boundary fired, and it exists because the
+// two reasons look nothing alike to a reader. The occupancy rule fires when the window is already
+// past the configured bound; K7's admission fires on a PROJECTION, and can fire at an occupancy
+// plainly below that bound. Reporting the latter as "Context at 60%" against a 75% threshold reads
+// as a bug in the very surface the End State asks to record why it acted.
+// #678 K6 adds a third reason, and it needs its own clause for the same argument one step further:
+// an efficiency relaunch can fire at 5% of a 1M-token window, so BOTH occupancy clauses above would
+// report it as pressure that is plainly not there. Capacity is named first when both hold, because a
+// no-fit verdict is the more urgent of two true facts.
+func boundaryHandoffCause(pct float64, after string, adm admission, eff efficiencyRelaunch) string {
+	if adm.handoffHelps() {
+		return fmt.Sprintf("Next step projected at %.0f%% of the window against a %.0f%% ceiling, from %.0f%% after %s",
+			adm.decision.ProjectedPct, adm.decision.HeadroomPct, pct, after)
+	}
+	if eff.warranted {
+		return boundaryEfficiencyCause(adm, eff)
+	}
+	return fmt.Sprintf("Context at %.0f%% after %s", pct, after)
+}
+
+// boundaryEfficiencyCause states the learned figures the relaunch was taken on, because an operator
+// reading "handing off for a clean session" at 5% occupancy has no other way to tell this from a bug.
+// The step's STABLE label is named rather than the bead id: the bead id is minted per instance and
+// says nothing about the history that produced the decision.
+func boundaryEfficiencyCause(adm admission, eff efficiencyRelaunch) string {
+	in := adm.efficiency.Inputs
+	if eff.level != "" {
+		return fmt.Sprintf("Next step %s runs at effort %s (exact thinking share %d %% over %d runs)",
+			adm.stepLabel, eff.level, in.ThinkingSharePct, in.PriorRuns)
+	}
+	return fmt.Sprintf("Next step %s has historically spanned %d sessions over %d runs",
+		adm.stepLabel, in.SessionsPerStep, in.PriorRuns)
 }
 
 // boundaryHandoffMessage is the self-mail body a boundary handoff leaves for the session that
 // inherits the fresh window. finalStep is the #622-C5 final-step case: the formula is already
 // complete and an improvement session inherits (driven by the marker + urgent self-mail), so there
 // is no next step to prime — the inheritor's action is to finish the improvement pass, not af prime.
-func boundaryHandoffMessage(pct float64, after string, finalStep bool) string {
+func boundaryHandoffMessage(pct float64, after string, finalStep bool, adm admission, eff efficiencyRelaunch) string {
 	if finalStep {
-		return fmt.Sprintf("Context at %.0f%% after %s. Fresh session: the improvement session inherits — run af mail check, then af improvement complete.", pct, after)
+		return fmt.Sprintf("%s. Fresh session: the improvement session inherits — run af mail check, then af improvement complete.",
+			boundaryHandoffCause(pct, after, adm, eff))
 	}
-	return fmt.Sprintf("Context at %.0f%% after %s. Fresh session: run af prime for the next step.", pct, after)
+	return fmt.Sprintf("%s. Fresh session: run af prime for the next step.", boundaryHandoffCause(pct, after, adm, eff))
 }
 
 // runBoundaryHandoff performs the cooperative boundary handoff, or declines it for a reason worth
@@ -336,7 +538,8 @@ func boundaryHandoffMessage(pct float64, after string, finalStep bool) string {
 // and a session that could not be recycled is merely one the forceful recovery ladder may catch
 // later — which is the degradation this feature is layered above, not a new failure.
 func runBoundaryHandoff(ctx context.Context, cwd, factoryRoot, after, instanceID string,
-	reading statusline.ChannelReading, cfg config.StepContextConfig, finalStep bool) {
+	reading statusline.ChannelReading, cfg config.StepContextConfig, finalStep bool,
+	adm admission, eff efficiencyRelaunch, chargeEfficiencyRelaunch bool, recordEfficiencyRelaunch func()) {
 	// af done legitimately runs outside tmux — an operator shell, a test. No pane, no handoff.
 	// Said out loud rather than declined silently: by the time this runs the decision has already
 	// come out true, so an operator whose factory never hands off has nothing else to grep for.
@@ -351,17 +554,41 @@ func runBoundaryHandoff(ctx context.Context, cwd, factoryRoot, after, instanceID
 		return
 	}
 
+	// #679 F12/BODY-6 (cap) and F11/T4 (record): both the efficiency-relaunch cap charge AND the
+	// efficiency enforcement record are committed HERE, past the two declines above (no pane, an
+	// unresolved role), not before the handoff. A cap slot spent on a boundary that DECLINED disarms the
+	// actuator early for a step it never recycled; a record written on a decline reports a relaunch that
+	// never happened, and Phase 7 measures a firing that was refused (AC-4's join holds on the SUCCESS
+	// path and does not require writing on the decline path). Past these gates the respawn below replaces
+	// this pane, so anything written after it would never be written — this is the commit point the
+	// bound's own comment meant by "counted before the relaunch", and it is exactly where the record must
+	// sit too, so it survives a respawn that never returns. The record's SHAPE differs per leg (the step
+	// leg carries step keys; the formula sibling omits them), so each caller supplies its own builder.
+	if chargeEfficiencyRelaunch {
+		bumpEfficiencyRelaunches(cwd, instanceID)
+		if recordEfficiencyRelaunch != nil {
+			recordEfficiencyRelaunch()
+		}
+	}
+
 	pct, _ := reading.UsedPct()
-	fmt.Printf("Context at %.0f%% after %s — handing off for a clean session.\n", pct, after)
+	fmt.Printf("%s — handing off for a clean session.\n", boundaryHandoffCause(pct, after, adm, eff))
 
 	subject := "HANDOFF: step context boundary"
-	message := boundaryHandoffMessage(pct, after, finalStep)
+	message := boundaryHandoffMessage(pct, after, finalStep, adm, eff)
 
 	// TriggerDetail is populated because this is the one cooperative class that KNOWS its
 	// occupancy. crash, error_pattern, compact_handoff and self_handoff leave it zero because they
 	// have no occupancy story; leaving it zero here would make the boundary indistinguishable from
 	// them in the funnel log, and the read surface renders a zero observed_pct as UNKNOWN.
 	detail := recycleDetail{ObservedPct: pct, ThresholdPct: cfg.HandoffPct, InstanceID: instanceID}
+	if adm.handoffHelps() {
+		// The same correction boundaryHandoffCause makes to the printed line. Occupancy and
+		// threshold stay honest — they are what was measured and what was configured — and the
+		// projection is what the recycle was actually taken against, so the log no longer reads as
+		// a boundary that fired below its own bound.
+		detail.ProjectedPct = adm.decision.ProjectedPct
+	}
 	if obs, ok := reading.Observation(); ok {
 		// The sanitized stem, which is the spelling the funnel's own fence compares against.
 		detail.SessionID = obs.SessionID()
@@ -480,6 +707,22 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 		ev := telemetryRecordFor(ctx, factoryRoot, cwd, vt.agent, instanceID, "")
 		ev.Event = telemetry.EventInstanceEnd
 		ev.Formula = telemetryFormulaName(formulaName)
+
+		// #678 K1: the pair that makes a run reproducible. instance_start recorded the formula as it
+		// was when the run began; re-hashing it HERE is what turns "the formula was edited mid-run"
+		// from an invisible event into two digests that differ. A single digest can only ever say
+		// what the run started from.
+		//
+		// The error is dropped for the reason instance_start drops it: an unreadable formula file
+		// yields "", and an omitempty empty string reads as "nobody recorded this" — the honest
+		// answer on a lifecycle path where observability never blocks work.
+		if formulaPath, err := formula.FindFormulaFile(telemetryFormulaName(formulaName), factoryRoot); err == nil {
+			ev.FormulaDigest, _ = formulaSHA256(formulaPath)
+		}
+		// Resolved at close and not at instantiation because the branch is still moving until now:
+		// the formula's own branch-setup step rebases, so the commit this run's work should be
+		// diffed against is not knowable when the run starts.
+		ev.BaseCommit = baseCommit(cwd)
 		appendTelemetryRecord(factoryRoot, ev)
 	}
 
@@ -530,7 +773,11 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 	improvementFired := false
 	var improvementInstr, improvementAgent string
 	if caller != "" && improvementFactoryEnabled(factoryRoot) {
-		fired, agent, instruction, reason := evaluateImprovementFire(cwd, factoryRoot, instanceID, caller, formulaName, shouldTerminate)
+		// The umbrella is resolved HERE, once, and handed down. tokenomicsState is the same
+		// function the instance_start record uses, so the instruction the agent receives and the
+		// posture every record of this run states come from one reading (#678 K10).
+		tokenomicsOn := tokenomicsState(factoryRoot) == telemetry.TokenomicsStateOn
+		fired, agent, instruction, reason := evaluateImprovementFire(cwd, factoryRoot, instanceID, caller, formulaName, shouldTerminate, tokenomicsOn)
 		switch {
 		case fired:
 			improvementFired = true
@@ -583,8 +830,64 @@ func sendWorkDoneAndCleanup(ctx context.Context, store issuestore.Store, cwd, fa
 		if cfg, err := config.LoadStartupConfig(factoryRoot); err == nil {
 			now := time.Now()
 			reading := stepContextReading(factoryRoot, cwd, improvementAgent, cfg.Recovery, now)
-			if shouldBoundaryHandoff(reading, cfg.StepContext, gateClose, true) {
-				runBoundaryHandoff(ctx, cwd, factoryRoot, "formula "+formulaName, instanceID, reading, cfg.StepContext, true)
+
+			// #668 K7 close-time, the final-step call site. The operand is ASSEMBLED here rather
+			// than passed as a constant, and the difference is not cosmetic even though today's
+			// answer is the same either way. A literal false says "this cell is not admission's
+			// business"; an assembled verdict says "admission was asked and had nothing to say" —
+			// and only the second stays true when something changes underneath it. What inherits
+			// this window is an improvement session, so the step key is deliberately empty: there
+			// is no next formula step, and naming the step that just closed would predict the cost
+			// of work already paid for. learnedAppetite reports an empty key as unknown and Admit
+			// turns unknown into an observation, so occupancy alone decides this cell exactly as it
+			// did before #668 — until a phase that keys appetite on improvement sessions arrives,
+			// at which point this site is already asking rather than waiting to be found again.
+			adm := stepAdmission(factoryRoot, cwd, improvementAgent, telemetryFormulaName(formulaName),
+				"", reading, cfg.Tokenomics, cfg.Recovery.ContextThresholdPct)
+
+			// #678 K6 on this leg too, and ASSEMBLED rather than passed as a constant for the same
+			// reason the admission above it is. Today it answers false by construction — the step key
+			// is empty, so the plan carries no learned data — and an assembled value is what keeps that
+			// true by arithmetic rather than by a literal nobody will revisit.
+			eff := boundaryEfficiencyRelaunch(cwd, instanceID, adm)
+
+			if shouldBoundaryHandoff(reading, cfg.StepContext, gateClose, true, adm.handoffHelps(), eff.warranted) {
+				// Same order as the more-steps site, for the same reason: the handoff may replace
+				// this pane and never return, so the record AC-4 asks for is written first.
+				if adm.handoffHelps() {
+					// No StepID/StepSeq/StepTitle, because there is no step: the formula is closed and
+					// what follows is an improvement session. AC-4's join still holds against the
+					// instance_end record written above on formula, instance, session and model, which
+					// is the finest granularity this cell has.
+					recordIntervention(ctx, factoryRoot, cwd, improvementAgent, instanceID, func(ev *telemetry.StepEvent) {
+						ev.Formula = telemetryFormulaName(formulaName)
+						ev.Mechanism = string(tokenomics.MechanismBudget)
+						ev.Action = telemetry.ActionHandoff
+						attachStepOccupancy(ev, reading, factoryRoot, now)
+					})
+				}
+				// #678 K6's record on this leg too. The improvement session is relaunched through the
+				// same respawnSession the more-steps boundary uses, and an arm that recorded only the
+				// mid-formula relaunches would report a fraction of its own firings as the whole.
+				//
+				// #679 F11/T4: the same closure move as the step leg. The record shape has NO step keys
+				// here — the formula is closed and what inherits the window is an improvement session — so
+				// this leg supplies its own builder past runBoundaryHandoff's decline gates.
+				efficiencyCaused := eff.warranted && efficiencyCausedBoundary(reading, cfg.StepContext, gateClose, adm)
+				recordFormulaRelaunch := func() {
+					recordEnforcement(ctx, factoryRoot, cwd, improvementAgent, instanceID, func(ev *telemetry.StepEvent) {
+						ev.Formula = telemetryFormulaName(formulaName)
+						ev.Mechanism = string(eff.mechanism)
+						ev.Action = telemetry.ActionHandoff
+						ev.Objective = telemetry.ObjectiveEfficiency
+						ev.EffortLevel = eff.level
+						attachStepOccupancy(ev, reading, factoryRoot, now)
+					})
+				}
+				// Same F12/BODY-6 move as the more-steps leg: the bump (and now the record) are inside
+				// runBoundaryHandoff, past its declines, so a declined improvement boundary spends no cap
+				// slot and files no phantom efficiency record.
+				runBoundaryHandoff(ctx, cwd, factoryRoot, "formula "+formulaName, instanceID, reading, cfg.StepContext, true, adm, eff, efficiencyCaused, recordFormulaRelaunch)
 			}
 		}
 	}
@@ -858,6 +1161,25 @@ func cleanupRuntimeArtifacts(cwd string) {
 	os.Remove(filepath.Join(cwd, ".runtime", "last_closed_step"))
 	os.Remove(filepath.Join(cwd, ".runtime", "step_primed"))
 	os.Remove(filepath.Join(cwd, ".runtime", "done_velocity"))
+	os.Remove(filepath.Join(cwd, ".runtime", "tokenomics_advisories.json"))
+	// #678 K5/K6, swept for the advisory ledger's reason: both are scoped to the formula that earned
+	// them. A relaunch count carried into the next formula would arrive at its first step already
+	// spent, and an effort breadcrumb naming a step label of the formula that just finished would make
+	// the next formula's first boundary compare its plan against a level nothing is running at.
+	os.Remove(effortBreadcrumbPath(cwd))
+	os.Remove(efficiencyRelaunchPath(cwd))
+	// #678 K8(b)'s counter, swept beside them. It is session-keyed and self-resets on a session
+	// change, so a stale one is never READ wrong — this sweeps it so a completed formula leaves no
+	// .runtime/ file behind, which is the property the rest of this function exists to keep.
+	os.Remove(primeCountPath(cwd))
+	// Swept for the same reason as the advisory ledger above: it is counsel scoped to the formula that
+	// earned it. Left behind, a refusal from the last minutes of formula A would be relayed into
+	// formula B's first fan-out and recorded against B's step id — counsel that is not merely stale
+	// but misfiled.
+	os.Remove(filepath.Join(cwd, ".runtime", dispatchLastRefusalName))
+	// A formula that completes must not carry a leaked sequential.slot into the next one; clear the
+	// whole sub-agent reservation ledger, not just the eight named files above (#669 F5).
+	clearDispatchReservations(cwd)
 }
 
 // readWorktreeID reads the worktree ID from .runtime/worktree_id.
@@ -966,7 +1288,7 @@ func terminateSession(sessionID, cwd string) {
 
 	fmt.Printf("Auto-terminating dispatched session %s\n", sessionID)
 
-	if err := t.KillSession(sessionID); err != nil {
+	if err := t.KillSession(sessionID); err != nil { //af:teardown:self
 		fmt.Fprintf(os.Stderr, "warning: auto-terminate failed: %v\n", err)
 	}
 }

@@ -25,14 +25,21 @@ import (
 // #458 Gap-4 / the unresolved review thread on agents_list_integration_test.go.
 var afRequireRealStore bool
 
+// afRequireLiveClaude is the same signal for the same reason, one dependency over: it turns the live
+// deny probe's only permitted skip (no claude CLI on PATH) into a failure, for a lane that installs
+// the CLI on purpose. Captured here for the identical reason as above — read inside the subtest it
+// would always be "", and a dead switch reads exactly like a satisfied one.
+var afRequireLiveClaude bool
+
 func TestMain(m *testing.M) {
 	// #389: block the integration suite when launched inside a live factory, BEFORE
 	// m.Run so no real tmux/worktree/git resource is created. Detection is by CWD under
 	// a factory worktree (see ciguard.go), so it touches no env and is unaffected by the
 	// NeutralizeAFEnv call below. No-op in CI / a clean checkout.
 	tmuxisolation.GuardCIOnly()
-	// Capture the CI signal before NeutralizeAFEnv unsets it (see afRequireRealStore).
+	// Capture the CI signals before NeutralizeAFEnv unsets them (see afRequireRealStore).
 	afRequireRealStore = os.Getenv("AF_REQUIRE_REAL_STORE") == "1"
+	afRequireLiveClaude = os.Getenv(liveProbeRequireEnv) == "1"
 	tmuxisolation.NeutralizeAFEnv()
 	os.Exit(m.Run())
 }

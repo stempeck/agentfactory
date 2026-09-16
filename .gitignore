@@ -124,6 +124,10 @@ test_results.txt
 !.claude/skills/architecture-docs/**
 !.claude/skills/improve-agent/
 !.claude/skills/improve-agent/**
+!.claude/skills/improve-solution/
+!.claude/skills/improve-solution/**
+!.claude/skills/perfeval-agent/
+!.claude/skills/perfeval-agent/**
 !.claude/skills/plan-review/
 !.claude/skills/plan-review/**
 !.claude/skills/plan-work/
@@ -135,7 +139,11 @@ test_results.txt
 !.claude/skills/six-sigma-challenge/
 !.claude/skills/six-sigma-challenge/**
 
-# Scratch dir the Stop-hook e2e harness falls back to when /tmp is noexec
-# (internal/cmd/hook_e2e_harness_test.go). Removed by t.Cleanup; ignored so a hard kill
-# cannot leave a 16 MB af binary staged.
+# Scratch dirs tryExecCapableDir (internal/cmd/exec_capable_test.go) falls back to when /tmp is
+# noexec — the Stop-hook e2e harness, the live deny probe, the gate self-verify harness and the
+# per-role SessionStart proof, in the order listed below. Removed by t.Cleanup; ignored so a hard
+# kill cannot leave a 16 MB af binary, or a whole disposable factory, staged.
 /internal/cmd/testdata/hooke2e*
+/internal/cmd/testdata/af-test-denyprobe*
+/internal/cmd/testdata/guardselfverify*
+/internal/cmd/testdata/af-test-sessionstart*

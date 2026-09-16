@@ -573,6 +573,14 @@ poll, sleep, nudge, or keepalive.
    analyst finished all 14 of its own steps, mailed `WORK_DONE`, and went idle without
    ever sending `RAPIDSOL: ANALYSIS COMPLETE`. Waiting only for the prescribed subject
    hangs this formula forever. Signals confirm; artifacts (action 3) verify.
+
+   **Run this exact block on EVERY wake — including a re-wake where you already hold one
+   signal.** Do NOT narrow it to check only the still-missing signal, and do NOT reword the
+   `ANALYSIS=… DESIGN=…` output line. The per-turn fidelity gate sees only the CURRENT
+   turn's tool calls, so a truncated or reformatted check reads as "the prescribed check
+   was not run as written" and trips a STEP_FIDELITY flag (observed: a one-signal re-wake
+   ran `DESIGN=<none>` alone and was flagged). Re-running the full two-signal block is
+   idempotent and cheap; the narrowed variant is never worth the flag.
    ```bash
    ANALYSIS=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: ANALYSIS COMPLETE")) | .id' | head -1)
    if [ -z "$ANALYSIS" ]; then

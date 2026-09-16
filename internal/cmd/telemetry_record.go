@@ -241,6 +241,7 @@ func telemetryStepSpan(factoryRoot, agent, instanceID, stepID, endTS string) ste
 
 	span := stepSpan{
 		seq:            start.StepSeq,
+		startTS:        start.TS,
 		ctxTokensStart: start.CtxTokensUsed,
 		cumTokens:      start.CumTokens,
 		sessionID:      start.SessionID,
@@ -264,6 +265,11 @@ func telemetryStepSpan(factoryRoot, agent, instanceID, stepID, endTS string) ste
 type stepSpan struct {
 	seq        int
 	durationMS int
+	// startTS is the step_start's own timestamp, carried rather than re-read because this function
+	// has already parsed the record it comes from. It is the opening edge of the half-open window
+	// the transcript-derived generation figures are attributed against, and durationMS cannot stand
+	// in for it: a duration says how long, not from when.
+	startTS string
 	// ctxTokensStart and cumTokens are the step's opening figures, carried forward so the closing
 	// record can state consumption without a second read. Pointers, because absent must stay
 	// distinguishable from zero all the way through.

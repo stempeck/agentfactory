@@ -4,7 +4,16 @@ Operator guide for the model registry (`.agentfactory/models.json`): profiles, m
 classes, and gateway coverage. Split out of [USING_AGENTFACTORY.md](USING_AGENTFACTORY.md).
 For the gateway-side runbook see [USING_LITELLM.md](USING_LITELLM.md); for the context-window
 keys a profile can declare (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`),
-see [USING_RECOVERY.md](USING_RECOVERY.md#declaring-a-backends-real-context-window).
+see [USING_RECOVERY.md](USING_RECOVERY.md#declaring-a-backends-real-context-window). A profile may
+also declare `AF_BACKEND_POOL_TOKENS` — the operator-set size of the shared backend pool the
+sub-agent-dispatch gate divides among concurrent sessions, distinct from the per-request context
+window above (see [Token economics](USING_TOKENOMICS.md#token-economics)). Two companion keys ride
+beside it and tune the same gate: `AF_BACKEND_CHILD_FLOOR_TOKENS` — the minimum free pool a launch
+must leave behind so the next child still has room to seat (defaults to 50,000 tokens when a pool is
+declared but the floor is not; a positive decimal, never zero); and `AF_DISABLE_PARALLEL_SUBAGENTS`
+— set to `"1"`, a hard cap that runs sub-agents strictly one at a time on that backend (a second is
+refused while any sibling still runs) instead of dividing the pool arithmetically. Both are inert
+wherever `AF_BACKEND_POOL_TOKENS` is absent.
 
 ## Model profiles and classes
 
@@ -59,3 +68,24 @@ offending profile and the fix:
 - **A rewritten profile loses its fitness attestation.** Re-run `af config models attest <profile>`
   after verifying the new endpoint. Editing only the `agents` map or `default` clears nothing.
 
+### One key a profile does not own outright: `CLAUDE_CODE_EFFORT_LEVEL`
+
+Every other key in a profile is exported verbatim. This one is filtered: a launch carries it only
+when the tokenomics effort arm is on — `af tokenomics on` for the umbrella, plus `"effort"` not set
+to `"off"` in `startup.json`'s `tokenomics` block. And when a launch does carry it, the value is
+not always the one the profile declared: with the arm on, the effort actuator can replace it in
+place with a lower level chosen from the next step's learned history — it never raises the declared
+level, and the profile's declaration stands only when the actuator selects nothing. With the arm off
+the key is dropped from the launch env and, on a reused pane, actively unset. `af tokenomics status`
+names which half is dark.
+
+It is filtered because it is one arm of a running experiment (#668 D16), and an experiment whose
+control group receives the treatment measures nothing. The filter applies to every launch path — `af
+sling`, `af up`, and every handoff / compact / watchdog relaunch — not only the relaunch the arm
+acts on, so an agent cannot carry the treatment in from its first turn and never be relaunched out
+of it.
+
+If you want a fixed effort level for reasons unrelated to tokenomics, set it in your shell rc rather
+than a profile: with the effort arm off the session inherits it untouched. With the arm on, though,
+the actuator can append its own chosen level to the launch and override the inherited value for that
+session — shell rc is not a way around the experiment.

@@ -120,6 +120,12 @@ jobs:
     # store, the failure mode #458 calls out. Set ONLY on this job; `unit` and
     # `web-unit` run against memstore and must NOT be affected. Mirrors the unit
     # job's Issue #435 "never silently skipped" guarantee precedent.
+    # AF_REQUIRE_LIVE_CLAUDE: "1" is the same switch for the #673 live deny probe
+    # (internal/cmd/dispatch_admit_live_probe_integration_test.go): it turns "claude not on PATH"
+    # from a skip into a failure. It is deliberately NOT set yet — no step here installs the claude
+    # CLI, so setting it today would fail this gating lane for a missing dependency rather than for
+    # a real regression. Add the install step and the flag together, or not at all; until then the
+    # probe's live half is dormant in CI and only its compiled-binary leg runs.
     env:
       AF_REQUIRE_REAL_STORE: "1"
     steps:

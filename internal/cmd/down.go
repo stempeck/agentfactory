@@ -118,7 +118,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 		}
 
 		mgr := session.NewManager(root, name, entry)
-		if err := mgr.Stop(); err != nil {
+		if err := mgr.Stop(); err != nil { //af:teardown:gated
 			if errors.Is(err, session.ErrNotRunning) {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s: not running\n", session.SessionName(name))
 				if downReset {
@@ -167,13 +167,13 @@ func runDown(cmd *cobra.Command, args []string) error {
 		watchdogSession := session.WatchdogSessionName()
 		tx := newCmdTmux()
 		if running, _ := tx.HasSession(watchdogSession); running {
-			_ = tx.KillSession(watchdogSession)
+			_ = tx.KillSession(watchdogSession) //af:teardown:dispatch
 			fmt.Fprintf(cmd.OutOrStdout(), "Stopped %s\n", watchdogSession)
 		}
 
 		dispatchSession := session.DispatchSessionName()
 		if running, _ := tx.HasSession(dispatchSession); running {
-			_ = tx.KillSession(dispatchSession)
+			_ = tx.KillSession(dispatchSession) //af:teardown:dispatch
 			fmt.Fprintf(cmd.OutOrStdout(), "Stopped %s\n", dispatchSession)
 		}
 	}
@@ -329,10 +329,10 @@ func closeAgentBeads(ctx context.Context, store issuestore.Store, agentName, rea
 // out against the operator's real Claude processes in a default-suite test, so the seam is the
 // guard. It returns nil when pgrep finds no orphans.
 var runPkill = func(pattern string) error {
-	if err := exec.Command("pgrep", "-f", pattern).Run(); err != nil {
+	if err := exec.Command("pgrep", "-f", pattern).Run(); err != nil { //af:teardown:dispatch
 		return nil // no orphaned processes
 	}
-	return exec.Command("pkill", "-9", "-f", pattern).Run()
+	return exec.Command("pkill", "-9", "-f", pattern).Run() //af:teardown:dispatch
 }
 
 func killOrphanedClaudeProcesses() {

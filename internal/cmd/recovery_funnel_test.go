@@ -75,6 +75,8 @@ func TestRecoveryFunnel_LogsTriggerForEveryRecycleClass(t *testing.T) {
 		{"compact_handoff", triggerCompactHandoff, "compact_handoff"},
 		{"self_handoff", triggerSelfHandoff, "self_handoff"},
 		{"step_boundary_handoff", triggerStepBoundaryHandoff, "step_boundary_handoff"},
+		{"unattributed_respawn", triggerUnattributedRespawn, "unattributed_respawn"},
+		{"backend_stall_respawn", triggerBackendStallRespawn, "backend_stall_respawn"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -127,6 +129,9 @@ func TestRecycleFence_ArmedOnEveryRecycleClass(t *testing.T) {
 		{"compact_handoff", triggerCompactHandoff, "compact_handoff"},
 		{"self_handoff", triggerSelfHandoff, "self_handoff"},
 		{"step_boundary_handoff", triggerStepBoundaryHandoff, "step_boundary_handoff"},
+		// #668 H-R3's two classes are deliberately absent: they describe a pane the factory did NOT
+		// replace, they never reach respawnSession, and they arm no fence. Their funnel line is
+		// covered by TestRespawnAttribution, which drives the entry point they actually use.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -572,24 +577,30 @@ func TestRecycleFence_DeadSessionSnapshotDoesNotRefire(t *testing.T) {
 
 // --- K20: re-provisioning on every class ------------------------------------------------------------
 
-// TestRecoveryFunnel_ReprovisionsSettingsOnEveryClass covers the pure-respawn provisioning gap: a
-// recycled session reaches neither af up nor af sling, so without this it could relaunch forever
-// without the statusLine registration the whole occupancy channel depends on — the observer
+// TestRecoveryFunnel_ReprovisionsSettingsAndIdentityOnEveryClass covers the pure-respawn provisioning
+// gap: a recycled session reaches neither af up nor af sling, so without this it could relaunch
+// forever without the statusLine registration the whole occupancy channel depends on — the observer
 // silently missing for the one agent that most needs observing.
 //
-// EnsureSettings is idempotent by unconditional overwrite, so the file is deleted between cases:
-// a leftover from an earlier class would make every later class pass for free.
-func TestRecoveryFunnel_ReprovisionsSettingsOnEveryClass(t *testing.T) {
+// Identity is asserted alongside settings (#675 K2) because the two halves fail the same way and only
+// one of them was ever wired: the funnel refreshed the file the HARNESS reads while leaving stale the
+// file the MODEL reads. Both are removed up front so that neither assertion can be satisfied by
+// something the fixture seeded rather than by the respawn under test.
+func TestRecoveryFunnel_ReprovisionsSettingsAndIdentityOnEveryClass(t *testing.T) {
 	for _, trigger := range []string{
 		triggerContextExhaustion, triggerDarkAtHighOccupancy, triggerProgressBackstop,
 		triggerCrash, triggerErrorPattern, triggerCompactHandoff, triggerSelfHandoff,
-		triggerStepBoundaryHandoff,
+		triggerStepBoundaryHandoff, triggerUnattributedRespawn, triggerBackendStallRespawn,
 	} {
 		t.Run(trigger, func(t *testing.T) {
 			root := setupTestFactoryForDone(t, "supervisor")
 			agentDir := config.AgentDir(root, "supervisor")
 			settings := filepath.Join(agentDir, ".claude", "settings.json")
+			identity := filepath.Join(agentDir, "CLAUDE.md")
 			if err := os.RemoveAll(filepath.Join(agentDir, ".claude")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(identity); err != nil && !os.IsNotExist(err) {
 				t.Fatal(err)
 			}
 
@@ -612,6 +623,14 @@ func TestRecoveryFunnel_ReprovisionsSettingsOnEveryClass(t *testing.T) {
 			var parsed map[string]any
 			if err := json.Unmarshal(data, &parsed); err != nil {
 				t.Errorf("settings.json must be valid JSON: %v", err)
+			}
+
+			rendered, err := os.ReadFile(identity)
+			if err != nil {
+				t.Fatalf("every recycle class must re-provision identity at %s: %v", identity, err)
+			}
+			if !strings.Contains(string(rendered), "# Agent Identity: supervisor") {
+				t.Errorf("CLAUDE.md was not rendered from the embedded template, got:\n%s", rendered)
 			}
 		})
 	}

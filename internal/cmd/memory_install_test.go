@@ -11,27 +11,24 @@ import (
 	"github.com/stempeck/agentfactory/internal/memory"
 )
 
-// The SessionStart command each settings template carried BEFORE issue #515 Phase 3, and the
-// UserPromptSubmit command both templates carry and must keep carrying unchanged. Frozen here so
-// the memory clause is provably an APPEND: any other edit to the PATH export, to `af prime --hook`
-// or to `af mail check --inject` stops being invisible to the suite. Every other hook assertion in
-// the tree is a strings.Contains, which is monotone and therefore cannot notice an append at all.
+// The PATH export every SessionStart entry must carry, and the UserPromptSubmit command both
+// templates carry and must keep carrying unchanged. Since #675 K3 the three SessionStart writers are
+// separate entries, so what this file pins is the memory entry: its exact command and the PATH export
+// in front of it. Entry count, order and the absence of `&&` chaining across the other two are pinned
+// by assertSessionStartWriters (internal/claude) and assertProvisionedSessionStart (install_test.go);
+// frozenUserPromptSubmit remains byte-exact here because UserPromptSubmit is still one command.
 const (
-	preMemorySessionStartAutonomous  = `export PATH="$HOME/go/bin:$HOME/.local/bin:$HOME/bin:$PATH" && af prime --hook && af mail check --inject`
-	preMemorySessionStartInteractive = `export PATH="$HOME/go/bin:$HOME/.local/bin:$HOME/bin:$PATH" && af prime --hook`
-	frozenUserPromptSubmit           = `export PATH="$HOME/go/bin:$HOME/.local/bin:$HOME/bin:$PATH" && af mail check --inject`
-	memoryHookSegment                = `af memory check --inject`
+	sessionStartHookPrefix = `export PATH="$HOME/go/bin:$HOME/.local/bin:$HOME/bin:$PATH" && `
+	frozenUserPromptSubmit = `export PATH="$HOME/go/bin:$HOME/.local/bin:$HOME/bin:$PATH" && af mail check --inject`
+	memoryHookSegment      = `af memory check --inject`
 )
 
-// provisionedHookCommand returns hooks.<event>[0].hooks[0].command from a provisioned
-// settings.json. Reading the PROVISIONED artifact rather than the embedded template is what makes
-// these assertions about what an agent actually receives.
-func provisionedHookCommand(t *testing.T, settingsPath, event string) string {
+// hookCommandGroups decodes hooks.<event> from a settings document into one command slice per
+// matcher group. Every hook-command reader in this package needs exactly this shape, and each
+// re-declaration of it is another place to get the JSON wrong while still compiling. `source` names
+// the document in failure messages, since callers supply either a path or an embedded template.
+func hookCommandGroups(t *testing.T, settings []byte, event, source string) [][]string {
 	t.Helper()
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatalf("reading %s: %v", settingsPath, err)
-	}
 	var parsed struct {
 		Hooks map[string][]struct {
 			Hooks []struct {
@@ -39,14 +36,51 @@ func provisionedHookCommand(t *testing.T, settingsPath, event string) string {
 			} `json:"hooks"`
 		} `json:"hooks"`
 	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("settings.json is not valid JSON: %v", err)
+	if err := json.Unmarshal(settings, &parsed); err != nil {
+		t.Fatalf("%s is not valid JSON: %v", source, err)
 	}
 	entries := parsed.Hooks[event]
-	if len(entries) == 0 || len(entries[0].Hooks) == 0 {
+	if len(entries) == 0 {
+		t.Fatalf("no %s hook in %s", event, source)
+	}
+	groups := make([][]string, 0, len(entries))
+	for _, e := range entries {
+		cmds := make([]string, 0, len(e.Hooks))
+		for _, h := range e.Hooks {
+			cmds = append(cmds, h.Command)
+		}
+		groups = append(groups, cmds)
+	}
+	return groups
+}
+
+// provisionedHookGroups reads a provisioned settings.json from disk. Reading the PROVISIONED
+// artifact rather than the embedded template is what makes these assertions about what an agent
+// actually receives.
+func provisionedHookGroups(t *testing.T, settingsPath, event string) [][]string {
+	t.Helper()
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", settingsPath, err)
+	}
+	return hookCommandGroups(t, data, event, settingsPath)
+}
+
+// provisionedHookCommand returns hooks.<event>[0].hooks[0].command.
+func provisionedHookCommand(t *testing.T, settingsPath, event string) string {
+	t.Helper()
+	groups := provisionedHookGroups(t, settingsPath, event)
+	if len(groups[0]) == 0 {
 		t.Fatalf("no %s hook in %s", event, settingsPath)
 	}
-	return entries[0].Hooks[0].Command
+	return groups[0][0]
+}
+
+// provisionedHookCommands returns every hooks.<event>[0].hooks[*].command. SessionStart now holds
+// one entry per writer, so a caller that reads only [0] can no longer see what an agent receives.
+func provisionedHookCommands(t *testing.T, settingsPath, event string) []string {
+	t.Helper()
+	return provisionedHookGroups(t, settingsPath, event)[0]
 }
 
 // TestMemoryFreshFactory_InstallSeedsVaultAndInjectStaysSilent is T-FRESH (issue #515 Phase 3
@@ -160,50 +194,36 @@ func TestMemoryFreshFactory_InstallSeedsVaultAndInjectStaysSilent(t *testing.T) 
 // TestMemoryHookNoRegression_SessionStartAppendsOnlySilentSegment is T-NOREG (issue #515 Phase 3
 // AC5): with an empty store the hook's stdout is byte-identical to pre-change.
 //
-// That claim cannot be measured by diffing against a binary that no longer exists, and an
-// in-process test cannot observe a real mail segment either — `af prime --hook` re-invokes
-// `af mail check --inject` itself (prime.go:222) and that helper no-ops under a test binary
-// (isTestBinary, prime.go:396-402) to prevent a fork bomb. So the claim decomposes into two halves
-// that ARE verifiable in process, and both are asserted here:
+// That claim cannot be measured by diffing against a binary that no longer exists, so it decomposes
+// into two halves that ARE verifiable in process, and both are asserted here:
 //
-//	Half A (structural): the provisioned SessionStart command is exactly the frozen pre-change
-//	command plus one appended memory segment — so the prime and mail segments are byte-identical —
-//	and UserPromptSubmit is untouched.
+//	Half A (structural): the memory writer occupies its own SessionStart entry and appears exactly
+//	once, so it cannot cost the prime or mail writers a byte — and UserPromptSubmit is untouched.
 //	Half B (behavioral): on an empty store the appended segment contributes zero bytes to stdout
 //	AND stderr, so concatenating it changes no byte of the hook's output.
 //	Half C: a control proving Half B is not vacuous.
 func TestMemoryHookNoRegression_SessionStartAppendsOnlySilentSegment(t *testing.T) {
-	t.Run("autonomous SessionStart is the frozen prefix plus one memory segment", func(t *testing.T) {
-		dir := setupFactoryDir(t)
-		if _, err := runInstallInDir(t, dir, "supervisor"); err != nil {
-			t.Fatalf("af install supervisor: %v", err)
-		}
-		settings := filepath.Join(dir, ".agentfactory", "agents", "supervisor", ".claude", "settings.json")
+	for role, roleType := range map[string]string{"supervisor": "autonomous", "manager": "interactive"} {
+		t.Run(roleType+" SessionStart carries the memory writer in its own entry", func(t *testing.T) {
+			dir := setupFactoryDir(t)
+			if _, err := runInstallInDir(t, dir, role); err != nil {
+				t.Fatalf("af install %s: %v", role, err)
+			}
+			settings := filepath.Join(dir, ".agentfactory", "agents", role, ".claude", "settings.json")
 
-		cmd := provisionedHookCommand(t, settings, "SessionStart")
-		if want := preMemorySessionStartAutonomous + " && " + memoryHookSegment; cmd != want {
-			t.Errorf("autonomous SessionStart is no longer the pre-change command plus the memory segment.\n want: %q\n got:  %q", want, cmd)
-		}
-		if n := strings.Count(cmd, memoryHookSegment); n != 1 {
-			t.Errorf("the memory segment must appear exactly once in SessionStart, got %d", n)
-		}
-	})
-
-	t.Run("interactive SessionStart is the frozen prefix plus one memory segment", func(t *testing.T) {
-		dir := setupFactoryDir(t)
-		if _, err := runInstallInDir(t, dir, "manager"); err != nil {
-			t.Fatalf("af install manager: %v", err)
-		}
-		settings := filepath.Join(dir, ".agentfactory", "agents", "manager", ".claude", "settings.json")
-
-		cmd := provisionedHookCommand(t, settings, "SessionStart")
-		if want := preMemorySessionStartInteractive + " && " + memoryHookSegment; cmd != want {
-			t.Errorf("interactive SessionStart is no longer the pre-change command plus the memory segment.\n want: %q\n got:  %q", want, cmd)
-		}
-		if strings.Contains(cmd, "af mail check") {
-			t.Error("interactive SessionStart must still NOT contain 'af mail check'")
-		}
-	})
+			cmds := provisionedHookCommands(t, settings, "SessionStart")
+			if want := sessionStartHookPrefix + memoryHookSegment; cmds[len(cmds)-1] != want {
+				t.Errorf("%s SessionStart's memory writer is not its own last entry.\n want: %q\n got:  %q", roleType, want, cmds[len(cmds)-1])
+			}
+			n := 0
+			for _, c := range cmds {
+				n += strings.Count(c, memoryHookSegment)
+			}
+			if n != 1 {
+				t.Errorf("the memory segment must appear exactly once across SessionStart, got %d", n)
+			}
+		})
+	}
 
 	// Injection is SessionStart-only (ux.md U-A). Nothing else in the tree asserts anything about
 	// UserPromptSubmit in either template, so this is the only mechanized guard against the clause

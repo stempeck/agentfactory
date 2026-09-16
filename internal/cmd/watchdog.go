@@ -23,6 +23,21 @@ import (
 	"github.com/stempeck/agentfactory/internal/worktree"
 )
 
+// watchdogTickSecs is the poll cadence, and the only spelling of it. It is the default the
+// --interval flag registers below AND what a DIFFERENT af process — `af statusline render`, `af up`
+// — uses to decide whether .runtime/watchdog_heartbeat has gone stale, because the flag var is
+// assigned inside the watchdog's own process and every other invocation of the binary reads the
+// registration default whatever the running watchdog was launched with. Restated as a constant for
+// defaultDispatchTickSecs' reason (cron_check.go:34): the number a cross-process reader needs is
+// not reachable from the variable that holds it. Deriving the flag default from it is what keeps
+// the two provably one number rather than two that happen to agree.
+//
+// Named residual: a watchdog launched `af watchdog --interval 60` is invisible to those readers, so
+// their staleness threshold stays 3×30s. `af up` launches a bare `af watchdog`, so the shipped tick
+// is the default; a hand-launched non-default interval trades a later alarm for no alarm at all,
+// which is the safe direction.
+const watchdogTickSecs = 30
+
 var (
 	watchdogInterval       int
 	watchdogSilenceTimeout int
@@ -99,7 +114,7 @@ failures and escalates to the supervisor for manual intervention.`,
 }
 
 func init() {
-	watchdogCmd.Flags().IntVar(&watchdogInterval, "interval", 30, "Polling interval in seconds")
+	watchdogCmd.Flags().IntVar(&watchdogInterval, "interval", watchdogTickSecs, "Polling interval in seconds")
 	watchdogCmd.Flags().IntVar(&watchdogSilenceTimeout, "silence-timeout", 300, "Seconds of no output change before triggering recovery")
 	rootCmd.AddCommand(watchdogCmd)
 }
@@ -627,6 +642,15 @@ func runWatchdog(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "watchdog: pane scope: %s\n", describePaneScope(ws))
 	fmt.Fprintf(cmd.OutOrStdout(), "watchdog: recovery scope: %s\n", describeRecoveryScope(ws.recovery))
 
+	// Beat once before the first tick. The heartbeat outlives the process — nothing deletes it, not
+	// even `af down` — so a factory restarted the next morning carries last night's timestamp, and
+	// the alarm reader (recoveryAlarms) would call this freshly-started watchdog dead for the whole
+	// first interval. It is alive right here; saying so is not a claim that a tick has run, only
+	// that the process reached its loop.
+	if err := writeWatchdogHeartbeat(root, time.Now()); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "watchdog: heartbeat write failed: %v\n", err)
+	}
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -843,7 +867,14 @@ func writeWatchdogHeartbeat(root string, now time.Time) error {
 		return err
 	}
 	content := now.UTC().Format(time.RFC3339Nano) + "\n"
-	return os.WriteFile(filepath.Join(runtimeDir, "watchdog_heartbeat"), []byte(content), 0o644)
+	return os.WriteFile(watchdogHeartbeatPath(root), []byte(content), 0o644)
+}
+
+// watchdogHeartbeatPath is shared with the alarm reader (recoveryAlarms) rather than composed at
+// each end: the heartbeat's whole value is that a second process can find it, so a path spelled
+// twice is a dead watchdog nobody notices.
+func watchdogHeartbeatPath(root string) string {
+	return filepath.Join(root, ".runtime", "watchdog_heartbeat")
 }
 
 // triggerTelemetryBackendGuard fires ensureTelemetryBackendFn asynchronously so a

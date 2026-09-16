@@ -333,6 +333,10 @@ func TestReportRendersContextStatesJSON(t *testing.T) {
 			"cum_tokens_delta", "ctx_bound_tokens", "over_occupancy", "over_consumption",
 			"compacted_mid_step", "ctx_observed_stale", "bound_exceeds_window",
 			"interrupted_observed_pct",
+			// #668 K10. A step that generated nothing measurable and a step that generated nothing
+			// are the same collapse this list exists to prevent, one surface over.
+			"out_tokens", "think_tokens_est", "thinking_share",
+			"peak_ctx_tokens", "subagent_tokens",
 		} {
 			if got := raw(r, key); got != "null" {
 				t.Errorf("%s = %s, want null", key, got)
@@ -429,4 +433,57 @@ func TestReportRendersContextStatesJSON(t *testing.T) {
 			t.Errorf("interrupted_observed_pct = %s, want null", got)
 		}
 	})
+}
+
+// TestReportThinkingShareNeedsANonZeroDenominator pins the one guard in the K10 block that a report
+// full of healthy fixtures never reaches.
+//
+// thinking_share is think_tokens_est over out_tokens, and out_tokens is a recorded figure rather
+// than a validated one: a step whose transcript held one assistant message with no output block
+// records 0. Without the guard the division is +Inf, encoding/json refuses to marshal it, and the
+// WHOLE report degrades to an error envelope — every other row lost to one step's arithmetic.
+func TestReportThinkingShareNeedsANonZeroDenominator(t *testing.T) {
+	root := setupTestFactoryForPrime(t)
+	t.Chdir(root)
+	enableTelemetryJSON(t)
+	seedTelemetryGate(t, root)
+
+	for _, ev := range []telemetry.StepEvent{
+		{
+			V: telemetry.SchemaVersion, Event: telemetry.EventStepStart,
+			TS: "2026-08-31T12:00:00.000Z", Agent: "manager", Formula: "offpath",
+			InstanceID: "af-668-share", StepID: "s-1", StepSeq: 1, StepTitle: "Generated nothing",
+			CumTokens: i64p(10_000),
+		},
+		{
+			V: telemetry.SchemaVersion, Event: telemetry.EventStepEnd,
+			TS: "2026-08-31T12:01:00.000Z", Agent: "manager", Formula: "offpath",
+			InstanceID: "af-668-share", StepID: "s-1", StepSeq: 1, StepTitle: "Generated nothing",
+			DurationMS: 60_000, Status: telemetry.StatusClosed, CumTokens: i64p(10_000),
+			// The pairing that reaches the guard: a measured estimate over a measured zero.
+			OutTokens: i64p(0), ThinkTokensEst: i64p(4_200),
+		},
+	} {
+		if err := telemetry.AppendEvent(config.TelemetryDir(root), ev); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	out, err := runTelemetryJSON(t, "report")
+	if err != nil {
+		t.Fatalf("report --json: %v", err)
+	}
+	r := jsonReportRowByStep(t, out, "Generated nothing")
+
+	if got := strings.TrimSpace(string(r["thinking_share"])); got != "null" {
+		t.Errorf("thinking_share = %s, want null — there is no share of zero output, and any number "+
+			"here is one the report invented", got)
+	}
+	// The two measured figures survive. Withholding them alongside the share would lose real data to
+	// a derivation that could not be made.
+	for key, want := range map[string]string{"out_tokens": "0", "think_tokens_est": "4200"} {
+		if got := strings.TrimSpace(string(r[key])); got != want {
+			t.Errorf("%s = %s, want %s", key, got, want)
+		}
+	}
 }

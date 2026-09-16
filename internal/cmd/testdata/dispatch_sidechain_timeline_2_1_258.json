@@ -1,0 +1,72 @@
+{
+  "fixture": "dispatch_sidechain_timeline",
+  "v": 1,
+  "cli_version": "2.1.258 (Claude Code)",
+  "provenance": "captured-layout",
+  "captured_at": "2026-09-04",
+  "capture_method": "Directory listing of the sub-agent sidechain real claude 2.1.258 wrote during Phase 4 Spike S: <CLAUDE_CONFIG_DIR>/projects/<slugged-workdir>/<session_id>/subagents/, holding one agent-<id>.jsonl plus one agent-<id>.meta.json per child. CAPTURED: the session id, the two child ids, the file names and the layout they sit in — the only things E1's glob actually derives its evidence path from. AUTHORED: every age_seconds, because git cannot carry mtimes, and every case but active-two-children, which are timelines applied on top of the captured layout to reach each leg of the rung. A case's verdict is therefore a claim about OUR code given the host's layout, not a claim about what the host did.",
+  "session_id": "d8a6e389-d579-4828-9313-6e6bc24a8945",
+  "cases": [
+    {
+      "name": "active-two-children",
+      "why": "The file set the capture actually had: two children plus their sidecars, both still being written. The 90s/30s spacing is authored — only the ordering matters — and E1 measures the newest, so the slot is retained.",
+      "files": [
+        { "name": "agent-a91571e7e61a75302.jsonl", "age_seconds": 90 },
+        { "name": "agent-a91571e7e61a75302.meta.json", "age_seconds": 90 },
+        { "name": "agent-a44bda11286392e54.jsonl", "age_seconds": 30 },
+        { "name": "agent-a44bda11286392e54.meta.json", "age_seconds": 30 }
+      ],
+      "measured": true,
+      "quiet_seconds": 30,
+      "releasable": false
+    },
+    {
+      "name": "quiet-past-release",
+      "why": "The same tree after the children stopped writing for longer than subagentQuietReleaseSecs. E1 measures and the slot may be released.",
+      "files": [
+        { "name": "agent-a91571e7e61a75302.jsonl", "age_seconds": 2000 },
+        { "name": "agent-a44bda11286392e54.jsonl", "age_seconds": 1300 }
+      ],
+      "measured": true,
+      "quiet_seconds": 1300,
+      "releasable": true
+    },
+    {
+      "name": "newest-child-wins",
+      "why": "The rung reports the NEWEST mtime, not the oldest: one child long finished must not release the slot a sibling still holds.",
+      "files": [
+        { "name": "agent-a91571e7e61a75302.jsonl", "age_seconds": 5000 },
+        { "name": "agent-a44bda11286392e54.jsonl", "age_seconds": 45 }
+      ],
+      "measured": true,
+      "quiet_seconds": 45,
+      "releasable": false
+    },
+    {
+      "name": "only-meta-json",
+      "why": "The host writes .meta.json sidecars beside the transcripts. The glob is agent-*.jsonl, so a directory holding only sidecars is 'cannot tell', not 'quiet'.",
+      "files": [
+        { "name": "agent-a91571e7e61a75302.meta.json", "age_seconds": 4000 }
+      ],
+      "measured": false,
+      "quiet_seconds": 0,
+      "releasable": false
+    },
+    {
+      "name": "empty-directory",
+      "why": "An existing but empty sidechain dir is 'cannot tell'. Treating zero matches as silence would make this rung trivially true whenever the path derivation is wrong.",
+      "files": [],
+      "measured": false,
+      "quiet_seconds": 0,
+      "releasable": false
+    },
+    {
+      "name": "missing-directory",
+      "why": "filepath.Glob returns (nil, nil) for a directory that does not exist, which must read the same as empty: retain.",
+      "files": null,
+      "measured": false,
+      "quiet_seconds": 0,
+      "releasable": false
+    }
+  ]
+}

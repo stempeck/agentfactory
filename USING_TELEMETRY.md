@@ -26,6 +26,10 @@ agents work changes either way — no new prompts, no new gates, no change to an
 af telemetry on        # start recording, factory-wide
 af telemetry status    # is it on, where is data going
 af telemetry off       # stop recording; existing records stay readable
+af telemetry report    # per-step timing and occupancy, from local records
+af telemetry band      # each closed step against what the factory has learned
+af telemetry rebuild   # fold closed steps into the learned digest the band reads
+af telemetry usage     # token and session figures, from the backend
 ```
 
 The toggle is a file — `<factory-root>/.agentfactory/.telemetry-gate` containing `on` — so the
@@ -193,14 +197,48 @@ already on disk stay readable:
 ```
 AGENT   STEP        STATUS  DURATION  STARTED               MODEL     VERB_MS
 manager plan        closed  4m12s     2026-07-23T09:14:02Z  opus-4-8  38
-Latency only. Token and cost figures live in the telemetry backend; af records step windows, never tokens.
+Latency only in this table. Token figures are on --json (out_tokens, think_tokens_est, peak_ctx_tokens); billed cost lives in the backend (af telemetry usage).
 ```
 
 Narrow it with `--agent NAME` or `--instance ID`, and use `--export` to push the local backlog
 to the dashboard before rendering.
 
-**Token counts come from the backend, not from disk.** `af` records how long each step took; it
-never records tokens. To read those without opening a dashboard, ask the backend directly:
+`af telemetry report --json` carries more than the table does: what each step's context window held
+at open and close, what it cost, and what it generated (`out_tokens`, `think_tokens_est`, the derived
+`thinking_share`, `peak_ctx_tokens`, `subagent_tokens`). Anything nobody measured is an explicit
+`null`, never a `0`.
+
+### Is this run normal?
+
+`af telemetry band` answers that as arithmetic instead of as an impression. It compares each closed
+step's peak occupancy, cumulative delta and duration against the median the factory has learned for
+that (formula, step, model) — and prints the band it judged against, not just the answer:
+
+```
+learned baselines: 12 aggregates across 2 formula digests (min runs: 3)
+manager  offpath / Phase 2 — implement  [lmstudio]  within_baselines (runs: 4)
+  peak_ctx_tokens    105000             within_baselines (median 100000 ±20% ⇒ 80000..120000)
+  cum_tokens_delta   -                  unmeasurable (median 40000 ±25% ⇒ 30000..50000)
+  duration_ms        612000             within_baselines (median 600000 ±50% ⇒ 300000..900000)
+```
+
+The medians come from the learned digest, which `af telemetry rebuild` folds out of closed step
+records — so a step with no history reads `no_baseline` rather than being judged, and a step whose
+run recorded no such figure reads `unmeasurable` rather than being scored as a zero. The tolerances
+widen with how much of the figure belongs to the host rather than to the step: peak occupancy is the
+tightest at ±20% because it is the number the admission predicate divides with, duration the loosest
+at ±50% because it is dominated by backend latency on the day.
+
+No verdict is ever written to a record. The band is recomputed on every read, because the median it
+compares against moves as the factory learns — a stored verdict would go on asserting a comparison
+against a band that no longer exists. `--json` gives the same content machine-readably, and
+`--agent` / `--instance` narrow it the same way `report` does.
+
+**Per-run token figures are local; billed usage comes from the backend.** `af` records what each
+step's window held and what it generated (see `report` above), and the backend never returns those —
+`af telemetry usage` answers `query_failed` for the per-step token columns because its logs stream
+does not carry them. What the backend does hold is billed usage and session counts, which nothing on
+disk knows. To read those without opening a dashboard, ask it directly:
 
 ```
 af telemetry usage
@@ -226,6 +264,15 @@ classes](USING_MODELS.md#model-profiles-and-classes).
 previous generation per agent, so on a busy factory the oldest formula runs eventually fall out
 of `af telemetry report` even though they already reached the dashboard. Anything dropped is
 counted and printed in the report — the loss is never silent.
+
+**What each step has historically cost outlives those records.** Alongside the raw records, `af`
+keeps a small per-formula summary — how much context each step of each formula has needed, per
+model — under `.agentfactory/telemetry/digest/`. It is updated when a step closes and it is a
+**cache, never the truth**: deleting it is always safe, and `af telemetry rebuild` reconstructs it
+from whatever records remain. Because the summary is what survives after the records rotate away,
+rebuilding *in place* keeps figures whose raw records are gone; delete the directory first if what
+you want is a rebuild from only what the store can still prove. Nothing reads this summary yet — it
+is being accumulated for a later release.
 
 ### Privacy
 

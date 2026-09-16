@@ -282,3 +282,90 @@ func TestUpVaultStaleness_AgeWordingAcrossBoundaries(t *testing.T) {
 		})
 	}
 }
+
+// TestUpAlarms_RaisedAlarmsFollowTheFactoryLine is the third and loudest terminus for a recovery
+// escalation (#673 item 2). `af up` is the moment an operator is looking at the factory rather than
+// at a pane, so a breaker that halted while nobody was watching is named here before any agent
+// starts. It joins the preflight cluster's contract — it cannot fail a launch — and, like the
+// vault warning above it, it must not displace the `factory: ` line that every observability test
+// greps for.
+func TestUpAlarms_RaisedAlarmsFollowTheFactoryLine(t *testing.T) {
+	root := seedStalenessFactory(t, 0)
+	if err := saveRecoveryState(root, "solver",
+		recoveryState{Halted: true, HaltReason: haltReasonRateCap, Attempts: 3}); err != nil {
+		t.Fatalf("plant breaker: %v", err)
+	}
+
+	stdout, _ := upPreflight(t, root)
+
+	lines := strings.Split(stdout, "\n")
+	if !strings.HasPrefix(lines[0], "factory: ") {
+		t.Fatalf("the alarm displaced the first stdout line: %q", lines[0])
+	}
+	alarm := findLineWith(stdout, "solver", "HALT")
+	if alarm == "" {
+		t.Fatalf("a halted breaker was not reported at startup; stdout=%q", stdout)
+	}
+	// The per-agent line shapes runUp uses to report work it DID on an agent. An alarm is not work
+	// done on an agent, and five start-set tests assert those shapes are absent for agents af up
+	// left alone — so the alarm must not wear one.
+	if agentTouched(alarm+"\n", "solver") {
+		t.Errorf("the alarm line is shaped like a per-agent runUp line: %q", alarm)
+	}
+}
+
+// TestUpAlarms_QuietFactorySaysNothing keeps the startup line from becoming noise: with no raised
+// alarm the preflight must be byte-identical to what it prints today.
+func TestUpAlarms_QuietFactorySaysNothing(t *testing.T) {
+	root := seedStalenessFactory(t, 0)
+
+	stdout, _ := upPreflight(t, root)
+
+	for _, class := range []string{"HALT", "DARK", "NOSTEP", "WDOG", "alerts:"} {
+		if strings.Contains(stdout, class) {
+			t.Errorf("a quiet factory reported %q at startup; stdout=%q", class, stdout)
+		}
+	}
+}
+
+// TestUpAlarms_ColdFactoryDoesNotOpenWithACircularWatchdogAlarm is the case the quiet-factory test
+// above CANNOT reach: its fixture has no heartbeat file at all, and an absent heartbeat is correctly
+// not a stale one. A factory that ran yesterday has one, nothing ever deletes it — not `af down` —
+// and `af up` always launches the watchdog. So without the WDOG filter every overnight launch opens
+// with "no watchdog tick for 14h — … re-run 'af up'", printed by `af up`, seconds before it starts
+// the watchdog. The negative half of the assertion is the whole test; the positive half is that the
+// agent-scoped classes, which `af up` does NOT clear, still come through.
+func TestUpAlarms_ColdFactoryDoesNotOpenWithACircularWatchdogAlarm(t *testing.T) {
+	root := seedStalenessFactory(t, 0)
+
+	beat := watchdogHeartbeatPath(root)
+	if err := os.MkdirAll(filepath.Dir(beat), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().Add(-14 * time.Hour)
+	if err := os.WriteFile(beat, []byte(stale.UTC().Format(time.RFC3339Nano)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(beat, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-vacuity: the shared reader must genuinely raise WDOG here, or the filter below is being
+	// credited for a condition that never arose.
+	if note := recoveryAlertsNote(root, time.Now()); !strings.Contains(note, "WDOG") {
+		t.Fatalf("the fixture did not produce a stale watchdog; the assertion would be vacuous: %q", note)
+	}
+	if err := saveRecoveryState(root, "solver",
+		recoveryState{Halted: true, HaltReason: haltReasonRateCap, Attempts: 3}); err != nil {
+		t.Fatalf("plant breaker: %v", err)
+	}
+
+	stdout, _ := upPreflight(t, root)
+
+	if strings.Contains(stdout, "WDOG") {
+		t.Errorf("`af up` reported a dead watchdog it is about to start; stdout=%q", stdout)
+	}
+	if findLineWith(stdout, "solver", "HALT") == "" {
+		t.Errorf("the WDOG filter took the halted breaker with it; stdout=%q", stdout)
+	}
+}

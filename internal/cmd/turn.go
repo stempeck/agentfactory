@@ -4,11 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
+	"github.com/stempeck/agentfactory/internal/config"
+	"github.com/stempeck/agentfactory/internal/telemetry"
+	"github.com/stempeck/agentfactory/internal/tokenomics"
 	"github.com/stempeck/agentfactory/internal/transcript"
 )
 
@@ -75,6 +80,69 @@ blocked by gate infrastructure (ADR-007). Only a usage error — an unknown
 	RunE: runTurnEvidence,
 }
 
+// fidelityInterventionHeading is the line the fidelity gate prints above this verb's output, and it
+// is declared HERE in Go while being spelled in bash, in two places (hooks/fidelity-gate.sh and
+// internal/cmd/install_hooks/fidelity-gate.sh). The duplication is deliberate and pinned:
+// TestFidelityGatePromptExcusesHarnessActions greps both scripts for this exact constant, so a
+// reworded heading fails loudly here instead of quietly detaching the judge's instruction — which
+// names this section — from the section itself.
+const fidelityInterventionHeading = "System interventions this turn:"
+
+// interventionEffects say WHAT the harness told the agent, one fixed clause per mechanism.
+//
+// Without them the section reads `- dispatch: advise`, and the grader's instruction — excuse
+// "anything the listed intervention accounts for" — is unbounded from the judge's side: a haiku
+// grader handed a broad excuse and an uninformative label will excuse more than was excused, which
+// would weaken the gate rather than correct its one known false positive. The judge cannot excuse a
+// behaviour it was never told about.
+//
+// Keyed on the CLOSED vocabulary and written out here, so no free text and no agent- or
+// operator-supplied string can reach the grader's prompt. A mechanism with no clause renders the
+// bare label, which is the pre-Phase-5 behaviour and is why the map is not exhaustive by force:
+// escalate moves work to a different backend rather than counselling it, and inventing an excuse for
+// it would be licensing something no mechanism asks for.
+//
+// Interview gained a clause with #678 K8, and it is the clause the grader needs most, because what
+// this mechanism does is WITHHOLD output. A turn primed with the identity block omitted, or with the
+// checkpoint block superseded by a brief, is a turn the harness gave less context to — and a grader
+// that judged it against a first turn's priming would fault the agent for a reduction the harness
+// applied.
+//
+// Effort's clause moved with the actuator. The level is no longer chosen from the headroom left: it
+// comes from what prior runs of this step generated, so the reduction is in force from a session's
+// first turn on a window with no pressure at all, and a clause naming headroom would tell the grader
+// something the arithmetic no longer says.
+var interventionEffects = map[string]string{
+	string(tokenomics.MechanismBudget):    "the harness told this session its next step would not fit and to hand off or narrow scope",
+	string(tokenomics.MechanismThrift):    "the harness told this session to read narrowly and not re-read what is already in context",
+	string(tokenomics.MechanismDispatch):  "the harness told this session to launch sub-agents one at a time and wait for each to return",
+	string(tokenomics.MechanismEffort):    "the harness started this session at reduced reasoning effort for this step",
+	string(tokenomics.MechanismInterview): "the harness withheld priming this session had already received, so this turn was given less context than a first turn would be",
+}
+
+var interventionsCmd = &cobra.Command{
+	Use:   "interventions",
+	Short: "Print the harness interventions that fired during this turn",
+	Long: `List the token-economics mechanisms that acted on this agent since a turn
+boundary, one per line, naming the mechanism and what it did.
+
+Intended for scripting and hook consumption: the fidelity-gate Stop hook calls
+this command and splices its output into the judge prompt, so a grader can tell
+an agent that deviated from its step contract apart from one the harness told to
+wait, to work at reduced effort, or to hand off (#668 K15).
+
+The source is af's own append-only record log, never the session transcript --
+which is what makes this a different command from ` + "`af turn evidence`" + ` rather than a
+flag on it.
+
+Nothing is printed when the turn had no interventions, when --since names no
+parsable boundary, or when the record log cannot be read. All of those exit 0:
+this runs inside a Stop hook that must never be blocked by gate infrastructure
+(ADR-007), and an empty section leaves the judge prompt byte-identical to what it
+would have been.`,
+	RunE: runTurnInterventionsCmd,
+}
+
 func init() {
 	evidenceCmd.Flags().String("transcript", "", "Path to the Claude Code session transcript (JSONL)")
 	evidenceCmd.Flags().String("format", formatText, "Output format: text (judge-facing block) or json (evidence record)")
@@ -82,7 +150,140 @@ func init() {
 		"Maximum tool calls to show, as a head+tail window over the turn")
 	evidenceCmd.Flags().Int("max-bytes", defaultTurnMaxBytes, "Maximum size of the rendered output in bytes (0 or less: unbounded)")
 	turnCmd.AddCommand(evidenceCmd)
+
+	interventionsCmd.Flags().String("since", "", "Turn boundary timestamp; records at or after it belong to this turn")
+	interventionsCmd.Flags().String("agent", "", "Agent whose record log to read (default: $AF_ROLE, else the working directory's agent)")
+	turnCmd.AddCommand(interventionsCmd)
+
 	rootCmd.AddCommand(turnCmd)
+}
+
+// runTurnInterventionsCmd resolves the two things the core cannot: which factory's log to read and
+// whose. Both are resolved the way the gate script beside it resolves them — AF_ROOT and AF_ROLE
+// first, the working directory second — so the command and its caller cannot disagree about which
+// agent's turn is being graded.
+//
+// Every resolution failure returns nil with nothing printed, for runTurnEvidence's reason.
+func runTurnInterventionsCmd(cmd *cobra.Command, _ []string) error {
+	since, _ := cmd.Flags().GetString("since")
+	agent, _ := cmd.Flags().GetString("agent")
+
+	// resolveWatchdogRoot rather than a raw AF_ROOT read, and rather than a fifth resolver of this
+	// package's own: it is already the "AF_ROOT first, cwd second" seam, and it NORMALISES the env
+	// value through config.FindFactoryRoot before trusting it. That normalisation is the whole point
+	// — AF_ROOT may itself carry a .factory-root redirect (helpers.go:464-466), and TelemetryDir of an
+	// un-redirected path names a directory with no steps/<agent>.jsonl in it. The verb would then
+	// print nothing forever and the only symptom would be a K15 section that never appears. The
+	// writer never consults AF_ROOT at all, which is exactly why preferring the raw value here is
+	// what would make the two disagree.
+	root, err := resolveWatchdogRoot()
+	if err != nil {
+		return nil
+	}
+	if agent == "" {
+		if agent = os.Getenv("AF_ROLE"); agent == "" {
+			cwd, werr := getWd()
+			if werr != nil {
+				return nil
+			}
+			if agent, err = resolveAgentName(cwd, root); err != nil {
+				return nil
+			}
+		}
+	}
+	return runTurnInterventionsCore(cmd.OutOrStdout(), root, agent, since)
+}
+
+// runTurnInterventionsCore renders the interventions recorded for agent at or after since.
+//
+// The window is half-open from `since` forward with no upper edge, and that asymmetry is right: the
+// gate runs at the END of the turn it is grading, so "not yet recorded" and "belongs to the next
+// turn" are the same empty set. A record stamped exactly at the boundary belongs to this turn — the
+// boundary is the user message that STARTED it, so anything at that instant is a consequence of it.
+//
+// An unparsable `since` prints nothing rather than defaulting to the epoch. fidelity-gate.sh:197
+// substitutes the literal "unknown" whenever the extractor found no boundary, and that string
+// reaches this verb on every such turn; treating it as "no lower bound" would hand the grader every
+// intervention the agent has ever received and excuse a turn that deviated for its own reasons.
+//
+// STATED RESIDUAL — the boundary is the last user record carrying no tool_result
+// (transcript/evidence.go:259-260), so an advisory injected by the SessionStart prime hook lands
+// BEFORE the first turn's boundary and is not reported to the grader for that turn. Every later
+// step is unaffected: the work loop has the agent run af prime itself, whose record is a tool result
+// and therefore after the boundary, and the K18 observer fires on PostToolUse, which is mid-turn by
+// construction. The residual is left rather than papered over because the fix requires knowing that
+// a boundary is a session's FIRST, which is not derivable from a timestamp — and its direction is
+// the safe one: this under-reports, which costs the grader context it did not have before this
+// phase, where the alternative would import a stale advisory into every later turn.
+func runTurnInterventionsCore(out io.Writer, root, agent, since string) error {
+	if root == "" || agent == "" {
+		return nil
+	}
+	boundary, err := time.Parse(time.RFC3339, since)
+	if err != nil {
+		return nil
+	}
+	// A malformed line is skipped by the reader and costs only itself (ReadStats.Malformed), which is
+	// the behaviour this verb wants: one corrupt record must not blind the grader to the ones beside
+	// it. A hard read error is different and yields nothing, because a log that could not be opened
+	// at all is not evidence that nothing fired.
+	records, _, err := telemetry.ReadEvents(config.TelemetryDir(root), telemetry.Filter{Agent: agent})
+	if err != nil {
+		return nil
+	}
+
+	var b strings.Builder
+	armFiredEffort, inWindowEffort := false, false
+	for _, r := range records {
+		if r.Event != telemetry.EventIntervention || r.Mechanism == "" {
+			continue
+		}
+		reducedEffort := r.Mechanism == string(tokenomics.MechanismEffort) && r.Action == telemetry.ActionReduceEffort
+		// The effort arm having fired at all is proof it applied a reduction in THIS factory, which is
+		// what separates a real treatment from an ambient host effort setting the env may carry into
+		// any process. It is read across the WHOLE log, not just this window, because the record that
+		// applied the reduction was stamped once at the relaunch boundary that falls before every turn
+		// the reduction then excuses.
+		if reducedEffort {
+			armFiredEffort = true
+		}
+		ts, err := time.Parse(telemetry.TimestampLayout, r.TS)
+		if err != nil || ts.Before(boundary) {
+			continue
+		}
+		fmt.Fprintf(&b, "- %s: %s", r.Mechanism, r.Action)
+		if effect := interventionEffects[r.Mechanism]; effect != "" {
+			fmt.Fprintf(&b, " — %s", effect)
+		}
+		if r.EffortLevel != "" {
+			fmt.Fprintf(&b, " (effort_level=%s)", r.EffortLevel)
+		}
+		if r.StepID != "" {
+			fmt.Fprintf(&b, " [step %s]", r.StepID)
+		}
+		b.WriteByte('\n')
+		if reducedEffort {
+			inWindowEffort = true
+		}
+	}
+	// The effort reduction is persistent session state, not a per-turn event, so
+	// its single boundary-stamped record falls before this turn's window and the grader of a reduced
+	// turn would never be told. When the arm has fired and the session-scoped current-effort surface
+	// still reports a reduced level, surface it here even with no in-window record — never falling back
+	// to the raw env alone, which every process inherits, so a factory that never reduced effort stays
+	// silent. Only the persistent effort reduction is un-filtered this way; every other pre-boundary
+	// record stays filtered, because those are turn-scoped events rather than standing state.
+	if armFiredEffort && !inWindowEffort {
+		if level := os.Getenv(config.EnvEffortLevel); level != "" {
+			fmt.Fprintf(&b, "- %s: %s", tokenomics.MechanismEffort, telemetry.ActionReduceEffort)
+			if effect := interventionEffects[string(tokenomics.MechanismEffort)]; effect != "" {
+				fmt.Fprintf(&b, " — %s", effect)
+			}
+			fmt.Fprintf(&b, " (effort_level=%s)\n", level)
+		}
+	}
+	_, _ = io.WriteString(out, b.String())
+	return nil
 }
 
 // runTurnEvidence is the RunE for `af turn evidence`. It returns nil for every transcript-side

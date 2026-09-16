@@ -1,10 +1,12 @@
 package checkpoint
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -333,4 +335,124 @@ func TestCompactionFieldsRoundTrip(t *testing.T) {
 	if !got.CompactionAt.Equal(original.CompactionAt) {
 		t.Errorf("CompactionAt = %v, want %v", got.CompactionAt, original.CompactionAt)
 	}
+}
+
+// TestResumeBrief is #668 K8's data shape. The brief is what makes a recycle cheap to resume from,
+// so four things have to hold at once: the builder mirrors WithNotes, the fields survive a real
+// write/read round trip, an OLD checkpoint written by a binary that had never heard of a brief
+// still decodes, and a checkpoint carrying no brief writes no brief keys. The third is the one that
+// matters in production — an in-flight agent's checkpoint predates this change — and the fourth is
+// what keeps an unwritten brief from reading downstream as an empty one.
+func TestResumeBrief(t *testing.T) {
+	artifacts := []string{"internal/cmd/done.go", "internal/cmd/prime.go"}
+
+	t.Run("the builder mirrors WithNotes", func(t *testing.T) {
+		cp := &Checkpoint{}
+		result := cp.WithResumeBrief(artifacts, "boundary matrix green", "step-3", "close step-2, then prime step-3")
+
+		if result != cp {
+			t.Error("WithResumeBrief should return same pointer")
+		}
+		if len(cp.ResumeArtifacts) != len(artifacts) {
+			t.Fatalf("ResumeArtifacts = %v, want %v", cp.ResumeArtifacts, artifacts)
+		}
+		for i, want := range artifacts {
+			if cp.ResumeArtifacts[i] != want {
+				t.Errorf("ResumeArtifacts[%d] = %q, want %q", i, cp.ResumeArtifacts[i], want)
+			}
+		}
+		if cp.ResumeVerified != "boundary matrix green" {
+			t.Errorf("ResumeVerified = %q, want %q", cp.ResumeVerified, "boundary matrix green")
+		}
+		if cp.ResumeNextStepID != "step-3" {
+			t.Errorf("ResumeNextStepID = %q, want %q", cp.ResumeNextStepID, "step-3")
+		}
+		if cp.ResumeNextAction != "close step-2, then prime step-3" {
+			t.Errorf("ResumeNextAction = %q, want %q", cp.ResumeNextAction, "close step-2, then prime step-3")
+		}
+	})
+
+	t.Run("the brief survives a write/read round trip", func(t *testing.T) {
+		dir := t.TempDir()
+		original := &Checkpoint{
+			Timestamp: time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC),
+			SessionID: "sess-brief",
+		}
+		original.WithResumeBrief(artifacts, "unit suite green", "s-3", "run TestBoundaryAdmission")
+
+		if err := Write(dir, original); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		got, err := Read(dir)
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if got == nil {
+			t.Fatal("Read returned nil")
+		}
+		if strings.Join(got.ResumeArtifacts, ",") != strings.Join(artifacts, ",") {
+			t.Errorf("ResumeArtifacts = %v, want %v", got.ResumeArtifacts, artifacts)
+		}
+		if got.ResumeVerified != original.ResumeVerified {
+			t.Errorf("ResumeVerified = %q, want %q", got.ResumeVerified, original.ResumeVerified)
+		}
+		if got.ResumeNextStepID != original.ResumeNextStepID {
+			t.Errorf("ResumeNextStepID = %q, want %q", got.ResumeNextStepID, original.ResumeNextStepID)
+		}
+		if got.ResumeNextAction != original.ResumeNextAction {
+			t.Errorf("ResumeNextAction = %q, want %q", got.ResumeNextAction, original.ResumeNextAction)
+		}
+	})
+
+	t.Run("a checkpoint written before the brief existed still decodes", func(t *testing.T) {
+		dir := t.TempDir()
+		legacy := `{"formula_id":"f-1","current_step":"s-2","timestamp":"2026-08-30T00:00:00Z","session_id":"old"}`
+		if err := os.WriteFile(Path(dir), []byte(legacy), 0600); err != nil {
+			t.Fatalf("seeding legacy checkpoint: %v", err)
+		}
+
+		got, err := Read(dir)
+		if err != nil {
+			t.Fatalf("Read of a pre-brief checkpoint must succeed: %v", err)
+		}
+		if got == nil {
+			t.Fatal("Read returned nil")
+		}
+		if got.FormulaID != "f-1" || got.CurrentStep != "s-2" {
+			t.Errorf("legacy fields lost: %+v", got)
+		}
+		if len(got.ResumeArtifacts) != 0 || got.ResumeVerified != "" || got.ResumeNextAction != "" ||
+			got.ResumeNextStepID != "" {
+			t.Errorf("a pre-brief checkpoint decoded a brief from nowhere: %+v", got)
+		}
+	})
+
+	t.Run("no brief writes no brief keys", func(t *testing.T) {
+		raw, err := json.Marshal(&Checkpoint{FormulaID: "f-1", SessionID: "s"})
+		if err != nil {
+			t.Fatalf("marshalling: %v", err)
+		}
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &keys); err != nil {
+			t.Fatalf("decoding: %v", err)
+		}
+		for _, k := range []string{"resume_artifacts", "resume_verified", "resume_next_action", "resume_next_step_id"} {
+			if _, present := keys[k]; present {
+				t.Errorf("a checkpoint with no brief carries %q; absent and empty must stay distinguishable", k)
+			}
+		}
+	})
+
+	t.Run("Summary surfaces the brief", func(t *testing.T) {
+		cp := (&Checkpoint{FormulaID: "f-1", CurrentStep: "s-2"}).
+			WithResumeBrief(artifacts, "unit suite green", "s-3", "run TestBoundaryAdmission")
+
+		got := cp.Summary()
+		if !strings.Contains(got, "run TestBoundaryAdmission") {
+			t.Errorf("Summary() = %q, want it to surface the brief's next action", got)
+		}
+		if empty := (&Checkpoint{}).Summary(); empty != "no significant state" {
+			t.Errorf("empty Summary() = %q, want the sentinel", empty)
+		}
+	})
 }

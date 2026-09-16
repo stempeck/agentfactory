@@ -214,6 +214,32 @@ if ! command -v claude &>/dev/null; then
     exit 0
 fi
 
+# FIDELITY-DELTA 6: show the judge what the HARNESS did to this turn (#668 K15).
+#
+# Every tokenomics mechanism works by interrupting the agent — telling it to wait on a
+# serialized fan-out, changing how hard it thinks, ending its turn at a boundary. To a
+# grader shown only the step contract and the response, all of those read as the agent
+# ignoring its instructions, and the gate then spends the escalation ladder punishing
+# compliance with the harness.
+#
+# Read through `af turn interventions` rather than reconstructed here: the records are af's
+# own append-only log, and a second jq-shaped copy of that read would drift from the writer.
+# Every failure rides in the command's OUTPUT and still exits 0 (ADR-007), and a boundary of
+# "unknown" makes it decline — so an older binary without the subcommand, an unreadable log
+# and a turn with no interventions all produce the same empty string.
+#
+# The section is a VARIABLE spliced into EVAL_INPUT rather than an edit to it, because with
+# the section empty the prompt below must be byte-identical to the one this gate has always
+# built. Pinned by TestFidelityGateInterventionSection.
+INTERVENTIONS=$(af turn interventions --since "$BOUNDARY_TS" --agent "$ROLE" 2>/dev/null)
+INTERVENTION_SECTION=""
+if [ -n "$INTERVENTIONS" ]; then
+    INTERVENTION_SECTION="
+System interventions this turn:
+$INTERVENTIONS
+"
+fi
+
 # FIDELITY-DELTA 5: prepend "Current step:" header to EVAL_INPUT. Description
 # is interpolated as a quoted bash variable; bash variable expansion does
 # NOT trigger command substitution, so $(...) inside the description is
@@ -231,7 +257,7 @@ $STEP_DESCRIPTION
 ---
 
 Assistant response: $MESSAGE
-
+$INTERVENTION_SECTION
 ---
 
 $TOOL_CONTEXT"
@@ -250,7 +276,8 @@ VERDICT=$(env -i HOME="$HOME" PATH="$PATH" \
     ${OTEL_EXPORTER_OTLP_HEADERS:+OTEL_EXPORTER_OTLP_HEADERS="$OTEL_EXPORTER_OTLP_HEADERS"} \
     ${OTEL_RESOURCE_ATTRIBUTES:+OTEL_RESOURCE_ATTRIBUTES="$OTEL_RESOURCE_ATTRIBUTES,af.overhead=grader"} \
     claude -p --model haiku --max-turns 1 \
-    --system-prompt "You are a JSON-only fidelity gate. You receive an assistant's response, the current formula step's contract, and the tool activity of the turn that just ended. Evaluate adherence to the step contract considering BOTH the text AND the tool evidence, under the evidence rules below. Respond with ONLY valid JSON, nothing else. $(cat "$PROMPT_FILE")" \
+    --settings '{"disableAllHooks": true}' \
+    --system-prompt "You are a JSON-only fidelity gate. You receive an assistant's response, the current formula step's contract, and the tool activity of the turn that just ended. Evaluate adherence to the step contract considering BOTH the text AND the tool evidence, under the evidence rules below. A 'System interventions this turn:' section, when present, lists harness-initiated actions the orchestrator took during this turn — the agent was told to wait, to work at reduced effort, or to hand off. Complying with one of those is not a deviation from the step contract: Each line states what the harness told this session to do. Grade as compliant the behaviour the listed intervention describes, and grade only what remains — an intervention excuses what it names and nothing beyond it. Respond with ONLY valid JSON, nothing else. $(cat "$PROMPT_FILE")" \
     "$EVAL_INPUT" 2>/dev/null)
 
 # Strip markdown code fences if present

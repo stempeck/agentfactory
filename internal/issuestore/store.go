@@ -166,6 +166,22 @@ type Filter struct {
 	// Assignee field above and ADR-002 §"sanctioned opt-out."
 	IncludeAllAgents bool
 	IncludeClosed    bool // include closed/done in addition to non-terminal
+
+	// CreatedAfter, when non-empty, bounds the result to issues whose
+	// CreatedAt is at or after this instant — an inclusive lower bound that
+	// keeps a whole-history read (`ListAll` over an agent's mail) from
+	// growing without limit as the agent lives (#679/T7).
+	//
+	// The value is an RFC-3339 UTC timestamp ("...Z"). Both bounds and stored
+	// timestamps carry the Z suffix, and the Python backend compares them
+	// lexically; a caller MUST format the bound with microsecond precision so
+	// no wider-precision stored value sorts before an equal instant. The bound
+	// is deliberately a COARSE floor: callers that need an exact window still
+	// filter the returned rows themselves (gate_flags does), so a slightly
+	// early floor only widens the read, it never drops an in-window row.
+	// Pinned across both adapters by RunStoreContract's
+	// Filter_CreatedAfter_bounds_by_creation_time sub-test.
+	CreatedAfter string
 }
 
 // CreateParams describes a new issue to create.

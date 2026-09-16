@@ -86,6 +86,17 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(cmd.OutOrStdout(), "factory: %s\n", root)
 
+	// The third terminus for a recovery escalation (#673 item 2), after the pane token and `af
+	// statusline status`. Launch is when an operator is looking at the factory rather than at a
+	// pane, so a breaker that halted while nobody was watching is named before any agent starts —
+	// and named BEFORE the preflight cluster below, because an agent this reports on is one `af up`
+	// is about to leave un-recovered. It joins that cluster's contract: it cannot fail a launch,
+	// and it never precedes the `factory:` line every observability test greps for. WDOG is the one
+	// class it drops, because this verb is the act that clears it (recoveryLaunchAlertsNote).
+	if note := recoveryLaunchAlertsNote(root, time.Now()); note != "" {
+		fmt.Fprint(cmd.OutOrStdout(), note)
+	}
+
 	// R1 (#515): the learnings vault is container-local and git-invisible, and ADR-019 bars
 	// closing that by requiring container recreation — so the residual stays open and this is the
 	// compensating control. Launch is the moment an operator is already thinking about the
@@ -257,12 +268,26 @@ func runUp(cmd *cobra.Command, args []string) error {
 		// Relaunch clears the dispatched marker AND the scoped-stop provenance datum (#548 P3,
 		// L-3) at both the main-root and worktree agent dirs: a fresh session must not inherit
 		// the previous dispatch's stop-rights, and this bounds the stale-owner window after an
-		// abnormal session death.
+		// abnormal session death. The refusal breadcrumb is swept here for the same reason
+		// done.go's formula-completion cleanup sweeps it (#677 F6): a refusal earned in the last
+		// minutes of a session that died abnormally must not survive into the relaunched one, or
+		// the observer relays a dead session's refusal against a step that never earned it. A fresh
+		// session re-creates its own breadcrumb if it earns a refusal.
 		os.Remove(filepath.Join(config.AgentDir(root, name), ".runtime", "dispatched"))
 		os.Remove(filepath.Join(config.AgentDir(root, name), ".runtime", "dispatch_owner"))
+		os.Remove(filepath.Join(config.AgentDir(root, name), ".runtime", dispatchLastRefusalName))
 		if wtPath != "" {
 			os.Remove(filepath.Join(config.AgentDir(wtPath, name), ".runtime", "dispatched"))
 			os.Remove(filepath.Join(config.AgentDir(wtPath, name), ".runtime", "dispatch_owner"))
+			os.Remove(filepath.Join(config.AgentDir(wtPath, name), ".runtime", dispatchLastRefusalName))
+		}
+		// A sub-agent whose session was torn down before it emitted SubagentStop leaves a
+		// sequential.slot no reaper clears until its 2h TTL, so the relaunched session's first launch
+		// would be falsely refused "one sub-agent is already running". Clear the whole reservation
+		// ledger at relaunch, at both agent dirs, alongside the dispatched marker (#669 F5, scenario i).
+		clearDispatchReservations(config.AgentDir(root, name))
+		if wtPath != "" {
+			clearDispatchReservations(config.AgentDir(wtPath, name))
 		}
 		// K4 (issue #392): if the in-worktree .runtime/hooked_formula pointer was
 		// lost (worktree relocated/removed), rebind it from the durable
@@ -296,7 +321,8 @@ func runUp(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		if len(modelEnv) > 0 {
-			mgr.SetModelEnv(modelEnv)
+			nextStep, formula := nextReadyStep(cmd.Context(), root, agentDir)
+			mgr.SetModelEnv(withEffortLevel(root, agentDir, modelEnv, nextStep, formula))
 		}
 		// Profile-key universe (issue #602), wired UNCONDITIONALLY — deliberately not inside
 		// the guard above, since an agent that resolves no profile is exactly the one that
@@ -547,6 +573,22 @@ func warnOmittedSinks(cmd *cobra.Command, root string, agentsCfg *config.AgentCo
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"warning: %q is a mail/notify target but is not in the startup set; its mail will sit unprocessed until it next runs\n", name)
 	}
+
+	// #672 AC-5 startup half (decisions.md D6): an escalation recipient that CANNOT RECEIVE is a
+	// louder failure than a sink that merely runs later. The neutral line above does not distinguish
+	// "will run later" from "the recovery ladder has nowhere to deliver a halt": the baseline incident
+	// was five "RECOVERY HALTED (escalation undelivered)" lines piling up with nothing reaching a
+	// human. When recoveryRecipientReachable is false — the recipient is not in agents.json, or is
+	// neither live nor in the startup set — say so prominently and specifically, so the route is fixed
+	// before a halt needs it rather than after.
+	for _, e := range escalationTargets() {
+		if reachable, _ := recoveryRecipientReachable(root, e); !reachable {
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"warning: escalation recipient %q CANNOT RECEIVE a recovery-halt escalation at startup "+
+					"(not live and not in the startup set); RECOVERY HALTED escalations would go undelivered — "+
+					"add %q to startup.json agents or start it now\n", e, e)
+		}
+	}
 }
 
 // launchWatchdog health-gates the long-lived af-watchdog session (#309 AC-4). It
@@ -593,7 +635,7 @@ func launchWatchdog(cmd *cobra.Command, t cmdTmux, root string, scope []string, 
 			return // healthy — leave it undisturbed
 		}
 		// Zombie — tmux session alive but `af watchdog` dead. Kill and recreate.
-		if err := t.KillSession(watchdogSession); err != nil {
+		if err := t.KillSession(watchdogSession); err != nil { //af:teardown:restorative
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to kill stale watchdog: %v\n", err)
 			return
 		}

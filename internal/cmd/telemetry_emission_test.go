@@ -23,6 +23,11 @@ import (
 // from a flag or a file.
 func primeWithHookSession(t *testing.T, sessionID string) {
 	t.Helper()
+	// This helper stands for the AGENT's own hook firing, and since #678 K1 that is a pane-guarded
+	// claim (prime.go:362). Set here rather than left to the runner's environment because the guard
+	// reads presence: a developer running the suite inside tmux would inherit a real TMUX_PANE and
+	// see these tests pass for a reason CI does not have.
+	t.Setenv("TMUX_PANE", "%0")
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)

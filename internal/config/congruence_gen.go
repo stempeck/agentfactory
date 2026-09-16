@@ -103,6 +103,16 @@ var congruencePinned = map[string]any{
 	// string — it has to be the very value the mapping's labels[] element was filled with.
 	"dispatch.workflows[].phases": []string{"mappings[].labels[]"},
 
+	// A cron's every must satisfy ParseCompactDuration (validateCrons, dispatch.go), which the
+	// synthetic "crons[].every" cannot; and a var KEY must be a legal identifier, which
+	// "crons[].vars.key" is not. Both are load-bearing: the drift test round-trips this fixture
+	// through SaveDispatchConfig, so an unpinned cron fails its own validator. The map is pinned by
+	// key rather than wholesale — a pinned empty map would be dropped by `json:"vars,omitempty"`,
+	// the same trap noted for mappings[].label above. name, agent and model need no pins: their
+	// synthetic path strings are already non-empty, unique and unconstrained.
+	"dispatch.crons[].every":    "1h",
+	"dispatch.crons[].vars.key": "repo",
+
 	// startup: the four gates are a closed enum.
 	"startup.quality":     "on",
 	"startup.fidelity":    "off",
@@ -129,6 +139,32 @@ var congruencePinned = map[string]any{
 	// (200000 / 75) so the fixture proves the fields were stated rather than defaulted.
 	"startup.step_context.bound_tokens": 180000,
 	"startup.step_context.handoff_pct":  80,
+
+	// tokenomics (#668 K2, #678 K3): eight closed enums, one host-vocabulary string and five bounded
+	// numerics. The enums take the same three values the four gates above do; the numerics are pinned
+	// DIFFERENT from the shipped defaults so the fixture proves the fields were stated rather than
+	// defaulted, and admission_margin_pct additionally has to land inside 0..100, which the per-type
+	// fill's 11 happens to satisfy but only by luck.
+	//
+	// The two strings are pinned because they MUST be: an unpinned string is filled with its own
+	// dotted path, so efficiency would arrive as "tokenomics.efficiency" — which the gate loop
+	// rejects — and efficiency_effort_level as a value the host has never heard of. Neither failure
+	// shows up as a fixture diff; both surface two layers away, in the drift test's subtest that
+	// pushes the generated fixture back through the real SaveStartupConfig.
+	"startup.tokenomics.enabled":                       "on",
+	"startup.tokenomics.budget":                        "on",
+	"startup.tokenomics.thrift":                        "off",
+	"startup.tokenomics.dispatch":                      "default",
+	"startup.tokenomics.interview":                     "on",
+	"startup.tokenomics.effort":                        "off",
+	"startup.tokenomics.escalate":                      "off",
+	"startup.tokenomics.efficiency":                    "off",
+	"startup.tokenomics.efficiency_effort_level":       "high",
+	"startup.tokenomics.efficiency_thinking_share_pct": 55,
+	"startup.tokenomics.efficiency_repeat_read_floor":  3,
+	"startup.tokenomics.efficiency_max_relaunches":     2,
+	"startup.tokenomics.admission_margin_pct":          25,
+	"startup.tokenomics.learned_min_runs":              7,
 
 	// statusline: elements is a closed whitelist, and pinning the WHOLE roster rather than one
 	// name means adding an element changes this fixture — which is the drift signal we want.

@@ -124,6 +124,45 @@ type dispatchEntry struct {
 	Attempts          int       `json:"attempts,omitempty"`
 }
 
+// cronState tracks when each operator-defined schedule last fired (issue #610), keyed by the
+// schedule's own name rather than a derived agent+every key: two schedules may target one agent
+// with different vars and must not collide here any more than they do in the overlap gate.
+//
+// It is a SEPARATE file from dispatchState on purpose (C-3). pruneDispatchState drops entries
+// older than 24 hours, which would silently reset every cadence longer than a day — a 14d schedule
+// would forget it had ever run and re-fire on the next tick, forever.
+type cronState struct {
+	Crons map[string]cronRecord `json:"crons"` // key: CronSchedule.Name
+}
+
+// cronRecord is one schedule's durable timing state.
+//
+// LastFiredAt and LastAttemptAt are deliberately separate (cross-review HIGH-4). LastFiredAt
+// records SUCCESSFUL fires only, so it is an honest anchor for the due predicate and never claims
+// a cadence that did not happen; LastAttemptAt records every attempt including failures, and is
+// what the retry backoff measures from. Collapsing the two would make a single transient sling
+// error consume a whole interval — on a 14d cadence, a fortnight of silence for a hiccup.
+//
+// LastDetail and ConsecutiveFailures are omitempty, matching the additive-field idiom
+// dispatchEntry establishes above: a healthy record carries neither, and an older state file
+// unmarshals them as zero values with no migration.
+type cronRecord struct {
+	LastFiredAt         time.Time `json:"last_fired_at"`
+	LastAttemptAt       time.Time `json:"last_attempt_at"`
+	LastOutcome         string    `json:"last_outcome"`
+	LastDetail          string    `json:"last_detail,omitempty"`
+	LastCheckAt         time.Time `json:"last_check_at"`
+	ConsecutiveFailures int       `json:"consecutive_failures,omitempty"`
+}
+
+// The three outcomes a schedule evaluation can durably record. A busy target and a failed fire are
+// distinct on purpose: neither advances LastFiredAt, but only the failure arms the retry backoff.
+const (
+	cronOutcomeFired       = "fired"
+	cronOutcomeSkippedBusy = "skipped_busy"
+	cronOutcomeError       = "error"
+)
+
 func runDispatch(cmd *cobra.Command, args []string) error {
 	wd, err := getWd()
 	if err != nil {
@@ -159,11 +198,10 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Check gh auth
-	if err := checkGHAuth(); err != nil {
-		return fmt.Errorf("GitHub CLI not authenticated: %w", err)
-	}
-
+	// The cycle lock is taken BEFORE the gh-auth check (issue #610). A scheduled sling makes no
+	// GitHub call at all, so leaving the cron pass behind that gate would couple every cadence to
+	// GitHub availability: one `gh auth` hiccup would silently stop the schedules too, which is
+	// the never-fires failure this feature exists to eliminate.
 	lk := lock.NewWithPath(filepath.Join(root, ".runtime", "dispatch-cycle.lock"))
 	if err := lk.Acquire(fmt.Sprintf("pid-%d", os.Getpid())); err != nil {
 		return fmt.Errorf("[%s] acquiring dispatch lock: %w", time.Now().UTC().Format("2006-01-02 15:04:05"), err)
@@ -175,12 +213,30 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.OutOrStdout(), stats.String())
 	}()
 
+	t := newCmdTmux()
+
+	// Crons run first and persist their own state inside the lock, so a GitHub failure below can
+	// never lose a fire that already happened. The clock is read ONCE here and passed down: a
+	// single tick that straddled two readings could evaluate one schedule as due and its sibling
+	// as not.
+	cronSt := loadCronState(root)
+	processCrons(cmd, root, t, dispatchCfg, agentsCfg, modelsCfg, &cronSt, stats, cronNow().UTC())
+
+	// A crons-only factory (which Phase 1 made configurable) reaches no GitHub call at all, so the
+	// auth gate is skipped rather than allowed to abort a cycle whose entire job is already done.
+	// The repo loop below is a no-op in that case by construction — ranging an empty Repos slice
+	// runs zero iterations and issues no query.
+	if len(dispatchCfg.Repos) > 0 {
+		if err := checkGHAuth(); err != nil {
+			return fmt.Errorf("GitHub CLI not authenticated: %w", err)
+		}
+	}
+
 	// Load dispatch state
 	state := loadDispatchState(root)
 
 	issueMappings, prMappings := groupMappingsBySource(dispatchCfg.Mappings)
 
-	t := newCmdTmux()
 	for _, repo := range dispatchCfg.Repos {
 		var items []ghItem
 		var itemMappings [][]config.DispatchMapping
@@ -311,7 +367,13 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 }
 
 // checkGHAuth verifies the GitHub CLI is authenticated.
-func checkGHAuth() error {
+//
+// Package-var seam (ADR-009, issue #610): promoted from a plain func so a test can prove the cron
+// pass persists its state BEFORE this gate can abort the cycle. That ordering is the whole reason
+// the lock moved above it, and runDispatch is otherwise undrivable — it shells out to
+// `gh auth status` and `gh issue list` with no seam. Promotion is behavior-preserving for
+// production: same command, same error, one caller.
+var checkGHAuth = func() error {
 	return exec.Command("gh", "auth", "status").Run()
 }
 
@@ -464,6 +526,59 @@ var dispatchItem = func(root, agent, itemURL, caller, model string) (string, err
 		afBin = "af"
 	}
 	c := exec.Command(afBin, buildSlingArgs(agent, caller, model, itemURL)...)
+	c.Dir = root
+	var buf bytes.Buffer
+	c.Stdout = io.MultiWriter(os.Stdout, &buf)
+	c.Stderr = os.Stderr
+	err = c.Run()
+	return buf.String(), err
+}
+
+// buildCronSlingArgs builds the `af sling` argv for a scheduled fire (issue #610):
+// `sling --agent <name> --reset --bare [--caller <caller>] [--model <model>] [--var k=v ...]`.
+//
+// --reset is unconditional for the same reason buildSlingArgs makes it unconditional on the item
+// path: the succession gate (sling.go:531-537) hard-errors on a stale prior instance, so a
+// schedule that omitted it would fire exactly once and then refuse forever.
+//
+// --bare (Phase 2) takes the place of the item path's positional itemURL rather than sitting
+// alongside it: a recurring wake has no triggering issue or PR to describe, and --bare waives
+// exactly the taskless rejection that would otherwise reject the argv. Factored out of cronSling
+// so the argv contract is unit-testable without spawning a subprocess.
+func buildCronSlingArgs(cron config.CronSchedule, caller string) []string {
+	args := []string{"sling", "--agent", cron.Agent, "--reset", "--bare"}
+	if caller != "" {
+		args = append(args, "--caller", caller)
+	}
+	if cron.Model != "" {
+		args = append(args, "--model", cron.Model)
+	}
+	// sorted: one config must always produce one argv, or the fire command changes shape between
+	// ticks and nothing about it is assertable.
+	for _, k := range sortedMapKeys(cron.Vars) {
+		args = append(args, "--var", k+"="+cron.Vars[k])
+	}
+	return args
+}
+
+// cronSling invokes `af sling` with a schedule's fire argv, returning sling's captured stdout
+// alongside the exit error. It mirrors dispatchItem's body but deliberately not its signature:
+// dispatchItem hardcodes buildSlingArgs, whose positional-itemURL shape a schedule cannot produce.
+//
+// The child environment is inherited, exactly as dispatchItem inherits it. `af sling --reset` only
+// admits the dispatcher through callerAuthority (authority.go:75-85), which reads TMUX to match
+// the dispatch session; a scrubbed Env would drop it and turn every scheduled fire into an
+// operator-teardown refusal.
+//
+// Package-var seam (ADR-009, issue #610): the cron pass fires through this var so tests swap it to
+// a recorder without spawning a real `af sling` subprocess — without the seam the whole scheduling
+// state machine is untestable.
+var cronSling = func(root string, argv []string) (string, error) {
+	afBin, err := os.Executable()
+	if err != nil {
+		afBin = "af"
+	}
+	c := exec.Command(afBin, argv...)
 	c.Dir = root
 	var buf bytes.Buffer
 	c.Stdout = io.MultiWriter(os.Stdout, &buf)
@@ -1178,6 +1293,221 @@ func stallHaltedTarget(cmd *cobra.Command, stats *dispatchCycleStats, itemKey, a
 	stats.errors++
 }
 
+// ============================================================================
+// Issue #610 Phase 3 — cron engine. The dispatcher's second work source: schedules that fire on a
+// cadence with no triggering issue or PR. processCrons is standalone rather than inline in
+// runDispatch for the reason dispatchTargetState's doc above records — runDispatch has no seam
+// around its gh shell-outs, so anything written inside it is unreachable from a hermetic test.
+// ============================================================================
+
+// cronNow is the dispatcher's clock for schedule arithmetic. It is a package-var seam
+// (design-doc.md:132, ADR-009 form) rather than a direct time.Now call, and it is the one seam in
+// this package justified by determinism instead of an external binary: a 14d cadence has no
+// reachable test otherwise, since the alternative is sleeping for a fortnight. runDispatch reads
+// it once per cycle and passes the instant down, so the pass itself never reads a clock.
+var cronNow = time.Now
+
+// cronRetryBackoff is how long a failing schedule waits before its next attempt, measured from
+// LastAttemptAt: interval x 2^(failures-1), bounded above by one hour and by the schedule's own
+// cadence (cross-review HIGH-4). The dispatch interval is the base because retrying faster than
+// the dispatcher wakes is meaningless; the two upper bounds stop a long-lived failure from
+// out-waiting the cadence it exists to serve.
+//
+// The doubling stops at the bound rather than shifting by failures-1. time.Duration is int64
+// nanoseconds, so an unbounded 300s << 25 exceeds it and wraps to a small or negative wait — which
+// would restore the tick-speed crash-retry loop this bound exists to prevent, after roughly two
+// hours of a permanently broken schedule.
+func cronRetryBackoff(intervalSecs, failures int, every time.Duration) time.Duration {
+	if failures < 1 {
+		return 0
+	}
+	limit := time.Hour
+	if every > 0 && every < limit {
+		limit = every
+	}
+	backoff := time.Duration(intervalSecs) * time.Second
+	if backoff <= 0 {
+		// Defensive: LoadDispatchConfig defaults IntervalSecs to 300 long before runDispatch builds
+		// a cycle, so a non-positive base only reaches here from a hand-built config. Substituting
+		// the bound rather than the base errs toward waiting, which is the safe direction — the
+		// arithmetic answer, zero, is precisely the tick-speed retry this function exists to stop.
+		return limit
+	}
+	for i := 1; i < failures && backoff < limit; i++ {
+		backoff *= 2
+	}
+	if backoff > limit {
+		backoff = limit
+	}
+	return backoff
+}
+
+// recordCronFailure applies the HIGH-4 error semantics: LastFiredAt is NOT advanced, because it
+// records real fires only and a status line claiming a fire that did not happen is worse than no
+// status at all. The attempt stamp and the failure count are what the retry backoff reads.
+func recordCronFailure(rec *cronRecord, now time.Time, detail string) {
+	rec.LastAttemptAt = now
+	rec.LastOutcome = cronOutcomeError
+	rec.LastDetail = detail
+	rec.ConsecutiveFailures++
+}
+
+// processCrons evaluates every configured schedule for this tick, fires the ones that are due, and
+// persists the result before returning (issue #610 N10, AC-2/3/4/6).
+//
+// It returns nothing and never aborts the cycle. A schedule that has gone stale since it was
+// written — agent uninstalled, formula edited, a required var no longer supplied — is downgraded
+// to a per-schedule error, exactly the posture cron_check.go:70-74 factored its helpers apart for:
+// the same tick also serves labelled items, and one bad schedule must not take them down with it.
+//
+// now is a parameter rather than a cronNow() read so that a single tick cannot straddle two clock
+// readings, and so the multi-tick tests can move time instead of sleeping.
+func processCrons(cmd *cobra.Command, root string, t cmdTmux, dispatchCfg *config.DispatchConfig,
+	agentsCfg *config.AgentConfig, modelsCfg *config.ModelsConfig, state *cronState,
+	stats *dispatchCycleStats, now time.Time) {
+
+	if len(dispatchCfg.Crons) == 0 && len(state.Crons) == 0 {
+		// Nothing configured and nothing stale to clean up: a factory that has never used crons
+		// must not grow a state file per tick.
+		return
+	}
+	if state.Crons == nil {
+		state.Crons = make(map[string]cronRecord)
+	}
+	pruneCronOrphans(state, dispatchCfg.Crons)
+
+	for _, cron := range dispatchCfg.Crons {
+		rec := state.Crons[cron.Name]
+		rec.LastCheckAt = now
+
+		every, err := config.ParseCompactDuration(cron.Every)
+		if err != nil {
+			// Unreachable from a loaded config — validateCrons owns the grammar — but this pass is
+			// also driven directly, and a cadence that cannot be parsed must be reported rather
+			// than treated as never-due. Silence is the one outcome a schedule may never produce.
+			//
+			// Gated on the same backoff as every other failure, passing a zero cadence so the bound
+			// falls back to the flat hour: the parse will fail identically next tick, and a
+			// complaint reprinted every 300s until someone notices is the unbounded-repeat shape
+			// the rest of this pass is built to avoid.
+			if rec.ConsecutiveFailures > 0 &&
+				now.Before(rec.LastAttemptAt.Add(cronRetryBackoff(dispatchCfg.IntervalSecs, rec.ConsecutiveFailures, 0))) {
+				state.Crons[cron.Name] = rec
+				continue
+			}
+			detail := fmt.Sprintf("cron %q has an unusable every %q: %v", cron.Name, cron.Every, err)
+			recordCronFailure(&rec, now, detail)
+			fmt.Fprintf(cmd.ErrOrStderr(), "cron %s failed: %s\n", cron.Name, detail)
+			stats.errors++
+			state.Crons[cron.Name] = rec
+			continue
+		}
+
+		// Due predicate. A zero LastFiredAt — never fired, or state lost — is due now: at-least-once
+		// beats never, and the worst case is ONE early fire, capped by the overlap gate below.
+		if !rec.LastFiredAt.IsZero() && now.Before(rec.LastFiredAt.Add(every)) {
+			state.Crons[cron.Name] = rec
+			continue // not due prints nothing; a per-tick line per schedule would drown the log
+		}
+
+		// The backoff gate is evaluated independently of the due predicate, and must be: a
+		// schedule that has never fired successfully has a zero LastFiredAt and is therefore
+		// permanently due, so this is the only thing standing between a broken one and a retry on
+		// every single tick.
+		if rec.ConsecutiveFailures > 0 &&
+			now.Before(rec.LastAttemptAt.Add(cronRetryBackoff(dispatchCfg.IntervalSecs, rec.ConsecutiveFailures, every))) {
+			state.Crons[cron.Name] = rec
+			continue
+		}
+
+		sessionID := session.SessionName(cron.Agent)
+		agentLive, probeErr := t.HasSession(sessionID)
+		if probeErr != nil {
+			// Fail closed (S-1, commit 9199d07c). A probe fault that defaulted to not-running would
+			// fire --reset at a possibly-live agent, force-stopping it and wiping its runtime
+			// state. A schedule that waits one tick loses nothing by comparison.
+			agentLive = true
+		}
+		if targetState := dispatchTargetState(root, cron.Agent, agentLive); targetState != targetStateFree {
+			// LastFiredAt is deliberately untouched here: the schedule stays due and re-evaluates
+			// next tick, so a busy agent defers the fire rather than consuming the interval.
+			rec.LastOutcome = cronOutcomeSkippedBusy
+			switch {
+			case targetState == targetStateHalted:
+				// Halted is a latch an operator must clear, not a deferral that resolves itself,
+				// so it takes the distinctly-named stall shape and counts as an error — the same
+				// discipline stallHaltedTarget applies on the item path.
+				rec.LastOutcome = cronOutcomeError
+				rec.LastDetail = fmt.Sprintf(haltedStallReason, cron.Agent, cron.Agent)
+				fmt.Fprintf(cmd.ErrOrStderr(), "stall cron %s: %s\n", cron.Name, rec.LastDetail)
+				stats.errors++
+			case targetState == targetStateBusy && probeErr != nil:
+				// Plain busy is the ONLY state inferred from the forced agentLive above; halted,
+				// recovering and dark are read from disk and hold whatever the probe did. So the
+				// probe fault earns the explanation only when nothing more specific is known —
+				// otherwise it would mask the more actionable line.
+				rec.LastDetail = fmt.Sprintf("agent %s liveness is unreadable, treated as busy: %v", cron.Agent, probeErr)
+				fmt.Fprintf(cmd.ErrOrStderr(), "skip cron %s: %s\n", cron.Name, rec.LastDetail)
+				stats.skipped++
+			default:
+				rec.LastDetail = fmt.Sprintf("agent %s is busy%s", cron.Agent, busySuffix(targetState))
+				fmt.Fprintf(cmd.OutOrStdout(), "skip cron %s: %s\n", cron.Name, rec.LastDetail)
+				stats.skipped++
+			}
+			state.Crons[cron.Name] = rec
+			continue
+		}
+
+		// Fire-time backstop (N4/N5). Phase 2 validates a schedule when it is WRITTEN; this arm
+		// re-runs the same cross-checks against the tree as it is NOW, because an agent
+		// uninstalled or a formula edited since would otherwise hard-error inside sling on every
+		// fire forever. A one-element slice turns checkCronRefs' reject-everything return into the
+		// per-schedule downgrade cron_check.go:70-74 promised this caller.
+		if err := checkCronRefs([]config.CronSchedule{cron}, agentsCfg, modelsCfg, root); err != nil {
+			recordCronFailure(&rec, now, err.Error())
+			fmt.Fprintf(cmd.ErrOrStderr(), "cron %s failed: %v\n", cron.Name, err)
+			stats.errors++
+			state.Crons[cron.Name] = rec
+			continue
+		}
+
+		if dispatchDryRun {
+			fmt.Fprintf(cmd.OutOrStdout(), "would fire cron %s: sling %s\n", cron.Name, cron.Agent)
+			stats.dispatched++
+			state.Crons[cron.Name] = rec
+			continue
+		}
+
+		if _, err := cronSling(root, buildCronSlingArgs(cron, dispatchCfg.NotifyOnComplete)); err != nil {
+			recordCronFailure(&rec, now, err.Error())
+			fmt.Fprintf(cmd.ErrOrStderr(), "cron %s failed: %v\n", cron.Name, err)
+			stats.errors++
+			state.Crons[cron.Name] = rec
+			continue
+		}
+
+		rec.LastFiredAt = now
+		rec.LastAttemptAt = now
+		rec.LastOutcome = cronOutcomeFired
+		rec.LastDetail = ""
+		rec.ConsecutiveFailures = 0
+		state.Crons[cron.Name] = rec
+		fmt.Fprintf(cmd.OutOrStdout(), "fire cron %s: sling %s\n", cron.Name, cron.Agent)
+		stats.dispatched++
+	}
+
+	if dispatchDryRun {
+		return // --dry-run reports what would happen and commits nothing (item-path parity)
+	}
+	// Saved here, still inside the cycle lock, rather than in runDispatch's tail: everything after
+	// this point can abort on GitHub, and a fire that already spawned a sling must not be
+	// forgotten and repeated on the next tick.
+	if err := saveCronState(root, state); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: saving cron state: %v\n", err)
+		stats.errors++
+	}
+}
+
 func (w *workflowCtx) run() {
 	phase, ambiguous := workflowCursor(w.item, w.wf.Phases)
 	if ambiguous {
@@ -1532,6 +1862,61 @@ func pruneDispatchState(state *dispatchState) {
 	}
 }
 
+// loadCronState reads .runtime/dispatch-crons.json.
+// Returns an empty state with initialized map if the file doesn't exist.
+func loadCronState(root string) cronState {
+	path := filepath.Join(root, ".runtime", "dispatch-crons.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cronState{Crons: make(map[string]cronRecord)}
+	}
+	var state cronState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return cronState{Crons: make(map[string]cronRecord)}
+	}
+	if state.Crons == nil {
+		state.Crons = make(map[string]cronRecord)
+	}
+	return state
+}
+
+// saveCronState writes .runtime/dispatch-crons.json atomically via temp file + rename.
+func saveCronState(root string, state *cronState) error {
+	runtimeDir := filepath.Join(root, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		return fmt.Errorf("creating .runtime directory: %w", err)
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling cron state: %w", err)
+	}
+	data = append(data, '\n')
+	tmp := filepath.Join(runtimeDir, ".dispatch-crons.json.tmp")
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return fmt.Errorf("writing temp cron state: %w", err)
+	}
+	return os.Rename(tmp, filepath.Join(runtimeDir, "dispatch-crons.json"))
+}
+
+// pruneCronOrphans drops records for schedules the operator has removed or renamed. Config is
+// truth: a deleted schedule leaves no status trace, and a renamed one fires fresh rather than
+// inheriting a stranger's cadence.
+//
+// This is a config-diff and shares nothing with pruneDispatchState's 24h cutoff — which is exactly
+// why cron timing lives in its own file. An age-based rule here would delete precisely the records
+// a long cadence depends on.
+func pruneCronOrphans(state *cronState, crons []config.CronSchedule) {
+	configured := make(map[string]struct{}, len(crons))
+	for _, cron := range crons {
+		configured[cron.Name] = struct{}{}
+	}
+	for name := range state.Crons {
+		if _, ok := configured[name]; !ok {
+			delete(state.Crons, name)
+		}
+	}
+}
+
 // dispatchCycleStats tracks per-cycle dispatch outcomes for the summary line.
 type dispatchCycleStats struct {
 	start      time.Time
@@ -1656,7 +2041,7 @@ func runDispatchStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("dispatcher is not running")
 	}
 
-	if err := t.KillSession(dispatchSessionName); err != nil {
+	if err := t.KillSession(dispatchSessionName); err != nil { //af:teardown:dispatch
 		return fmt.Errorf("killing tmux session: %w", err)
 	}
 
@@ -1694,12 +2079,33 @@ func runDispatchStatus(cmd *cobra.Command, args []string) error {
 
 	state := loadDispatchState(root)
 
+	// Schedules are DECLARED in the config, not in the dispatch state, so the status path has to
+	// read it (issue #610 N11). ANY load error — absent, unreadable, unparseable, or failing
+	// LoadDispatchConfig's own validation — degrades to "no schedules to show" rather than
+	// aborting: a half-edited dispatch.json must not take `af dispatch status` down with it, and
+	// this command is the surface an operator reaches for to diagnose exactly that.
+	var crons []config.CronSchedule
+	if cfg, err := config.LoadDispatchConfig(root); err == nil {
+		crons = cfg.Crons
+	}
+
 	// Build agent session state map
 	agentState := make(map[string]bool)
 	for _, entry := range state.Dispatched {
 		if _, checked := agentState[entry.Agent]; !checked {
 			agentRunning, _ := t.HasSession(session.SessionName(entry.Agent))
 			agentState[entry.Agent] = agentRunning
+		}
+	}
+	// Cron agents need the same probe: the loop above walks dispatched ITEMS only, and a map read
+	// of a missing key yields false — so a schedule whose agent has never been sent a GitHub item
+	// would report agent_running:false while its session was up. The `checked` guard keeps the
+	// cheap-offline-read contract below intact: one probe per DISTINCT agent, and none at all on a
+	// factory with no crons.
+	for _, cron := range crons {
+		if _, checked := agentState[cron.Agent]; !checked {
+			agentRunning, _ := t.HasSession(session.SessionName(cron.Agent))
+			agentState[cron.Agent] = agentRunning
 		}
 	}
 
@@ -1717,11 +2123,19 @@ func runDispatchStatus(cmd *cobra.Command, args []string) error {
 	// status command stays a cheap offline read.
 	agentRecovery := computeAgentRecovery(root, state.Dispatched)
 
+	// Scheduled slings (issue #610 N11), joined here for the same reason as the three precomputes
+	// above: the renderers stay pure and testable.
+	schedules := computeCronStatus(root, crons, agentState)
+
 	if jsonOut {
-		return emitDispatchStatusJSON(cmd, running, state.Dispatched, agentState, phaseComplete, agentRecovery)
+		return emitDispatchStatusJSON(cmd, running, state.Dispatched, agentState, phaseComplete, agentRecovery, schedules)
 	}
 
-	out := formatDispatchStatus(running, state.Dispatched, agentState, phaseComplete)
+	// Read the clock ONCE and pass the instant down, mirroring how runDispatch hands cronNow().UTC()
+	// to processCrons: a renderer that read the clock per row could straddle two readings, and a
+	// pure renderer is the only way "due now" is a property of the fixture rather than of when the
+	// suite happens to run.
+	out := formatDispatchStatus(running, state.Dispatched, agentState, phaseComplete, schedules, cronNow().UTC())
 	fmt.Fprint(cmd.OutOrStdout(), out)
 	return nil
 }
@@ -1775,6 +2189,89 @@ func computeAgentRecovery(root string, entries map[string]dispatchEntry) map[str
 	return byAgent
 }
 
+// computeCronStatus joins the operator's DECLARED schedules with the engine's RECORDED outcomes
+// (issue #610 N11), read once here for the same reason as the precomputes above.
+//
+// The config is truth, exactly as pruneCronOrphans treats it: this iterates crons and looks each
+// record up by name, so a schedule deleted from dispatch.json leaves no status trace even while its
+// record is still on disk awaiting the next pass's prune.
+//
+// It returns nil — not an empty slice — when nothing is configured. Both elide the omitempty JSON
+// key, but nil says so at the source.
+//
+// loadCronState cannot fail (a missing or undecodable file reads as empty state), which is what
+// keeps this compatible with the cheap, offline-friendly read the status command promises.
+func computeCronStatus(root string, crons []config.CronSchedule, agentState map[string]bool) []cronStatusEntry {
+	if len(crons) == 0 {
+		return nil
+	}
+	state := loadCronState(root)
+
+	schedules := make([]cronStatusEntry, 0, len(crons))
+	for _, cron := range crons {
+		rec := state.Crons[cron.Name]
+
+		entry := cronStatusEntry{
+			Name:                cron.Name,
+			Agent:               cron.Agent,
+			AgentRunning:        agentState[cron.Agent],
+			Every:               cron.Every,
+			LastOutcome:         rec.LastOutcome,
+			LastDetail:          rec.LastDetail,
+			LastAttemptAt:       rec.LastAttemptAt,
+			ConsecutiveFailures: rec.ConsecutiveFailures,
+		}
+
+		// A zero LastFiredAt means "never fired successfully" — cronRecord stores it by value, so
+		// taking its address unconditionally would hand every never-fired schedule a non-nil
+		// pointer to 0001-01-01 and emit a fire that never happened (HIGH-4).
+		if !rec.LastFiredAt.IsZero() {
+			fired := rec.LastFiredAt
+			entry.LastFiredAt = &fired
+		}
+
+		// Next due mirrors the engine's due predicate — last SUCCESSFUL fire plus the cadence — so
+		// status tells the operator the same story the dispatcher acts on. It stays the zero time
+		// when the schedule has never fired or the cadence cannot be parsed; deriving it by
+		// addition in either case would emit 0001-01-01T04:00:00Z, a stamp that looks like data and
+		// reads as overdue by two millennia. An unusable cadence is unreachable through
+		// LoadDispatchConfig (validateCrons owns the grammar) but must still render rather than
+		// abort, matching the per-schedule downgrade the engine applies to the same input.
+		if every, err := config.ParseCompactDuration(cron.Every); err == nil && !rec.LastFiredAt.IsZero() {
+			entry.NextDueAt = rec.LastFiredAt.Add(every)
+		}
+
+		schedules = append(schedules, entry)
+	}
+	return schedules
+}
+
+// cronStatusEntry is the per-schedule JSON shape emitted by `af dispatch status --json`
+// (issue #610 N11). Like dispatchStatusEntry it is a versioned contract, pinned by
+// TestDispatchStatus_JSON_SchemaSnapshot_Crons.
+//
+// LastFiredAt is a POINTER because encoding/json's omitempty has no effect on a struct-typed field,
+// so a zero time.Time would emit 0001-01-01T00:00:00Z rather than elide the key. Go 1.24's omitzero
+// would elide it without the pointer, but this package has no omitzero anywhere and this is not the
+// contract to introduce it on. NextDueAt and LastAttemptAt are ALWAYS present because their zero
+// value is the honest answer for a schedule that has never fired — there is nothing to elide.
+//
+// LastFiredAt records SUCCESSFUL fires only, mirroring cronRecord (HIGH-4) — a status line claiming
+// a fire that did not happen is worse than no status at all. A schedule that has only ever errored
+// therefore carries an outcome and a detail but no fire stamp.
+type cronStatusEntry struct {
+	Name                string     `json:"name"`
+	Agent               string     `json:"agent"`
+	AgentRunning        bool       `json:"agent_running"`
+	Every               string     `json:"every"`
+	NextDueAt           time.Time  `json:"next_due_at"`
+	LastFiredAt         *time.Time `json:"last_fired_at,omitempty"` // nil = never fired
+	LastOutcome         string     `json:"last_outcome,omitempty"`  // "fired" | "skipped_busy" | "error" | ""
+	LastDetail          string     `json:"last_detail,omitempty"`   // skip reason / error text
+	LastAttemptAt       time.Time  `json:"last_attempt_at"`
+	ConsecutiveFailures int        `json:"consecutive_failures,omitempty"`
+}
+
 // dispatchStatusEntry is the per-dispatch JSON shape emitted by
 // `af dispatch status --json`. The field set is a versioned contract pinned by
 // TestDispatchStatus_JSON_SchemaSnapshot. "issue" is the dispatch key (the
@@ -1811,6 +2308,12 @@ type dispatchStatusEntry struct {
 type dispatchStatusJSON struct {
 	DispatcherRunning bool                  `json:"dispatcher_running"`
 	Entries           []dispatchStatusEntry `json:"entries"`
+
+	// Scheduled slings (issue #610 N11, additive). omitempty is load-bearing rather than
+	// cosmetic: it is what keeps a factory with no crons emitting the frozen 2-key top level
+	// that TestDispatchStatus_JSON_SchemaSnapshot pins. Schedules are a separate list from
+	// Entries on purpose — entries are item-keyed (<repo>#<n>), schedules are name-keyed.
+	Schedules []cronStatusEntry `json:"schedules,omitempty"`
 }
 
 // emitDispatchStatusError writes a {"state":"error",...} envelope through the cobra
@@ -1828,8 +2331,10 @@ func emitDispatchStatusError(cmd *cobra.Command, e error) error {
 }
 
 // emitDispatchStatusJSON marshals the dispatcher state as JSON to stdout. Entries
-// are sorted by issue key for deterministic, snapshot-stable output.
-func emitDispatchStatusJSON(cmd *cobra.Command, running bool, entries map[string]dispatchEntry, agentState map[string]bool, phaseComplete map[string]bool, agentRecovery map[string]string) error {
+// are sorted by issue key for deterministic, snapshot-stable output; schedules arrive in the
+// operator's document order, which is already deterministic because they come from a config slice
+// rather than from a map.
+func emitDispatchStatusJSON(cmd *cobra.Command, running bool, entries map[string]dispatchEntry, agentState map[string]bool, phaseComplete map[string]bool, agentRecovery map[string]string, schedules []cronStatusEntry) error {
 	keys := make([]string, 0, len(entries))
 	for k := range entries {
 		keys = append(keys, k)
@@ -1839,6 +2344,9 @@ func emitDispatchStatusJSON(cmd *cobra.Command, running bool, entries map[string
 	out := dispatchStatusJSON{
 		DispatcherRunning: running,
 		Entries:           make([]dispatchStatusEntry, 0, len(entries)),
+		// Deliberately NOT pre-made, unlike Entries: nil is what elides the key and preserves the
+		// frozen 2-key top level on a factory with no crons.
+		Schedules: schedules,
 	}
 	for _, k := range keys {
 		e := entries[k]
@@ -1927,7 +2435,10 @@ func resolveDispatchInterval(flagValue, configValue int) int {
 // epic), keyed by the dispatch-state map key. Declared-vs-actual drift is surfaced for
 // workflow entries whose agent is gone but whose instance has NOT genuinely completed —
 // the dispatcher will re-sling them, so a stall can never masquerade as completion (D5-D).
-func formatDispatchStatus(running bool, entries map[string]dispatchEntry, agentState map[string]bool, phaseComplete map[string]bool) string {
+//
+// now is a parameter rather than a clock read so the whole renderer stays pure: "due now" is then a
+// property of the schedules it was handed, not of when it ran (issue #610 N11).
+func formatDispatchStatus(running bool, entries map[string]dispatchEntry, agentState map[string]bool, phaseComplete map[string]bool, schedules []cronStatusEntry, now time.Time) string {
 	var buf bytes.Buffer
 
 	if running {
@@ -1938,6 +2449,9 @@ func formatDispatchStatus(running bool, entries map[string]dispatchEntry, agentS
 
 	if len(entries) == 0 {
 		fmt.Fprintln(&buf, "No dispatched issues.")
+		// A crons-only factory lives on exactly this path — zero dispatched issues and real
+		// schedules — so the early return may not swallow the block it exists to show.
+		writeSchedulesBlock(&buf, schedules, running, now)
 		return buf.String()
 	}
 
@@ -1982,10 +2496,91 @@ func formatDispatchStatus(running bool, entries map[string]dispatchEntry, agentS
 			phase = "-"
 		}
 
-		age := time.Since(entry.DispatchedAt).Round(time.Minute)
+		age := now.Sub(entry.DispatchedAt).Round(time.Minute)
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s ago\n", key, entry.Source, entry.Agent, workflow, phase, status, age)
 	}
 	w.Flush()
 
+	writeSchedulesBlock(&buf, schedules, running, now)
+
 	return buf.String()
+}
+
+// writeSchedulesBlock renders the operator's scheduled slings and, when the dispatcher is down, the
+// advisory that none of them will fire (issue #610 N11, ux.md §C1).
+//
+// Everything here is gated on there being schedules at all — including the carrier-down warning.
+// Gating that warning on !running alone would make every stopped, entry-less factory grow an
+// advisory about crons it does not have.
+//
+// The block gets its OWN tabwriter: the entries table above is an unrelated table, and sharing one
+// would bleed its column widths into these rows. Schedules are not sorted — they come from a config
+// slice, so document order is already deterministic, unlike the map-derived entries above.
+func writeSchedulesBlock(buf *bytes.Buffer, schedules []cronStatusEntry, running bool, now time.Time) {
+	if len(schedules) == 0 {
+		return
+	}
+
+	fmt.Fprintln(buf)
+	fmt.Fprintln(buf, "Schedules:")
+
+	w := tabwriter.NewWriter(buf, 0, 0, 2, ' ', 0)
+	for _, s := range schedules {
+		// "never" is not the same claim as "never fired successfully but keeps erroring", so the
+		// outcome rides along whenever there is one: a failing schedule reads last=never (error)
+		// rather than passing for a brand-new one that is simply waiting its turn.
+		last := "never"
+		if s.LastFiredAt != nil {
+			last = s.LastFiredAt.UTC().Format(time.RFC3339)
+		}
+		if s.LastOutcome != "" {
+			last += " (" + s.LastOutcome + ")"
+		}
+
+		// A zero next-due is a schedule that has never fired (or whose cadence is unusable), and
+		// the engine fires a never-fired schedule on its next tick — so "due now" is the truthful
+		// reading of both the zero time and any stamp already in the past.
+		next := "due now"
+		if s.NextDueAt.After(now) {
+			next = s.NextDueAt.UTC().Format(time.RFC3339)
+		}
+
+		fields := []string{foldCell(s.Name), "agent=" + foldCell(s.Agent), "every=" + foldCell(s.Every), "last=" + last, "next=" + next}
+		if note := scheduleNote(s); note != "" {
+			fields = append(fields, note)
+		}
+		fmt.Fprintln(w, "  "+strings.Join(fields, "\t"))
+	}
+	w.Flush()
+
+	// The warning trails the rows it is about. Leading with it would put an advisory above the
+	// evidence for it, and an operator scanning down would read the schedules as the explanation
+	// of a warning rather than the warning as a verdict on the schedules.
+	if !running {
+		fmt.Fprintln(buf, cronsWontFireWarning)
+	}
+}
+
+// foldCell collapses a cell's whitespace so that one schedule can only ever occupy one row.
+//
+// Every string a schedule row prints is authored outside this function: Name and Agent come from
+// dispatch.json, where validateCrons enforces non-empty and unique but no charset, and LastDetail
+// is engine-authored err.Error() text. A newline in any of them would both break the tabwriter
+// block and forge lines that look like status output — an operator-supplied name of
+// "x\nDispatcher: RUNNING" is enough to fake a whole dispatcher header.
+func foldCell(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// scheduleNote is the trailing cell of a schedule row: why the last evaluation did not fire, and
+// how long it has been going wrong.
+func scheduleNote(s cronStatusEntry) string {
+	var parts []string
+	if s.LastDetail != "" {
+		parts = append(parts, foldCell(s.LastDetail))
+	}
+	if s.ConsecutiveFailures > 0 {
+		parts = append(parts, fmt.Sprintf("%d consecutive failures", s.ConsecutiveFailures))
+	}
+	return strings.Join(parts, ", ")
 }

@@ -676,7 +676,7 @@ func TestTelemetryUsage_UnknownVerbFallbackListsUsage(t *testing.T) {
 		t.Fatal("an unknown verb must still error")
 	}
 
-	const want = "usage: af telemetry [on|off|status|report|usage]"
+	const want = "usage: af telemetry [on|off|status|report|band|usage|rebuild]"
 	if err.Error() != want {
 		t.Errorf("fallback = %q,\n    want %q\n"+
 			"Asserted by equality on purpose: the existing Contains(err, \"usage\") checks match "+

@@ -24,7 +24,9 @@
 //     closed allowlist of scalars. Since #622 a measurement may be a POINTER to a scalar, so
 //     that "nobody measured this" stays distinguishable from "this measured zero"; one level of
 //     indirection to one number carries no more content than the number, and a map, slice,
-//     interface, nested struct or pointer to any of those is still refused.
+//     interface, nested struct or pointer to any of those is still refused. #668 adds generation
+//     figures and a formula content digest under the same rule: a digest is a hash, not the
+//     document, and a token count is a number, so neither widens what the boundary admits.
 //   - Rotation never discards records the export cursor has not passed. Where a hard ceiling
 //     forces a discard, the count is computed before the rename and persisted, because a hole
 //     in the data that nothing reports is worse than a hole that does.

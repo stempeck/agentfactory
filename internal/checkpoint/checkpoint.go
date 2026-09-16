@@ -58,6 +58,50 @@ type Checkpoint struct {
 
 	// CompactionAt is when the compaction event occurred.
 	CompactionAt time.Time `json:"compaction_at,omitempty"`
+
+	// The handoff interview (#668 K8). A recycling session is the last thing that still knows what
+	// it was doing, and today it says so only in Notes — one free-text line the inheriting session
+	// has to re-derive everything from. These three fields are that same knowledge in a shape a
+	// reader can branch on: which files the work is in, what has already been established, and the
+	// one thing to do next. Structure rather than prose is the whole point — prime's resume slimming
+	// has to decide whether a brief supersedes a section, and it cannot decide that about a
+	// sentence.
+	//
+	// Every field is omitempty, and that is load-bearing twice over. An agent already in flight has
+	// a checkpoint on disk written by a binary that never heard of a brief, and it must keep
+	// decoding (Read is tolerant by design, :70-87). And a checkpoint written WITHOUT a brief must
+	// not be readable as one carrying an empty brief, because slimming arms on the brief's presence:
+	// absent and empty leading to the same behaviour is how a session loses context it needed.
+	ResumeArtifacts  []string `json:"resume_artifacts,omitempty"`
+	ResumeVerified   string   `json:"resume_verified,omitempty"`
+	ResumeNextAction string   `json:"resume_next_action,omitempty"`
+
+	// ResumeNextStepID is which step the brief was written FOR (#678 K8a). Without it the brief's own
+	// successor is the one reader that cannot tell the brief is about it: a boundary handoff recycles
+	// BETWEEN steps, so prime sees the inheriting session as starting a new step rather than resuming
+	// one, and the same-step slim rule cannot arm. It re-receives every section the brief already
+	// carries.
+	//
+	// On today's single write path this holds the same value as CurrentStep — the interview and
+	// WithFormula are handed the same ready step by the same caller. That is a fact about the caller,
+	// not a property of the field, and the two are read under DIFFERENT rules: CurrentStep answers
+	// "which step is this checkpoint about", which every non-brief reader asks, while this answers
+	// "which step was this BRIEF written for", which only the successor rule asks and which must go
+	// stale with the brief rather than with the formula state. Collapsing them would make the slimming
+	// rule read a field that a later WithFormula is free to move underneath it.
+	//
+	// Written only by the interview, i.e. only where a next action is written too, so it is a brief
+	// field rather than a fourth piece of formula state — and omitempty for the reason the three above
+	// are: a checkpoint that names no successor must not read as one naming an empty successor.
+	ResumeNextStepID string `json:"resume_next_step_id,omitempty"`
+}
+
+// HasResumeBrief reports whether an interview was actually conducted. The next action is the
+// discriminator rather than any of the three, because it is the only one whose absence makes the
+// brief useless: a list of files with nothing to do about them supersedes no section of prime's
+// output, and artifacts alone are already in ModifiedFiles.
+func (cp *Checkpoint) HasResumeBrief() bool {
+	return cp != nil && cp.ResumeNextAction != ""
 }
 
 // Path returns the checkpoint file path for a given agent directory.
@@ -188,6 +232,23 @@ func (cp *Checkpoint) WithNotes(notes string) *Checkpoint {
 	return cp
 }
 
+// WithResumeBrief adds the handoff interview to a checkpoint (#668 K8).
+//
+// It is a separate builder from WithNotes rather than an extension of it because the two have
+// different owners and different lifetimes: Notes is the recycle's subject line, written by whoever
+// triggered the handoff, and captureCheckpointWithFormula overwrites it on every capture. A brief
+// written into Notes would be destroyed by that same call.
+// nextAction stays the final parameter even though nextStepID was added after it: HasResumeBrief
+// keys on the next action, so it is the field whose write arms every reader of the brief, and a
+// caller building the argument list left to right should reach it last.
+func (cp *Checkpoint) WithResumeBrief(artifacts []string, verified, nextStepID, nextAction string) *Checkpoint {
+	cp.ResumeArtifacts = artifacts
+	cp.ResumeVerified = verified
+	cp.ResumeNextStepID = nextStepID
+	cp.ResumeNextAction = nextAction
+	return cp
+}
+
 // Age returns how long ago the checkpoint was written.
 func (cp *Checkpoint) Age() time.Duration {
 	return time.Since(cp.Timestamp)
@@ -220,6 +281,14 @@ func (cp *Checkpoint) Summary() string {
 
 	if cp.Branch != "" {
 		parts = append(parts, fmt.Sprintf("branch: %s", cp.Branch))
+	}
+
+	// The brief's next action goes last because it is the only clause a reader acts on, and the
+	// four above it are what that action is about. Only the next action is summarised: artifacts
+	// are already counted by the modified-files clause, and the verified statement is a paragraph,
+	// not a fact a one-line summary can carry without becoming the brief itself.
+	if cp.ResumeNextAction != "" {
+		parts = append(parts, fmt.Sprintf("next: %s", cp.ResumeNextAction))
 	}
 
 	if len(parts) == 0 {

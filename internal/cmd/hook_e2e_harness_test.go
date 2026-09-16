@@ -38,10 +38,7 @@ import (
 //   - The grader runs under `env -i HOME=... PATH=...` (fidelity-gate.sh:244, quality-gate.sh:135),
 //     so no custom variable reaches the `claude` stub. It keys off its inherited working directory
 //     instead, which is the agent workdir the gate itself uses for .runtime/.
-const (
-	hookE2ERole      = "gate-e2e-agent"
-	hookE2EExecProbe = "hooke2e-exec-ok"
-)
+const hookE2ERole = "gate-e2e-agent"
 
 type hookE2EGate struct {
 	name     string
@@ -252,51 +249,11 @@ func hookE2EMirrorDirExcept(t *testing.T, base, name, src string, excluded map[s
 // while testing a completely different program.
 func hookE2EExecDir(t *testing.T) string {
 	t.Helper()
-	dir, err := hookE2ETryExecDir(t)
+	dir, err := tryExecCapableDir(t, "hooke2e")
 	if err != nil {
 		t.Fatalf("no exec-capable directory for the gate shims (is /tmp mounted noexec?): %v", err)
 	}
 	return dir
-}
-
-// hookE2ETryExecDir is the non-fatal form, for callers that only want to HARDEN an existing test
-// rather than depend on the shims.
-//
-// The repo tree is the LAST candidate, so `make test` — which redirects both TMPDIR and GOTMPDIR to
-// $HOME/.cache/af-test (Makefile:55-59) — never reaches it. A bare `go test` on a machine with a
-// noexec /tmp does, and then builds the af binary under internal/cmd/testdata/hooke2e*; that path is
-// gitignored and removed by the Cleanup below, so it only outlives a hard kill.
-func hookE2ETryExecDir(t *testing.T) (string, error) {
-	t.Helper()
-
-	var tried []string
-	candidates := []string{
-		os.Getenv("GOTMPDIR"),
-		os.Getenv("TMPDIR"),
-		filepath.Join(findRepoRoot(t), "internal", "cmd", "testdata"),
-	}
-	for _, base := range candidates {
-		if base == "" {
-			continue
-		}
-		if err := os.MkdirAll(base, 0o755); err != nil {
-			tried = append(tried, fmt.Sprintf("%s: %v", base, err))
-			continue
-		}
-		dir, err := os.MkdirTemp(base, "hooke2e")
-		if err != nil {
-			tried = append(tried, fmt.Sprintf("%s: %v", base, err))
-			continue
-		}
-		if err := hookE2EProbeExec(dir); err != nil {
-			_ = os.RemoveAll(dir)
-			tried = append(tried, fmt.Sprintf("%s: %v", base, err))
-			continue
-		}
-		t.Cleanup(func() { _ = os.RemoveAll(dir) })
-		return dir, nil
-	}
-	return "", fmt.Errorf("every candidate rejected: %s", strings.Join(tried, "; "))
 }
 
 // hookE2EHermeticShimDir plants the shim pair WITHOUT building af, for callers whose subject is a
@@ -313,27 +270,12 @@ func hookE2ETryExecDir(t *testing.T) (string, error) {
 // without one is no worse off than it is today.
 func hookE2EHermeticShimDir(t *testing.T) string {
 	t.Helper()
-	dir, err := hookE2ETryExecDir(t)
+	dir, err := tryExecCapableDir(t, "hooke2e")
 	if err != nil {
 		t.Logf("gate hooks will run against the ambient PATH: %v", err)
 		return ""
 	}
 	return hookE2EPlantShims(t, dir, "shim-hermetic", filepath.Join(dir, "af-real-absent"), true, true)
-}
-
-func hookE2EProbeExec(dir string) error {
-	probe := filepath.Join(dir, "probe.sh")
-	if err := os.WriteFile(probe, []byte("#!/bin/bash\necho "+hookE2EExecProbe+"\n"), 0o755); err != nil {
-		return err
-	}
-	out, err := exec.Command(probe).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("exec probe failed: %v (%s)", err, bytes.TrimSpace(out))
-	}
-	if !bytes.Contains(out, []byte(hookE2EExecProbe)) {
-		return fmt.Errorf("exec probe produced %q", out)
-	}
-	return nil
 }
 
 func hookE2EBuildAF(t *testing.T, repoRoot, dir string) string {
@@ -371,9 +313,14 @@ func hookE2EWriteScript(t *testing.T, path, body string) {
 	}
 }
 
-// hookE2EAfShim answers every `af` verb the gates call. Only `turn evidence` reaches real code;
-// the rest are recorded and faked, because a real `af` in this tier would construct the operator's
+// hookE2EAfShim answers every `af` verb the gates call. Only the `turn` verbs reach real code; the
+// rest are recorded and faked, because a real `af` in this tier would construct the operator's
 // issue store (ADR-018).
+//
+// `turn interventions` (#668 K15) qualifies on the same test ADR-018 sets for `turn evidence`: it
+// reads the append-only telemetry log and constructs no store. It has to be delegated rather than
+// faked, because the section it produces is the SUBJECT of TestFidelityGateInterventionSection — a
+// shim that printed a canned block would assert the harness against itself.
 //
 // The ledger is the mechanism behind two assertions that have no other observable: "a compliant run
 // sends no STEP_FIDELITY mail" and "a verdict backlog collapses to one bead". Arguments are escaped
@@ -402,13 +349,14 @@ log_call() {
 }
 log_call "$@"
 
-if [ "$1" = "turn" ] && [ "$2" = "evidence" ]; then
+if [ "$1" = "turn" ] && { [ "$2" = "evidence" ] || [ "$2" = "interventions" ]; }; then
+    verb="$2"
     shift 2
     # An absent af-real is the deliberately degraded mode the lock tests run in: they only need the
     # gate to stop calling the network, not to derive evidence. Every test that DOES care asserts
     # the evidence block is non-empty, so this can never pass for a broken build.
     if [ -x "$AF_REAL" ]; then
-        exec "$AF_REAL" turn evidence "$@"
+        exec "$AF_REAL" turn "$verb" "$@"
     fi
     exit 0
 fi
