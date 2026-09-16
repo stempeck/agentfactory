@@ -609,19 +609,13 @@ const (
 	// the AF_/CLAUDE_ prefixes, so an ambient pane survives for an agent running the suite from
 	// inside one and is absent in CI — the dedup assertions below would then hold on a developer
 	// host and fail on the runner, for a reason that reads like a dedup bug.
-	sessionStartPane = "%0"
-	// internal/templates/roles/ and .agentfactory/agents.json both hold 43 today, so this floor is
-	// exact rather than slack. It is not a claim about how many agents a factory may have — it is
-	// the tripwire for an enumerator that has quietly stopped seeing the embedded templates, which
-	// would otherwise turn this whole sweep into a loop over nothing.
-	sessionStartRosterFloor = 43
-
+	sessionStartPane          = "%0"
 	primeHookSegment          = "af prime --hook"
 	mailHookSegment           = "af mail check --inject"
 	hookEventUserPromptSubmit = "UserPromptSubmit"
 
-	// The one line that says a mail block was delivered (mail.go:652), and the anchor every one of
-	// the 43 role templates opens its identity with. Counting the first across every entry is AC-4;
+	// The one line that says a mail block was delivered (mail.go:652), and the anchor every role
+	// template opens its identity with. Counting the first across every entry is AC-4;
 	// finding the second anywhere is an AC-2 failure.
 	mailInjectionHeader   = "Mail delivered to "
 	memoryInjectionHeader = "Memory from your own past runs"
@@ -866,8 +860,17 @@ func TestSessionStartOutputFitsInlineLimit_EveryRole(t *testing.T) {
 	if len(roles) == 0 {
 		t.Fatal("the embedded roster enumerated zero roles; this sweep would pass having proven nothing")
 	}
-	if len(roles) < sessionStartRosterFloor {
-		t.Fatalf("the embedded roster holds %d roles, want at least %d", len(roles), sessionStartRosterFloor)
+	// The tripwire for an enumerator that has quietly stopped seeing the embedded templates, which
+	// would otherwise turn this whole sweep into a loop over nothing. The embed is built from
+	// internal/templates/roles/, so the roster must be exactly the template files the checkout holds.
+	// Counting them here instead of pinning a number keeps the sweep honest for any roster size,
+	// including a published subset of this one.
+	shipped, err := filepath.Glob(filepath.Join(findRepoRoot(t), "internal", "templates", "roles", "*.md.tmpl"))
+	if err != nil {
+		t.Fatalf("globbing internal/templates/roles: %v", err)
+	}
+	if len(roles) != len(shipped) {
+		t.Fatalf("the embedded roster enumerates %d roles but internal/templates/roles/ holds %d templates", len(roles), len(shipped))
 	}
 
 	// A hang detector, not a budget: the whole sweep measures ~15s against Makefile:99's 4m
@@ -891,7 +894,7 @@ func TestSessionStartOutputFitsInlineLimit_EveryRole(t *testing.T) {
 		// covered by its own subtest below rather than by weakening this one.
 		//
 		// The fit is deliberately tight, and the arithmetic is worth stating because it is the same
-		// for all 43 roles: ids are fixed-width (`af-` + 8 hex), so each rendered entry is 74 bytes
+		// for every role: ids are fixed-width (`af-` + 8 hex), so each rendered entry is 74 bytes
 		// of header + 603 of indented body + 1 blank = 678, and 678 × 6 = 4,068 against
 		// mailInjectTotalBytes 4,096. That 28-byte margin IS the tripwire mailInjectK's own doc
 		// (mail.go:506-510) describes — anything adding ≥5 bytes per entry reds the no-overflow
