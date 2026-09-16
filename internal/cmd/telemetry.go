@@ -17,10 +17,11 @@ import (
 )
 
 var telemetryCmd = &cobra.Command{
-	Use:   "telemetry [on|off|status|report|usage]",
+	Use:   "telemetry [on|off|status|report|band|usage|compare|rebuild]",
 	Short: "Toggle telemetry, show its status, or report per-step timing and token usage",
 	Long: `Toggle telemetry recording and export on or off, show current status,
-render the local per-step timing table, or query the backend for token usage.
+render the local per-step timing table, query the backend for token usage, or
+judge whether a change to the factory actually made a run cheaper.
 
   af telemetry on|off               switch factory-wide recording
   af telemetry status               gate state, config, and export posture
@@ -28,12 +29,34 @@ render the local per-step timing table, or query the backend for token usage.
   af telemetry report --agent NAME  limit the table to one agent
   af telemetry report --instance ID limit the table to one formula instance
   af telemetry report --export      drain the local backlog to the backend first
+  af telemetry band                 judge each closed step against what the
+                                    factory has learned for it
   af telemetry usage                token usage and session metrics from the backend
   af telemetry usage --agent NAME   limit the query to one agent
   af telemetry usage --instance ID  limit the query to one formula instance
+  af telemetry compare              did a change help? the verdict over two
+                                    five-run arms
+  af telemetry rebuild              rebuild the learned-data cache from the records
 
 Timing comes from local records; usage comes from the backend, so usage is the
-one verb that needs a reachable endpoint. It always exits 0 — read .state.`,
+one verb that needs a reachable endpoint. It always exits 0 — read .state.
+
+band computes "within baselines" rather than asserting it: every verdict is
+derived at read time from the learned median and a stated tolerance, and none is
+ever written onto a record — the band moves as the digest learns, so a stored
+verdict would outlive the comparison it was made under. A step with no trusted
+history reads no_baseline, which is neither a pass nor a failure.
+
+compare is the only verb that claims a change worked; every other reading here is
+a diagnostic. The bar is median(after) < min(before) over five runs per arm, and a
+failed precondition voids rather than fails — fail is a claim about the
+intervention, void is a claim about the comparison, and arms that were not held
+fixed say nothing in either direction. It takes --formula, --surface, --before and
+--after, and prints the null false-pass odds beside the verdict so nobody has to
+look them up. See "How improvement is proven" in USING_TOKENOMICS.md.
+
+rebuild reads every agent's records, so it ignores --agent: a per-agent cache
+would be missing every other agent's runs of the same formula step.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runTelemetry,
 }
@@ -43,6 +66,12 @@ func init() {
 	telemetryCmd.Flags().String("agent", "", "Limit the report to one agent")
 	telemetryCmd.Flags().Bool("export", false, "Drain the local backlog to the configured backend before rendering")
 	telemetryCmd.Flags().Bool("json", false, "Emit machine-readable JSON instead of the human table")
+	telemetryCmd.Flags().String("formula", "", "compare: the formula whose runs are being compared")
+	telemetryCmd.Flags().String("surface", "", "compare: a (the formula changed) or b (the posture changed)")
+	telemetryCmd.Flags().String("before", "", "compare: comma-separated instance ids of the before arm")
+	telemetryCmd.Flags().String("after", "", "compare: comma-separated instance ids of the after arm")
+	telemetryCmd.Flags().String("verify-input-digest", "", "compare: assert every run was slung with this input digest")
+	telemetryCmd.Flags().String("fidelity", "", "compare: attested artifact fidelity, <instance_id>=<verified>/<inaccurate>, comma-separated")
 	rootCmd.AddCommand(telemetryCmd)
 }
 
@@ -106,16 +135,22 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 
 	gateFile := telemetryGateFile(factoryRoot)
 
-	// status and report have both a human and a machine-readable form, and this is where --json
-	// picks between them; usage has only the machine-readable one and routes through the switch
-	// below, which is why it is absent here. on and off stay human-only, and the console can never
-	// invoke them.
+	// status, report, band and compare have both a human and a machine-readable form, and this is
+	// where --json picks between them; usage has only the machine-readable one and routes through
+	// the switch below, which is why it is absent here. on and off stay human-only, and the console
+	// can never invoke them.
 	if jsonOut {
 		if len(args) == 0 || args[0] == "status" {
 			return emitTelemetryStateJSON(factoryRoot)
 		}
 		if len(args) > 0 && args[0] == "report" {
 			return emitTelemetryReportJSON(cmd, factoryRoot)
+		}
+		if len(args) > 0 && args[0] == "band" {
+			return emitTelemetryBandJSON(cmd, factoryRoot)
+		}
+		if len(args) > 0 && args[0] == "compare" {
+			return emitTelemetryCompareJSON(cmd, factoryRoot)
 		}
 	}
 
@@ -140,10 +175,16 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 		fmt.Println("telemetry: off")
 	case "report":
 		return runTelemetryReport(cmd, factoryRoot)
+	case "band":
+		return runTelemetryBand(cmd, factoryRoot)
+	case "compare":
+		return runTelemetryCompare(cmd, factoryRoot)
 	case "usage":
 		return runTelemetryUsage(cmd, factoryRoot)
+	case "rebuild":
+		return runTelemetryRebuild(factoryRoot)
 	default:
-		return fmt.Errorf("usage: af telemetry [on|off|status|report|usage]")
+		return fmt.Errorf("usage: af telemetry [on|off|status|report|band|usage|rebuild]")
 	}
 
 	return nil
@@ -362,7 +403,7 @@ func formatTelemetryReport(factoryRoot, agentFilter, instanceFilter string, now 
 	w.Flush()
 
 	fmt.Fprintln(&buf)
-	fmt.Fprintln(&buf, "Latency only. Token and cost figures live in the telemetry backend; af records step windows, never tokens.")
+	fmt.Fprintln(&buf, "Latency only in this table. Token figures are on --json (out_tokens, think_tokens_est, peak_ctx_tokens); billed cost lives in the backend (af telemetry usage).")
 	fmt.Fprint(&buf, lossNote)
 	return buf.String(), nil
 }
@@ -683,6 +724,11 @@ func printStepContextKnobs(factoryRoot string) {
 	// print it to this phase; without a caller an operator whose recovery ladder cannot seat the
 	// shipped default never learns that their effective handoff_pct was derived rather than chosen.
 	if warning, ok := config.StepContextLint(cfg); ok {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
+	}
+	// #672 AC-4 sibling: the admission ceiling silently overridden by the exhaustion breaker is, like a
+	// clamped handoff_pct, a number an operator reads as chosen when it is not. Quiet on shipped defaults.
+	if warning, ok := config.AdmissionBandLint(cfg); ok {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
 	}
 }

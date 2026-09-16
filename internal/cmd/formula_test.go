@@ -856,16 +856,21 @@ func TestProvisioningPipeline_TypeInteractive(t *testing.T) {
 	}
 
 	settingsStr := string(settingsData)
-	// The autonomous template includes "af prime --hook && af mail check --inject"
-	// in SessionStart, while the interactive template has just "af prime --hook".
-	if strings.Contains(settingsStr, "af prime --hook && af mail check --inject") {
-		t.Error("interactive settings.json should not contain 'af prime --hook && af mail check --inject' in SessionStart (that's the autonomous template)")
+	// SessionStart no longer tells the two templates apart: since #675 K3 both carry the same three
+	// independently-budgeted writers. The templates now diverge at PreCompact and at Stop, so that is
+	// where the provisioned variant has to be identified.
+	if !strings.Contains(settingsStr, "af compact-handoff --interactive") {
+		t.Error("interactive settings.json should carry 'af compact-handoff --interactive' in PreCompact (that is the interactive variant's marker)")
+	}
+	if strings.Contains(settingsStr, "fidelity-gate.sh") {
+		t.Error("interactive settings.json should not wire fidelity-gate.sh in Stop (that's the autonomous template)")
 	}
 
-	// Verify it's valid JSON
-	if !strings.Contains(settingsStr, "hooks") {
-		t.Error("settings.json should contain hooks configuration")
+	var settings map[string]interface{}
+	if err := json.Unmarshal(settingsData, &settings); err != nil {
+		t.Fatalf("parsing settings.json: %v", err)
 	}
+	assertProvisionedSessionStart(t, settings)
 }
 
 func TestProvisioningPipeline_CreatesAllArtifacts(t *testing.T) {
@@ -1172,11 +1177,19 @@ func TestGenerateAgentTemplate_StandardSections(t *testing.T) {
 		t.Error("template missing autonomous agent declaration")
 	}
 
-	// Template variables present
-	for _, v := range []string{"{{ .Role }}", "{{ .Description }}", "{{ .RootDir }}", "{{ .WorkDir }}"} {
+	// Template variables present. {{ .Description }} is deliberately NOT among them: the generator
+	// bakes the formula's full description into the template text, because agents.json carries only
+	// its first sentence and every renderer but agent-gen reads from there (#675 K2).
+	for _, v := range []string{"{{ .Role }}", "{{ .RootDir }}", "{{ .WorkDir }}"} {
 		if !strings.Contains(content, v) {
 			t.Errorf("template missing template variable %s", v)
 		}
+	}
+	if strings.Contains(content, "{{ .Description }}") {
+		t.Error("generated template still reads {{ .Description }}; the full description must be baked in")
+	}
+	if !strings.Contains(content, "You are **{{ .Role }}**, "+f.Description+".") {
+		t.Error("generated template does not carry the formula's full description in its identity line")
 	}
 }
 
@@ -2378,5 +2391,71 @@ description = "Orient yourself"
 	}
 	if !strings.Contains(stderr, "missing-skill") && !strings.Contains(err.Error(), "missing-skill") {
 		t.Errorf("error should mention missing-skill; stderr=%q err=%v", stderr, err)
+	}
+}
+
+// t4581113_sectionBody returns the body of the `## <heading>` section of a generated agent
+// template — from the heading through the line before the next H2. Used by the T11/T13 concern
+// tests; prefixed to avoid colliding with helpers other agents add to this shared package.
+func t4581113_sectionBody(t *testing.T, content, heading string) string {
+	t.Helper()
+	marker := "## " + heading
+	start := strings.Index(content, marker)
+	if start < 0 {
+		t.Fatalf("generated template has no %q section", marker)
+	}
+	rest := content[start+len(marker):]
+	if end := strings.Index(rest, "\n## "); end >= 0 {
+		rest = rest[:end]
+	}
+	return rest
+}
+
+// TestGenerateAgentTemplate_NoLoneDotLine (T13-a) pins that a formula description ending in a
+// trailing newline does not render a bare `.` on its own line in the generated identity sentence.
+// At head, formula.go:471 concatenates `description + "."`, so a description ending in "\n" yields
+// "...paragraph.\n.\n\n" — the exact lone-dot line seen in deployed CLAUDE.md files. RED at head;
+// the D8 fix (TrimRight the description, append a period only when it lacks terminal punctuation)
+// flips it green.
+func TestGenerateAgentTemplate_NoLoneDotLine(t *testing.T) {
+	f := &formula.Formula{
+		Name:        "test-lonedot",
+		Description: "First paragraph.\n\nLast paragraph.\n",
+		Type:        formula.TypeWorkflow,
+		Version:     1,
+	}
+	content := generateAgentTemplate(f, "test-lonedot", "autonomous")
+
+	if strings.Contains(content, "\n.\n") {
+		t.Errorf("generated identity carries a lone-dot line (\\n.\\n): the description's trailing newline was not trimmed before the period was appended")
+	}
+	if strings.Contains(content, ".\n.") {
+		t.Errorf("generated identity carries a '.\\n.' sequence: the terminal period landed on its own line")
+	}
+	if !strings.Contains(content, "You are **{{ .Role }}**, First paragraph.\n\nLast paragraph.\n\n") {
+		t.Errorf("identity sentence does not end cleanly after the trimmed description; got:\n%s", content)
+	}
+}
+
+// TestGeneratedStartupProtocol_ActsOnDeliveredMail (T11-a) pins that the generated agent's Startup
+// Protocol mail step reflects the reconciled "act on the mail delivered at session start" model
+// (mirroring prime.go outputStartupDirective, prime.go:648/652) rather than instructing a redundant
+// `af mail inbox` go-fetch as its first action. At head, formula.go:518 emits "Check mail for
+// pending instructions (`af mail inbox`)". RED at head; the D7 reword flips it green.
+func TestGeneratedStartupProtocol_ActsOnDeliveredMail(t *testing.T) {
+	f := &formula.Formula{
+		Name:        "test-startup",
+		Description: "Test formula",
+		Type:        formula.TypeWorkflow,
+		Version:     1,
+	}
+	content := generateAgentTemplate(f, "test-startup", "autonomous")
+	startup := t4581113_sectionBody(t, content, "Startup Protocol")
+
+	if !strings.Contains(strings.ToLower(startup), "mail delivered at session start") {
+		t.Errorf("generated Startup Protocol does not reflect the reconciled 'act on the mail delivered at session start' model:\n%s", startup)
+	}
+	if strings.Contains(startup, "Check mail for pending instructions") {
+		t.Errorf("generated Startup Protocol still instructs a redundant `af mail inbox` go-fetch ('Check mail for pending instructions') as its first action; the hook array already delivers mail:\n%s", startup)
 	}
 }

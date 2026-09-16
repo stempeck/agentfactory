@@ -1,8 +1,12 @@
 # ADR-007: Hooks never block; enforcement is via mail to agent inbox; no escalation into a void
 
-**Status:** Accepted (extended 2026-06-15 — "no escalation into a void"; see *Amendment* below)
+**Status:** Accepted (extended 2026-06-15 — "no escalation into a void"; amended
+2026-08-31 — one enumerated exception: the dispatch capacity-admission gate,
+#672; see *Amendments* below)
 **Date:** 2026-03-23 (quality-gate `dac416a`); 2026-04-10
-(fidelity-gate `871e9f9`); extended 2026-06-15 (no-escalation-into-a-void)
+(fidelity-gate `871e9f9`); extended 2026-06-15 (no-escalation-into-a-void);
+amended 2026-08-31 (enumerated exception — dispatch capacity-admission gate,
+operator decision — #668/#672)
 
 ## Context
 
@@ -109,6 +113,62 @@ mechanism.
 - Enforcement that escalates must route through a channel that cannot trigger the
   condition it reports.
 - "Hooks never block" and gate→own-inbox routing are unchanged.
+
+## Amendment (2026-08-31): One enumerated exception — the sub-agent dispatch capacity-admission gate (#672)
+
+**Status:** Accepted (operator decision, 2026-08-31). The original decision is
+**broad by intent — every hook-shaped mechanism exits 0 — and it remains
+broad.** This amendment grants ONE exemption, named below. It defines no exempt
+class and no process for adding one: every other hook-shaped mechanism exits 0,
+without exception.
+
+### Context
+
+The #668 design applied the broad rule as written — correctly — and therefore
+demoted deterministic capacity admission for sub-agent dispatch to a deferred
+contingency (PR #669). The operator's acceptance run (2026-08-31, instance
+`af-2dc03367`) then measured this ADR's accepted cost — "some damage may be
+done before the agent can respond" — at full price: three sub-agents launched
+against a 262,144-token shared backend pool, the orchestrator starved behind
+its own children, the run wedged for hours, and zero interventions fired
+(#672). Post-act mail cannot prevent a resource commitment; for this one
+decision, the prohibition costs more than the property it protects.
+
+### Decision
+
+One exception is enumerated:
+
+**The sub-agent dispatch capacity-admission gate (#672)** — pre-act
+interception of Agent/Task dispatch — may refuse a launch. The exception is
+valid only while ALL of the following hold; violating any of them makes the
+gate non-conforming — it does not widen this exception:
+
+1. **No evaluator in the decision path.** The verdict is arithmetic over
+   operator-declared backend capacity facts and harness-observed live-context
+   state. No LLM call, no external judgment service.
+2. **Fail-open on any input-resolution error**: the launch is admitted and an
+   observe record written. The property the broad rule protects — agent
+   progress is never blocked by gate infrastructure problems — is preserved
+   verbatim.
+3. **Structurally inert where no capacity fact is declared** for the profile's
+   backend: refusal is impossible there by construction, not by tuning.
+4. **Every refusal is a recorded intervention**, retrievable through the
+   standard read surfaces and carrying the arithmetic that justified it.
+5. **Scope is the dispatch of new sub-agent work only.** No other tool call
+   may be refused under this amendment; mail remains the channel for all
+   advisory and evaluative feedback.
+
+### Consequences
+
+- The broad rule stands for everything else, exactly as before.
+- This amendment is precedent for nothing. It grants one exemption and no
+  procedure for granting another. A design citing the "deterministic" or
+  "arithmetic" character of some other hook to justify blocking is out of
+  order: conditions 1–5 bound this one exemption; they are not a template.
+- The #672 rework proceeds under this exemption rather than around this ADR.
+
+Reference: #668 (measured incident), #672 (rework acceptance criteria),
+PR #669 (acceptance-failed implementation under rework).
 
 ## Corpus links
 

@@ -44,85 +44,37 @@ import (
 //     "runPkill" identifier (capital P) and off pkill inside _test.go (not scanned here).
 var teardownCallPattern = regexp.MustCompile(`KillSession\(|\bmgr\.Stop\(|Manager\.Stop\(|\b(pgrep|pkill)\b`)
 
-// allowedTeardownSites is the class-tagged inventory of every production teardown call/decl
-// site of an audited shape, re-verified 2026-07-18 for #548 Phase 2 (gate wiring atop c9dcf98e).
-// The done.go and sling.go anchors were re-measured on 2026-07-23 when #329 Phase 3 added
-// telemetry recording above them; both are the same call sites, moved, and neither changed
-// class — this inventory pins line numbers, so an edit anywhere above a site re-anchors it.
-// Re-anchored again on 2026-07-23 for #329 Phase 4a (telemetry launch-env injection added lines
-// above the session.go/helpers.go/up.go KillSession sites); same sites, moved, same classes.
-// Re-anchored again on 2026-07-28 for #561 (continuation directive added above the done.go
-// site); same site, moved, same class.
-// Re-anchored again on 2026-08-07 for #602 Phase 2 (profile-key-universe hygiene added the
-// carve-out lists above the session.go interface decl, the universe field/setter/filter above
-// the Start() sites, the tmux-twin clearing loop above the Start() cleanup sites, the inline
-// twin's unset segment above Manager.Stop, and the unconditional setter call above the up.go
-// watchdog respawn); same sites, moved, same classes.
-// Re-anchored again on 2026-08-07 for PR #605 review fixes (F1/P1 added shellCriticalVars + the
-// staleUniverseKeys shape/protected-name guard, and F6 softened the modelKeyUniverse field doc,
-// all above the session.go KillSession sites); same sites, moved, same classes.
-// Re-anchored again on 2026-08-08 for #598 Phase 1a (ANTHROPIC_DEFAULT_FABLE_MODEL joined
-// redirectFamilyVars, adding the member and its rationale comment above every session.go site);
-// same sites, moved, same classes.
-// Re-anchored again on 2026-08-15 for #515 Phase 4 (the preserved-memory teardown report
-// added an import to both files plus the report block inside finishDispatchedSession and
-// cleanupAgentWorktree, all above these sites); same sites, moved, same classes.
-// Re-anchored again on 2026-08-15 for #515 Phase 6 (the vault export-staleness warning added a
-// time import and a gated block to runDown, and a call plus its rationale to runUp, all above
-// these sites); same sites, moved, same classes.
-// Re-anchored again on 2026-08-14 for #622 Phase 2 (step-boundary occupancy capture and the
-// cooperative handoff added lines above the done.go site; the G10 kill-guard repair added
-// isSelfTmuxSession to the authKillGuard.KillSession permit set and a line to its doc, moving the
-// two helpers.go Phase-4 sites); same sites, moved, same classes.
-// Re-anchored again on 2026-08-15 for PR #623 B-2 (boundaryHandoffMessage extracted above the
-// done.go self-terminate site); same site, moved, same class.
-// Re-anchored again on 2026-08-16 for the #515<->main(#622/#623) merge: up.go/down.go carry only
-// #515's line shifts (main did not touch them), so their sites stay at #515's anchors; done.go was
-// edited by both designs, so its self-terminate site lands at :969 (beyond both branches' recorded
-// values); same sites, moved, same classes.
-// A matched line whose "relpath:line" key is absent here fails the scan — so adding a new audited
-// call site REQUIRES appending a classified entry in the same diff (design constraint C-1,
-// review-time). Classes:
+// teardownAuditSentinel is the load-bearing marker every production teardown call/decl site of an
+// audited shape MUST carry on its own line: a trailing `//af:teardown:<class>` naming its
+// Authority-Matrix class. It is part of the scanner MECHANISM, not explanatory prose — the scan keys
+// on it — which is why it lives in the source at the site rather than in an inventory here.
+//
+// It REPLACES the former line-number-keyed allowlist (#679 T9). That map pinned "relpath:line",
+// so an edit ANYWHERE above a site re-anchored it, and the fix each time was to re-measure the number
+// and append a history line — a maintenance burden that diverged from the code and a guard kept green
+// by bookkeeping rather than by structure. The sentinel travels WITH the call: a site that moves
+// keeps its classification for free, and a NEW audited call with no sentinel still fails the scan, so
+// the C-1 guarantee holds unchanged — no teardown surface may be added without a classification
+// decision in the same diff. Keyed per LINE, it also gives each of the three byte-identical
+// `KillSession(sessionID)` calls in Manager.Start() its own marker, which a function+call-expression
+// key could not: those three collapse to one key and a planted fourth identical call would match the
+// allowlisted key and pass, defeating the planted-call non-vacuity proof.
+//
+// Classes (design-doc.md Authority Matrix L188-213):
 //
 //	decl        — interface/method declaration (matches the token but is not a call)
 //	self        — permitted self-scope (guarded self-forward / af done self-terminate)
 //	restorative — kill-and-recreate / failure cleanup during Start()/respawn (not teardown)
-//	gated       — teardown guarded by an authority gate routed through scopedStopAllowed: the
-//	              af down per-agent Stop loop (K5/K9) and the af sling --reset stop (#548 P2/P5)
+//	gated       — teardown gated by scopedStopAllowed (an authority gate): the af down per-agent
+//	              Stop loop (K5/K9) and the af sling --reset stop (#548 P2/P5)
 //	dispatch    — dispatcher-session teardown / orphan sweep (K5/K7/K10 down --all path)
-//
-// Per integration.md I4 (inventory rows 1-11) + design-doc.md Authority Matrix (L188-213).
-var allowedTeardownSites = map[string]string{
-	// --- KillSession( : interface / method DECLARATIONS (token match, not a call) ---
-	"internal/cmd/helpers.go:76":      "decl", // cmdTmux interface method decl
-	"internal/cmd/helpers.go:106":     "decl", // K8 authKillGuard.KillSession override decl (Phase 4)
-	"internal/session/session.go:267": "decl", // session-tmux interface method decl
-	"internal/tmux/tmux.go:266":       "decl", // *Tmux.KillSession method decl
-	// --- KillSession( : real calls ---
-	"internal/cmd/helpers.go:111":     "self",        // K8 guarded self-forward g.cmdTmux.KillSession (Phase 4)
-	"internal/session/session.go:521": "restorative", // Start() zombie kill-and-recreate
-	"internal/session/session.go:726": "restorative", // Start() shell-ready failure cleanup
-	"internal/session/session.go:733": "restorative", // Start() memory-check failure cleanup
-	"internal/session/session.go:742": "restorative", // Start() send-keys failure cleanup
-	"internal/session/session.go:985": "gated",       // Manager.Stop() teardown (K9 backstop)
-	"internal/cmd/up.go:596":          "restorative", // watchdog respawn (re-anchored from :567 by #596 Phase 5, which added the recovery config keys and the statusLine provisioning note to the cobra Long above this site; from :552 by #596 Phase 3, which added the K20 pre-check and the recovery-only launch notice)
-	"internal/cmd/down.go:170":        "dispatch",    // watchdog-session teardown (K5)
-	"internal/cmd/down.go:176":        "dispatch",    // dispatch-session teardown (K5)
-	"internal/cmd/done.go:969":        "self",        // af done self-terminate (re-anchored from :722 (#515) / :963 (main) by the merge)
-	"internal/cmd/dispatch.go:1659":   "dispatch",    // af dispatch stop teardown (K7) (re-anchored from :1549 by #596 Phase 4A, which added the K11 recovery-aware busy decisions and the dispatch-status recovery precompute above this site)
-	// --- Manager.Stop (mgr.Stop() calls) ---
-	"internal/cmd/down.go:121":  "gated", // K5 per-agent Stop loop (refusal proven by loop-never-entered)
-	"internal/cmd/sling.go:202": "gated", // --reset stop, gated by scopedStopAllowed (#548 P5): self/dispatcher/manager tiers with not-running + dispatch-daemon carve-outs, consistent with the af down per-agent Stop site (down.go:106)
-	// --- pgrep / pkill : K10 runPkill orphan-sweep seam ---
-	"internal/cmd/down.go:332": "dispatch", // exec.Command("pgrep", ...) orphan-sweep seam (K10)
-	"internal/cmd/down.go:335": "dispatch", // exec.Command("pkill", ...) orphan-sweep seam (K10)
-}
+var teardownAuditSentinel = regexp.MustCompile(`//af:teardown:(decl|self|restorative|gated|dispatch)\b`)
 
 // scanTeardownCallSites walks root for PRODUCTION (non-_test.go) .go files and returns
-// "relpath:line: reason" findings for any audited teardown call SHAPE whose relpath:line key
-// (relative to repoRoot, slash-normalized) is not in allowedTeardownSites. //go:build
-// integration files and comment-only lines are skipped. Factored out so the non-vacuous
-// "catches planted" proof can run the SAME logic over a t.TempDir() fixture tree.
+// "relpath:line: reason" findings for any audited teardown call SHAPE whose own line does NOT
+// carry a teardownAuditSentinel classifying it. //go:build integration files and comment-only
+// lines are skipped. Factored out so the non-vacuous "catches planted" proof can run the SAME
+// logic over a t.TempDir() fixture tree.
 func scanTeardownCallSites(root, repoRoot string) []string {
 	var findings []string
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -155,11 +107,12 @@ func scanTeardownCallSites(root, repoRoot string) []string {
 			if !teardownCallPattern.MatchString(line) {
 				continue
 			}
-			key := fmt.Sprintf("%s:%d", rel, i+1)
-			if _, ok := allowedTeardownSites[key]; !ok {
-				findings = append(findings, fmt.Sprintf("%s: unclassified teardown call site: %s",
-					key, strings.TrimSpace(line)))
+			if teardownAuditSentinel.MatchString(line) {
+				continue
 			}
+			key := fmt.Sprintf("%s:%d", rel, i+1)
+			findings = append(findings, fmt.Sprintf("%s: unclassified teardown call site: %s",
+				key, strings.TrimSpace(line)))
 		}
 		return nil
 	})
@@ -167,7 +120,7 @@ func scanTeardownCallSites(root, repoRoot string) []string {
 }
 
 // TestTeardownScannerAllowlistedCallSites is the K13 clean-tree gate (AC-1): every audited
-// teardown call site under internal/ must be present in the class-tagged allowlist. A new,
+// teardown call site under internal/ must carry a teardownAuditSentinel classifying it. A new,
 // unclassified KillSession(/Manager.Stop(/pkill site fails the build here.
 func TestTeardownScannerAllowlistedCallSites(t *testing.T) {
 	root := findRepoRoot(t)
@@ -175,9 +128,9 @@ func TestTeardownScannerAllowlistedCallSites(t *testing.T) {
 	findings := scanTeardownCallSites(internalDir, root)
 	if len(findings) > 0 {
 		t.Errorf("found %d unclassified production teardown call site(s) of an audited shape "+
-			"(KillSession(/mgr.Stop(/pgrep|pkill).\nEach new site MUST be classified: append a "+
-			"\"relpath:line\": \"<class>\" entry to allowedTeardownSites in this file, choosing the "+
-			"Authority-Matrix class (design-doc.md L188-213). (#541 K13 / constraint C-1)\nFindings:\n  %s",
+			"(KillSession(/mgr.Stop(/pgrep|pkill).\nEach new site MUST be classified: add a trailing "+
+			"//af:teardown:<class> sentinel on the site's own line, choosing the Authority-Matrix "+
+			"class (design-doc.md L188-213). (#541 K13 / constraint C-1)\nFindings:\n  %s",
 			len(findings), strings.Join(findings, "\n  "))
 	}
 }

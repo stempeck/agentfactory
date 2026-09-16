@@ -571,30 +571,12 @@ func SetupAgent(factoryRoot, worktreePath, agentName string, isOwner bool) (stri
 	}
 
 	// Render CLAUDE.md via templates (not copy)
-	tmpl := templates.New()
-	templateRole := agentName
-	if !tmpl.HasRole(templateRole) {
-		templateRole = agentEntry.Type
-		if templateRole == "interactive" {
-			templateRole = "manager"
-		} else if templateRole == "autonomous" {
-			templateRole = "supervisor"
-		}
-	}
-
-	data := templates.RoleData{
-		Role:        agentName,
-		Description: agentEntry.Description,
-		RootDir:     factoryRoot,
-		WorkDir:     agentDir,
-	}
-	claudeContent, err := tmpl.RenderRole(templateRole, data)
+	claudeContent, err := templates.RenderIdentity(templates.New(), agentName, agentEntry, factoryRoot, agentDir)
 	if err != nil {
 		return "", fmt.Errorf("rendering CLAUDE.md: %w", err)
 	}
-	claudeMDPath := filepath.Join(agentDir, "CLAUDE.md")
-	if err := os.WriteFile(claudeMDPath, []byte(claudeContent), 0o644); err != nil {
-		return "", fmt.Errorf("writing CLAUDE.md: %w", err)
+	if err := templates.WriteIdentity(agentDir, claudeContent); err != nil {
+		return "", err
 	}
 
 	// Generate settings.json via claude.EnsureSettings (not copy)

@@ -23,7 +23,7 @@ func gatewayModelsForLaunch() *config.ModelsConfig {
 
 // TestLaunchLine_EndpointProfile_CarriesDerivedClassExports is the end-to-end pin for issue #598
 // Phase 2: registry → ResolveModelEnv → SetModelEnv → launch line. Every layer above this one can
-// be correct while the launch line still carries KEY=” for a class the gateway must serve, which
+// be correct while the launch line still carries KEY='' for a class the gateway must serve, which
 // is the incident shape — so the assertion that matters is made here, on the emitted command.
 //
 // internal/session may import internal/config (the import runs one way; config parses session.go

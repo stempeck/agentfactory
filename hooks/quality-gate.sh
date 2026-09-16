@@ -140,6 +140,7 @@ VERDICT=$(env -i HOME="$HOME" PATH="$PATH" \
     ${OTEL_EXPORTER_OTLP_HEADERS:+OTEL_EXPORTER_OTLP_HEADERS="$OTEL_EXPORTER_OTLP_HEADERS"} \
     ${OTEL_RESOURCE_ATTRIBUTES:+OTEL_RESOURCE_ATTRIBUTES="$OTEL_RESOURCE_ATTRIBUTES,af.overhead=grader"} \
     claude -p --model haiku --max-turns 1 \
+    --settings '{"disableAllHooks": true}' \
     --system-prompt "You are a JSON-only quality gate. You receive an assistant's response along with the tool activity of the turn that just ended. Evaluate the response considering BOTH the text AND the tool evidence, under the evidence rules below. Respond with ONLY valid JSON, nothing else. $(cat "$PROMPT_FILE")" \
     "$EVAL_INPUT" 2>/dev/null)
 

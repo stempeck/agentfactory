@@ -275,3 +275,101 @@ func TestUp_SkipFitnessFlag_Registered(t *testing.T) {
 		t.Error("af up must register a --skip-fitness flag")
 	}
 }
+
+// TestConfigModelsCheck_CapacityWarning owns the CHECK-path half of #673's CONFIG-LINT wiring.
+// TestConfigModelsSet_CapacityWarning proves the write path reaches the lint and TestCapacityLintProfile
+// proves the predicate; without this, deleting the sweep from runConfigModelsCheck entirely would leave
+// the whole package green, and the lint would silently cover only half the surfaces it is documented on.
+//
+// Exit-neutrality is asserted DIFFERENTIALLY — the same registry checked with and without the capacity
+// key must return the same error — rather than against a fixed exit code. The transport verdict has its
+// own reasons to be non-zero (an unserved class, an unreachable gateway), and a test that pinned "nil"
+// would be asserting those instead of the property it is here for.
+func TestConfigModelsCheck_CapacityWarning(t *testing.T) {
+	checkWithCapacity := func(t *testing.T, capacity map[string]string) (string, error) {
+		t.Helper()
+		root := setupConfigFactory(t)
+		profile := map[string]string{
+			"ANTHROPIC_MODEL":      "gpt-5.3-codex",
+			"ANTHROPIC_BASE_URL":   "https://gw.example:4000",
+			"ANTHROPIC_AUTH_TOKEN": "file:secrets/codex.key",
+		}
+		for k, v := range capacity {
+			profile[k] = v
+		}
+		writeValidModels(t, root, &config.ModelsConfig{Models: map[string]map[string]string{"codex": profile}})
+		writeSecretFile(t, root, "secrets/codex.key", "sk-real-value")
+		orig := httpProbe
+		httpProbe = func(string, string) ([]string, error) {
+			return []string{"gpt-5.3-codex", "claude-fable-5"}, nil
+		}
+		t.Cleanup(func() { httpProbe = orig })
+		return runModelsCmd(t, runConfigModelsCheck, "codex")
+	}
+	sameVerdict := func(t *testing.T, got, want error) {
+		t.Helper()
+		if (got == nil) != (want == nil) || (got != nil && got.Error() != want.Error()) {
+			t.Errorf("the capacity lint changed check's verdict: %v with the key, %v without", got, want)
+		}
+	}
+
+	t.Run("a cap that arms nothing is surfaced by check", func(t *testing.T) {
+		out, err := checkWithCapacity(t, map[string]string{config.EnvDisableParallelSubagents: "0"})
+		for _, want := range []string{"warning:", "codex", config.EnvDisableParallelSubagents} {
+			if !strings.Contains(out, want) {
+				t.Errorf("check output should contain %q; out=%q", want, out)
+			}
+		}
+		_, baseline := checkWithCapacity(t, nil)
+		sameVerdict(t, err, baseline)
+	})
+
+	t.Run("a pool below the child floor is surfaced by check", func(t *testing.T) {
+		out, err := checkWithCapacity(t, map[string]string{config.EnvBackendPoolTokens: "40000"})
+		for _, want := range []string{"warning:", config.EnvBackendPoolTokens, "40000"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("check output should contain %q; out=%q", want, out)
+			}
+		}
+		_, baseline := checkWithCapacity(t, nil)
+		sameVerdict(t, err, baseline)
+	})
+
+	t.Run("a coherent registry adds no capacity noise to check", func(t *testing.T) {
+		out, _ := checkWithCapacity(t, map[string]string{
+			config.EnvDisableParallelSubagents: "1", config.EnvBackendPoolTokens: "400000",
+		})
+		if strings.Contains(out, "AF_") {
+			t.Errorf("a coherent capacity declaration warned on check; out=%q", out)
+		}
+	})
+
+	// The sweep must not inherit the endpoint filter the transport probes use. A capacity
+	// misconfiguration is a fact about the document, so naming ONE profile must not hide another's.
+	t.Run("checking one profile still reports every profile's capacity", func(t *testing.T) {
+		root := setupConfigFactory(t)
+		writeValidModels(t, root, &config.ModelsConfig{
+			Models: map[string]map[string]string{
+				"codex": {
+					"ANTHROPIC_MODEL":      "gpt-5.3-codex",
+					"ANTHROPIC_BASE_URL":   "https://gw.example:4000",
+					"ANTHROPIC_AUTH_TOKEN": "file:secrets/codex.key",
+				},
+				// No endpoint at all, so `names` never contains it and no probe ever runs for it.
+				"local": {"ANTHROPIC_MODEL": "claude-opus-4-8", config.EnvBackendPoolTokens: "40000"},
+			},
+		})
+		writeSecretFile(t, root, "secrets/codex.key", "sk-real-value")
+		orig := httpProbe
+		httpProbe = func(string, string) ([]string, error) {
+			return []string{"gpt-5.3-codex", "claude-fable-5"}, nil
+		}
+		t.Cleanup(func() { httpProbe = orig })
+
+		out, _ := runModelsCmd(t, runConfigModelsCheck, "codex")
+
+		if !strings.Contains(out, "local") || !strings.Contains(out, config.EnvBackendPoolTokens) {
+			t.Errorf("checking \"codex\" hid the un-probed profile's capacity misconfiguration; out=%q", out)
+		}
+	})
+}

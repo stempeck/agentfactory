@@ -409,15 +409,25 @@ func TestMemoryCheckInject_RendersProvenanceFramedBudgetedBlock(t *testing.T) {
 	})
 	t.Chdir(aliceDir)
 
-	out, err := execMemoryOut(t, "check", "--inject")
+	stdout, err := execMemoryOut(t, "check", "--inject")
 	if err != nil {
 		t.Fatalf("check --inject: %v", err)
+	}
+	// The writer's own SessionStart hook entry ships one hookSpecificOutput object; the block the
+	// agent reads is its additionalContext. The ceiling below is asserted on the DECODED block,
+	// which is the artifact the budget was sized for.
+	out := decodeAdditionalContext(t, stdout)
+	if ev := hookEventOf(t, stdout); ev != "SessionStart" {
+		t.Errorf("memory's envelope should name SessionStart, got %q", ev)
 	}
 	if !strings.HasPrefix(out, "<system-reminder>") {
 		t.Errorf("block must open with <system-reminder>, got:\n%s", out)
 	}
 	if !strings.HasSuffix(out, "</system-reminder>\n") {
 		t.Errorf("block must close with </system-reminder>, got:\n%s", out)
+	}
+	if strings.Contains(stdout, htmlEscapedFence) {
+		t.Error("the envelope HTML-escaped the fence; emitHookContext must disable escaping")
 	}
 	// Provenance framing (security.md T4 mitigation 1): the block says what these are, and each
 	// note travels with its attribution so a downstream session weighs rather than obeys.

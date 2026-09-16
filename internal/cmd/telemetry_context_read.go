@@ -108,6 +108,18 @@ type stepContextFacts struct {
 
 	interruptedTrigger string
 	interruptedPct     *float64
+
+	// #668 K10: what the step GENERATED, as opposed to what its window held. Phases 1 and 5 have
+	// been writing these to the record since they shipped and nothing on the report surface has ever
+	// read them, so an operator asking what a step produced had to open the raw JSONL.
+	//
+	// thinkingShare is the only derived one and the only float: the other four are the record's own
+	// figures, carried through unchanged.
+	outTokens      *int64
+	thinkTokensEst *int64
+	peakCtxTokens  *int64
+	subagentTokens *int64
+	thinkingShare  *float64
 }
 
 // deriveStepContext is #622 C6, and it is pure: same records in, same facts out, no clock, no
@@ -158,6 +170,23 @@ func deriveStepContext(pair stepPair, stalenessSecs int) stepContextFacts {
 		f.overOccupancy = &over
 	}
 	f.stale = deriveStaleness(*end, stalenessSecs)
+
+	// #668 K10. Read from the CLOSE only, and therefore below the open-step return above: all four
+	// scalars are derived from the step's transcript window at close (telemetry_generation.go:216-233)
+	// and a step_start record carries none of them. An open step reports every one as null, which is
+	// the truth — the step has generated something and nobody has counted it yet.
+	f.outTokens = end.OutTokens
+	f.thinkTokensEst = end.ThinkTokensEst
+	f.peakCtxTokens = end.PeakCtxTokens
+	f.subagentTokens = end.SubagentTokens
+	// The same guard AggregateSamples applies to the same ratio (aggregate.go:93-97): out tokens at
+	// zero is not a step that thought about nothing, it is a step whose generation was never counted,
+	// and dividing by it would put an infinity or a NaN on a JSON surface that has no spelling for
+	// either.
+	if f.outTokens != nil && f.thinkTokensEst != nil && *f.outTokens > 0 {
+		share := float64(*f.thinkTokensEst) / float64(*f.outTokens)
+		f.thinkingShare = &share
+	}
 
 	f.cumTokensDelta, f.consumptionState = deriveConsumption(pair)
 	if f.cumTokensDelta != nil && f.ctxBoundTokens != nil {

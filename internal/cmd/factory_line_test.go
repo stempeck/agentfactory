@@ -144,7 +144,7 @@ func TestFactoryLine_PrimeMetadataCarriesFactory(t *testing.T) {
 	var buf bytes.Buffer
 
 	agentDir := filepath.Join(root, ".agentfactory", "agents", "manager")
-	if err := primeAgent(t.Context(), &buf, root, "manager", agentDir); err != nil {
+	if _, err := primeAgent(t.Context(), &buf, root, "manager", agentDir); err != nil {
 		t.Fatalf("primeAgent: %v", err)
 	}
 

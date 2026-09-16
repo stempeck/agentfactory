@@ -233,6 +233,10 @@ func runStatuslineRenderCore(out io.Writer, root string, in io.Reader, agent str
 		SessionTokens: sessionTokens,
 		Color:         cfg.ColorEnabled() && os.Getenv(noColorKey) == "", // env-free library; the effective decision is computed HERE (redirect precedent)
 		Redirect:      redirect,
+		// Read on every tick with no cache, beside the durable reads above it: the alarm's whole
+		// promise is that it appears within one refresh interval of the latch being written, and a
+		// cache is a way for a safety alarm to be out of date (scale.md S-4a).
+		Alert: recoveryAlarmNote(root, now),
 	}
 	if line := markStatuslineLines(scrubWatchdogNeedles(statusline.RenderWith(cfg, p, branch, daily, opts))); line != "" {
 		fmt.Fprintln(out, line)
@@ -305,6 +309,13 @@ func printStatuslineStatus(root string) error {
 		fmt.Println("statusline: on")
 	} else {
 		fmt.Println("statusline: off")
+	}
+
+	// Second, before anything that can fail: the pane has room for `⚠ HALT worker` and no more, so
+	// this is where the rest of it lives. It runs whether the gate is on or off on purpose — a
+	// factory with the statusline switched off is precisely the one whose pane cannot alarm.
+	if note := recoveryAlertsNote(root, time.Now()); note != "" {
+		fmt.Print(note)
 	}
 
 	cfg, cfgErr := config.LoadStatuslineConfig(root)
@@ -418,6 +429,65 @@ func statuslineStalenessNote(root string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "stale agents (settings.json lacks the statusLine key): %s\n", strings.Join(stale, ", "))
 	fmt.Fprintln(&b, "  run `af install --init` to reprovision agent settings; live worktrees self-heal on their next dispatch/recreation.")
+	return b.String()
+}
+
+// recoveryAlertsNote is the loud twin of the pane's alarm token: every raised alarm, named, with
+// the act that clears each one. Empty when the factory is quiet — an alerts block that recited the
+// roster on a healthy factory would be the noise that teaches an operator to skim past the one that
+// matters.
+//
+// It lives beside the other status notes because `af statusline status` is its home surface. `af up`
+// prints the same text from the same function, so the two surfaces cannot describe the same alarm
+// differently.
+func recoveryAlertsNote(root string, now time.Time) string {
+	raised, scanErr := recoveryAlarms(root, now)
+	return alertsBlock(raised, scanErr, "the statusline pane carries the leading class only")
+}
+
+// recoveryLaunchAlertsNote is the same block for `af up`, minus WDOG. `af up` ALWAYS launches the
+// watchdog (launchWatchdog, #596 Decision 4), and nothing ever deletes .runtime/watchdog_heartbeat —
+// not even `af down` — so every launch of a factory that sat idle overnight would otherwise open
+// with "no watchdog tick for 840m … re-run 'af up'", printed by `af up`, seconds before it fixes the
+// condition it is reporting. An alarm that fires on the act that clears it is how an operator learns
+// to skim past the alarms that matter, which is the failure this whole terminus exists to end.
+//
+// The agent-scoped classes are NOT filtered: `af up` does not clear a halted breaker, and naming one
+// before any agent starts is the point.
+func recoveryLaunchAlertsNote(root string, now time.Time) string {
+	raised, scanErr := recoveryAlarms(root, now)
+	kept := raised[:0]
+	for _, a := range raised {
+		if a.class != alarmClassWdog {
+			kept = append(kept, a)
+		}
+	}
+	return alertsBlock(kept, scanErr, "watchdog alarms omitted; this command starts it")
+}
+
+// alertsBlock is the shared rendering, so the two surfaces cannot describe the same alarm
+// differently — they differ only in which alarms they are handed, and each says so in its own
+// header rather than repeating a claim about the pane that is not true of both.
+//
+// A failed scan is reported even when nothing was raised, and FIRST: "nothing is wrong" and "I
+// could not tell" are the same silence on the pane, and this is the only surface that can separate
+// them. It is the reason the pane's silence on an unreadable directory is an accepted residual
+// rather than a hole.
+func alertsBlock(raised []recoveryAlarm, scanErr error, header string) string {
+	if len(raised) == 0 && scanErr == nil {
+		return ""
+	}
+	var b strings.Builder
+	if scanErr != nil {
+		fmt.Fprintf(&b, "alerts: recovery state UNREADABLE — %v\n", scanErr)
+		fmt.Fprintln(&b, "  no agent can be reported on until this is fixed; the statusline pane is silent about it by design")
+	}
+	if len(raised) > 0 {
+		fmt.Fprintf(&b, "alerts: %d raised (%s)\n", len(raised), header)
+		for _, a := range raised {
+			fmt.Fprintf(&b, "  %s\n", a.describe())
+		}
+	}
 	return b.String()
 }
 

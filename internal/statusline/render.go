@@ -36,13 +36,20 @@ const (
 	sgrCost     = "\x1b[37m" // white
 	sgrTok      = "\x1b[90m" // gray
 	sgrDaily    = "\x1b[34m" // blue (the "D")
+	// sgrAlert paints the recovery alarm (#673 item 2). BRIGHT red, and api.md's sketch of this
+	// element cites 31m — the divergence is deliberate, not an oversight. Not sgrRemove's
+	// "\x1b[31m": the two would be byte-identical, and stripSGR — which is how the grammar tests
+	// detect an SGR that escaped this palette — cannot see a code that another entry already
+	// strips. A distinct sequence is what makes the alert's own registration below testable
+	// rather than asserted. It also reads differently from the diff element's "-47".
+	sgrAlert = "\x1b[91m" // bright red
 )
 
 // paletteSGR is every non-reset SGR the renderer may emit. stripSGR and the grammar tests derive from
 // this single list so a palette change cannot silently escape the "only our palette" guarantee.
 var paletteSGR = []string{
 	sgrModel, sgrDir, sgrBranch, sgrAdd, sgrRemove, sgrElapsed,
-	sgrBarFull, sgrBarEmpty, sgrPercent, sgrCost, sgrTok, sgrDaily,
+	sgrBarFull, sgrBarEmpty, sgrPercent, sgrCost, sgrTok, sgrDaily, sgrAlert,
 }
 
 // paint wraps s in an SGR colour + reset when colour is on and s is non-empty. An empty string is
@@ -83,6 +90,12 @@ type RenderOpts struct {
 	SessionTokens int64
 	Color         bool
 	Redirect      bool
+	// Alert is the recovery alarm token (#673 item 2) — `⚠ HALT worker` and its siblings — read
+	// from durable breaker state by the cmd layer, which is the only layer allowed to (ADR-004).
+	// It is NOT an element: it never appears in cfg.Elements, is never electable, and leads line 1
+	// whenever it is non-empty. A safety alarm is not a layout preference, and a factory whose
+	// statusline.json predates this field must still show it, with nothing to migrate.
+	Alert string
 }
 
 // Render is the backward-compatible entry: the cost-only, no-color render with just the redirect
@@ -99,8 +112,17 @@ func Render(cfg *config.StatuslineConfig, p Payload, branch string, daily DailyT
 // fact — Gap 12). Per-half drop (H-R2): session/daily render any truthful half — the cost half is
 // governed by the never-$0.00 rule, the token half by the empty-counter rule; the element vanishes
 // only when both are absent. ANSI color is applied last, gated on opts.Color.
+// opts.Alert leads line 1 when raised, prepended HERE rather than inside collectTokens: the alarm
+// has to outlive both of that function's silences — a nil config and a config whose line-1 elements
+// all dropped — and this is the only seam that sees opts before either can happen. Sanitized like
+// every other token (SEC-2) even though its author is our own cmd layer, so the pane's guarantee is
+// a property of the renderer rather than of one careful caller; an empty alert survives sanitize as
+// empty and costs exactly zero bytes, which is what keeps every pre-existing render golden true.
 func RenderWith(cfg *config.StatuslineConfig, p Payload, branch string, daily DailyTotals, opts RenderOpts) string {
 	line1, line2 := collectTokens(cfg, p, branch, daily, opts)
+	if alert := sanitize(opts.Alert); alert != "" {
+		line1 = append([]string{paint(opts.Color, sgrAlert, alert)}, line1...)
+	}
 	return joinNonEmpty([]string{strings.Join(line1, sep), strings.Join(line2, sep)}, "\n")
 }
 

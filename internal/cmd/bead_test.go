@@ -248,7 +248,7 @@ func newBeadCreateCmd(t *testing.T) *cobra.Command {
 // requirement from IMPLREADME_PHASE1: when `af bead create --parent` is run
 // from an agent workspace, the created bead's Assignee is auto-populated
 // from detectCreatingAgent so the Phase 1 data-plane invariant
-// (parent_id = '' OR assignee != '') is satisfied by construction.
+// (parent_id = "" OR assignee != "") is satisfied by construction.
 func TestRunBeadCreate_ParentScoped_PopulatesAssignee(t *testing.T) {
 	factoryRoot, agentDir := setupFactoryFixture(t, "alice")
 	store := installMemStore(t)

@@ -264,7 +264,7 @@ func readDarwinMemAvailableMB() (uint64, error) {
 type tmuxClient interface {
 	HasSession(name string) (bool, error)
 	IsClaudeRunning(session string) bool
-	KillSession(name string) error
+	KillSession(name string) error //af:teardown:decl
 	NewSession(name, workDir string) error
 	SetEnvironment(session, key, value string) error
 	UnsetEnvironment(session, key string) error
@@ -518,7 +518,7 @@ func (m *Manager) Start() error {
 			return ErrAlreadyRunning
 		}
 		// Zombie — tmux alive but Claude dead. Kill and recreate.
-		if err := m.tmux.KillSession(sessionID); err != nil {
+		if err := m.tmux.KillSession(sessionID); err != nil { //af:teardown:restorative
 			return fmt.Errorf("killing zombie session: %w", err)
 		}
 	}
@@ -723,14 +723,14 @@ func (m *Manager) Start() error {
 
 	// Wait for shell to be ready
 	if err := m.tmux.WaitForShellReady(sessionID, 5*time.Second); err != nil {
-		_ = m.tmux.KillSession(sessionID)
+		_ = m.tmux.KillSession(sessionID) //af:teardown:restorative
 		return fmt.Errorf("waiting for shell: %w", err)
 	}
 
 	// Pre-flight memory check before launching Claude
 	availMB, memErr := checkAvailableMemoryFunc()
 	if memErr == nil && availMB < 512 {
-		_ = m.tmux.KillSession(sessionID)
+		_ = m.tmux.KillSession(sessionID) //af:teardown:restorative
 		return fmt.Errorf("insufficient memory to launch Claude: %dMB available, 512MB required", availMB)
 	}
 
@@ -739,7 +739,7 @@ func (m *Manager) Start() error {
 
 	// Send startup command after brief delay
 	if err := m.tmux.SendKeysDelayed(sessionID, startupCmd, 200); err != nil {
-		_ = m.tmux.KillSession(sessionID)
+		_ = m.tmux.KillSession(sessionID) //af:teardown:restorative
 		return fmt.Errorf("starting Claude agent: %w", err)
 	}
 
@@ -982,7 +982,7 @@ func (m *Manager) Stop() error {
 	time.Sleep(100 * time.Millisecond)
 
 	// Kill the session
-	if err := m.tmux.KillSession(sessionID); err != nil {
+	if err := m.tmux.KillSession(sessionID); err != nil { //af:teardown:gated
 		return fmt.Errorf("killing session: %w", err)
 	}
 
@@ -1011,7 +1011,10 @@ func (m *Manager) buildNudge() string {
 	if m.initialPrompt != "" {
 		return ""
 	}
-	nudge := "Run `af prime` to check mail and begin work."
+	// "check mail" left with #675: the SessionStart hooks deliver mail on their own, so prime is no
+	// longer where an agent learns it has any. The `af prime` instruction itself stays — it is what
+	// loads identity and formula context.
+	nudge := "Run `af prime` to load your context and begin work."
 	if m.agentEntry.Directive != "" {
 		nudge += " " + m.agentEntry.Directive
 	}

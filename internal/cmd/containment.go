@@ -70,7 +70,7 @@ func runContainmentCheck(cmd *cobra.Command, _ []string) error {
 }
 
 // readContainmentPayload decodes the hook JSON from r. Mirrors prime.go's
-// readHookSessionID: a decode failure yields ok=false rather than an error, because
+// readHookPayload: a decode failure yields ok=false rather than an error, because
 // a hook must never block on a malformed payload.
 func readContainmentPayload(r io.Reader) (containmentPayload, bool) {
 	var p containmentPayload
@@ -362,15 +362,7 @@ func correctiveBody(boundary, target string) string {
 // emitAdditionalContext writes the PreToolUse hookSpecificOutput.additionalContext
 // JSON to out (the same-loop correction channel).
 func emitAdditionalContext(out io.Writer, body string) {
-	var payload struct {
-		HookSpecificOutput struct {
-			HookEventName     string `json:"hookEventName"`
-			AdditionalContext string `json:"additionalContext"`
-		} `json:"hookSpecificOutput"`
-	}
-	payload.HookSpecificOutput.HookEventName = "PreToolUse"
-	payload.HookSpecificOutput.AdditionalContext = body
-	_ = json.NewEncoder(out).Encode(&payload)
+	emitHookContext(out, "PreToolUse", body)
 }
 
 // dedupKey is the sha256 of "target|boundary" (sha256 idiom: prime.go:268).

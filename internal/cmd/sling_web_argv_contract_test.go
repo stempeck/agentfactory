@@ -275,7 +275,7 @@ func TestSlingWebArgvContract_DashPrefixedTaskReachesBoundFieldIntact(t *testing
 // non-empty positional task. validateSlingArgs is the af-core guard the web's argv must satisfy.
 func TestSlingWebArgvContract_EmptyTaskRejected(t *testing.T) {
 	for _, args := range [][]string{nil, {""}, {"   "}} {
-		err := validateSlingArgs("", "rootcause-all", args)
+		err := validateSlingArgs("", "rootcause-all", args, false)
 		if err == nil {
 			t.Errorf("validateSlingArgs with args=%q should reject an empty task", args)
 			continue
@@ -285,7 +285,7 @@ func TestSlingWebArgvContract_EmptyTaskRejected(t *testing.T) {
 		}
 	}
 	// A non-empty task is accepted (the happy path the web always sends).
-	if err := validateSlingArgs("", "rootcause-all", []string{webTask}); err != nil {
+	if err := validateSlingArgs("", "rootcause-all", []string{webTask}, false); err != nil {
 		t.Errorf("validateSlingArgs with a real task should succeed, got %v", err)
 	}
 }

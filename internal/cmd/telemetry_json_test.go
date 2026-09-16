@@ -598,6 +598,15 @@ func TestTelemetryReportJSON_SchemaSnapshot(t *testing.T) {
 			"over_occupancy": true, "over_consumption": true, "consumption_state": true,
 			"compacted_mid_step": true, "ctx_observed_stale": true, "bound_exceeds_window": true,
 			"interrupted_trigger": true, "interrupted_observed_pct": true,
+
+			// #668 K10, listed under the same claim: what the step generated is reported on every
+			// row, and an unmeasured one spells all five as null rather than dropping them.
+			"out_tokens": true, "think_tokens_est": true, "thinking_share": true,
+			"peak_ctx_tokens": true, "subagent_tokens": true,
+
+			// #679 F7, same claim: the two authoring-waste signals K10 ranks steps by are on every
+			// row, null on a step that recorded none rather than dropped.
+			"repeat_reads": true, "sessions": true,
 		}, "rows["+string(rune('0'+i))+"]")
 	}
 
@@ -745,7 +754,11 @@ func TestTelemetryReportJSON_CorruptRecordsReportStats(t *testing.T) {
 // behind the flag set. telemetryCmd is a package-level singleton and this file sorts ahead of
 // every other telemetry test file, so an uncleared flag reroutes their assertions.
 func TestResetReportFlags_CoversEveryRegisteredFlag(t *testing.T) {
-	dirty := map[string]string{"instance": "i", "agent": "a", "export": "true", "json": "true"}
+	dirty := map[string]string{
+		"instance": "i", "agent": "a", "export": "true", "json": "true",
+		"formula": "f", "surface": "b", "before": "x", "after": "y",
+		"verify-input-digest": "d", "fidelity": "x=1/0",
+	}
 	for name, value := range dirty {
 		if err := telemetryCmd.Flags().Set(name, value); err != nil {
 			t.Fatalf("dirty --%s: %v", name, err)
@@ -824,4 +837,27 @@ func assertNestedKeySetMap(t *testing.T, got map[string]json.RawMessage, want ma
 			t.Errorf("%s has unexpected key %q", label, k)
 		}
 	}
+}
+
+// TestReadSurfaceCarriesRepeatReadsAndSessions pins that both JSON read surfaces expose the repeat_reads
+// and sessions figures a step records, so a consumer reading the JSON can see them: telemetryReportRowJSON
+// (the report row) and bandRowJSON (the band row). Marshalling a zero row of each and checking for the
+// keys proves the surface carries them.
+func TestReadSurfaceCarriesRepeatReadsAndSessions(t *testing.T) {
+	assertHasKeys := func(t *testing.T, label string, v any) {
+		t.Helper()
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", label, err)
+		}
+		out := string(b)
+		for _, key := range []string{`"repeat_reads"`, `"sessions"`} {
+			if !strings.Contains(out, key) {
+				t.Errorf("%s JSON is missing key %s; a consumer cannot read that figure:\n%s", label, key, out)
+			}
+		}
+	}
+
+	assertHasKeys(t, "telemetryReportRowJSON", telemetryReportRowJSON{})
+	assertHasKeys(t, "bandRowJSON", bandRowJSON{})
 }

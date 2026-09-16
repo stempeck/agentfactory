@@ -201,6 +201,68 @@ func removeIdleCycles(cwd string) {
 	os.Remove(filepath.Join(cwd, ".runtime", "idle_cycles"))
 }
 
+// resumeArtifactCap bounds the artifact leg of the brief. The brief is rendered into the resumed
+// session's prime output, and a working tree with two hundred dirty paths would put two hundred
+// lines in front of every session that inherits it — the exact cost K16 exists to cut. The full
+// list is not lost: it stays in ModifiedFiles on the same checkpoint, which is where a reader who
+// wants all of it should look.
+const resumeArtifactCap = 12
+
+// conductResumeInterview asks the recycling session the three questions scale.md:105-109 names —
+// which artifacts the work is in, what is already established, and the one thing to do next — and
+// records the answers in fields rather than prose.
+//
+// collectHandoffState (below) has assembled the same knowledge since long before this, and it is
+// left alone: its product is the mail body a human reads, and free text is the right shape for
+// that. This is the same interview conducted for a machine. prime's slimming has to decide whether
+// the brief supersedes a section of its own output, and it cannot decide that about a sentence.
+//
+// Every answer is derived from what the store and the checkpoint already hold. Nothing here asks
+// the session what it thinks it accomplished: a recycling session is recycling because its window
+// is full, and the least reliable thing in the room is its own account of itself.
+//
+// The next action is written LAST and only when a ready step exists, because HasResumeBrief keys
+// on it. A brief that is half-written is worse than none — slimming would arm on it and drop
+// sections whose content the brief never carried.
+func conductResumeInterview(ctx context.Context, store issuestore.Store, cp *checkpoint.Checkpoint,
+	formulaID string, ready issuestore.ReadyResult) {
+
+	if cp == nil || len(ready.Steps) == 0 {
+		return
+	}
+
+	var artifacts []string
+	if n := len(cp.ModifiedFiles); n > 0 {
+		if n > resumeArtifactCap {
+			n = resumeArtifactCap
+		}
+		artifacts = append(artifacts, cp.ModifiedFiles[:n]...)
+	}
+
+	verified := ""
+	closed, err := store.List(ctx, issuestore.Filter{Parent: formulaID, Statuses: []issuestore.Status{issuestore.StatusClosed}})
+	if err == nil {
+		total := ready.TotalSteps
+		if total < len(closed) {
+			total = len(closed)
+		}
+		verified = fmt.Sprintf("%d of %d formula steps closed", len(closed), total)
+	}
+	if cp.LastCommit != "" {
+		commit := cp.LastCommit
+		if len(commit) > 8 {
+			commit = commit[:8]
+		}
+		if verified != "" {
+			verified += "; "
+		}
+		verified += "last commit " + commit
+	}
+
+	step := ready.Steps[0]
+	cp.WithResumeBrief(artifacts, verified, step.ID, fmt.Sprintf("continue step %s: %s", step.ID, step.Title))
+}
+
 // collectHandoffState gathers formula progress, inbox count, and modified files.
 func collectHandoffState(ctx context.Context, cwd, factoryRoot string) string {
 	var parts []string

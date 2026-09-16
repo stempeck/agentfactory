@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -157,7 +158,7 @@ func TestSaveStartupConfig_GateEnumRejectedBeforeRecoveryRelations(t *testing.T)
 	}
 }
 
-// The af config startup set write path (config_set.go:134-141) decodes stdin into a
+// The af config startup set write path (runConfigStartupSet) decodes stdin into a
 // FRESH StartupConfig, so a document omitting "recovery" — i.e. every document any
 // operator has today — reaches SaveStartupConfig with an all-zero block. Only the
 // validate-fill keeps that write path open.
@@ -237,5 +238,139 @@ func TestSaveStartupConfig_GateEnumRejectedBeforeStepContextRelations(t *testing
 	}
 	if !strings.Contains(err.Error(), "quality") {
 		t.Errorf("the gate-enum loop must fire ahead of the step_context relations; got %v", err)
+	}
+}
+
+// The af config startup set write path decodes stdin into a FRESH StartupConfig, so a document
+// omitting "tokenomics" — i.e. every document in existence — reaches SaveStartupConfig with an
+// all-zero block. This is the same write path TestSaveStartupConfig_MissingStepContextFillsDefaults
+// pins for #622, and the same two-sided guard: the fill keeps the write path open, and the seed in
+// defaultStartupConfig keeps the ABSENT-FILE path open, which never runs the validator at all.
+func TestSaveStartupConfig_MissingTokenomicsFillsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".agentfactory"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	cfg := &StartupConfig{Quality: "on"} // caller-built literal, no Tokenomics
+	if err := SaveStartupConfig(StartupConfigPath(dir), cfg); err != nil {
+		t.Fatalf("a literal with no Tokenomics must save, got %v", err)
+	}
+
+	raw, err := os.ReadFile(StartupConfigPath(dir))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !strings.Contains(string(raw), `"tokenomics"`) {
+		t.Errorf("the written file must carry the filled block, got %s", raw)
+	}
+
+	loaded, err := LoadStartupConfig(dir)
+	if err != nil {
+		t.Fatalf("LoadStartupConfig: %v", err)
+	}
+	if want := defaultTokenomicsConfig(); loaded.Tokenomics != want {
+		t.Errorf("Tokenomics = %+v, want %+v", loaded.Tokenomics, want)
+	}
+
+	// The seed enum is the umbrella, and it takes the same three values the four gate enums
+	// beside it take. Nothing else in the block means anything until it is on.
+	for _, v := range []string{"on", "off", "default"} {
+		cfg := &StartupConfig{Tokenomics: TokenomicsConfig{Enabled: v}}
+		if err := SaveStartupConfig(StartupConfigPath(dir), cfg); err != nil {
+			t.Errorf("tokenomics.enabled = %q must be accepted, got %v", v, err)
+		}
+	}
+}
+
+// Every written tokenomics value rejects LOUDLY and names both the on-disk key and the value the
+// operator wrote — the validateStepContextRelations posture, not the
+// watchdog clamp. A misconfigured mechanism that silently corrected itself would be a policy the
+// operator never chose and cannot see.
+func TestSaveStartupConfig_WrittenTokenomicsRejectedLoudly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".agentfactory"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		cfg      TokenomicsConfig
+		wantKey  string
+		wantText string
+	}{
+		{"the seed enum", TokenomicsConfig{Enabled: "sometimes"}, "tokenomics.enabled", "sometimes"},
+		{"budget", TokenomicsConfig{Budget: "sometimes"}, "tokenomics.budget", "sometimes"},
+		{"thrift", TokenomicsConfig{Thrift: "yes"}, "tokenomics.thrift", "yes"},
+		{"dispatch", TokenomicsConfig{Dispatch: "maybe"}, "tokenomics.dispatch", "maybe"},
+		{"interview", TokenomicsConfig{Interview: "1"}, "tokenomics.interview", "1"},
+		{"effort", TokenomicsConfig{Effort: "high"}, "tokenomics.effort", "high"},
+		{"escalate", TokenomicsConfig{Escalate: "ON"}, "tokenomics.escalate", "ON"},
+		{"admission_margin_pct above the range", TokenomicsConfig{AdmissionMarginPct: 250}, "tokenomics.admission_margin_pct", "250"},
+		{"admission_margin_pct below the range", TokenomicsConfig{AdmissionMarginPct: -1}, "tokenomics.admission_margin_pct", "-1"},
+		{"learned_min_runs below the floor", TokenomicsConfig{LearnedMinRuns: -3}, "tokenomics.learned_min_runs", "-3"},
+		{"efficiency", TokenomicsConfig{Efficiency: "sometimes"}, "tokenomics.efficiency", "sometimes"},
+		{"efficiency_effort_level outside the host vocabulary", TokenomicsConfig{EfficiencyEffortLevel: "medium-ish"}, "tokenomics.efficiency_effort_level", "medium-ish"},
+		{"efficiency_thinking_share_pct above the range", TokenomicsConfig{EfficiencyThinkingSharePct: 140}, "tokenomics.efficiency_thinking_share_pct", "140"},
+		{"efficiency_thinking_share_pct below the range", TokenomicsConfig{EfficiencyThinkingSharePct: -1}, "tokenomics.efficiency_thinking_share_pct", "-1"},
+		{"efficiency_repeat_read_floor below the floor", TokenomicsConfig{EfficiencyRepeatReadFloor: -2}, "tokenomics.efficiency_repeat_read_floor", "-2"},
+		{"efficiency_max_relaunches below the floor", TokenomicsConfig{EfficiencyMaxRelaunches: -4}, "tokenomics.efficiency_max_relaunches", "-4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := SaveStartupConfig(StartupConfigPath(dir), &StartupConfig{Tokenomics: tc.cfg})
+			if err == nil {
+				t.Fatalf("SaveStartupConfig accepted %+v", tc.cfg)
+			}
+			if !errors.Is(err, ErrInvalidType) {
+				t.Errorf("error %v should wrap ErrInvalidType", err)
+			}
+			for _, want := range []string{tc.wantKey, tc.wantText} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q must name %q so the operator can find what they wrote", err, want)
+				}
+			}
+		})
+	}
+}
+
+// The numeric knobs invert the enum ordering the same way step_context does: a zero is "absent on
+// disk", so the relations run FIRST and skip it, and the fill then supplies the shipped value. If
+// the fill ran first there would be no way left to tell an absent knob from a written 0, and an
+// operator who wrote 0 deliberately would silently get 10.
+func TestSaveStartupConfig_TokenomicsZeroIsAbsentNotWritten(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".agentfactory"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	cfg := &StartupConfig{Tokenomics: TokenomicsConfig{Budget: "on"}} // both numerics absent
+	if err := SaveStartupConfig(StartupConfigPath(dir), cfg); err != nil {
+		t.Fatalf("absent numerics must fill, not reject: %v", err)
+	}
+	want := defaultTokenomicsConfig()
+	if cfg.Tokenomics.AdmissionMarginPct != want.AdmissionMarginPct {
+		t.Errorf("admission_margin_pct = %d, want the shipped %d", cfg.Tokenomics.AdmissionMarginPct, want.AdmissionMarginPct)
+	}
+	if cfg.Tokenomics.LearnedMinRuns != want.LearnedMinRuns {
+		t.Errorf("learned_min_runs = %d, want the shipped %d", cfg.Tokenomics.LearnedMinRuns, want.LearnedMinRuns)
+	}
+}
+
+// Pins that the gate-enum loop still fires ahead of the tokenomics numeric relations, the same
+// ordering property the recovery and step_context siblings pin. Only a document violating BOTH
+// discriminates.
+func TestSaveStartupConfig_GateEnumRejectedBeforeTokenomicsRelations(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".agentfactory"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	bad := &StartupConfig{Quality: "bogus", Tokenomics: TokenomicsConfig{AdmissionMarginPct: 250}}
+	err := SaveStartupConfig(StartupConfigPath(dir), bad)
+	if err == nil {
+		t.Fatal("SaveStartupConfig accepted a config with both a bad gate and a bad relation")
+	}
+	if !strings.Contains(err.Error(), "quality") {
+		t.Errorf("the gate-enum loop must fire ahead of the tokenomics relations; got %v", err)
 	}
 }

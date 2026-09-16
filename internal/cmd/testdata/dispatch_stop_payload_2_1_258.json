@@ -1,0 +1,70 @@
+{
+  "fixture": "dispatch_stop_payload",
+  "v": 1,
+  "cli_version": "2.1.258 (Claude Code)",
+  "provenance": "captured",
+  "captured_at": "2026-09-04",
+  "capture_method": "A SubagentStop hook writing its verbatim stdin to a log directory, wired into a disposable factory driven by real claude 2.1.258 against a loopback httptest-shaped stub scripting ONE assistant turn with TWO Agent tool_use blocks (Phase 4 Spike S). Paths are the spike's own disposable tree; ids are the run's own and identify nothing.",
+  "payloads": [
+    {
+      "session_id": "d8a6e389-d579-4828-9313-6e6bc24a8945",
+      "transcript_path": "/tmp/spikeS/home2/.claude/projects/-tmp-spikeS-home2-work/d8a6e389-d579-4828-9313-6e6bc24a8945.jsonl",
+      "cwd": "/tmp/spikeS/home2/work",
+      "prompt_id": "f64e915c-c30a-49e9-a6c2-d0bdedf3e4fa",
+      "permission_mode": "default",
+      "agent_id": "a91571e7e61a75302",
+      "agent_type": "general-purpose",
+      "hook_event_name": "SubagentStop",
+      "stop_hook_active": false,
+      "agent_transcript_path": "/tmp/spikeS/home2/.claude/projects/-tmp-spikeS-home2-work/d8a6e389-d579-4828-9313-6e6bc24a8945/subagents/agent-a91571e7e61a75302.jsonl",
+      "last_assistant_message": "done",
+      "background_tasks": [
+        {
+          "id": "a91571e7e61a75302",
+          "type": "subagent",
+          "status": "running",
+          "description": "one",
+          "agent_type": "general-purpose"
+        },
+        {
+          "id": "a44bda11286392e54",
+          "type": "subagent",
+          "status": "running",
+          "description": "two",
+          "agent_type": "general-purpose"
+        }
+      ],
+      "session_crons": []
+    },
+    {
+      "session_id": "d8a6e389-d579-4828-9313-6e6bc24a8945",
+      "transcript_path": "/tmp/spikeS/home2/.claude/projects/-tmp-spikeS-home2-work/d8a6e389-d579-4828-9313-6e6bc24a8945.jsonl",
+      "cwd": "/tmp/spikeS/home2/work",
+      "prompt_id": "f64e915c-c30a-49e9-a6c2-d0bdedf3e4fa",
+      "permission_mode": "default",
+      "agent_id": "a44bda11286392e54",
+      "agent_type": "general-purpose",
+      "hook_event_name": "SubagentStop",
+      "stop_hook_active": false,
+      "agent_transcript_path": "/tmp/spikeS/home2/.claude/projects/-tmp-spikeS-home2-work/d8a6e389-d579-4828-9313-6e6bc24a8945/subagents/agent-a44bda11286392e54.jsonl",
+      "last_assistant_message": "done",
+      "background_tasks": [
+        {
+          "id": "a91571e7e61a75302",
+          "type": "subagent",
+          "status": "running",
+          "description": "one",
+          "agent_type": "general-purpose"
+        },
+        {
+          "id": "a44bda11286392e54",
+          "type": "subagent",
+          "status": "running",
+          "description": "two",
+          "agent_type": "general-purpose"
+        }
+      ],
+      "session_crons": []
+    }
+  ]
+}

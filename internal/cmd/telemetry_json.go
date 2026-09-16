@@ -153,6 +153,30 @@ type telemetryReportRowJSON struct {
 	// (recovery.go:68-71). The occupancy is null, never 0, for the four classes that record none.
 	InterruptedTrigger     string   `json:"interrupted_trigger"`
 	InterruptedObservedPct *float64 `json:"interrupted_observed_pct"`
+
+	// #668 K10: what the step GENERATED. The columns above describe what the window HELD; these
+	// describe what was put into it, which is the half a reader had to open the raw JSONL for.
+	//
+	// Same convention as everything above it, for the same reason: pointer, never omitempty. Only a
+	// closed step's transcript is scanned, so every one of these is null on an open row — and null
+	// there means "not counted yet", which a zero would spell as "generated nothing".
+	//
+	// ThinkingShare is derived, not recorded: think_tokens_est over out_tokens, null when out_tokens
+	// is absent or zero. It is on the row rather than left to the consumer because the guard against
+	// dividing by an uncounted generation is a rule, and a rule restated by every consumer is a rule
+	// one of them will get wrong.
+	OutTokens      *int64   `json:"out_tokens"`
+	ThinkTokensEst *int64   `json:"think_tokens_est"`
+	ThinkingShare  *float64 `json:"thinking_share"`
+	PeakCtxTokens  *int64   `json:"peak_ctx_tokens"`
+	SubagentTokens *int64   `json:"subagent_tokens"`
+
+	// #679 F7: the two authoring-waste signals K10 (improve-agent Phase 1.5b) ranks steps by. Both
+	// are recorded/derived per step but had no per-step read surface — only compare's per-run sums.
+	// Same convention as the block above: pointer, never omitempty. RepeatReads is null on an open
+	// row (only a close records it); Sessions is null where no closed window spanned the step.
+	RepeatReads *int64 `json:"repeat_reads"`
+	Sessions    *int64 `json:"sessions"`
 }
 
 type telemetryReadStatsJSON struct {
@@ -379,8 +403,22 @@ func telemetryJSONRows(agent string, records []telemetry.StepEvent, now time.Tim
 		}
 	}
 
+	spans := telemetry.SessionSpans(records)
 	for i := range rows {
 		attachStepContextJSON(&rows[i], pairs[i], readCtx)
+		if pairs[i].end != nil {
+			rows[i].RepeatReads = pairs[i].end.RepeatReads
+		}
+		stepID := ""
+		if pairs[i].end != nil {
+			stepID = pairs[i].end.StepID
+		} else if pairs[i].start != nil {
+			stepID = pairs[i].start.StepID
+		}
+		if n, ok := spans[telemetry.StepRunKey{InstanceID: rows[i].InstanceID, StepID: stepID}]; ok {
+			sessions := int64(n)
+			rows[i].Sessions = &sessions
+		}
 	}
 	return rows
 }
@@ -419,6 +457,11 @@ func attachStepContextJSON(row *telemetryReportRowJSON, pair stepPair, readCtx r
 	row.BoundExceedsWindow = facts.boundDrift
 	row.InterruptedTrigger = facts.interruptedTrigger
 	row.InterruptedObservedPct = facts.interruptedPct
+	row.OutTokens = facts.outTokens
+	row.ThinkTokensEst = facts.thinkTokensEst
+	row.ThinkingShare = facts.thinkingShare
+	row.PeakCtxTokens = facts.peakCtxTokens
+	row.SubagentTokens = facts.subagentTokens
 }
 
 // elapsedMSSinceRecord degrades to zero rather than to a sentinel, because this field is a

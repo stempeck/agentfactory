@@ -341,6 +341,128 @@ func TestSettingsRoundTrip_CanonicalSchemaCongruence(t *testing.T) {
 	})
 }
 
+// TestSettingsRoundTrip_CronsPreserved is #610 AC-8's proof that dispatch.json's new `crons` section
+// rides the raw tier — that a console save cannot erase it the way the pre-#620 typed mirror erased
+// `improvement`, then `telemetry`, then `workflows` and `mappings[].model` from operators' disks.
+//
+// It is deliberately NOMINATIVE, which the header at the top of this file indicts. It is not a
+// relapse: the nameless guard is TestSettingsRoundTrip_CanonicalSchemaCongruence, which already
+// carries `crons` through by recursion and stays untouched above. This is the greppable
+// demonstration layered on top of it, naming the three keys most at risk where a reader looking for
+// AC-8 will find them. Its own anti-vacuity gate is what stops it decaying into the pattern it
+// resembles: a fixture that lost `crons` fails here loudly instead of passing green over nothing.
+func TestSettingsRoundTrip_CronsPreserved(t *testing.T) {
+	const (
+		file      = "dispatch"
+		editKey   = "trigger_label"
+		editValue = "edited-by-console"
+	)
+
+	fixture := congruenceFixture(t, file)
+
+	// Anti-vacuity, before anything else. The gate at the top of this file predates #610 and checks
+	// only `workflows`, `workflows[0].label`, `mappings[0].model` and startup's recovery block, so
+	// without this a fixture regenerated without a crons array would make every assertion below
+	// trivially true.
+	disp := decodeAny(t, "dispatch fixture", fixture).(map[string]any)
+	crons, ok := disp["crons"].([]any)
+	if !ok || len(crons) == 0 {
+		t.Fatalf("dispatch.json fixture has no non-empty `crons` array — the fixture no longer portrays "+
+			"the section this test exists to prove survives a save, so this test guards nothing. "+
+			"Regenerate with: go test ./internal/config/ -run TestConfigCongruence_Regenerate -update. Got: %v", disp["crons"])
+	}
+	cron, ok := crons[0].(map[string]any)
+	if !ok {
+		t.Fatalf("dispatch.json fixture: crons[0] is not an object — anti-vacuity gate failed. Got: %v", crons[0])
+	}
+	for _, k := range []string{"name", "agent", "every", "model"} {
+		if s, _ := cron[k].(string); s == "" {
+			t.Fatalf("dispatch.json fixture: crons[0].%s is empty — a zero value cannot prove survival", k)
+		}
+	}
+	// vars is a map nested inside an array — the shape leafPaths' array recursion exists to reach,
+	// and the one a consumer that flattened the document would lose without touching any other key.
+	if vars, _ := cron["vars"].(map[string]any); len(vars) == 0 {
+		t.Fatalf("dispatch.json fixture: crons[0].vars is not a non-empty object — anti-vacuity gate failed")
+	}
+
+	root := fixtureFactory(t, file)
+	svc, fr := writeServiceAt(t, root)
+
+	view, err := svc.Read(context.Background())
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	fv, ok := view.Files[file]
+	if !ok || len(fv.Doc) == 0 {
+		t.Fatalf("files[%q].doc is empty — the document on disk was not served", file)
+	}
+
+	// Simulate the client edit: retain the document as read, change exactly one unrelated scalar,
+	// send the whole thing back. The erasure this proves impossible happened on the WRITE leg.
+	merged := map[string]any{}
+	if err := json.Unmarshal(fv.Doc, &merged); err != nil {
+		t.Fatal(err)
+	}
+	merged[editKey] = editValue
+	payload, err := json.Marshal(merged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Write(context.Background(), file, payload, ""); err != nil {
+		t.Fatalf("Write(%s): %v", file, err)
+	}
+
+	// A write actually reached af. fr.writes counts only stdin-bearing invocations: since #620 the
+	// READ leg also shells out (af config fingerprint --json), so fr.calls cannot answer this.
+	if fr.writes != 1 {
+		t.Fatalf("af write invocations = %d, want exactly 1 (a test that never wrote proves nothing)", fr.writes)
+	}
+	if fr.verb != "config" || len(fr.args) != 2 || fr.args[0] != file || fr.args[1] != "set" {
+		t.Fatalf("argv = %s %v, want config [%s set]", fr.verb, fr.args, file)
+	}
+
+	wantLeaves, gotLeaves := map[string]string{}, map[string]string{}
+	leafPaths("", decodeAny(t, "fixture", fixture), wantLeaves)
+	leafPaths("", decodeAny(t, "captured write payload", fr.stdin), gotLeaves)
+
+	// The three at-risk keys, named: `crons` is what #610 adds, and `workflows` and mappings[].model
+	// are two of the sections #620 erased. Presence AND value, because a key that came back with a
+	// smeared value is still data loss.
+	for _, p := range []string{
+		"crons[0].name",
+		"crons[0].agent",
+		"crons[0].every",
+		"crons[0].vars.repo",
+		"crons[0].model",
+		"workflows[0].label",
+		"mappings[0].model",
+	} {
+		want, ok := wantLeaves[p]
+		if !ok {
+			t.Fatalf("dispatch.json fixture has no leaf %q, so naming it proves nothing. Regenerate with: "+
+				"go test ./internal/config/ -run TestConfigCongruence_Regenerate -update", p)
+		}
+		got, ok := gotLeaves[p]
+		if !ok {
+			t.Errorf("the console ERASED dispatch.json key %q on save: it was on disk, it is absent from "+
+				"the document sent to `af config dispatch set`, and that setter replaces the whole file", p)
+			continue
+		}
+		if got != want {
+			t.Errorf("dispatch.json key %q changed value across the round-trip: %q → %q", p, want, got)
+		}
+	}
+
+	// Defence in depth: nothing else was lost alongside them, and the edit itself landed.
+	for _, p := range missingPaths(wantLeaves, gotLeaves) {
+		t.Errorf("the console ERASED dispatch.json key %q on save", p)
+	}
+	if got := gotLeaves[editKey]; got != editValue {
+		t.Errorf("the simulated edit did not land: %s = %q, want %q", editKey, got, editValue)
+	}
+}
+
 // missingPaths returns the sorted leaf paths present in want but absent from got.
 func missingPaths(want, got map[string]string) []string {
 	var out []string

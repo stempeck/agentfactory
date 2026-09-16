@@ -294,6 +294,66 @@ func runConfigModelsSetSplit(t *testing.T, stdin string) (string, string, error)
 // larger auto-compact window silently caps unless CLAUDE_CODE_MAX_CONTEXT_TOKENS declares the
 // real one (issue #602). That combination is incoherent but legal: the registry saves and the
 // command warns.
+// TestConfigModelsSet_CapacityWarning is #673's CONFIG-LINT at the seam an operator actually touches.
+// TestCapacityLintProfile owns the predicate; this owns the wiring — that the third lint is reached
+// from the write path at all, that it reports on stderr, and that reporting changes nothing about
+// whether the registry was saved. A lint that rejected would turn a documentation problem into an
+// outage, which is why the save is asserted alongside the warning rather than after it.
+func TestConfigModelsSet_CapacityWarning(t *testing.T) {
+	t.Run("a cap value that arms nothing saves and warns", func(t *testing.T) {
+		root := setupConfigFactory(t)
+		body := `{"models":{"gw":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:1234","ANTHROPIC_AUTH_TOKEN":"tok","ANTHROPIC_MODEL":"claude-opus-4-8","AF_DISABLE_PARALLEL_SUBAGENTS":"0"}}}`
+		stdout, stderr, err := runConfigModelsSetSplit(t, body)
+		if err != nil {
+			t.Fatalf("runConfigModelsSet: %v (stderr=%q)", err, stderr)
+		}
+		for _, want := range []string{"warning:", "gw", "AF_DISABLE_PARALLEL_SUBAGENTS"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("stderr %q should contain %q", stderr, want)
+			}
+		}
+		if !strings.Contains(stdout, "Models configuration saved.") {
+			t.Errorf("stdout %q should confirm the save; the lint must never reject", stdout)
+		}
+		loaded, err := config.LoadModelsConfig(root)
+		if err != nil {
+			t.Fatalf("LoadModelsConfig: %v", err)
+		}
+		if got := loaded.Models["gw"]["AF_DISABLE_PARALLEL_SUBAGENTS"]; got != "0" {
+			t.Errorf("the warned-about value did not survive the write: got %q", got)
+		}
+	})
+
+	t.Run("a pool below the child floor saves and warns", func(t *testing.T) {
+		setupConfigFactory(t)
+		body := `{"models":{"gw":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:1234","ANTHROPIC_AUTH_TOKEN":"tok","ANTHROPIC_MODEL":"claude-opus-4-8","AF_BACKEND_POOL_TOKENS":"40000"}}}`
+		stdout, stderr, err := runConfigModelsSetSplit(t, body)
+		if err != nil {
+			t.Fatalf("runConfigModelsSet: %v (stderr=%q)", err, stderr)
+		}
+		for _, want := range []string{"warning:", "AF_BACKEND_POOL_TOKENS", "40000"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("stderr %q should contain %q", stderr, want)
+			}
+		}
+		if !strings.Contains(stdout, "Models configuration saved.") {
+			t.Errorf("stdout %q should confirm the save", stdout)
+		}
+	})
+
+	t.Run("a coherent capacity registry is silent", func(t *testing.T) {
+		setupConfigFactory(t)
+		body := `{"models":{"gw":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:1234","ANTHROPIC_AUTH_TOKEN":"tok","ANTHROPIC_MODEL":"claude-opus-4-8","AF_DISABLE_PARALLEL_SUBAGENTS":"1","AF_BACKEND_POOL_TOKENS":"400000"}}}`
+		_, stderr, err := runConfigModelsSetSplit(t, body)
+		if err != nil {
+			t.Fatalf("runConfigModelsSet: %v (stderr=%q)", err, stderr)
+		}
+		if strings.Contains(stderr, "AF_") {
+			t.Errorf("a coherent capacity declaration warned: %q", stderr)
+		}
+	})
+}
+
 func TestConfigModelsSet_PairingWarning(t *testing.T) {
 	const (
 		compKey = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"

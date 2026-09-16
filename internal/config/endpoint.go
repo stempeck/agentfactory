@@ -34,6 +34,29 @@ func IsLoopbackEndpoint(baseURL string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// NormalizedEndpoint reduces a profile's ANTHROPIC_BASE_URL to its backend identity —
+// scheme://host, lowercased — so that two profiles pointing at one endpoint pool
+// together and a trailing slash, a redundant default port, or a case difference does
+// not split them (#672 D3). It is the grouping key the dispatch-admit summer partitions
+// live sessions by: sessions sharing this string share the backend's capacity.
+//
+// It returns "" when the profile declares no base URL, and that emptiness is load-bearing:
+// a cloud profile (no ANTHROPIC_BASE_URL) has no shared backend to pool against, so an
+// empty key is the signal to EXCLUDE the session from every pool — the isEndpointProfile
+// half of AC-6's cloud inertness (#672 D2/D9c), realized here rather than by a model-name
+// heuristic. A base URL that does not parse also yields "" (fail-inert, never mis-group).
+func NormalizedEndpoint(profile map[string]string) string {
+	base := profile[envBaseURL]
+	if base == "" {
+		return ""
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return strings.ToLower(u.Scheme + "://" + u.Host)
+}
+
 // secretRefPrefix marks an ANTHROPIC_AUTH_TOKEN value as a reference to a secret
 // file (dereferenced at launch time in Phase 2) rather than a literal token.
 const secretRefPrefix = "file:"

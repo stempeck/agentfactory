@@ -52,6 +52,13 @@ func sanitize(s string) string {
 	return capMiddle(b.String())
 }
 
+// SanitizeToken is sanitize, exported. RenderOpts.Alert is the one pane token assembled OUTSIDE
+// this package — it reads durable factory state the library may not touch (ADR-004), so the cmd
+// layer builds it and never travels renderElement's per-element sanitize. That layer still owes the
+// alert the same strip and the same 64-rune cap at construction, and the only way to owe it to the
+// SAME rules rather than to a second copy of them is to hand out this one.
+func SanitizeToken(s string) string { return sanitize(s) }
+
 // skipEscape returns the index just past a single ESC-introduced sequence beginning at i
 // (s[i] == 0x1b). The core guarantee is that the ESC byte itself never survives, so no escape
 // can be introduced; on top of that it also swallows the now-inert parameter/string bytes of a

@@ -526,9 +526,10 @@ func applyGate(root, formulaDir, gate, state string) error {
 		if err := applyFidelityGate(root, formulaDir, state); err != nil {
 			return err
 		}
-		// The blanket writer records itself here rather than at its call site so up.go stays
-		// byte-identical — its line numbers are pinned by teardown_scanner_enforce_test.go's
-		// allowedTeardownSites, which would re-anchor on any inserted line.
+		// The blanket writer records provenance here at the gate-apply chokepoint so every path
+		// that sets the fidelity gate records it uniformly. (It formerly sat here to keep up.go
+		// byte-identical for a line-number-keyed teardown allowlist; #679 T9 re-keyed that audit
+		// onto per-site sentinels, so the line-pin constraint is gone.)
 		appendFidelityProvenance(root, fidelitySourceStartup, state)
 		return nil
 	case "improvement":

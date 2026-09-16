@@ -323,7 +323,7 @@ func TestValidateDispatchArgs_Errors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateSlingArgs(tt.formula, tt.agent, tt.args)
+			err := validateSlingArgs(tt.formula, tt.agent, tt.args, false)
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -363,7 +363,7 @@ func TestValidateDispatchArgs_ValidCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateSlingArgs(tt.formula, tt.agent, tt.args)
+			err := validateSlingArgs(tt.formula, tt.agent, tt.args, false)
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -471,7 +471,7 @@ func TestPersistFormulaCaller_StaleClearAndRewrite(t *testing.T) {
 }
 
 func TestValidateDispatchArgs_WhitespaceOnlyTask(t *testing.T) {
-	err := validateSlingArgs("", "ultraimplement", []string{"   "})
+	err := validateSlingArgs("", "ultraimplement", []string{"   "}, false)
 	if err == nil {
 		t.Fatal("expected error for whitespace-only task")
 	}
@@ -2491,7 +2491,7 @@ title = "Step 2"
 }
 
 // TestInstantiateFormula_FallsBackToSlingAgentWhenUndeclared pins the Phase 1
-// data-plane invariant (parent_id = ” OR assignee != ”): when no agent is
+// data-plane invariant (parent_id = "" OR assignee != ""): when no agent is
 // declared at any formula level, the step bead's Assignee falls back to the
 // CLI-resolved slingAgent via assigneeForStep. Empty Assignee on
 // parent-scoped beads is now unrepresentable; the fallback is what makes

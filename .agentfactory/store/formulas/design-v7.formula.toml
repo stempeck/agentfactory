@@ -57,6 +57,8 @@ that cannot see each other's output.
 | Context filling up | Use `af handoff` to cycle to fresh session |
 | Blocked on external | Mail Supervisor, mark yourself stuck |
 | Scope unclear | Default to 'medium' unless problem is obviously small or large |
+| `af done` says "no active formula (missing .runtime/hooked_formula)" | Your shell's cwd left the agent directory (a `cd` earlier in the same command chain). Run `af done` and `af prime` from the agent directory; wrap git work in a subshell: `( cd "$AF_WORKTREE" && git ... ) && af done` |
+| WORKTREE_CONTAINMENT mail after reading factory-root data | Runtime data that lives only at the factory root (`.agentfactory/telemetry/`, `models.json`, `agents.json`) is read by ABSOLUTE path (`cat /path/...`), never by `cd` — the containment check flags any cwd outside your worktree. Acknowledge the mail and delete it |
 
 ## Anti-Patterns to Avoid
 
@@ -111,12 +113,18 @@ af mail inbox
 ```
 
 **4. Extract requirements from the bead:**
-The bead is your source of truth. It may provide requirements in one of three forms:
+The bead is your source of truth. It may provide requirements in one of four forms:
 
 - **Inline requirements**: The bead description itself contains the design problem. Extract requirements directly.
 - **Proposal document path**: The bead references a file (e.g., `docs/design-request.md`). Read it completely.
 - **GitHub issue link**: The bead contains a URL (e.g., `https://github.com/org/repo/issues/123`).
   Fetch the issue via `gh issue view <number> --repo <org/repo>` and extract requirements from it.
+- **Coordinator problem summary**: If `af bead show {{issue}}` reports "not found", this is a
+  coordinator-dispatched pipeline run: the problem input is the file
+  `<repo-root>/.designs/{{issue}}/problem-summary-{{issue}}.md`. Read it completely — it is the
+  designated shared problem input. If it says "consume it directly; do not re-fetch", do NOT
+  re-fetch its origin issue; the file is your source. (`af bead update {{issue}}` may still work
+  for notes even when `show` does not — the two resolve differently.)
 
 Whichever form, capture the full requirements — this is your spec. You will quote it VERBATIM into `source.md` at phase-1-source-capture. Do not paraphrase yet.
 
@@ -158,6 +166,15 @@ git branch --show-current
 git checkout -b agent/<name>
 ```
 
+**Shared-worktree guard:** if you are ALREADY on a pipeline branch inside a shared worktree
+(other agents dispatched on the same branch — `git log --oneline -5` shows commits from the
+coordinator or sibling agents), STAY on that branch. Do NOT create a new branch and do NOT
+rebase — either would disrupt concurrent agents sharing the tree. Instead verify the branch
+is 0 behind origin/{{default_branch}}:
+```bash
+git fetch origin && git rev-list --left-right --count HEAD...origin/{{default_branch}}   # right side must be 0
+```
+
 **3. Ensure clean working state:**
 ```bash
 git status                  # Should show "working tree clean"
@@ -169,11 +186,16 @@ If dirty state from previous work:
 # If changes are relevant to this issue:
 git add -A && git commit -m "WIP: <description>"
 
-# If changes are unrelated cruft:
-git stash push -m "unrelated changes before {{issue}}"
-# Or discard if truly garbage:
+# If changes are unrelated cruft (PRIVATE worktree only — see the guard below):
+git stash push -u -m "design-v7-{{issue}}-prework"
+# Or discard if truly garbage (PRIVATE worktree only):
 git checkout -- .
 ```
+**Shared-worktree guard for the dirty-state case:** in a shared pipeline worktree the modified
+files are usually live sibling agents' identity renders (`.agentfactory/agents/<sibling>/CLAUDE.md`,
+rewritten by provisioning while their sessions run) — a 2026-09-10 run found three of them plus 133
+foreign stash entries. NEVER `git checkout -- .` or touch the stash there: `git checkout -- .` overwrites
+a running agent's identity file. Leave sibling-owned modifications in place and commit only your own paths.
 
 **4. Sync with main:**
 ```bash
@@ -213,7 +235,7 @@ ls .designs/{{issue}}/source.md 2>/dev/null || echo "No prior source.md found"
 
 **If NO prior artifacts exist:**
 - This is acceptable — most design work starts fresh.
-- Close this step with reason "No prior design contract found"
+- Close this step with the reason recorded: `af done --skip "No prior design contract found"` (there is no `--reason` flag; `--skip <reason>` is how a step closes with a recorded reason)
 - Proceed to `preflight-tests`.
 
 **Exit criteria:** Prior design state reviewed and either preserved, archived, or confirmed absent."""
@@ -235,6 +257,12 @@ git checkout origin/{{default_branch}}
 # Discover the project's test command from CLAUDE.md, Makefile, package.json, etc.
 # Then run it. Examples: make test, npm test, cargo test, go test ./...
 ```
+
+**Shared-worktree guard:** NEVER `git checkout`/`git stash` in a shared pipeline worktree —
+it yanks the tree out from under concurrent agents. If
+`git diff --name-only origin/{{default_branch}}...HEAD` shows no code files (design docs and
+agent metadata only), then running the test suite on HEAD is exactly equivalent to testing
+main — do that instead, with no checkout and no stash.
 
 **2. If tests PASS:**
 ```bash
@@ -369,6 +397,21 @@ For bug fixes, enhancements, or refactors, read the affected code areas:
 Before launching sub-agents, capture verified ground truth so they work from
 facts, not imagination. Include ALL applicable sections:
 
+**Generate every pasted section with shell redirection, never by re-typing it through the model.**
+The snapshot runs to thousands of lines; the measured cost of this step on a 2026-09-08 run was
+~58K output tokens, almost all of it pasted text. Build the file with `sed -n 'A,Bp' <file> >> "$OUTPUT_DIR/codebase-snapshot.md"`,
+`<tool> --help >> ...`, `find ... >> ...` and heredocs, and label each pasted code block with its
+TRUE `file:Lstart-Lend` in a header line above it (the snapshot's own line numbers are not the source's).
+Runtime data that lives only at the factory root (`.agentfactory/telemetry/`, `models.json`,
+`agents.json`) is read by ABSOLUTE path — never `cd` outside your worktree, the containment check flags it.
+
+**Paste first, read once.** Do not view a code region in one tool call and then paste the same region
+in another: that carries every region through your context twice, once as a view and once as the
+snapshot the sub-agents will read. A 2026-09-10 run did exactly that and grew its window from 63K to
+240K tokens in this step, leaving every later step above the factory's 200K bound. Append each
+region to the snapshot with `sed -n`/`awk` FIRST, then read the snapshot section once when you need
+to understand it; grep for the symbol to find the range, do not print the range to find the symbol.
+
 1. **Package tree**: Run `find . -type f -name "*.go" -not -path "*/vendor/*" | head -200` from the codebase root. Paste the full output.
 
 2. **Module identity**: Run `head -5 go.mod`. Paste the output.
@@ -393,7 +436,9 @@ violate ADRs or reverse recent deliberate changes.
 
 1. **ADR search**: Run `find docs/architecture/adrs -name "ADR-*.md" -o -name "adr-*.md" 2>/dev/null`
    and read any ADRs whose title or content relates to the problem domain keywords.
-   For each relevant ADR, paste its title, status, and the key decision verbatim.
+   For each relevant ADR, paste its title, status, and the key decision verbatim — locate the
+   `## Decision` heading (and an amendment's `### Decision`) programmatically and quote that span with
+   its true line numbers; guessed line ranges land on Context text (observed 6 of 8 wrong on 2026-09-08).
 
 2. **Prior design search**: Run `ls .designs/` and identify any prior designs on the same
    or related issues. For each relevant prior design, read its `design-doc.md` and paste:
@@ -462,12 +507,12 @@ from `source.md` and assigning a dimension owner.
 **1. Produce `$OUTPUT_DIR/verification.md` with TWO tables:**
 
 ### Table A — Constraint Verification
-| C-id | Verbatim text (copy from source.md) | My interpretation | Prohibits | Requires | Dimension owner(s) | Relaxation impact |
+| ID | Verbatim text (copy from source.md) | My interpretation | Prohibits | Requires | Dimension owner(s) | Relaxation impact |
 |------|-------------------------------------|-------------------|-----------|----------|---------------------|-------------------|
 | C-1  | "[copy/paste]"                      | [prose]           | [list]    | [list]   | Data / Security     | [what changes]    |
 
 ### Table B — AC Verification
-| AC-id | Verbatim text (copy from source.md) | My interpretation | What evidence proves it works? | Dimension owner(s) |
+| ID | Verbatim text (copy from source.md) | My interpretation | What evidence proves it works? | Dimension owner(s) |
 |-------|-------------------------------------|-------------------|-------------------------------|---------------------|
 | AC-a  | "[copy/paste]"                      | [prose]           | [test name or observable]      | API / Integration   |
 
@@ -496,6 +541,7 @@ echo "GATE A (count equality) passed."
 **Additional manual checks (the bash check is necessary but not sufficient):**
 - Every row's "verbatim text" column MUST be a direct copy (use quotation marks). Paraphrase FAILS the gate.
 - Every row MUST have at least one dimension owner. An unowned AC/constraint WILL be missed.
+- Table header cells MUST NOT begin with `AC-` or `C-` (use `ID`, as the templates above do): the count check matches every line starting `| AC-`/`| C-`, so a header like `| AC-id |` false-counts and the gate fails at N+1 vs N.
 
 **If FAIL:** STOP. Add missing rows, re-copy verbatim text, assign owners. Do NOT proceed.
 **If PASS:** Close this step and continue.
@@ -516,8 +562,13 @@ runs in its own context window. They cannot see each other's output. This
 independence is the entire point — three analysts with the same source material
 but different analytical lenses produce genuinely independent findings.
 
-All three sub-agents use `subagent_type: "general-purpose"` and
-`run_in_background: true`.
+All three sub-agents use `subagent_type: "general-purpose"` and run in the
+background. Set `run_in_background: true` where the harness's Agent tool exposes
+that parameter; on harnesses where background execution is the Agent tool's
+default and no such parameter exists, launching normally satisfies this directive
+— the observable that matters (for you AND for any per-turn reviewer) is three
+async launch results ("working in the background") in ONE message, then output
+files on disk. Do not treat a missing parameter as a missing launch.
 
 **Entry:** `source.md` and `verification.md` exist with all ACs and constraints captured.
 **Exit:** All three sub-agent output files exist in `$OUTPUT_DIR/`.
@@ -535,7 +586,7 @@ Determine the scope from your Phase 1 analysis (small / medium / large).
 
 **Agent tool parameters:**
 - `subagent_type`: `"general-purpose"`
-- `run_in_background`: `true`
+- `run_in_background`: `true` (if the harness exposes it; else background-by-default applies — see the spawn note above)
 - `description`: `"Design Dimensions Analyst"`
 
 **Prompt** (fill in $OUTPUT_DIR and SCOPE before passing):
@@ -685,6 +736,14 @@ specific source. If you cannot point to where the number comes from, mark it [UN
 
 DYNAMIC VALUES: Values marked with ⚡ in codebase-snapshot.md are runtime values that
 change over time. Do not state them as fixed facts.
+
+## Environment notes (operational, not source content)
+
+- The repository root is the worktree named in codebase-snapshot.md; run every command from there and never `cd` to any other checkout. Read factory-root runtime data only by absolute path.
+- LINE NUMBERS: codebase-snapshot.md pastes code regions whose TRUE file:line range is printed in the header above each block. The line numbers your Read tool shows for the snapshot file itself are NOT the source's. Cite the header's range, or Read the real file and cite its lines. Citing the snapshot document's own line numbers as source lines is a fidelity defect.
+- Write ONLY the files this prompt names, inside $OUTPUT_DIR. Do not write to /tmp or anywhere else; do not modify code, formulas, or config.
+- When you rely on an ABSENCE claim ("X never happens", "nothing reads Y"), run the grep or ls that would find the counterexample and cite it before relying on it.
+- Return a short completion summary (files written and their line counts) when done.
 ```
 
 ---
@@ -693,7 +752,7 @@ change over time. Do not state them as fixed facts.
 
 **Agent tool parameters:**
 - `subagent_type`: `"general-purpose"`
-- `run_in_background`: `true`
+- `run_in_background`: `true` (if the harness exposes it; else background-by-default applies — see the spawn note above)
 - `description`: `"Architecture Elevation Analyst"`
 
 **Prompt** (fill in $OUTPUT_DIR before passing):
@@ -824,6 +883,14 @@ Use this structure:
 
 Same rules as Dimensions Analyst: only cite what you verify via codebase-snapshot.md or
 Read. Mark unverified claims [UNVERIFIED]. Do not invent paths or counts.
+
+## Environment notes (operational, not source content)
+
+- The repository root is the worktree named in codebase-snapshot.md; run every command from there and never `cd` to any other checkout. Read factory-root runtime data only by absolute path.
+- LINE NUMBERS: codebase-snapshot.md pastes code regions whose TRUE file:line range is printed in the header above each block. The line numbers your Read tool shows for the snapshot file itself are NOT the source's. Cite the header's range, or Read the real file and cite its lines. Citing the snapshot document's own line numbers as source lines is a fidelity defect.
+- Write ONLY the files this prompt names, inside $OUTPUT_DIR. Do not write to /tmp or anywhere else; do not modify code, formulas, or config.
+- When you rely on an ABSENCE claim ("X never happens", "nothing reads Y"), run the grep or ls that would find the counterexample and cite it before relying on it.
+- Return a short completion summary (files written and their line counts) when done.
 ```
 
 ---
@@ -832,7 +899,7 @@ Read. Mark unverified claims [UNVERIFIED]. Do not invent paths or counts.
 
 **Agent tool parameters:**
 - `subagent_type`: `"general-purpose"`
-- `run_in_background`: `true`
+- `run_in_background`: `true` (if the harness exposes it; else background-by-default applies — see the spawn note above)
 - `description`: `"Six-Sigma Gap Analyst"`
 
 **Prompt** (fill in $OUTPUT_DIR before passing):
@@ -940,12 +1007,40 @@ scope gap | unstated assumption | failure mode gap | dependency fragility | obse
 
 Same rules as other analysts: only cite what you verify via codebase-snapshot.md or
 Read. Mark unverified claims [UNVERIFIED]. Do not invent paths or counts.
+
+## Environment notes (operational, not source content)
+
+- The repository root is the worktree named in codebase-snapshot.md; run every command from there and never `cd` to any other checkout. Read factory-root runtime data only by absolute path.
+- LINE NUMBERS: codebase-snapshot.md pastes code regions whose TRUE file:line range is printed in the header above each block. The line numbers your Read tool shows for the snapshot file itself are NOT the source's. Cite the header's range, or Read the real file and cite its lines. Citing the snapshot document's own line numbers as source lines is a fidelity defect.
+- Write ONLY the files this prompt names, inside $OUTPUT_DIR. Do not write to /tmp or anywhere else; do not modify code, formulas, or config.
+- When you rely on an ABSENCE claim ("X never happens", "nothing reads Y"), run the grep or ls that would find the counterexample and cite it before relying on it.
+- Return a short completion summary (files written and their line counts) when done.
 ```
 
 ---
 
 **After launching all three sub-agents**, wait for all to complete. Then verify
 their output files exist:
+
+**Waiting is in-contract:** turns spent waiting for background sub-agent completion
+notifications — with no tool calls, or only mail hygiene — are part of executing this step.
+The spawn directive is satisfied by the SINGLE earlier message containing three Agent tool
+calls; the durable evidence is the output files appearing on disk. A per-turn reviewer (e.g.
+the fidelity gate) must not expect the spawn to recur in later turns, and you must NOT
+re-launch sub-agents in response to per-turn gate mail — re-launching would duplicate running
+work AND violate the single-message rule. If gate mail flags a waiting turn, reply once with
+the artifact evidence (files on disk + the earlier launch turn) and continue waiting.
+Mail-hygiene note: gate mail arrives FROM your own agent identity, so `af mail reply`
+lands back in YOUR OWN inbox as new unread mail — after replying, delete both the gate
+mail and your echoed reply. Later gate mails on further waiting turns get the same
+single-reply-plus-delete treatment; the answer is never a re-launch.
+After three flagged turns the gate sends a FIDELITY_ESCALATION threatening `af down`. Do not
+re-launch. Reply to the escalation with the same evidence (the launch turn, each output file's
+mtime from `ls -la --time-style=+%H:%M:%S "$OUTPUT_DIR"`), mail the supervisor a copy
+(`af mail send supervisor -s "design-v7: fidelity gate flagging in-contract waiting turns" -m "..."`),
+run `af prime` as the escalation asks (the step text you re-read is the justification), and make a
+durability commit of the sub-agent files already on disk (`git add "$OUTPUT_DIR"/*.md && git commit`)
+so a kill cannot lose them. Then continue waiting.
 
 ```bash
 OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
@@ -988,7 +1083,7 @@ Spawn a SINGLE sub-agent (NOT in background — must complete before Phase 3):
 
 **Agent tool parameters:**
 - `subagent_type`: `"general-purpose"`
-- `run_in_background`: `false`
+- `run_in_background`: `false` (if the harness exposes it; on background-by-default harnesses launch normally and enforce sequencing yourself: WAIT for the completion notification and do not proceed until verification-report.md exists)
 - `description`: `"Fidelity Verifier"`
 
 **Prompt** (fill in $OUTPUT_DIR before passing):
@@ -1022,6 +1117,8 @@ From all sub-agent output files, extract every claim about the EXISTING codebase
 - Timing/interval assertions (find the actual config value or code)
 - Behavioral assertions about existing code
 - ADR citations (verify the ADR exists and the quote is accurate)
+- NEGATIVE inferences ("X does not do Y", "no test covers Z", "nothing guards W"): these are claims too — run the grep/ls/read that would find the counterexample and classify them; a prior run missed false negatives
+- Claims that cite documentation OUTSIDE this repository (harness hook output caps, hook ordering, compaction behaviour): not verifiable here — classify UNVERIFIABLE-EXTERNAL and list them in their own table so the synthesis knows which facts rest on external documentation
 
 PAY SPECIAL ATTENTION to:
 - Step/item counts: run `grep -c` to get exact counts, don't trust prose
@@ -1040,6 +1137,7 @@ For each claim:
    - VERIFIED: factually accurate
    - INACCURATE: factually wrong — provide the CORRECT information
    - UNVERIFIABLE: about proposed new code (exclude)
+   - UNVERIFIABLE-EXTERNAL: rests on documentation outside this repository (list separately; never counted as VERIFIED)
 
 ### Step 3: Write verification-report.md
 
@@ -1052,13 +1150,23 @@ Write to $OUTPUT_DIR/verification-report.md:
 - Verified: N
 - Inaccurate: N (with corrections)
 - Unverifiable: N (excluded)
+- Unverifiable-external (documentation outside the repo): N (listed below)
 
 ## Claim Details
 
-| # | Claim | Source File | Classification | Correction (if inaccurate) |
+| # | Claim | Source File | Classification | Correction (if inaccurate) | How verified |
 
 For every INACCURATE claim, the Correction column MUST contain the factually correct
 information that should be used instead.
+
+## External-documentation claims
+
+| # | Claim | Source File | Which analyses depend on it |
+
+## Cross-analysis contradictions
+
+Where two sub-agent files make incompatible factual claims about the SAME existing code (not
+proposals), list both and state which one the code supports, with the command you ran.
 
 ## Rules
 
@@ -1066,6 +1174,9 @@ information that should be used instead.
 - Be strict: close-but-wrong file paths are INACCURATE
 - Be fair: approximately correct line numbers (within ~20 lines) are VERIFIED
 - Every classification must include what you did to verify
+- ABSENCE CLAIMS are claims: for every "nothing reads X" / "no site does Y", run the grep that would find the counterexample, record the command, and classify it
+- LINE NUMBERS: codebase-snapshot.md's own line numbers are NOT the source's; check every cited line against the real file
+- Read factory-root runtime data (telemetry, models.json) only by absolute path; never `cd` outside the worktree; write ONLY verification-report.md
 ```
 
 After the fidelity verifier completes, verify the report exists:
@@ -1100,9 +1211,11 @@ prior reads. Do not rely on sub-agent outputs as a proxy for source.
 **2. Re-paste each AC** from `source.md` into a scratch checklist at
 `$OUTPUT_DIR/synthesis-checklist.md`:
 
-| AC-id | Verbatim text (RE-COPY from source.md RIGHT NOW) | Clauses (enumerated) | Each clause satisfied by which component? |
+| ID | Verbatim text (RE-COPY from source.md RIGHT NOW) | Clauses (enumerated) | Each clause satisfied by which component? |
 |-------|------------------------------------------------|----------------------|-------------------------------------------|
 | AC-a  | "..."                                          | (i) ... (ii) ...     | (i) [comp] (ii) [comp]                    |
+
+(The header cell is `ID`, not `AC-id`, on purpose: the count check below matches every line starting `| AC-`, and a header spelled `| AC-id |` would false-count.)
 
 **Gate 3.0 check:**
 - Every AC in `source.md` is listed.
@@ -1125,7 +1238,9 @@ requirement. Return to `phase-2-parallel-analysis` and add coverage.
 
 **Gate 3.0b — Fidelity Gate:**
 
-**3. Read `$OUTPUT_DIR/verification-report.md`** completely.
+**3. Read `$OUTPUT_DIR/verification-report.md`** completely. Files above ~30 KB are persisted to
+disk instead of shown when `cat` whole — read them in line-range chunks (`sed -n '1,160p'`, `'161,320p'`, …)
+so the content actually enters your context.
 
 For every claim marked INACCURATE:
 1. Note the correction provided by the verifier.
@@ -1136,6 +1251,10 @@ For every claim marked INACCURATE:
 **Gate 3.0b check:** design-doc.md (when written in Phase 3) must contain ZERO
 claims that verification-report.md flagged as INACCURATE. Every inaccurate claim
 must be replaced with its correction or removed entirely.
+
+Also carry the report's External-documentation claims and Cross-analysis contradictions into the
+checklist addendum: the synthesis must say which of its facts rest on documentation outside the
+repository, and must pick the code-supported side of every contradiction.
 
 Record any required corrections in `$OUTPUT_DIR/synthesis-checklist.md` as an
 addendum so they are available during synthesis.
@@ -1163,7 +1282,8 @@ fidelity corrections available.
 
 **Step 3.1: Read All Sub-Agent Outputs**
 
-Read each file completely:
+Read each file completely (files above ~30 KB must be read in line-range chunks with `sed -n`, or the
+harness persists them to disk instead of showing them and nothing enters your context):
 1. `$OUTPUT_DIR/audit.md` — dimension analysis audit
 2. `$OUTPUT_DIR/conflicts.md` — cross-dimension conflict matrix
 3. `$OUTPUT_DIR/dependencies.md` — dependency graph
@@ -1247,11 +1367,18 @@ Use this template:
 All proposals respect the constraints captured in source.md:
 - C-1: [short name] — [compliance note]
 
+(Each constraint bullet MUST start literally `- C-<id>` — no bold or other prefix — because
+the Step 4.4 finalize check counts lines matching `^- C-`. A bullet written `- **C-1 ...`
+does not count and fails the check.)
+
 ## AC Traceability (REQUIRED)
 
 | AC id | Verbatim quote from source.md | Clause breakdown | Addressed by | Verified by |
 |-------|------------------------------|------------------|--------------|-------------|
 | AC-a  | "..."                        | (i)...(ii)...    | [component]  | [test name] |
+
+(Keep the header cell spelled `AC id` — no hyphen — because the Step 4.4 finalize check
+counts lines matching `^| AC-`; a header spelled `| AC-id |` would false-count.)
 
 ## Architecture Elevation Verdict
 
@@ -1297,8 +1424,8 @@ Every conflict row MUST have a resolution. "Unresolved" is NOT acceptable.
 
 ## Risk Registry
 
-| Risk | Severity | Likelihood | Mitigation | Owner | Source |
-| [risk] | ... | ... | ... | ... | [dimension / elevation / gap analysis] |
+| Risk | Severity | Likelihood | Mitigation | Owner | Source | Phase |
+| [risk] | ... | ... | ... | ... | [dimension / elevation / gap analysis] | [implementation phase that carries the mitigation] |
 
 ## Six-Sigma Caveats
 
@@ -1454,7 +1581,7 @@ Any missing row or unmapped clause: STOP, return to `gate-b-synthesis-regroundin
 **Step 4.6: Risk Verification**
 
 - Every risk in the Risk Registry has a mitigation.
-- Every risk is assigned to an implementation phase.
+- Every risk is assigned to an implementation phase (the `Phase` column; a row without one fails — a 2026-09-10 run had to patch the table after the fact because the template lacked the column).
 - Risks from all three sources (dimensions, elevation, gap analysis) are represented.
 
 ---
@@ -1466,9 +1593,11 @@ reviews the PR). Commit now:
 
 ```bash
 OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
-cd "${AF_WORKTREE:-.}"
-find .designs/ -maxdepth 1 -type l -delete
-git add "$OUTPUT_DIR"/
+# Subshell: the cd must not leak into the shell that runs `af done` next — af done reads
+# .runtime/hooked_formula relative to the cwd and fails with "no active formula" from the worktree root.
+( cd "${AF_WORKTREE:-.}" &&
+find .designs/ -maxdepth 1 -type l -delete;
+git add "$OUTPUT_DIR"/ &&
 git commit -m "design: design-v7 artifacts for {{issue}}
 
 - source.md (verbatim requirements)
@@ -1480,8 +1609,10 @@ git commit -m "design: design-v7 artifacts for {{issue}}
 - six_sigma_gaps.md (six-sigma gap analysis)
 - verification-report.md (fidelity verification of all codebase claims)
 - synthesis-checklist.md (Gate B: pre-synthesis re-grounding)
-- design-doc.md (with AC Traceability, elevation verdict, six-sigma caveats)"
+- design-doc.md (with AC Traceability, elevation verdict, six-sigma caveats)" )
 ```
+
+Run `af done` from your agent directory afterwards (never from the worktree root).
 
 **If any verification fails:** STOP. Return to the indicated earlier step.
 Do NOT paper over a failing check.
@@ -1555,13 +1686,18 @@ test run is a sanity check that the branch is still green.
     likely means you accidentally committed non-design files — revert those.
   - If no (pre-existing): File a bead, but still must pass for your PR
 
+**Shared-worktree guard:** NEVER `git stash`/`git checkout` in a shared pipeline worktree — it
+yanks the tree out from under concurrent agents and the stash stack is shared with every other
+session. If `git diff --name-only origin/{{default_branch}}...HEAD` lists only `.designs/` and
+`.analysis/` files, HEAD is main plus documents and the failure is pre-existing by construction:
+file the bead and skip the probe. Only in a worktree you alone occupy:
 ```bash
-# Check if failure exists on main:
-git stash
+# Check if failure exists on main (private worktree only; tagged stash, never bare pop):
+git stash push -u -m "design-v7-{{issue}}-pretest"
 git checkout {{default_branch}}
 # Run the same test command you discovered above
 git checkout -
-git stash pop
+git stash apply "$(git stash list --format='%H %gs' | awk '/design-v7-{{issue}}-pretest/{print $1; exit}')"
 ```
 
 **3. Validate terraform if .tf files were modified:**
@@ -1634,9 +1770,16 @@ synthesis-checklist.md, design-doc.md) are committed deliverables.
 ```bash
 git status
 ```
-Must show "working tree clean". If not:
+Must show "working tree clean" in a worktree you alone occupy. If not:
 - Commit legitimate changes
-- Discard garbage: `git checkout -- .`
+- Discard garbage YOU created, by path: `git checkout -- <your-file>`
+
+**Shared-worktree guard:** in a shared pipeline worktree, `git status` also shows live sibling
+agents' identity renders as modified (`.agentfactory/agents/<sibling>/CLAUDE.md`, rewritten by
+provisioning while their sessions run; a 2026-09-10 run had three). They are not your cruft and
+`git checkout -- .` would overwrite a running agent's identity file — NEVER run it there. The
+exit criterion in a shared worktree is: no untracked files of yours and every `.designs/{{issue}}/`
+artifact committed; sibling-owned modifications stay untouched.
 
 **2. Check for untracked files:**
 ```bash
@@ -1651,9 +1794,15 @@ Should be empty. If not:
 ```bash
 git stash list
 ```
-Should be empty. If not:
-- Pop and commit: `git stash pop && git add -A && git commit`
-- Or drop if garbage: `git stash drop`
+Should be empty of YOUR entries. The stash stack is shared with the main checkout and every
+worktree (a 2026-09-10 run saw 133 entries from other sessions); an entry you did not tag is another
+session's work — NEVER pop or drop it. For entries carrying your own tag (`design-v7-{{issue}}-…`),
+locate by tag first, then apply and drop that entry only:
+```bash
+git stash list --format='%gd %gs' | grep "design-v7-{{issue}}-"
+git stash apply <sha-of-your-entry> && git add -A && git commit -m "WIP: restored own stash"
+git stash drop <stash@{n}-of-your-entry>
+```
 
 **4. Push your branch:**
 ```bash
@@ -1662,13 +1811,15 @@ git push -u origin $(git branch --show-current)
 
 **5. Verify nothing left behind:**
 ```bash
-git status                  # Clean
-git stash list              # Empty
+git status                  # Clean, or only sibling-owned identity files in a shared worktree
+git stash list              # No entries carrying your tag
 git log origin/{{default_branch}}..HEAD   # Your commits
 git diff origin/{{default_branch}}...HEAD # Your changes (expected — design artifacts only)
 ```
 
-**Exit criteria:** Branch pushed, workspace clean, no cruft."""
+**Exit criteria:** Branch pushed, no untracked files of yours, every `.designs/{{issue}}/` artifact
+committed, no stash entries of yours; in a shared worktree, sibling-owned modified files and foreign
+stash entries are expected and left alone."""
 
 [[steps]]
 id = "prepare-for-review"
@@ -1734,6 +1885,15 @@ design-v7 forcing functions applied:
 - Cross-perspective conflict mining (dimension-vs-elevation, dimension-vs-gaps)
 - Elevation verdict: [insert verdict]
 - design-doc.md: AC Traceability, elevation verdict integration, six-sigma caveats, risk registry"
+```
+
+**1b. If a PR already exists for this branch:** `gh pr create` will refuse with
+"a pull request for branch ... already exists" and print its URL. This is normal on
+coordinator-run pipeline branches (the coordinator opens the PR up front). Do NOT treat it
+as failure and do NOT open a second PR: your commits are already pushed to the branch and
+therefore already inside that PR. Post the same body as a comment instead:
+```bash
+gh pr comment <existing-pr-number> --body "<the body from step 1>"
 ```
 
 **2. Complete the formula:**

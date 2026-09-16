@@ -156,10 +156,15 @@ func TestT_INT_4_FindRootResolversConfinedToSeam(t *testing.T) {
 		t.Fatal("drift scan found zero config.FindLocalRoot calls in internal/cmd — the scan is not matching (guards nothing)")
 	}
 
-	// --- internal/mail + internal/formula: library seams take an explicit root ---
+	// --- internal/mail + internal/formula + internal/tokenomics: library seams take an
+	// explicit root ---
 	// ANY ambient config.FindFactoryRoot / config.FindLocalRoot in these packages
 	// re-opens the laundering hole thread 7a closed, with zero CI signal otherwise.
-	for _, pkg := range []string{"mail", "formula"} {
+	//
+	// tokenomics joined the list with the package (#668 K5). Its purity claim is the load-bearing
+	// one there — the whole decision matrix is table-testable only while the package resolves no
+	// root of its own — and until it was listed here that claim had no CI signal either.
+	for _, pkg := range []string{"mail", "formula", "tokenomics"} {
 		for _, c := range scanConfigResolvers(t, filepath.Join(root, "internal", pkg)) {
 			violations = append(violations, fmt.Sprintf(
 				"internal/%s/%s:%d: config.%s called in %q — internal/%s seams must receive an ALREADY-VALIDATED root from the cmd layer, never resolve it ambiently (#519 review, thread 7a)",

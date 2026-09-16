@@ -49,7 +49,7 @@ func TestEvaluateImprovementFire_MarkerFormulaPathMatchesCompletionResolution(t 
 	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
 	writeFormulaFile(t, root, "fx", true)
 
-	fired, agent, _, reason := evaluateImprovementFire(root, root, "inst-1", "manager", "Formula: fx", false)
+	fired, agent, _, reason := evaluateImprovementFire(root, root, "inst-1", "manager", "Formula: fx", false, false)
 	if !fired {
 		t.Fatalf("expected fire, got reason=%q", reason)
 	}
@@ -70,7 +70,7 @@ func TestImprovementInstruction_EditTargetIsAbsoluteFactoryRoot(t *testing.T) {
 	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
 	writeFormulaFile(t, root, "fx", true)
 
-	instruction, f, ok := improvementInstruction(root, "Formula: fx")
+	instruction, f, ok := improvementInstruction(root, "Formula: fx", false)
 	if !ok {
 		t.Fatal("expected improvementInstruction to resolve")
 	}
@@ -89,7 +89,7 @@ func TestImprovementInstruction_ReadsMemoryBeforeEditingAndWritesAfter(t *testin
 	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
 	writeFormulaFile(t, root, "fx", true)
 
-	instruction, f, ok := improvementInstruction(root, "Formula: fx")
+	instruction, f, ok := improvementInstruction(root, "Formula: fx", false)
 	if !ok {
 		t.Fatal("expected improvementInstruction to resolve")
 	}
@@ -142,7 +142,7 @@ func TestImprovementInstruction_MemoryWiringLeftIssue483Intact(t *testing.T) {
 	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
 	writeFormulaFile(t, root, "fx", true)
 
-	instruction, f, ok := improvementInstruction(root, "Formula: fx")
+	instruction, f, ok := improvementInstruction(root, "Formula: fx", false)
 	if !ok {
 		t.Fatal("expected improvementInstruction to resolve")
 	}
@@ -179,7 +179,7 @@ func TestImprovementInstruction_MemoryRoundTripsThroughTheVerbsItNames(t *testin
 	factoryRoot, aliceDir := setupMemoryFixture(t)
 	writeStoreFormula(t, factoryRoot, "fx", "name = \"fx\"\n")
 
-	instruction, _, ok := improvementInstruction(factoryRoot, "Formula: fx")
+	instruction, _, ok := improvementInstruction(factoryRoot, "Formula: fx", false)
 	if !ok {
 		t.Fatal("expected improvementInstruction to resolve")
 	}
@@ -250,7 +250,7 @@ func TestImprovementInstruction_VerificationDoesNotClaimExitCodeAlone(t *testing
 	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
 	writeFormulaFile(t, root, "fx", true)
 
-	instruction, _, ok := improvementInstruction(root, "Formula: fx")
+	instruction, _, ok := improvementInstruction(root, "Formula: fx", false)
 	if !ok {
 		t.Fatal("expected improvementInstruction to resolve")
 	}
@@ -272,7 +272,7 @@ func TestImprovementInstruction_ContainmentClaimIsHedgedNotUnconditional(t *test
 	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
 	writeFormulaFile(t, root, "fx", true)
 
-	instruction, _, ok := improvementInstruction(root, "Formula: fx")
+	instruction, _, ok := improvementInstruction(root, "Formula: fx", false)
 	if !ok {
 		t.Fatal("expected improvementInstruction to resolve")
 	}
@@ -415,7 +415,7 @@ func TestImprovementComplete_WorktreeDivergence_InstructionTargetsSameFileVerdic
 	}
 
 	// (b) The AC9/AC1 assertion this test exists for.
-	instruction, f, ok := improvementInstruction(fx.trueRoot, "Formula: "+fx.formula)
+	instruction, f, ok := improvementInstruction(fx.trueRoot, "Formula: "+fx.formula, false)
 	if !ok {
 		t.Fatal("expected improvementInstruction to resolve")
 	}
@@ -435,7 +435,7 @@ func TestImprovementInstruction_NonWorktree_TargetUnchanged(t *testing.T) {
 	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
 	writeFormulaFile(t, root, "fx", true)
 
-	_, f, ok := improvementInstruction(root, "Formula: fx")
+	_, f, ok := improvementInstruction(root, "Formula: fx", false)
 	if !ok {
 		t.Fatal("expected improvementInstruction to resolve")
 	}
@@ -479,7 +479,7 @@ func TestImprovementInstructionTemplate_NeverAutoPromotes(t *testing.T) {
 	root := setupTestFactoryForImprovement(t, map[string]bool{"alpha": true})
 	writeFormulaFile(t, root, "fx", true)
 
-	instruction, _, ok := improvementInstruction(root, "Formula: fx")
+	instruction, _, ok := improvementInstruction(root, "Formula: fx", false)
 	if !ok {
 		t.Fatal("expected improvementInstruction to resolve")
 	}
@@ -502,7 +502,7 @@ func TestImprovementInstructionTemplate_NeverAutoPromotes(t *testing.T) {
 func TestImprovementComplete_WorktreeForceReclaimed_EditSurvives(t *testing.T) {
 	fx := setupWorktreeDivergenceFixture(t, "alpha", "fx")
 
-	instruction, _, ok := improvementInstruction(fx.trueRoot, "Formula: "+fx.formula)
+	instruction, _, ok := improvementInstruction(fx.trueRoot, "Formula: "+fx.formula, false)
 	if !ok {
 		t.Fatal("expected improvementInstruction to resolve")
 	}
@@ -625,7 +625,7 @@ func TestImprovementComplete_RealGitWorktree_SurvivesRealForceRemove(t *testing.
 		t.Fatalf(".factory-root redirect = %q, want %q", strings.TrimSpace(string(redirect)), trueRoot)
 	}
 
-	instruction, _, ok := improvementInstruction(trueRoot, "Formula: fx")
+	instruction, _, ok := improvementInstruction(trueRoot, "Formula: fx", false)
 	if !ok {
 		t.Fatal("expected improvementInstruction to resolve")
 	}

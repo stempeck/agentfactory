@@ -96,6 +96,73 @@ Phase 2 already knows which steps are suspect.
 Carry the step-owned findings into Phase 2's insertion-point reasoning and Phase 3's
 classification; a context finding names the step, it does not by itself name the failure category.
 
+## Phase 1.5b: Efficiency Review
+
+Phase 1.5 asks what the run's context window **held**. This phase asks what it **cost** — which
+steps generated the most tokens, and whether the formula's own authoring is what made them do it.
+Run it before Phase 2 as well, so the insertion-point reasoning sees both.
+
+Skip it only when `.runtime/improvement_pending` carries `"tokenomics_state":"off"`. The factory is
+then not running the efficiency objective, and a ranking nobody will act on is spend, not evidence.
+
+1. **Pull both payloads.**
+
+    ```bash
+    af telemetry report --instance <instance_id> --json
+    af telemetry band --instance <instance_id> --json
+    ```
+
+    Branch on the `state` VALUE in each, exactly as Phase 1.5 does. `band` answers with no rows
+    when the formula has not been run often enough to have learned medians; that is an answer, not
+    a failure, and it means step 3 below is the whole review.
+
+2. **Rank the steps by what they generated.** Score each of the report's `rows[]` as
+   `out_tokens + subagent_tokens` and take the top three.
+
+    **Both keys are `null` on any step the run did not measure.** `null` is not `0`. An unmeasured
+    step must never rank as a cheap one — say it was not measured and leave it out of the ranking.
+
+    Then read, on the same rows:
+
+    | Figure | What it tells you |
+    |--------|-------------------|
+    | `thinking_share` | the fraction of `out_tokens` attributed to thinking; high means the step deliberated rather than produced |
+    | `think_tokens_est` | the estimate that share is computed from |
+    | `peak_ctx_tokens` | the fullest the window got while the step ran |
+    | `subagent_tokens` | what the step's sub-agents spent — often the larger half of its cost |
+
+    From `band`'s `rows[].figures[]`, read the figures named `out_tokens`, `subagent_tokens` and
+    `think_tokens` — that last one is the host's EXACT thinking figure, not the estimate above —
+    and take each one's `median`, `verdict` and `direction`. A step that you ranked in the top
+    three AND that `band` reports `"direction":"above"` is the strongest evidence this review can
+    produce: it is expensive, and it is expensive *for itself*.
+
+3. **Name the authoring pattern.** For each top-ranked step, read its text in the formula and say
+   which of these it does. This is what makes a cost the FORMULA's rather than the task's:
+
+    - **Top-to-bottom re-read** of an artifact the run has already produced
+    - **Re-verification sub-agent** that re-derives a fact an earlier step established
+    - **Re-copy table** — a directive to reproduce content that already exists in a file
+    - **Whole-artifact sub-agent prompt** — a sub-agent handed a large file when it needs a section
+
+    If none of them fits, the step's cost belongs to the task and the formula cannot fix it. Say so
+    and stop. Inventing an edit here spends tokens to save none.
+
+4. **Classify under `## Authoring-Artifact Waste`** in [PATTERNS.md](./PATTERNS.md), and carry that
+   fix pattern into Phase 5.
+
+**What this review may never trade away.** Every fix it produces must leave the step-id set, the
+gate steps, the artifact paths named in step text, and the protected capture directives
+(`Verbatim`, `RE-COPY`, `byte-for-byte`, `read it top to bottom`) exactly as they were.
+`af improvement complete` counts all four before and after and reports the delta in the outcome
+mail, so an edit that buys tokens by dropping a gate is not a saving — it is a finding against you.
+
+**Output** — state explicitly:
+- **Measured?**: "no generation figures for instance `<id>`", or the top three steps with their
+  `out_tokens + subagent_tokens` scores
+- **Per ranked step**: step id, the authoring pattern named (or "task-inherent"), and the band
+  `direction` where `band` returned data
+
 ## Phase 2: Read and Understand the Formula
 
 Read the full formula TOML. For each step, note:
@@ -118,6 +185,7 @@ Before designing any fix, categorize the gap. State which type:
 | **Wrong output location** | Artifacts written to wrong path (relative vs absolute, variable resolution) | `## Wrong Output Location` |
 | **Signal/ordering failure** | Agent didn't send required signal, steps ran out of order, race condition | `## Signal Ordering` |
 | **Enforcement gap** | Step instructions exist but agent can bypass without consequence | `## Enforcement Gap` |
+| **Authoring-artifact waste** | Step re-reads, re-copies or re-derives something the run already produced; high `out_tokens`/`subagent_tokens` for little new output | `## Authoring-Artifact Waste` |
 
 State: "This is a **<category>** failure because <one sentence>."
 
@@ -183,7 +251,14 @@ Walk through the fix as if executing it. Produce this checklist — all must pas
 [ ] BASE PRESERVED: Permanent files (CLAUDE.md, configs, settings) untouched
 [ ] IDEMPOTENT: Running twice produces the same result
 [ ] UNSKIPPABLE: Executing agent cannot misinterpret or skip this action
+[ ] SEMANTICS PRESERVED: step-id set, gate set, artifact paths and verbatim-capture directives unchanged
 ```
+
+The SEMANTICS PRESERVED check is the one an efficiency fix is most likely to fail, because deleting
+a gate or a capture directive is the cheapest way to make a step generate fewer tokens. Check it
+against the formula as it was when this session started, not against your intent.
+`af improvement complete` counts the same four things independently and puts the delta in the
+outcome mail, so a failure here becomes visible whether or not you notice it.
 
 For the UNSKIPPABLE check, attempt these escape paths against your fix:
 - **Skip**: Can the agent proceed to the next action without executing this one?
@@ -196,8 +271,10 @@ If any check fails, return to Phase 5 and redesign.
 
 Present findings to the user interactively:
 
-1. **Summary**: The gap, classification, sibling scan results, and the Phase 1.5 context review —
-   the steps reviewed and the arm chosen for each, or "no context data for instance `<id>`"
+1. **Summary**: The gap, classification, sibling scan results, the Phase 1.5 context review — the
+   steps reviewed and the arm chosen for each, or "no context data for instance `<id>`" — and the
+   Phase 1.5b efficiency review: the ranked steps and the authoring pattern named for each, or "no
+   generation figures for instance `<id>`"
 2. **Proposed changes**: List each insertion/modification with before→after
 3. **Validation results**: The Phase 7 checklist (all passing)
 4. **Ask**: "Which improvements should I apply?"

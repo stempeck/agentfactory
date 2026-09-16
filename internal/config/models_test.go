@@ -469,6 +469,112 @@ func TestPairingLintProfile(t *testing.T) {
 	}
 }
 
+// TestCapacityLintProfile pins #673's CONFIG-LINT: the capacity declarations that SURVIVE
+// validateModelProfile and are then ignored at runtime. Its band is narrow because most capacity
+// typos are already load errors, and the "never fires" half of this table is the part that keeps it
+// narrow — a lint that also fired on the rejected shapes would be unreachable, and one that fired on
+// coherent registries would train operators to ignore it.
+func TestCapacityLintProfile(t *testing.T) {
+	tests := []struct {
+		name        string
+		profile     map[string]string
+		want        bool
+		contains    []string
+		notContains []string
+	}{
+		{
+			// The real footgun: legal, deliberate-looking, and arms nothing, because
+			// ParallelSubagentsDisabled is exact-"1".
+			name:     "a cap set to 0 arms nothing and says so",
+			profile:  map[string]string{EnvDisableParallelSubagents: "0"},
+			want:     true,
+			contains: []string{"gw", EnvDisableParallelSubagents, `"0"`, `"1"`},
+		},
+		{
+			// An endpoint profile is the shape the gate actually judges, so this is the message that
+			// may promise a refusal.
+			name: "a pool below the default child floor refuses every launch",
+			profile: map[string]string{
+				EnvBackendPoolTokens: "40000", "ANTHROPIC_BASE_URL": "http://127.0.0.1:1234",
+			},
+			want:     true,
+			contains: []string{"gw", EnvBackendPoolTokens, "40000", "50000", "will be refused"},
+		},
+		{
+			// The same number on a profile the gate never reaches. Promising a refusal here would send
+			// the operator to raise a pool that is not read at all; the remedy is the missing endpoint.
+			name:        "a below-floor pool with no endpoint is inert, and the message says so",
+			profile:     map[string]string{EnvBackendPoolTokens: "40000"},
+			want:        true,
+			contains:    []string{"gw", EnvBackendPoolTokens, "ANTHROPIC_BASE_URL", "never read"},
+			notContains: []string{"will be refused"},
+		},
+		{
+			// The floor is read through the same accessor the gate uses, so an operator who raises it
+			// moves the warning with it rather than discovering the mismatch at dispatch time.
+			name: "an operator-raised floor moves the boundary with it",
+			profile: map[string]string{
+				EnvBackendPoolTokens: "60000", EnvBackendChildFloorTokens: "80000",
+				"ANTHROPIC_BASE_URL": "http://127.0.0.1:1234",
+			},
+			want:     true,
+			contains: []string{"60000", "80000"},
+		},
+		{
+			name:    "a pool exactly at the floor fits and is silent",
+			profile: map[string]string{EnvBackendPoolTokens: "50000"},
+		},
+		{name: "an armed cap beside an ample pool is silent",
+			profile: map[string]string{EnvDisableParallelSubagents: "1", EnvBackendPoolTokens: "400000"}},
+		{name: "a profile declaring no capacity keys is silent", profile: map[string]string{"ANTHROPIC_MODEL": "gpt-5.6-sol"}},
+		{name: "an empty profile is silent", profile: map[string]string{}},
+		{
+			// Both already hard LOAD ERRORS (models.go validateModelProfile). Linting them would be
+			// unreachable code; asserting silence here is what documents that.
+			name:    "a value the loader already rejects is not this lint's business",
+			profile: map[string]string{EnvDisableParallelSubagents: "true", EnvBackendPoolTokens: "lots"},
+		},
+		{
+			// An empty string is absent, not zero — the same rule every accessor in this file follows.
+			name:    "empty capacity keys are absent, not misconfigured",
+			profile: map[string]string{EnvDisableParallelSubagents: "", EnvBackendPoolTokens: ""},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			warning, ok := CapacityLintProfile("gw", tc.profile)
+			if ok != tc.want {
+				t.Fatalf("hasWarning = %v, want %v (warning=%q)", ok, tc.want, warning)
+			}
+			if !ok {
+				if warning != "" {
+					t.Errorf("no warning expected but got %q", warning)
+				}
+				return
+			}
+			for _, w := range tc.contains {
+				if !strings.Contains(warning, w) {
+					t.Errorf("warning %q should contain %q", warning, w)
+				}
+			}
+			for _, w := range tc.notContains {
+				if strings.Contains(warning, w) {
+					t.Errorf("warning %q must not contain %q — the remedy it names would be wrong", warning, w)
+				}
+			}
+		})
+	}
+
+	// The lint reports; it must never reinterpret. TestParallelSubagentsDisabled owns the predicate,
+	// and this restates the one overlap so a future lint that "helpfully" accepted "0" would fail here
+	// as well as there.
+	t.Run("the strict runtime predicate is untouched by the lint", func(t *testing.T) {
+		if ParallelSubagentsDisabled(map[string]string{EnvDisableParallelSubagents: "0"}) {
+			t.Error(`"0" now arms the cap; the lint was supposed to warn about it, not honour it`)
+		}
+	})
+}
+
 func TestResolveModelEnv_ExpandsFullSet(t *testing.T) {
 	cfg := &ModelsConfig{
 		Models: map[string]map[string]string{
@@ -1494,5 +1600,30 @@ func TestEndpointClassSource_NamesTheRungTheLadderUsed(t *testing.T) {
 				t.Errorf("reported source %q (%q), but the ladder filled %q", source, tc.profile[source], completed[tc.key])
 			}
 		})
+	}
+}
+
+// TestValidateModelProfile_DisableParallelSubagents pins F6 (r3906601... AF_DISABLE_PARALLEL_SUBAGENTS
+// is unvalidated): the hard-cap flag must be validated at the same write boundary as the pool and
+// child-floor keys, so a typo like "true" is a loud load error rather than silently leaving the cap
+// OFF (the accessor engages only on the exact "1"). Accept {"", "0", "1"}; reject anything else with
+// the pool/floor clauses' ErrInvalidType shape. RED at head (validateModelProfile ignores the key, so
+// every value passes).
+func TestValidateModelProfile_DisableParallelSubagents(t *testing.T) {
+	for _, v := range []string{"", "0", "1"} {
+		if err := validateModelProfile("cap", map[string]string{EnvDisableParallelSubagents: v}); err != nil {
+			t.Errorf("AF_DISABLE_PARALLEL_SUBAGENTS=%q was rejected, want accepted (the accessor's allowed set): %v", v, err)
+		}
+	}
+	for _, v := range []string{"2", "true", "yes", "x"} {
+		err := validateModelProfile("cap", map[string]string{EnvDisableParallelSubagents: v})
+		if err == nil {
+			t.Errorf("AF_DISABLE_PARALLEL_SUBAGENTS=%q was accepted; a non-{\"\",\"0\",\"1\"} value must be a "+
+				"loud load error, not a silently-disabled cap", v)
+			continue
+		}
+		if !errors.Is(err, ErrInvalidType) {
+			t.Errorf("AF_DISABLE_PARALLEL_SUBAGENTS=%q rejected with %v, want the pool/floor clauses' ErrInvalidType shape", v, err)
+		}
 	}
 }

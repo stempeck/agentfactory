@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/lock"
+	"github.com/stempeck/agentfactory/internal/session"
 )
 
 // --- matchItemToAgent tests ---
@@ -450,12 +451,16 @@ func TestResolveDispatchInterval(t *testing.T) {
 func TestFormatDispatchStatus(t *testing.T) {
 	now := time.Now().UTC()
 
+	// Every case here is deliberately cron-less: these four pin the pre-#610 output, and the
+	// schedules arm is covered by TestFormatDispatchStatus_Schedules (dispatch_schedules_test.go),
+	// whose negative control guards the two "No dispatched issues." cases below.
 	tests := []struct {
 		name          string
 		running       bool
 		entries       map[string]dispatchEntry
 		agentState    map[string]bool
 		phaseComplete map[string]bool
+		schedules     []cronStatusEntry
 		wantHas       []string
 		wantNot       []string
 	}{
@@ -498,7 +503,7 @@ func TestFormatDispatchStatus(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			out := formatDispatchStatus(tc.running, tc.entries, tc.agentState, tc.phaseComplete)
+			out := formatDispatchStatus(tc.running, tc.entries, tc.agentState, tc.phaseComplete, tc.schedules, now)
 			for _, want := range tc.wantHas {
 				if !strings.Contains(out, want) {
 					t.Errorf("formatDispatchStatus output missing %q\ngot: %s", want, out)
@@ -641,6 +646,10 @@ func TestDispatchStop_NotRunning(t *testing.T) {
 	}
 }
 
+// TestDispatchStatus_JSON_SchemaSnapshot is the NO-CRON fixture of the two-fixture snapshot
+// (issue #610 Phase 4, N12). Its factory has no dispatch.json at all, so it proves that the
+// additive `schedules` key stays elided and the frozen 2-key top level survives untouched.
+// The crons fixture is TestDispatchStatus_JSON_SchemaSnapshot_Crons, below.
 func TestDispatchStatus_JSON_SchemaSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	afDir := filepath.Join(dir, ".agentfactory")
@@ -792,6 +801,169 @@ func TestDispatchStatus_JSON_SchemaSnapshot(t *testing.T) {
 	}
 	if e.Recovery != "" {
 		t.Errorf("non-workflow entry recovery = %q, want empty so omitempty elides the key", e.Recovery)
+	}
+}
+
+// TestDispatchStatus_JSON_SchemaSnapshot_Crons is the CRON fixture of the two-fixture snapshot
+// (issue #610 Phase 4, N12), and the only end-to-end proof that runDispatchStatus reads the config
+// and the cron state at all. Its factory is crons-only — zero dispatched issues, three schedules —
+// which is both the shape the feature exists for and the shape that would silently emit nothing if
+// the schedules never reached the emitter.
+//
+// The three schedules are chosen to exercise every elidable key in BOTH directions, because a key
+// set frozen from one shape freezes nothing about the others:
+//
+//	patrol (fired)   — last_fired_at / last_outcome present, last_detail / consecutive_failures absent
+//	fresh  (never)   — all four absent
+//	broken (erroring) — last_outcome / last_detail / consecutive_failures present, last_fired_at absent
+//
+// next_due_at and last_attempt_at are frozen as ALWAYS present: omitempty is a no-op on a
+// struct-typed field in encoding/json, and this repo uses no omitzero.
+func TestDispatchStatus_JSON_SchemaSnapshot_Crons(t *testing.T) {
+	dir := t.TempDir()
+	afDir := filepath.Join(dir, ".agentfactory")
+	os.MkdirAll(afDir, 0o755)
+	os.WriteFile(filepath.Join(afDir, "factory.json"), []byte(`{"type":"factory","version":1}`), 0o644)
+
+	fake, _ := setupHermeticSessions(t)
+	// One live cron agent, so agent_running is frozen as a key that carries a real probe result
+	// rather than a Go zero value that happens to look plausible.
+	fake.present[session.SessionName("patrolman")] = true
+
+	// A crons-only dispatch.json is legal since Phase 1 relaxed the repos/trigger_label/mappings
+	// emptiness checks, and LoadDispatchConfig runs only the struct-level validator — so this
+	// fixture needs no agents.json.
+	writeDispatchJSON(t, dir, `{"crons":[`+
+		`{"name":"patrol","agent":"patrolman","every":"4h"},`+
+		`{"name":"fresh","agent":"newbie","every":"7d"},`+
+		`{"name":"broken","agent":"patrolman","every":"1h"}]}`)
+
+	fired := time.Unix(1700000000, 0).UTC()
+	if err := saveCronState(dir, &cronState{Crons: map[string]cronRecord{
+		"patrol": {LastFiredAt: fired, LastAttemptAt: fired, LastOutcome: cronOutcomeFired, LastCheckAt: fired},
+		"broken": {LastAttemptAt: fired, LastOutcome: cronOutcomeError, LastDetail: "boom", LastCheckAt: fired, ConsecutiveFailures: 2},
+		// A record whose schedule is not in the config must leave no status trace (config is truth).
+		"deleted": {LastFiredAt: fired, LastAttemptAt: fired, LastOutcome: cronOutcomeFired},
+	}}); err != nil {
+		t.Fatalf("saveCronState: %v", err)
+	}
+
+	origDir, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("json", false, "")
+	_ = cmd.Flags().Set("json", "true")
+	var buf strings.Builder
+	cmd.SetOut(&buf)
+	if err := runDispatchStatus(cmd, nil); err != nil {
+		t.Fatalf("runDispatchStatus: %v", err)
+	}
+	out := strings.TrimSpace(buf.String())
+
+	// Top-level key set grows to exactly 3: the frozen pair plus the additive schedules array.
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &top); err != nil {
+		t.Fatalf("unmarshal %q: %v", out, err)
+	}
+	wantTop := map[string]bool{"dispatcher_running": true, "entries": true, "schedules": true}
+	if len(top) != len(wantTop) {
+		t.Errorf("top-level key count = %d (%v), want %d (%q)", len(top), keysOf(top), len(wantTop), out)
+	}
+	for k := range wantTop {
+		if _, ok := top[k]; !ok {
+			t.Errorf("missing top-level key %q in %q", k, out)
+		}
+	}
+	for k := range top {
+		if !wantTop[k] {
+			t.Errorf("unexpected top-level key %q in %q", k, out)
+		}
+	}
+
+	var schedules []map[string]json.RawMessage
+	if err := json.Unmarshal(top["schedules"], &schedules); err != nil {
+		t.Fatalf("unmarshal schedules: %v", err)
+	}
+	// Config document order, not sorted: patrol, fresh, broken. The orphaned "deleted" record is
+	// absent because the config, not the state file, decides which schedules exist.
+	if len(schedules) != 3 {
+		t.Fatalf("want 3 schedules, got %d (%q)", len(schedules), out)
+	}
+
+	// Per-schedule key sets are frozen the same bidirectional way the entry shapes are.
+	base := []string{"name", "agent", "agent_running", "every", "next_due_at", "last_attempt_at"}
+	for _, tc := range []struct {
+		label string
+		index int
+		want  []string
+	}{
+		{"fired", 0, append(append([]string{}, base...), "last_fired_at", "last_outcome")},
+		{"never-fired", 1, base},
+		{"erroring", 2, append(append([]string{}, base...), "last_outcome", "last_detail", "consecutive_failures")},
+	} {
+		want := map[string]bool{}
+		for _, k := range tc.want {
+			want[k] = true
+		}
+		got := schedules[tc.index]
+		if len(got) != len(want) {
+			t.Errorf("%s schedule key count = %d (%v), want %d", tc.label, len(got), keysOf(got), len(want))
+		}
+		for k := range want {
+			if _, ok := got[k]; !ok {
+				t.Errorf("missing %s schedule key %q in %q", tc.label, k, out)
+			}
+		}
+		for k := range got {
+			if !want[k] {
+				t.Errorf("unexpected %s schedule key %q in %q", tc.label, k, out)
+			}
+		}
+	}
+
+	// Value-level guards: the schedules reflect the seeded config and cron state.
+	var parsed dispatchStatusJSON
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("unmarshal typed: %v", err)
+	}
+	if len(parsed.Entries) != 0 {
+		t.Errorf("entries = %+v, want none — this is a crons-only factory", parsed.Entries)
+	}
+	p := parsed.Schedules[0]
+	if p.Name != "patrol" || p.Agent != "patrolman" || p.Every != "4h" {
+		t.Errorf("schedule = %+v, want name=patrol agent=patrolman every=4h", p)
+	}
+	if p.LastFiredAt == nil || !p.LastFiredAt.Equal(fired) {
+		t.Errorf("patrol last_fired_at = %v, want %v", p.LastFiredAt, fired)
+	}
+	if want := fired.Add(4 * time.Hour); !p.NextDueAt.Equal(want) {
+		t.Errorf("patrol next_due_at = %v, want %v — status must mirror the engine's due predicate", p.NextDueAt, want)
+	}
+	if !p.AgentRunning {
+		t.Error("patrol agent_running = false, want true — a live cron agent that was never GitHub-dispatched must still be probed")
+	}
+	// Negative control: the elided keys really are elided because the VALUES are zero, not because
+	// the emitter dropped them.
+	f := parsed.Schedules[1]
+	if f.LastFiredAt != nil || f.LastOutcome != "" {
+		t.Errorf("never-fired schedule = %+v, want no fire stamp and no outcome so omitempty elides both", f)
+	}
+	if !f.NextDueAt.IsZero() {
+		t.Errorf("never-fired next_due_at = %v, want the zero time", f.NextDueAt)
+	}
+	if f.AgentRunning {
+		t.Error("fresh agent_running = true, want false — its agent has no session")
+	}
+	b := parsed.Schedules[2]
+	if b.LastFiredAt != nil || b.LastOutcome != cronOutcomeError || b.LastDetail != "boom" || b.ConsecutiveFailures != 2 {
+		t.Errorf("erroring schedule = %+v, want no fire stamp (HIGH-4) but outcome/detail/failures preserved", b)
+	}
+	// Its attempt stamp is non-zero, which is exactly the input that would derive
+	// 0001-01-01T01:00:00Z if next-due were anchored on attempts instead of fires.
+	if !b.NextDueAt.IsZero() {
+		t.Errorf("erroring next_due_at = %v, want the zero time — an attempt is not a fire", b.NextDueAt)
 	}
 }
 

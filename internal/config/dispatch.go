@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 
 	"github.com/stempeck/agentfactory/internal/fsutil"
 )
@@ -24,6 +25,7 @@ type DispatchConfig struct {
 	RetryAfterSecs             int               `json:"retry_after_seconds"`
 	RemoveTriggerAfterDispatch bool              `json:"remove_trigger_after_dispatch"`
 	Workflows                  []Workflow        `json:"workflows,omitempty"`
+	Crons                      []CronSchedule    `json:"crons,omitempty"`
 }
 
 // DispatchMapping maps GitHub labels to an agent name.
@@ -47,6 +49,18 @@ type DispatchMapping struct {
 type Workflow struct {
 	Label  string   `json:"label"`  // operator-applied GitHub label that triggers the workflow
 	Phases []string `json:"phases"` // ordered existing mapping labels
+}
+
+// CronSchedule declares one operator-owned recurring sling (issue #610): a wake that fires on a
+// cadence with no triggering issue or PR. Name is the schedule's own identity rather than a derived
+// agent+every key, because two schedules may target one agent with different vars and must not
+// collide in the overlap gate or the runtime state map.
+type CronSchedule struct {
+	Name  string            `json:"name"`            // required, unique across crons
+	Agent string            `json:"agent"`           // required
+	Every string            `json:"every"`           // required, compact duration ("4h", "14d")
+	Vars  map[string]string `json:"vars,omitempty"`  // optional; empty or absent is a bare re-sling
+	Model string            `json:"model,omitempty"` // optional per-cron model profile (#480 parity)
 }
 
 // LoadDispatchConfig loads and validates .agentfactory/dispatch.json.
@@ -157,14 +171,27 @@ func ValidateDispatchConfig(disp *DispatchConfig, agents *AgentConfig, models *M
 
 // validateDispatchConfig checks that the dispatch config is well-formed.
 func validateDispatchConfig(cfg *DispatchConfig) error {
-	if len(cfg.Repos) == 0 {
-		return fmt.Errorf("%w: dispatch config must have at least one repo", ErrMissingField)
-	}
-	if cfg.TriggerLabel == "" {
-		return fmt.Errorf("%w: dispatch config must have a trigger_label", ErrMissingField)
-	}
-	if len(cfg.Mappings) == 0 {
-		return fmt.Errorf("%w: dispatch config must have at least one mapping", ErrMissingField)
+	// All three GitHub-side sections may be empty once at least one cron is declared (issue #610):
+	// a crons-only factory dispatches nothing from GitHub but still wakes agents on a cadence, and
+	// without this it is both unwritable and, once hand-edited, silently skipped at af up.
+	// trigger_label is included deliberately — it is the arming query's only input, so a
+	// crons-only config has nothing to arm.
+	//
+	// With no crons the three rejections stand byte-unchanged, sentinel and message alike:
+	// startDispatch (internal/cmd/dispatch.go:1632-1637) reads ErrMissingField as "dispatch not
+	// configured", and every unconfigured factory depends on that friendly skip. This is a guard
+	// around the block rather than an early return so the interval/retry/notify defaults below
+	// still fill for a crons-only config.
+	if len(cfg.Crons) == 0 {
+		if len(cfg.Repos) == 0 {
+			return fmt.Errorf("%w: dispatch config must have at least one repo", ErrMissingField)
+		}
+		if cfg.TriggerLabel == "" {
+			return fmt.Errorf("%w: dispatch config must have a trigger_label", ErrMissingField)
+		}
+		if len(cfg.Mappings) == 0 {
+			return fmt.Errorf("%w: dispatch config must have at least one mapping", ErrMissingField)
+		}
 	}
 	for i, m := range cfg.Mappings {
 		if m.Label != "" && len(m.Labels) > 0 {
@@ -188,6 +215,9 @@ func validateDispatchConfig(cfg *DispatchConfig) error {
 		}
 	}
 	if err := validateWorkflows(cfg); err != nil {
+		return err
+	}
+	if err := validateCrons(cfg); err != nil {
 		return err
 	}
 	if cfg.IntervalSecs <= 0 {
@@ -260,6 +290,52 @@ func validateWorkflows(cfg *DispatchConfig) error {
 				workflowSource = m.Source
 			} else if m.Source != workflowSource {
 				return fmt.Errorf("workflow %q has phases with mixed source (%q vs %q); cross-source workflows are not supported", wf.Label, workflowSource, m.Source)
+			}
+		}
+	}
+	return nil
+}
+
+// validateCrons checks the struct-level (no-agents.json-needed) rules for recurring slings
+// (issue #610 Phase 1). Agent existence, formula-bearingness and model resolution are cross-file
+// concerns and live with the other cross-file cron checks in the cmd layer, for the import-cycle
+// reason recorded above ValidateDispatchConfig.
+//
+// Every error here is PLAIN. It must never wrap ErrMissingField: startDispatch
+// (internal/cmd/dispatch.go:1632-1637) reads that sentinel as "dispatch not configured" and
+// friendly-skips the entire dispatcher, so a sentinel-classed schedule error would turn one
+// hand-edited `every` value into a silent outage of items and crons alike. The sibling
+// validateWorkflows wraps its empty-label check above; that is the line NOT to copy.
+func validateCrons(cfg *DispatchConfig) error {
+	seen := make(map[string]bool)
+	for i, cron := range cfg.Crons {
+		if cron.Name == "" {
+			return fmt.Errorf("cron at index %d must have a name", i)
+		}
+		if seen[cron.Name] {
+			return fmt.Errorf("cron %q has duplicate name", cron.Name)
+		}
+		seen[cron.Name] = true
+		if cron.Agent == "" {
+			return fmt.Errorf("cron %q must have an agent", cron.Name)
+		}
+		if _, err := ParseCompactDuration(cron.Every); err != nil {
+			return fmt.Errorf("cron %q: %w", cron.Name, err)
+		}
+		// Var keys ride into `--var k=v` argv, which parseCLIVars (internal/cmd/sling.go) splits on
+		// the FIRST '=', and are matched by the {{\w+}} template grammar. A key carrying '=' or a
+		// space would silently resolve to the wrong value or to nothing at all, and strict decode
+		// does not police map interiors — so the shape is enforced here. The rule is the same POSIX
+		// identifier grammar IsValidEnvKeyName already owns, for the same reason: the key is joined
+		// raw into a command line.
+		keys := make([]string, 0, len(cron.Vars))
+		for key := range cron.Vars {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys) // a cron with more than one bad key must always name the same one
+		for _, key := range keys {
+			if !IsValidEnvKeyName(key) {
+				return fmt.Errorf("cron %q has invalid var key %q: expected a letter or underscore followed by letters, digits or underscores", cron.Name, key)
 			}
 		}
 	}

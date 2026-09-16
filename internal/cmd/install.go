@@ -604,32 +604,12 @@ func runInstallRole(cmd *cobra.Command, role string) error {
 	}
 
 	// 4. Render CLAUDE.md from template — try agent-specific template first, fall back to type default
-	tmpl := templates.New()
-	templateRole := role
-	if !tmpl.HasRole(templateRole) {
-		if entry.Formula != "" {
-			fmt.Fprintf(os.Stderr, "WARNING: agent %q is formula-generated but its template is not embedded in the binary. Agent will function via workspace CLAUDE.md but af prime will inject a generic template.\n", role)
-		}
-		templateRole = entry.Type
-		if templateRole == "interactive" {
-			templateRole = "manager"
-		} else if templateRole == "autonomous" {
-			templateRole = "supervisor"
-		}
-	}
-
-	data := templates.RoleData{
-		Role:        role,
-		Description: entry.Description,
-		RootDir:     factoryRoot,
-		WorkDir:     roleDir,
-	}
-	claudeMD, err := tmpl.RenderRole(templateRole, data)
+	claudeMD, err := templates.RenderIdentity(templates.New(), role, entry, factoryRoot, roleDir)
 	if err != nil {
 		return fmt.Errorf("rendering CLAUDE.md: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(roleDir, "CLAUDE.md"), []byte(claudeMD), 0644); err != nil {
-		return fmt.Errorf("writing CLAUDE.md: %w", err)
+	if err := templates.WriteIdentity(roleDir, claudeMD); err != nil {
+		return err
 	}
 
 	// 5. Write settings.json based on role type
@@ -1117,14 +1097,31 @@ func reprovisionAgentSettings(cwd string, out io.Writer) error {
 		return nil
 	}
 
+	tmpl := templates.New()
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
+		agentDir := config.AgentDir(cwd, name)
 		roleType := claude.RoleTypeFor(name, agents)
-		if err := claude.EnsureSettings(config.AgentDir(cwd, name), roleType); err != nil {
+		if err := claude.EnsureSettings(agentDir, roleType); err != nil {
 			fmt.Fprintf(out, "warning: could not re-provision settings for agent %s: %v\n", name, err)
+		}
+		// The identity file is re-provisioned alongside settings.json: it is the carrier the model
+		// actually reads at session start, and af install --init was the one funnel that refreshed
+		// the settings half while leaving a stale CLAUDE.md in place.
+		agentEntry, ok := agents.Agents[name]
+		if !ok {
+			continue
+		}
+		identity, err := templates.RenderIdentity(tmpl, name, agentEntry, cwd, agentDir)
+		if err != nil {
+			fmt.Fprintf(out, "warning: could not re-provision identity for agent %s: %v\n", name, err)
+			continue
+		}
+		if err := templates.WriteIdentity(agentDir, identity); err != nil {
+			fmt.Fprintf(out, "warning: could not re-provision identity for agent %s: %v\n", name, err)
 		}
 	}
 

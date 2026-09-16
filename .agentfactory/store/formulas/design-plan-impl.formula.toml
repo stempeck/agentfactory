@@ -51,6 +51,7 @@ This formula guides an agent through the design-plan-impl Mode A process:
 | Extracting IMPLREADMEs after the outline | Mode B belongs to design-phase-impl — STOP after the outline is verified and pushed |
 | Creating phases that aren't self-contained | Each phase must stand alone |
 | Numbering phases to match design doc when dependencies differ | Number by dependency order |
+| Inflating phase COUNT — one phase per deliverable/domain when they share a service and PR | Right-size: collapse to the fewest phases hard boundaries allow (phase-3 op 9); a net-deletion or single-service change stays 1–2 phases |
 | Planning for one environment but not the other | Deployment audit catches parity gaps |
 | Routing all phases to *implement | Classify workstreams; route to specialized skills or agents |
 | Assuming a specific file exists | Locate design artifacts from the merged input branch's diff, not guessed paths |
@@ -478,11 +479,33 @@ Merge the design spec with the investigation findings.
      **add a parity phase** to the outline
    - If deploy scripts need updates for new features, add that to the relevant phase
 
-**Anti-pattern:** Do NOT number phases to match design doc when dependencies differ.
-Implementation ordering comes from actual code dependencies, not narrative order.
+9. **Right-size — collapse to the fewest phases (scope proportionality)**: operations
+   6–8 only ever ADD or SPLIT phases. This operation is their MANDATORY counterweight.
+   After splitting, MERGE phases back down — two deliverables belong in the SAME phase
+   unless a HARD boundary forces them apart. A hard boundary is exactly one of:
+   - **cross-service** — they live in different flavors and cannot land in one PR;
+   - **cross-repo** — one is out-of-repo (e.g. a separate terraform / ZT-ops PR);
+   - **merge-gate co-requirement** — one MUST NOT merge without the other, yet each is
+     authored as its own review unit;
+   - **deferrable / separate-ticket** — a genuinely independent feature the ticket does
+     not require to ship (it belongs to its own ticket, not a phase here).
+   Deliverables that touch the same files/service and can land in ONE PR are ONE phase —
+   do NOT split a type change, the return it enables, the same-line comment fix, and its
+   tests into separate phases. Out-of-repo and `manual` items are **linked follow-ups**,
+   not first-class phases, unless they gate the merge. Anchor to the design's own
+   narrative: if the design narrates N phases and you are about to emit more than N, each
+   extra phase needs a one-line hard-split reason from the list above; if it has none,
+   collapse it.
+
+**Anti-pattern (two-directional):** Do NOT number phases to match design doc when
+dependencies differ — ordering comes from actual code dependencies, not narrative order.
+But do NOT inflate the phase COUNT either: dependency order decides SEQUENCE, not how many
+phases exist. Collapse (operation 9) is mandatory — a net-deletion or single-service change
+stays 1–2 phases even when the design narrates more sub-steps.
 
 **Exit criteria:** Every phase has adjusted scope, gotchas, refined ACs, design
-references, workstream classification, and deployment coverage."""
+references, workstream classification, and deployment coverage — AND the phase set has
+been collapsed to the fewest phases hard boundaries allow (operation 9)."""
 
 [[steps]]
 id = "phase-4-construct-outline"
@@ -530,6 +553,13 @@ Each phase below is a **self-contained extraction unit**. Workflow:
 {ASCII dependency diagram}
 
 {Explanation of which phases can run in parallel}
+
+**Scope proportionality** (MANDATORY — the outline is rejected by GATE 0 without this):
+- The design narrates **{N}** phases; this outline has **{M}**.
+- If {M} > {N}, list EACH extra phase and its hard-split reason, one per line, using
+  this exact prefix (reason from: cross-service | cross-repo | merge-gate | deferrable-ticket):
+  `- Extra phase {X}: {reason} — {detail}`
+- Out-of-repo / `manual` follow-ups (NOT counted as in-repo merge phases): {list or "none"}
 
 ## Deployment Coverage
 
@@ -698,6 +728,27 @@ grep -n 'Today:' /tmp/ac-lines.txt
 # Expected: every N matches. Three of 21 were wrong on the run that produced this
 # check, and a wrong baseline sends the implementer hunting a pre-state that does
 # not exist (or, worse, reads a vacuous pass as proof the phase is already done).
+
+# 2f. SCOPE PROPORTIONALITY — over-decomposition is a defect, not a virtue. Every
+#     check above guards the NO-DROP direction; this one guards NO-NEEDLESS-SPLIT.
+#     Why this exists: a prior run turned a design that narrated 3 phases (a
+#     net-deletion frame-lift) into 12 outline phases — 10 by dependency/domain
+#     splitting + 2 appended by the deployment audit — none the ticket needed.
+OUTLINE="{design_dir}/implementation-plan/implementation_plan_outline.md"
+# 2f-i. The Scope-proportionality block exists and declares both counts.
+grep -cF '**Scope proportionality' "$OUTLINE"
+# Expected: 1
+grep -oE 'narrates [*][*][0-9]+[*][*] phases; this outline has [*][*][0-9]+[*][*]' "$OUTLINE"
+# Expected: one line, both numbers present.
+# 2f-ii. If M (outline phases) > N (design phases), EVERY extra phase must be
+#        enumerated with a hard-split reason.
+N=$(grep -oE 'narrates [*][*][0-9]+' "$OUTLINE" | grep -oE '[0-9]+' | head -1)
+M=$(grep -cE '^## Phase ' "$OUTLINE")
+EXTRAS=$(grep -cE '^- Extra phase ' "$OUTLINE")
+echo "N(design)=$N  M(outline)=$M  extras_listed=$EXTRAS"
+# Expected: if M > N then EXTRAS >= (M - N), each carrying a reason from
+# {cross-service|cross-repo|merge-gate|deferrable-ticket}. Any same-service,
+# same-PR phase that is really another phase's deliverable MUST be merged, not listed.
 ```
 
 Then verify each item:
@@ -718,7 +769,10 @@ Then verify each item:
 - [ ] Phase dependency chain is a valid DAG (no cycles)
 - [ ] Every deployment target in the repo is covered by at least one phase
 - [ ] Each phase has a Recommended Skill annotation
-- [ ] Phases spanning multiple domains have been split into domain-specific sub-phases
+- [ ] Phases are split ONLY where a hard boundary (cross-service/cross-repo/merge-gate) requires a separate PR — same-service, same-PR deliverables are NOT split (check 2f)
+- [ ] A **Scope proportionality** block exists and declares design-phase-count N and outline-phase-count M (check 2f-i)
+- [ ] If M > N, every extra phase is enumerated with a hard-split reason from {cross-service|cross-repo|merge-gate|deferrable-ticket}; no same-service/same-PR deliverable is its own phase (check 2f-ii)
+- [ ] Out-of-repo and `manual` items are listed as linked follow-ups, not counted as in-repo merge phases
 - [ ] For each risk in the design-doc's Risk Registry, the mitigation action appears in the relevant phase
 
 **If ANY check FAILS**: Go back and fix the outline. Do NOT proceed.

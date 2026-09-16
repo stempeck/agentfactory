@@ -273,7 +273,7 @@ func assertRecoveryDefaults(t *testing.T, r RecoveryConfig) {
 }
 
 // K3 (#596), the absent-file half of the "pin all four edits" invariant.
-// LoadStartupConfig's absent-file branch (startup.go:40-42) returns
+// LoadStartupConfig's absent-file branch returns
 // defaultStartupConfig() WITHOUT calling validateStartupConfig, so a recovery
 // default seeded only in the validate-fill leaves a factory with no startup.json
 // holding an all-zero recovery block — threshold 0, dark_grace 0, rate_cap 0.
@@ -444,6 +444,64 @@ func TestValidateStartupConfig_DefaultsAreSelfConsistent(t *testing.T) {
 	}
 }
 
+// TestShippedDefaultsCloseTheAdmitThenDieBand is #672 AC-4 at the default level. The admission
+// ceiling (100 - admission_margin_pct) and the exhaustion breaker (context_threshold_pct) live in
+// two different config structs and are validated in isolation, so nothing stops the shipped defaults
+// from admitting a step at an occupancy the breaker will kill mid-body. Pre-#672 they did exactly
+// that: margin 10 / threshold 85 is a ceiling of 90% sitting ABOVE an 85% breaker — a step admitted
+// in (85%, 90%] is recycled while rendering its own body ("admitted at 83%, breaker-recycled at 86%
+// two minutes later"). The invariant is ceiling <= breaker, read from the actual shipped defaults so
+// a later change to either one is re-checked here.
+func TestShippedDefaultsCloseTheAdmitThenDieBand(t *testing.T) {
+	cfg := defaultStartupConfig()
+	ceiling := 100 - cfg.Tokenomics.AdmissionMarginPct
+	breaker := cfg.Recovery.ContextThresholdPct
+	if ceiling > breaker {
+		t.Errorf("shipped defaults: admission ceiling %d%% (100 - margin %d) sits ABOVE the exhaustion breaker %d%%; "+
+			"a step admitted in (%d%%, %d%%] is killed mid-body — the admit-then-die band AC-4 forbids",
+			ceiling, cfg.Tokenomics.AdmissionMarginPct, breaker, breaker, ceiling)
+	}
+}
+
+// TestAdmissionBandLint is #672 AC-4's visibility half: the WARN fires exactly when an operator's
+// admission ceiling sits above the breaker (the runtime clamp then silently overrides it), and stays
+// quiet on the shipped defaults and on any margin whose ceiling already sits at or below the breaker.
+func TestAdmissionBandLint(t *testing.T) {
+	t.Run("QuietOnShippedDefaults", func(t *testing.T) {
+		if warning, ok := AdmissionBandLint(defaultStartupConfig()); ok {
+			t.Errorf("shipped defaults must not warn (ceiling 84 <= breaker 85), got %q", warning)
+		}
+	})
+
+	t.Run("FiresWhenCeilingAboveBreaker", func(t *testing.T) {
+		cfg := defaultStartupConfig()
+		cfg.Tokenomics.AdmissionMarginPct = 10 // ceiling 90 > breaker 85
+		warning, ok := AdmissionBandLint(cfg)
+		if !ok {
+			t.Fatal("margin 10 (ceiling 90) above breaker 85 must warn")
+		}
+		for _, k := range []string{"admission_margin_pct", "context_threshold_pct", "90", "85"} {
+			if !strings.Contains(warning, k) {
+				t.Errorf("warning must name %q, got %q", k, warning)
+			}
+		}
+	})
+
+	t.Run("QuietWhenCeilingEqualsBreaker", func(t *testing.T) {
+		cfg := defaultStartupConfig()
+		cfg.Tokenomics.AdmissionMarginPct = 15 // ceiling 85 == breaker 85, still admitted (clamp is <=)
+		if _, ok := AdmissionBandLint(cfg); ok {
+			t.Error("ceiling == breaker is not the admit-then-die band; the lint must stay quiet")
+		}
+	})
+
+	t.Run("NilIsQuiet", func(t *testing.T) {
+		if _, ok := AdmissionBandLint(nil); ok {
+			t.Error("a nil config must not warn")
+		}
+	})
+}
+
 // TestRecoveryRefreshInterval_MatchesSettingsTemplates closes the drift hole that made the comment
 // above only ASPIRATIONALLY true. recoveryRefreshIntervalSecs claims to be "the statusline
 // refreshInterval registered by the settings template", but nothing connected the two: the
@@ -513,8 +571,8 @@ func assertStepContextDefaults(t *testing.T, sc StepContextConfig) {
 	}
 }
 
-// #622 C1, the "pin all seed sites" invariant. LoadStartupConfig's absent-file branch
-// (startup.go:123-124) returns defaultStartupConfig() WITHOUT calling validateStartupConfig, so a
+// #622 C1, the "pin all seed sites" invariant. LoadStartupConfig's absent-file branch returns
+// defaultStartupConfig() WITHOUT calling validateStartupConfig, so a
 // default seeded only in the fill leaves a factory with no startup.json holding an all-zero
 // step_context block — bound 0, handoff 0. The AbsentBlock subtest covers the validated path; the
 // PAIR pins BOTH seeds, neither alone does.
@@ -552,7 +610,7 @@ func TestStartupStepContextDefaults(t *testing.T) {
 	})
 
 	t.Run("StatedZerosAreDefaulted", func(t *testing.T) {
-		// The house idiom (startup.go:195-203): a zero numeric means "absent", so a stated 0 is
+		// The house idiom the fill functions document: a zero numeric means "absent", so a stated 0 is
 		// defaulted rather than rejected. That is what makes the >=1 half of the ladder reachable
 		// only for negatives, and it is stated here so the trade cannot be changed by accident.
 		dir := writeStartupRoot(t, `{"step_context":{"bound_tokens":0,"handoff_pct":0}}`)
@@ -602,7 +660,7 @@ func TestStartupStepContextDefaults(t *testing.T) {
 
 // The ladder relations of #622 C1, one case per relation. A value the operator ACTUALLY WROTE is
 // rejected loudly, naming the on-disk key and the offending value — the validateRecoveryRelations
-// idiom (startup.go:241-263). The clamp-and-warn half is HIGH-1 and applies only to values that
+// idiom. The clamp-and-warn half is HIGH-1 and applies only to values that
 // are absent from disk; TestStartupStepContextUpgradeClamps covers it.
 func TestStartupStepContextRejectsExplicitLadderViolations(t *testing.T) {
 	// wantValues is asserted separately from wantKeys because the two halves of the message
@@ -786,4 +844,222 @@ func TestStartupStepContextUpgradeClamps(t *testing.T) {
 			}
 		}
 	})
+}
+
+func assertTokenomicsDefaults(t *testing.T, got TokenomicsConfig) {
+	t.Helper()
+	if want := defaultTokenomicsConfig(); got != want {
+		t.Errorf("Tokenomics = %+v, want the shipped %+v", got, want)
+	}
+}
+
+// The two backward-compat paths are separate guards on separate code, and a factory breaks in a
+// different way if either is missing: an existing startup.json that omits the block fails the enum
+// loop, and the ABSENT-FILE path returns defaultStartupConfig() without running the validator at
+// all — so the seed is the only thing covering it.
+func TestStartupTokenomicsDefaults(t *testing.T) {
+	t.Run("AbsentFile", func(t *testing.T) {
+		dir := t.TempDir() // no startup.json — the unvalidated path
+
+		cfg, err := LoadStartupConfig(dir)
+		if err != nil {
+			t.Fatalf("absent file must still load (C-4), got %v", err)
+		}
+		assertTokenomicsDefaults(t, cfg.Tokenomics)
+	})
+
+	t.Run("AbsentBlock", func(t *testing.T) {
+		// Every startup.json in existence omits "tokenomics", so it unmarshals to an all-zero
+		// block whose seven empty enums the gate loop would otherwise reject.
+		dir := writeStartupRoot(t, `{"quality":"on","telemetry":"on"}`)
+
+		cfg, err := LoadStartupConfig(dir)
+		if err != nil {
+			t.Fatalf("a startup.json without \"tokenomics\" must still load, got %v", err)
+		}
+		assertTokenomicsDefaults(t, cfg.Tokenomics)
+	})
+
+	t.Run("EmptyBlock", func(t *testing.T) {
+		dir := writeStartupRoot(t, `{"tokenomics":{}}`)
+
+		cfg, err := LoadStartupConfig(dir)
+		if err != nil {
+			t.Fatalf("an empty tokenomics block must load, got %v", err)
+		}
+		assertTokenomicsDefaults(t, cfg.Tokenomics)
+	})
+
+	t.Run("StatedZerosAreDefaulted", func(t *testing.T) {
+		dir := writeStartupRoot(t, `{"tokenomics":{"admission_margin_pct":0,"learned_min_runs":0}}`)
+
+		cfg, err := LoadStartupConfig(dir)
+		if err != nil {
+			t.Fatalf("a stated 0 must default, not reject, got %v", err)
+		}
+		assertTokenomicsDefaults(t, cfg.Tokenomics)
+	})
+
+	t.Run("WrittenZeroMaxRelaunchesReadsAsUnset", func(t *testing.T) {
+		// A written efficiency_max_relaunches: 0 reads as UNSET and fills to the shipped default. That is
+		// this whole block's one absence convention (fillTokenomicsNumericDefaults): a stated 0 on any of
+		// these numeric knobs means "unset", not a runtime value, so the block has a single spelling for
+		// absence rather than a per-key carve-out. Disabling efficiency relaunches has its own spelling,
+		// tokenomics.efficiency off; 0 is not a second one, and the doc table states this so an operator
+		// who reads "≥ 0" is not surprised. PartialBlockFillsTheRest pins the OMITTED case; this pins the
+		// WRITTEN 0, so the documented convention cannot lapse silently.
+		dir := writeStartupRoot(t, `{"tokenomics":{"efficiency_max_relaunches":0}}`)
+
+		cfg, err := LoadStartupConfig(dir)
+		if err != nil {
+			t.Fatalf("a written 0 must load, not reject, got %v", err)
+		}
+		if cfg.Tokenomics.EfficiencyMaxRelaunches != defaultEfficiencyMaxRelaunches {
+			t.Errorf("efficiency_max_relaunches = %d, want %d — a written 0 reads as unset and fills to the "+
+				"default; disabling efficiency relaunches is tokenomics.efficiency off, not a written 0",
+				cfg.Tokenomics.EfficiencyMaxRelaunches, defaultEfficiencyMaxRelaunches)
+		}
+	})
+
+	t.Run("PartialBlockFillsTheRest", func(t *testing.T) {
+		dir := writeStartupRoot(t, `{"tokenomics":{"enabled":"on","escalate":"on"}}`)
+
+		cfg, err := LoadStartupConfig(dir)
+		if err != nil {
+			t.Fatalf("a partial tokenomics block must load, got %v", err)
+		}
+		if cfg.Tokenomics.Enabled != "on" || cfg.Tokenomics.Escalate != "on" {
+			t.Errorf("written values must survive the fill, got %+v", cfg.Tokenomics)
+		}
+		if cfg.Tokenomics.Budget != "default" || cfg.Tokenomics.Thrift != "default" {
+			t.Errorf("omitted mechanisms must fill to \"default\", got %+v", cfg.Tokenomics)
+		}
+		if cfg.Tokenomics.AdmissionMarginPct != defaultAdmissionMarginPct {
+			t.Errorf("admission_margin_pct = %d, want %d", cfg.Tokenomics.AdmissionMarginPct, defaultAdmissionMarginPct)
+		}
+		// The efficiency knobs fill from the same partial block. They are named separately because
+		// two of them floor at ZERO, so an unfilled key and a written one are the same bytes and only
+		// this assertion can tell a fill that ran from one that never happened.
+		if cfg.Tokenomics.Efficiency != "default" || cfg.Tokenomics.EfficiencyEffortLevel != defaultEfficiencyEffortLevel {
+			t.Errorf("omitted efficiency enums must fill, got %+v", cfg.Tokenomics)
+		}
+		if cfg.Tokenomics.EfficiencyThinkingSharePct != defaultEfficiencyThinkingSharePct ||
+			cfg.Tokenomics.EfficiencyRepeatReadFloor != defaultEfficiencyRepeatReadFloor ||
+			cfg.Tokenomics.EfficiencyMaxRelaunches != defaultEfficiencyMaxRelaunches {
+			t.Errorf("omitted efficiency numerics must fill, got %+v", cfg.Tokenomics)
+		}
+	})
+
+	t.Run("ExplicitValuesSurvive", func(t *testing.T) {
+		// Every efficiency value below differs from its shipped default, so a fill that ran over a
+		// written value is a failure here rather than a coincidence.
+		dir := writeStartupRoot(t, `{"tokenomics":{"enabled":"on","budget":"on","thrift":"off","dispatch":"off","interview":"on","effort":"on","escalate":"off","efficiency":"off","efficiency_effort_level":"low","efficiency_thinking_share_pct":55,"efficiency_repeat_read_floor":3,"efficiency_max_relaunches":2,"admission_margin_pct":25,"learned_min_runs":7}}`)
+
+		cfg, err := LoadStartupConfig(dir)
+		if err != nil {
+			t.Fatalf("LoadStartupConfig: %v", err)
+		}
+		want := TokenomicsConfig{
+			Enabled: "on", Budget: "on", Thrift: "off", Dispatch: "off",
+			Interview: "on", Effort: "on", Escalate: "off",
+			Efficiency: "off", EfficiencyEffortLevel: "low",
+			EfficiencyThinkingSharePct: 55, EfficiencyRepeatReadFloor: 3,
+			EfficiencyMaxRelaunches: 2,
+			AdmissionMarginPct:      25, LearnedMinRuns: 7,
+		}
+		if cfg.Tokenomics != want {
+			t.Errorf("Tokenomics = %+v, want %+v", cfg.Tokenomics, want)
+		}
+	})
+}
+
+// Every rejection names the DOTTED key, not the bare mechanism name. "tokenomics must be on/off"
+// would send an operator looking at the wrong line of their file — there are seven enums in the
+// block and four more beside it, and only the path distinguishes them.
+func TestStartupTokenomicsRejectsWrittenValues(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		body    string
+		wantKey string
+		wantVal string
+	}{
+		{"the seed enum", `{"tokenomics":{"enabled":"sometimes"}}`, "tokenomics.enabled", "sometimes"},
+		{"budget", `{"tokenomics":{"budget":"sometimes"}}`, "tokenomics.budget", "sometimes"},
+		{"thrift", `{"tokenomics":{"thrift":"yes"}}`, "tokenomics.thrift", "yes"},
+		{"dispatch", `{"tokenomics":{"dispatch":"maybe"}}`, "tokenomics.dispatch", "maybe"},
+		{"interview", `{"tokenomics":{"interview":"true"}}`, "tokenomics.interview", "true"},
+		{"effort", `{"tokenomics":{"effort":"high"}}`, "tokenomics.effort", "high"},
+		{"escalate", `{"tokenomics":{"escalate":"ON"}}`, "tokenomics.escalate", "ON"},
+		{"admission_margin_pct", `{"tokenomics":{"admission_margin_pct":250}}`, "tokenomics.admission_margin_pct", "250"},
+		{"learned_min_runs", `{"tokenomics":{"learned_min_runs":-3}}`, "tokenomics.learned_min_runs", "-3"},
+		{"efficiency", `{"tokenomics":{"efficiency":"sometimes"}}`, "tokenomics.efficiency", "sometimes"},
+		// The one efficiency key validated by MEMBERSHIP rather than range. "medium-ish" is not in the
+		// host's effort vocabulary, and the tri-state gate loop the other enums use would have taken
+		// it no more happily — it belongs to neither list.
+		{"efficiency_effort_level", `{"tokenomics":{"efficiency_effort_level":"medium-ish"}}`, "tokenomics.efficiency_effort_level", "medium-ish"},
+		{"efficiency_thinking_share_pct", `{"tokenomics":{"efficiency_thinking_share_pct":140}}`, "tokenomics.efficiency_thinking_share_pct", "140"},
+		{"efficiency_repeat_read_floor", `{"tokenomics":{"efficiency_repeat_read_floor":-2}}`, "tokenomics.efficiency_repeat_read_floor", "-2"},
+		{"efficiency_max_relaunches", `{"tokenomics":{"efficiency_max_relaunches":-4}}`, "tokenomics.efficiency_max_relaunches", "-4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeStartupRoot(t, tc.body)
+
+			_, err := LoadStartupConfig(dir)
+			if err == nil {
+				t.Fatalf("LoadStartupConfig accepted %s", tc.body)
+			}
+			if !errors.Is(err, ErrInvalidType) {
+				t.Errorf("error %v should wrap ErrInvalidType", err)
+			}
+			for _, want := range []string{tc.wantKey, tc.wantVal} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q must name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// admission_margin_pct is a PERCENTAGE and is bounded 0..100 like every other _pct knob in this
+// file. 100 is admitted because a margin of the whole window is a coherent (if extreme) refusal
+// to admit anything; 101 is not a percentage.
+func TestStartupTokenomicsNumericBounds(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		ok   bool
+	}{
+		{`{"tokenomics":{"admission_margin_pct":1}}`, true},
+		{`{"tokenomics":{"admission_margin_pct":100}}`, true},
+		{`{"tokenomics":{"admission_margin_pct":101}}`, false},
+		{`{"tokenomics":{"admission_margin_pct":-1}}`, false},
+		{`{"tokenomics":{"learned_min_runs":1}}`, true},
+		{`{"tokenomics":{"learned_min_runs":1000}}`, true},
+		{`{"tokenomics":{"learned_min_runs":-1}}`, false},
+		{`{"tokenomics":{"efficiency_thinking_share_pct":1}}`, true},
+		{`{"tokenomics":{"efficiency_thinking_share_pct":100}}`, true},
+		{`{"tokenomics":{"efficiency_thinking_share_pct":101}}`, false},
+		{`{"tokenomics":{"efficiency_thinking_share_pct":-1}}`, false},
+		// Zero is a share met by every step that ever generated anything, which is the absence of a
+		// policy rather than a weaker one — and it is also what an omitted key unmarshals to, so it
+		// is filled with the shipped default rather than rejected.
+		{`{"tokenomics":{"efficiency_thinking_share_pct":0}}`, true},
+		// The two counted knobs accept zero and have no ceiling — but a written 0 is this struct's
+		// "unset" spelling, so the loader fills it to the shipped default (floor 0 -> 1, relaunch bound
+		// 0 -> 6, see WrittenZeroMaxRelaunchesFillsToDefault), not a runtime "counsel always" / "never
+		// relaunch". These rows pin only that Validate ACCEPTS 0; they do not assert its runtime value.
+		{`{"tokenomics":{"efficiency_repeat_read_floor":0}}`, true},
+		{`{"tokenomics":{"efficiency_repeat_read_floor":-1}}`, false},
+		{`{"tokenomics":{"efficiency_max_relaunches":0}}`, true},
+		{`{"tokenomics":{"efficiency_max_relaunches":-1}}`, false},
+	} {
+		t.Run(tc.body, func(t *testing.T) {
+			_, err := LoadStartupConfig(writeStartupRoot(t, tc.body))
+			if tc.ok && err != nil {
+				t.Errorf("want accepted, got %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Error("want rejected, got nil")
+			}
+		})
+	}
 }

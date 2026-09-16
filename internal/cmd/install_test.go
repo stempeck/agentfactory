@@ -101,21 +101,27 @@ func TestInstallRole_InteractiveSettings(t *testing.T) {
 		t.Fatalf("parsing settings.json: %v", err)
 	}
 
+	assertProvisionedSessionStart(t, settings)
+}
+
+// assertProvisionedSessionStart pins the shape a provisioned settings.json must carry: one hook
+// entry per SessionStart writer, never a chain. Both role types get all three — with the writers
+// independently budgeted, withholding mail from interactive no longer buys anything (#675 K3).
+func assertProvisionedSessionStart(t *testing.T, settings map[string]interface{}) {
+	t.Helper()
+	want := []string{"af prime --hook", "af mail check --inject", "af memory check --inject"}
 	hooks := settings["hooks"].(map[string]interface{})
 	sessionStart := hooks["SessionStart"].([]interface{})
 	entry := sessionStart[0].(map[string]interface{})
 	hooksList := entry["hooks"].([]interface{})
-	hook := hooksList[0].(map[string]interface{})
-	cmd := hook["command"].(string)
-
-	if cmd == "" {
-		t.Fatal("SessionStart hook command is empty")
+	if len(hooksList) != len(want) {
+		t.Fatalf("SessionStart has %d hook entries, want %d (one per writer)", len(hooksList), len(want))
 	}
-	if strings.Contains(cmd, "af mail check") {
-		t.Error("interactive SessionStart should NOT contain 'af mail check'")
-	}
-	if !strings.Contains(cmd, "af prime --hook") {
-		t.Error("interactive SessionStart should contain 'af prime --hook'")
+	for i, w := range want {
+		cmd := hooksList[i].(map[string]interface{})["command"].(string)
+		if !strings.HasSuffix(cmd, w) {
+			t.Errorf("SessionStart entry %d should end in %q, got: %s", i, w, cmd)
+		}
 	}
 }
 
@@ -137,16 +143,7 @@ func TestInstallRole_AutonomousSettings(t *testing.T) {
 		t.Fatalf("parsing settings.json: %v", err)
 	}
 
-	hooks := settings["hooks"].(map[string]interface{})
-	sessionStart := hooks["SessionStart"].([]interface{})
-	entry := sessionStart[0].(map[string]interface{})
-	hooksList := entry["hooks"].([]interface{})
-	hook := hooksList[0].(map[string]interface{})
-	cmd := hook["command"].(string)
-
-	if !strings.Contains(cmd, "af prime --hook && af mail check --inject") {
-		t.Errorf("autonomous SessionStart should contain 'af prime --hook && af mail check --inject', got: %s", cmd)
-	}
+	assertProvisionedSessionStart(t, settings)
 }
 
 func TestInstallRole_UnknownRole(t *testing.T) {
@@ -657,6 +654,7 @@ func TestSkillsFS_ContainsAllFiles(t *testing.T) {
 		"install_skills/github-issue/SKILL.md",
 		"install_skills/improve-agent/PATTERNS.md",
 		"install_skills/improve-agent/SKILL.md",
+		"install_skills/perfeval-agent/SKILL.md",
 		"install_skills/rapid-implement/SKILL.md",
 	}
 

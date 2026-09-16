@@ -72,7 +72,11 @@ func TestOutputCheckpointContext_WithCheckpoint(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	outputCheckpointContext(&buf, dir)
+	// Every slimming operand at its neutral value: "" is not-a-resume (#668 K16), "" is not-priming-a-
+	// step and false is the interview arm off (#678 K8a). These cases are about the full checkpoint
+	// block, and TestPrimeSlimming owns the same-step slimmed half while
+	// TestRepurposedMechanismFiresWithoutPressure owns the successor one.
+	outputCheckpointContext(&buf, dir, "", "", false)
 	output := buf.String()
 
 	if !strings.Contains(output, "Previous Session Checkpoint") {
@@ -95,7 +99,7 @@ func TestOutputCheckpointContext_WithCheckpoint(t *testing.T) {
 func TestOutputCheckpointContext_NoCheckpoint(t *testing.T) {
 	dir := t.TempDir()
 	var buf strings.Builder
-	outputCheckpointContext(&buf, dir)
+	outputCheckpointContext(&buf, dir, "", "", false)
 	if buf.Len() != 0 {
 		t.Errorf("expected no output when no checkpoint, got %q", buf.String())
 	}
@@ -120,7 +124,7 @@ func TestOutputCheckpointContext_StaleCheckpoint(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	outputCheckpointContext(&buf, dir)
+	outputCheckpointContext(&buf, dir, "", "", false)
 
 	// Should produce no output for stale checkpoint
 	if buf.Len() != 0 {
@@ -152,7 +156,7 @@ func TestOutputCheckpointContext_CompactionHandoff(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	outputCheckpointContext(&buf, dir)
+	outputCheckpointContext(&buf, dir, "", "", false)
 	output := buf.String()
 
 	if !strings.Contains(output, "Compaction Recovery") {
@@ -194,7 +198,7 @@ func TestOutputCheckpointContext_CompactionHandoff_WithLastError(t *testing.T) {
 	os.WriteFile(filepath.Join(runtimeDir, "last_error"), []byte("HTTP 400 Invalid signature in thinking block"), 0o644)
 
 	var buf strings.Builder
-	outputCheckpointContext(&buf, dir)
+	outputCheckpointContext(&buf, dir, "", "", false)
 	output := buf.String()
 
 	if !strings.Contains(output, "HTTP 400 Invalid signature in thinking block") {
@@ -217,7 +221,7 @@ func TestOutputCheckpointContext_CompactionHandoff_NoLastError(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	outputCheckpointContext(&buf, dir)
+	outputCheckpointContext(&buf, dir, "", "", false)
 	output := buf.String()
 
 	if !strings.Contains(output, "Compaction Recovery") {
@@ -261,7 +265,7 @@ func TestPrimeAgent_NoFormula_Unchanged(t *testing.T) {
 	var buf strings.Builder
 
 	// No .runtime/hooked_formula exists → formula context self-guards (no output)
-	err := primeAgent(t.Context(), &buf, root, "manager", filepath.Join(root, ".agentfactory", "agents", "manager"))
+	_, err := primeAgent(t.Context(), &buf, root, "manager", filepath.Join(root, ".agentfactory", "agents", "manager"))
 	if err != nil {
 		t.Fatalf("primeAgent failed: %v", err)
 	}
@@ -290,7 +294,7 @@ func TestPrimeAgent_NoFormulaFile_NoFormulaContext(t *testing.T) {
 	var buf strings.Builder
 
 	// No .runtime/hooked_formula → formula context self-guards (no output)
-	err := primeAgent(t.Context(), &buf, root, "manager", filepath.Join(root, ".agentfactory", "agents", "manager"))
+	_, err := primeAgent(t.Context(), &buf, root, "manager", filepath.Join(root, ".agentfactory", "agents", "manager"))
 	if err != nil {
 		t.Fatalf("primeAgent failed: %v", err)
 	}
@@ -326,7 +330,7 @@ func TestPrimeAgent_AutoInjectsFormulaContext(t *testing.T) {
 	os.MkdirAll(config.StoreDir(root), 0o755)
 
 	var buf strings.Builder
-	err := primeAgent(t.Context(), &buf, root, "manager", filepath.Join(root, ".agentfactory", "agents", "manager"))
+	_, err := primeAgent(t.Context(), &buf, root, "manager", filepath.Join(root, ".agentfactory", "agents", "manager"))
 	if err != nil {
 		t.Fatalf("primeAgent failed: %v", err)
 	}
@@ -357,7 +361,7 @@ func TestPrimeAgent_NoFormulaContext_WhenNoHookedFormula(t *testing.T) {
 	os.MkdirAll(config.StoreDir(root), 0o755)
 
 	var buf strings.Builder
-	err := primeAgent(t.Context(), &buf, root, "manager", filepath.Join(root, ".agentfactory", "agents", "manager"))
+	_, err := primeAgent(t.Context(), &buf, root, "manager", filepath.Join(root, ".agentfactory", "agents", "manager"))
 	if err != nil {
 		t.Fatalf("primeAgent failed: %v", err)
 	}

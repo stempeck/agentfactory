@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,6 +21,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/lock"
 	"github.com/stempeck/agentfactory/internal/session"
 	"github.com/stempeck/agentfactory/internal/statusline"
+	"github.com/stempeck/agentfactory/internal/templates"
 )
 
 // The #596 recovery decision layer: K4 evaluator, K5 durable breaker, K7 executor, K8 verified
@@ -64,6 +66,18 @@ const (
 	// instead of the forceful ladder, and a report that cannot tell the two apart cannot show that
 	// the cooperative half is working.
 	triggerStepBoundaryHandoff = "step_boundary_handoff"
+
+	// The two classes for a pane the factory did NOT recycle (#668 H-R3). The measured Phase 1 run
+	// had a mid-step session replacement — a stall at 80% occupancy followed by a fresh session —
+	// with no funnel entry at all, so every count derived from this log was short by one and the
+	// sessions-per-step figure the whole feature is judged on was quietly wrong.
+	//
+	// They are two classes rather than one because the two causes call for different answers. A
+	// replacement out of a channel that had already gone quiet is the backend dropping the session;
+	// a replacement out of a healthy channel is something else entirely, and an operator who cannot
+	// tell them apart has to investigate both as if they were the same fault.
+	triggerUnattributedRespawn = "unattributed_respawn"
+	triggerBackendStallRespawn = "backend_stall_respawn"
 
 	// triggerUnknown is what an unset RespawnOptions.Trigger records. A future caller that adds a
 	// recycle path and forgets to name its class must produce a visibly UNCLASSIFIED line rather
@@ -281,6 +295,12 @@ type recoveryLogEntry struct {
 	Trigger      string  `json:"trigger"`
 	ObservedPct  float64 `json:"observed_pct"`
 	ThresholdPct int     `json:"threshold_pct"`
+	// ProjectedPct is what the recycle was taken AGAINST when a prediction took it, rather than a
+	// measurement. Without it a #668 K7 boundary logs "observed 60 / threshold 75" and reads to an
+	// operator as a recycle that fired below its own bound — the machine-facing twin of the
+	// misreport boundaryHandoffCause fixes for the human-facing string. omitempty because every
+	// other class recycles on what it measured, and a zero here would claim a projection of none.
+	ProjectedPct float64 `json:"projected_pct,omitempty"`
 	SessionID    string  `json:"session_id"`
 	InstanceID   string  `json:"instance_id"`
 	ResumedStep  string  `json:"resumed_step"`
@@ -296,6 +316,7 @@ const recoveryLogVersion = 1
 type recycleDetail struct {
 	ObservedPct  float64
 	ThresholdPct int
+	ProjectedPct float64
 	SessionID    string
 	InstanceID   string
 	ResumedStep  string
@@ -441,6 +462,30 @@ type recoveryState struct {
 	// reported again.
 	DarkEscalatedAt string `json:"dark_escalated_at"`
 
+	// K17 (#668): a tokenomics mechanism has told this agent to wait, and until this deadline the
+	// watchdog must not read the resulting quiet as a stall. Two halves of one factory otherwise
+	// fight over the same agent — one telling it to hold at a step boundary, the other recycling it
+	// for holding — and the agent walks its attempts up to RECOVERY HALTED for compliance.
+	//
+	// A DEADLINE rather than a flag, because the failure mode of a flag is unbounded: the process
+	// that set it is the one being asked to stop working, so "clear it when done" has no owner if
+	// that session never comes back. An expired or undecodable deadline protects nothing — the
+	// fail-CLOSED direction here, and the inverse of K7's admission, because the dangerous
+	// direction for a suppressor is the permissive one.
+	//
+	// The reason is carried so a non-recycle has an explanation an operator can read; it is a
+	// mechanism label, never free text from a session.
+	InterventionLatchUntil  string `json:"intervention_latch_until"`
+	InterventionLatchReason string `json:"intervention_latch_reason"`
+
+	// H-R3 (#668): the session id this agent was last observed running. It is the ONLY way to
+	// notice a replacement the factory did not perform — the funnel records which session it
+	// killed, so on its own it cannot distinguish "we recycled that session" from "that session
+	// went away and something else replaced it". Durable rather than in-memory beside
+	// agentRecoveryTrack.lastSessionID, because a watchdog restart would otherwise report the
+	// first session it ever sees as an unattributed replacement.
+	LastSeenSessionID string `json:"last_seen_session_id"`
+
 	// corrupt is not persisted. It marks a state that could not be decoded, so the executor can
 	// refuse without overwriting the evidence.
 	corrupt bool
@@ -496,6 +541,392 @@ func saveRecoveryState(root, agent string, st recoveryState) error {
 	return fsutil.WriteFileAtomic(recoveryStatePath(root, agent), data, 0o644)
 }
 
+// --- K7: the operator-visible alarm ------------------------------------------------------------
+
+// Every escalation this file raises used to end in a mailbox. The recipient is a roster member
+// whose 2,443 lifetime messages were purged unread, so five RECOVERY HALTED escalations reached
+// nobody at all — the alarm had no terminus a human looks at.
+//
+// What follows is that terminus, and it is a READER only. Each escalator writes its durable latch
+// BEFORE it attempts delivery (haltRecovery sets Halted then escalates; escalateDarkChannel stamps
+// DarkEscalatedAt then sends; escalateNoStep the same), so an alarm sourced from
+// the latch is independent of whether the mail arrived, of whether the recipient exists, and of
+// whether anybody ever reads it. Delivery-independence is inherited from that write ordering rather
+// than built here.
+
+// The alarm vocabulary. Together with agent names — which config.ValidateAgentName has already
+// constrained to [a-zA-Z][a-zA-Z0-9_-]* — these fixed labels are the ENTIRE set of strings that can
+// reach an operator's pane from this path (security.md:57). Nothing read off disk is ever echoed.
+const (
+	alarmClassHalt   = "HALT"
+	alarmClassDark   = "DARK"
+	alarmClassNoStep = "NOSTEP"
+	alarmClassWdog   = "WDOG"
+
+	// haltReasonUnclassified is what a halt cause outside this file's haltReason* set reads as. It
+	// belongs to the vocabulary rather than to haltReasonLabel's switch because it is the label an
+	// operator sees, and a label nothing else can name is a label a test has to spell by hand.
+	haltReasonUnclassified = "unclassified"
+)
+
+// alarmClassRank orders the classes by what an operator must act on first: a halted breaker has
+// stopped recovering an agent and only a human can restart it; a dark channel is an outage the
+// factory is still working on.
+//
+// WDOG is last DESPITE being the condition that invalidates the freshness of the three above it —
+// a HALT latch clears only under `af recovery reset` and the channel stamps clear only inside a
+// watchdog tick, so a dead watchdog freezes every other class and then loses to it. That is a
+// deliberate trade for the pane's one token, which has room for the agent-scoped class an operator
+// can act on; `af statusline status` and `af up` name every raised alarm including this one, and
+// the pane still carries the +N that says there is more. The residual is real: a factory with any
+// standing HALT shows its dead watchdog only as part of that count.
+var alarmClassRank = map[string]int{
+	alarmClassHalt:   0,
+	alarmClassDark:   1,
+	alarmClassNoStep: 2,
+	alarmClassWdog:   3,
+}
+
+// maxBreakerBytes bounds what the alarm will read. This scan runs on the statusline's render tick,
+// so an unbounded ReadFile here is an unbounded read in the pane's hot path; a breaker this schema
+// wrote is ~1KB.
+const maxBreakerBytes = 64 << 10
+
+// watchdogHeartbeatStaleAfter is when a heartbeat stops meaning "alive". Three ticks, so a single
+// slow or skipped poll is not an alarm — the same reasoning as the 3× staleness floor
+// internal/config/startup.go:335-350 applies to the statusline's own refresh, and the tick term is
+// watchdog.go's own constant rather than a second copy of the number.
+const watchdogHeartbeatStaleAfter = 3 * watchdogTickSecs * time.Second
+
+// recoveryAlarm is one raised condition, in closed vocabulary. agent is empty for WDOG, which is a
+// property of the factory rather than of any agent.
+type recoveryAlarm struct {
+	class  string
+	agent  string
+	reason string        // HALT only, always a haltReason* constant
+	quiet  time.Duration // WDOG only
+}
+
+// recoveryAlarms is the ONE read of the alarm's durable sources; the pane token, `af statusline
+// status` and `af up` are three renderings of its result, not three scans. It is read per tick with
+// no cache (scale.md S-4a): the roster bounds it, and a cache is a way for an alarm to be stale.
+//
+// The returned error is the scan's own failure, NOT an alarm: an unreadable state directory means
+// the alarm cannot see whether anything is wrong, which is worse than seeing nothing wrong and must
+// not read the same. The pane discards it — the render's silence contract wins there
+// (security.md:87) — and the loud surfaces name it, which is the only reason returning it is worth
+// the second return value. An ABSENT directory is not a failure: a factory that has never recovered
+// an agent has nothing to scan.
+func recoveryAlarms(root string, now time.Time) ([]recoveryAlarm, error) {
+	var raised []recoveryAlarm
+
+	entries, scanErr := os.ReadDir(recoveryStateDir(root))
+	if errors.Is(scanErr, fs.ErrNotExist) {
+		scanErr = nil
+	}
+	if scanErr == nil {
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+				continue // fsutil.WriteFileAtomic stages <agent>.json.<rand>.tmp in this same directory
+			}
+			agent := strings.TrimSuffix(e.Name(), ".json")
+			// A file whose name is not a roster-shaped agent name is not evidence about an agent.
+			// Dropping it is what makes "only roster names reach the pane" mechanical rather than
+			// a property of who can write to the directory.
+			if config.ValidateAgentName(agent) != nil {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			// Two ways a directory entry can be something other than a breaker this factory wrote,
+			// both fail-closed to the same answer. Info() is an LSTAT: a symlink reports the LINK's
+			// size, so a size check alone would wave through evil.json -> /dev/zero and hand
+			// loadRecoveryState an unbounded read on the pane's render tick — the exact hazard the
+			// cap exists to prevent. saveRecoveryState writes regular files through
+			// fsutil.WriteFileAtomic; nothing else belongs here.
+			//
+			// This is the ONE place the alarm knowingly disagrees with the other consumers of the
+			// same file: loadRecoveryState neither caps the size nor checks the mode, so
+			// `af agents list --json` would follow the symlink and decode the 100KB breaker.
+			// Accepted rather than reconciled — pushing either check down would change what three
+			// shipped JSON contracts answer, to fix a file nothing in this schema writes. The pane
+			// erring toward "something is wrong with this agent" is the safe direction for an alarm.
+			if !info.Mode().IsRegular() || info.Size() > maxBreakerBytes {
+				raised = append(raised, recoveryAlarm{class: alarmClassHalt, agent: agent, reason: haltReasonCorrupt})
+				continue
+			}
+			if alarm, ok := agentAlarm(agent, loadRecoveryState(root, agent)); ok {
+				raised = append(raised, alarm)
+			}
+		}
+	}
+
+	if quiet, ok := watchdogQuietFor(root, now); ok {
+		raised = append(raised, recoveryAlarm{class: alarmClassWdog, quiet: quiet})
+	}
+
+	// By severity first, then by name. The pane shows raised[0] and nothing else, so this sort is
+	// what decides which of several conditions an operator is told about — not a tidiness pass.
+	sort.Slice(raised, func(i, j int) bool {
+		if ri, rj := alarmClassRank[raised[i].class], alarmClassRank[raised[j].class]; ri != rj {
+			return ri < rj
+		}
+		return raised[i].agent < raised[j].agent
+	})
+	return raised, scanErr
+}
+
+// agentAlarm reduces one breaker to at most one alarm. An agent that is both halted and dark gets
+// the halt: two lines about one agent buys an operator nothing the first line did not already earn
+// them, and the leading class is what the pane has room for.
+//
+// A breaker that cannot be decoded reads HALTED, because loadRecoveryState says so — the same
+// answer `af agents list --json` and the dispatch gate already publish. Inventing a gentler one
+// here would make the pane disagree with the JSON contracts about the same file. saveRecoveryState
+// writes through fsutil.WriteFileAtomic, so this is genuinely corrupt bytes rather than a torn read.
+func agentAlarm(agent string, st recoveryState) (recoveryAlarm, bool) {
+	switch {
+	case st.Halted:
+		return recoveryAlarm{class: alarmClassHalt, agent: agent, reason: haltReasonLabel(st.HaltReason)}, true
+	case st.DarkEscalatedAt != "":
+		return recoveryAlarm{class: alarmClassDark, agent: agent}, true
+	case st.NoStepEscalatedAt != "":
+		return recoveryAlarm{class: alarmClassNoStep, agent: agent}, true
+	}
+	return recoveryAlarm{}, false
+}
+
+// haltReasonLabel maps a halt cause to the operator-facing text. Unlike recoveryReason,
+// which echoes an unrecognised trigger it was handed in-process, this one refuses to: its input
+// comes off disk, where anything at all can be written, and the pane is the last place a
+// free-text string should be able to reach. An unrecognised cause reads UNCLASSIFIED for
+// triggerUnknown's reason — visibly unclassified beats plausibly wrong.
+func haltReasonLabel(reason string) string {
+	switch reason {
+	case haltReasonMaxAttempts, haltReasonRateCap, haltReasonCorrupt:
+		return reason
+	}
+	return haltReasonUnclassified
+}
+
+// watchdogQuietFor reports how long the watchdog has been silent, and whether that is long enough
+// to alarm. An ABSENT heartbeat is not a stale one: a factory whose watchdog has never run has not
+// lost one, and treating the two alike would alarm on every fresh factory — which is how an alarm
+// teaches the operator it watches over to ignore it.
+func watchdogQuietFor(root string, now time.Time) (time.Duration, bool) {
+	info, err := os.Stat(watchdogHeartbeatPath(root))
+	if err != nil {
+		return 0, false
+	}
+	quiet := now.Sub(info.ModTime())
+	if quiet < watchdogHeartbeatStaleAfter {
+		return 0, false
+	}
+	return quiet, true
+}
+
+// recoveryAlarmNote is the pane's whole alarm: one compact token at the head of line 1, or nothing.
+// It has room for the leading condition and a count, so multiple alarms collapse (⚠ HALT×2 +1) and
+// `af statusline status` is where the rest of the story lives.
+//
+// The result is capped and stripped by the renderer's own routine (statusline.SanitizeToken) rather
+// than by a second copy of those rules here, so a token this builds can never be wider than an
+// element the renderer would have capped.
+func recoveryAlarmNote(root string, now time.Time) string {
+	raised, _ := recoveryAlarms(root, now) // a scan that failed is the loud surfaces' story, not the pane's
+	if len(raised) == 0 {
+		return ""
+	}
+
+	head := raised[0]
+	leading := 0
+	for _, a := range raised {
+		if a.class == head.class {
+			leading++
+		}
+	}
+
+	tok := "⚠ " + head.class
+	switch {
+	case head.class == alarmClassWdog:
+		tok += " quiet " + formatQuietFor(head.quiet)
+	case leading > 1:
+		tok += fmt.Sprintf("×%d", leading)
+	default:
+		tok += " " + head.agent
+	}
+	if rest := len(raised) - leading; rest > 0 {
+		tok += fmt.Sprintf(" +%d", rest)
+	}
+	return statusline.SanitizeToken(tok)
+}
+
+// formatQuietFor renders a silence in the coarsest unit that still tells an operator what to do —
+// minutes, then hours, then days. Seconds would strobe the pane on every render tick, which is the
+// same reason the elapsed element drops them (ux.md C2.1); and a watchdog that died before lunch
+// reads "14h", not the "840m" an operator has to divide in their head at the moment they are least
+// inclined to.
+func formatQuietFor(d time.Duration) string {
+	switch {
+	case d >= 24*time.Hour:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	case d >= time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+}
+
+// describe is one alarm as a loud line: which agent, which class, on what documented cause, and the
+// act that ends it. The pane says HALT worker; this says what to do about it.
+//
+// Unlike the pane token this does NOT travel statusline.SanitizeToken — a 64-rune cap would cut
+// these lines mid-sentence. It is safe without one only because every field it interpolates was
+// closed upstream: agent survived config.ValidateAgentName, reason came out of haltReasonLabel's
+// switch, class is a constant, quiet is a duration. A future field read straight off disk would
+// break that and put an attacker-chosen escape on the operator's terminal, since both callers
+// fmt.Print this verbatim.
+func (a recoveryAlarm) describe() string {
+	switch a.class {
+	case alarmClassHalt:
+		return fmt.Sprintf("HALT %s (%s) — no further automatic recovery; run 'af recovery reset %s' after investigating",
+			a.agent, a.reason, a.agent)
+	// The channel classes clear themselves ONLY through noteChannelHealth, which runs inside
+	// evaluateAgent — i.e. for agents that are both on the roster AND live. A latch left by an agent
+	// since decommissioned or shut down has no path back to healthy, so "clears itself" would be
+	// advice that never comes true on the one alarm an operator cannot wait out. Both therefore name
+	// the operator's escape hatch too, in the same breath as the automatic one.
+	case alarmClassDark:
+		return fmt.Sprintf("DARK %s — occupancy channel silent; clears itself once the channel reads fresh again, "+
+			"or run 'af recovery reset %s' if the agent is gone for good", a.agent, a.agent)
+	case alarmClassNoStep:
+		return fmt.Sprintf("NOSTEP %s — session with no open step; clears itself once the channel reads fresh again, "+
+			"or run 'af recovery reset %s' if the agent is gone for good", a.agent, a.agent)
+	case alarmClassWdog:
+		return fmt.Sprintf("WDOG no watchdog tick for %s — recovery is unsupervised; check the watchdog session and re-run 'af up'",
+			formatQuietFor(a.quiet))
+	}
+	return ""
+}
+
+// --- K17: the intervention latch ---------------------------------------------------------------
+
+// interventionLatchHolds reports whether a mechanism's declared wait is still in effect.
+//
+// An absent, expired or undecodable deadline all read the same: NOT held. That is the fail-closed
+// answer and it is the one that matters — this predicate suppresses recovery, so the direction
+// that costs something is the permissive one. A latch whose deadline could not be parsed would,
+// read the other way, take an agent out of the watchdog's reach until an operator noticed.
+func interventionLatchHolds(st recoveryState, now time.Time) bool {
+	until, ok := parseRecoveryStamp(st.InterventionLatchUntil)
+	return ok && now.Before(until)
+}
+
+// armInterventionLatch declares a wait and reports whether this call BEGAN one.
+//
+// The return value is the episode discriminator: a mechanism that fires on every prime while an
+// agent waits would otherwise write one intervention record per prime for a single wait, and the
+// record log is what the sessions-per-step figures are computed from. A call that finds a live
+// latch leaves it exactly as it is — deadline and reason both — because extending it would let a
+// repeated advisory hold the watchdog off indefinitely, which is the unbounded-flag failure the
+// deadline exists to prevent.
+//
+// Best-effort by design: an armer that cannot write the breaker gets no latch, which means the
+// watchdog behaves exactly as it did before this mechanism existed. The two refusals in front of the
+// write are the file's own (a corrupt breaker is never laundered by a fresh write), and a refusal is
+// reported on stderr rather than swallowed.
+//
+// There is exactly ONE armer, K18's sub-agent observer (subagent_observer.go), and the reason no
+// other surface qualifies is the design-doc.md K17 row's wording: the latch is scoped to a serialized
+// sub-agent phase IN PROGRESS. The latch suppresses every fire class the watchdog has, exhaustion
+// included, so arming it asserts that an agent is quiet BY DESIGN — a claim only an OBSERVATION can
+// support. K7's open-time advisory describes an agent that is working, and K9's prime-time
+// serialization counsel describes a fan-out that has not started and may never; arming on either
+// would blind the watchdog on the strength of advice.
+//
+// STATED RESIDUAL — the load/check/save below is not atomic. The observer runs one process per Task
+// completion, so two completions milliseconds apart can both find no live latch, both arm, and both
+// fire — duplicate counsel, and one episode counted twice in the firing totals. It is left because
+// the alternative is a second on-disk marker beside a primitive whose whole point is to be the one
+// place a wait is declared, and because the failure is bounded by the deadline: the second firing is
+// the same advisory, and the third is suppressed by whichever write landed.
+func armInterventionLatch(root, agent, reason string, ttl time.Duration, now time.Time) bool {
+	st := loadRecoveryState(root, agent)
+	if interventionLatchHolds(st, now) {
+		return false
+	}
+	// A corrupt breaker and a live latch both return false, and only one of them is a refusal. The
+	// live latch is the ordinary answer to "did this call begin an episode"; the corrupt breaker is a
+	// mechanism asking for a wait and not getting one, which an operator has to be able to see.
+	if st.corrupt {
+		fmt.Fprintf(os.Stderr, "recovery: %s: intervention latch refused: breaker state is unreadable\n", agent)
+		return false
+	}
+	st.InterventionLatchUntil = recoveryStamp(now.Add(ttl))
+	st.InterventionLatchReason = reason
+	if err := saveRecoveryState(root, agent, st); err != nil {
+		fmt.Fprintf(os.Stderr, "recovery: %s: intervention latch write failed: %v\n", agent, err)
+		return false
+	}
+	return true
+}
+
+// --- H-R3: attributing a replacement nobody recorded ---------------------------------------------
+
+// noteSessionReplacement records a session change the factory cannot account for.
+//
+// The discriminator is what the funnel left behind: when af recycles an agent, armRecycleFence
+// writes the DEAD session's id into LastRecoverySessionID. So a replacement whose predecessor is
+// that id is one this layer already logged, and anything else replaced a session while the factory
+// was not looking.
+//
+// It runs before noteChannelHealth clears the quiet marker, because that marker is the only
+// evidence available for which of the two classes this was — read afterwards, every replacement
+// would look healthy and the backend-stall class would never be reachable.
+//
+// STATED RESIDUAL — the discriminator is a single previous id, so three cases read as unattributed
+// that are not backend replacements: an operator's own `af down` + `af up`, two af-initiated
+// recycles inside one watchdog tick (the tick sees A→C while LastRecoverySessionID holds B), and
+// nothing at all for a halted agent, whose evaluation returns before this call. H-R3's figure is
+// therefore an upper bound on unattributed replacements, not a count of them, and Phase 7's
+// sessions-per-step comparison should read it as one. Closing the gap needs a per-agent history of
+// recycled ids rather than the single most recent one, which is a durable-state change this phase's
+// file set does not reach.
+func noteSessionReplacement(root, agent string, st *recoveryState, r statusline.ChannelReading, now time.Time) {
+	obs, ok := r.Observation()
+	if !ok {
+		return
+	}
+	seen := obs.SessionID()
+	if seen == "" || seen == st.LastSeenSessionID {
+		return
+	}
+	previous := st.LastSeenSessionID
+	st.LastSeenSessionID = seen
+
+	// The first sighting of an agent is not a replacement, and neither is the transition this
+	// layer performed itself.
+	if previous == "" || previous == st.LastRecoverySessionID {
+		return
+	}
+
+	trigger := triggerUnattributedRespawn
+	if st.ChannelQuietSince != "" {
+		trigger = triggerBackendStallRespawn
+	}
+	// appendRecycleRecord, not recordRecycleAt: this is an observation, and the fence arm the latter
+	// performs would be written underneath the caller's in-memory breaker copy and lost. The only
+	// mutation this function makes is to that copy, which the caller saves.
+	appendRecycleRecord(RespawnOptions{
+		FactoryRoot:   root,
+		AgentName:     agent,
+		Trigger:       trigger,
+		TriggerDetail: recycleDetail{SessionID: previous},
+	}, nil, now)
+}
+
 // noteRecoveryAttempt records one attempt against the sliding window and the absolute rate cap,
 // and reports the halt cause if either latched.
 //
@@ -545,6 +976,11 @@ func noteRecoveryAttempt(st *recoveryState, trigger string, cfg config.RecoveryC
 // itself clean — and it fires at most once per step by construction. Counting it would let a long
 // formula of context-heavy steps exhaust the cap through correct behaviour and reach RECOVERY
 // HALTED, an operator action, for doing exactly what the boundary exists to make it do.
+//
+// unattributed_respawn and backend_stall_respawn (#668 H-R3) are OUT for the stronger version of
+// the same reason: this layer did not initiate them and could not have. They are observations of
+// something that already happened, recorded so the counts are honest, and counting an observation
+// against the cap would halt an agent for the backend's behaviour.
 func isRateCappedTrigger(trigger string) bool {
 	switch trigger {
 	case triggerContextExhaustion, triggerDarkAtHighOccupancy, triggerProgressBackstop:
@@ -659,29 +1095,81 @@ func provisionRecycleSettings(opts RespawnOptions) {
 	}
 }
 
+// provisionIdentity is provisionRecycleSettings' other half. A respawn replaces the pane, so the
+// relaunched session re-reads CLAUDE.md; without this the funnel refreshed the settings the harness
+// reads and left stale the identity the model reads. Same best-effort contract: a wedged agent must
+// still be recycled if the render fails.
+func provisionIdentity(opts RespawnOptions) {
+	if opts.FactoryRoot == "" {
+		return
+	}
+	dir := respawnAgentDir(opts)
+	if dir == "" {
+		return
+	}
+	content, err := templates.RenderIdentity(templates.New(), opts.AgentName, opts.AgentEntry, opts.FactoryRoot, dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "recovery: %s: identity re-provision failed: %v\n", opts.AgentName, err)
+		return
+	}
+	if err := templates.WriteIdentity(dir, content); err != nil {
+		fmt.Fprintf(os.Stderr, "recovery: %s: identity re-provision failed: %v\n", opts.AgentName, err)
+	}
+}
+
 // recordRecycle is K6 + K19: the funnel's single call into this layer after the pane is replaced.
+// noteSessionReplacement enters one level lower, at appendRecycleRecord, because its two classes
+// describe a pane that was replaced without af replacing it: there is no respawn for it to sit
+// behind and no fence for it to arm.
 //
 // It reads the clock itself rather than taking one, which is the one place this file departs from
-// the repository's trailing-`now` idiom. helpers.go is pinned by line number by
-// teardown_scanner_enforce_test.go (:76, :104, :108 — all above the funnel), so giving it the
-// `time` import would shift those three lines and fail a conformance test that has nothing to do
-// with recovery. recordRecycleAt is the seam tests drive with a fixed clock.
+// the repository's trailing-`now` idiom. recordRecycleAt is the seam tests drive with a fixed clock.
 func recordRecycle(opts RespawnOptions, respawnErr error) {
 	recordRecycleAt(opts, respawnErr, time.Now())
 }
 
 func recordRecycleAt(opts RespawnOptions, respawnErr error, now time.Time) {
+	entry, ok := appendRecycleRecord(opts, respawnErr, now)
+	if !ok {
+		return
+	}
+	// A failed respawn replaced no pane, so there is no new session to protect: arming the fence on
+	// the still-alive wedged session would make recycleFenceBlocks suppress every later re-fire, the
+	// breaker would never reach max_attempts, and AC-7's halt+escalate would never engage. Arm only
+	// on success; the K6 log write above stays unconditional (AC-6 logs every recycle class).
+	if respawnErr == nil {
+		if err := armRecycleFence(opts.FactoryRoot, opts.AgentName, entry.Trigger, entry.SessionID, now); err != nil {
+			fmt.Fprintf(os.Stderr, "recovery: %s: recycle fence arm failed: %v\n", opts.AgentName, err)
+		}
+	}
+}
+
+// appendRecycleRecord writes the K6 funnel line and reports what it filed, WITHOUT touching the
+// breaker. It is split out because the funnel now has two kinds of caller and only one of them owns
+// a recycle.
+//
+// A caller that performed the recycle (recordRecycleAt) must also arm the fence. A caller that
+// merely NOTICED one (noteSessionReplacement) must not: it holds no pane, protects no replacement
+// it created, and — decisively — it is invoked from inside evaluateAgent, which is holding its own
+// in-memory copy of the same breaker file and will save it on every path out. A read-modify-write
+// underneath that copy is discarded, so a fence armed here would be a fence nobody has. Writing the
+// log line and nothing else is the whole of what an observer is entitled to do.
+//
+// The closed trigger allowlist stays here, in the one place both callers pass through, so a class
+// can never enter the funnel through the observation path that could not enter through the recycle
+// path.
+func appendRecycleRecord(opts RespawnOptions, respawnErr error, now time.Time) (recoveryLogEntry, bool) {
 	// A root is required: without one, filepath.Join would compose a RELATIVE .runtime path and
 	// scatter recovery state into whatever directory the process happens to be in.
 	if opts.FactoryRoot == "" || opts.AgentName == "" {
-		return
+		return recoveryLogEntry{}, false
 	}
 
 	trigger := opts.Trigger
 	switch trigger {
 	case triggerContextExhaustion, triggerDarkAtHighOccupancy, triggerProgressBackstop,
 		triggerCrash, triggerErrorPattern, triggerCompactHandoff, triggerSelfHandoff,
-		triggerStepBoundaryHandoff:
+		triggerStepBoundaryHandoff, triggerUnattributedRespawn, triggerBackendStallRespawn:
 	default:
 		trigger = triggerUnknown
 	}
@@ -703,6 +1191,7 @@ func recordRecycleAt(opts RespawnOptions, respawnErr error, now time.Time) {
 		Trigger:      trigger,
 		ObservedPct:  opts.TriggerDetail.ObservedPct,
 		ThresholdPct: opts.TriggerDetail.ThresholdPct,
+		ProjectedPct: opts.TriggerDetail.ProjectedPct,
 		SessionID:    sessionID,
 		InstanceID:   opts.TriggerDetail.InstanceID,
 		ResumedStep:  opts.TriggerDetail.ResumedStep,
@@ -715,15 +1204,7 @@ func recordRecycleAt(opts RespawnOptions, respawnErr error, now time.Time) {
 	if err := appendRecoveryLog(opts.FactoryRoot, entry); err != nil {
 		fmt.Fprintf(os.Stderr, "recovery: %s: recovery log write failed: %v\n", opts.AgentName, err)
 	}
-	// A failed respawn replaced no pane, so there is no new session to protect: arming the fence on
-	// the still-alive wedged session would make recycleFenceBlocks suppress every later re-fire, the
-	// breaker would never reach max_attempts, and AC-7's halt+escalate would never engage. Arm only
-	// on success; the K6 log write above stays unconditional (AC-6 logs every recycle class).
-	if respawnErr == nil {
-		if err := armRecycleFence(opts.FactoryRoot, opts.AgentName, trigger, sessionID, now); err != nil {
-			fmt.Fprintf(os.Stderr, "recovery: %s: recycle fence arm failed: %v\n", opts.AgentName, err)
-		}
-	}
+	return entry, true
 }
 
 // --- K4: the evaluator ----------------------------------------------------------------------
@@ -873,7 +1354,11 @@ type recoveryDecision struct {
 	executed bool
 	halted   bool
 	fenced   bool
-	err      error
+	// latched is the #668 K17 answer: this agent was not recycled because a mechanism had declared
+	// it waiting. Distinct from fenced because the two refusals mean opposite things — the fence
+	// says the evidence is stale, the latch says the evidence is right and acting on it is wrong.
+	latched bool
+	err     error
 }
 
 // pollOccupancy evaluates every in-scope agent's occupancy channel and acts on the verdicts.
@@ -963,6 +1448,12 @@ func evaluateAgent(root, agent string, entry config.AgentEntry, reading statusli
 	agentDir := resolveAgentDir(root, agent)
 	stepID, hasStep, stepKnown := recoveryOpenStep(agentDir)
 
+	// H-R3: attribute a session replacement this layer did not perform, while the quiet marker
+	// that says which class it was is still standing. It appends a funnel line and updates the `st`
+	// this function owns; it writes no breaker file of its own, so nothing it does can be clobbered
+	// by the save on the way out — and nothing it does can decide anything below.
+	noteSessionReplacement(root, agent, &st, reading, now)
+
 	// Track the current quiet episode before anything reads it. A healthy channel ends the episode
 	// and re-arms both the dark and no-step escalations, so a genuinely new outage is reported
 	// again rather than being permanently silenced by the first one.
@@ -1028,6 +1519,21 @@ func evaluateAgent(root, agent string, entry config.AgentEntry, reading statusli
 		d.fenced = true
 		d.verdict.fire = false
 		d.verdict.reason = "recycle fence: no newer observation from a different session"
+		if err := saveRecoveryState(root, agent, st); err != nil {
+			d.err = err
+		}
+		return d
+	}
+
+	// K17 (#668): a mechanism has told this agent to wait, so its quiet is by design and the
+	// attempt it would otherwise burn buys nothing. Placed AFTER the fence and before the executor
+	// deliberately: everything above is evidence-gathering that must keep running while an agent
+	// waits — the quiet episode, the advisory, the confirmation — and only the act of taking the
+	// session away is suppressed.
+	if interventionLatchHolds(st, now) {
+		d.latched = true
+		d.verdict.fire = false
+		d.verdict.reason = "intervention latch: " + st.InterventionLatchReason
 		if err := saveRecoveryState(root, agent, st); err != nil {
 			d.err = err
 		}

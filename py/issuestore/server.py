@@ -45,6 +45,7 @@ TOOLS = [
                 "labels": {"type": "array", "items": {"type": "string"}},
                 "include_all_agents": {"type": "boolean"},
                 "include_closed": {"type": "boolean"},
+                "created_after": {"type": "string"},
             },
         },
     },

@@ -205,10 +205,19 @@ func runConfigDispatchSet(cmd *cobra.Command, _ []string) error {
 	// dispatch write: it warns and falls through with a nil config, skipping the
 	// cross-check rather than hard-failing (PR #482).
 	models := loadModelsConfigForCrossCheck(root, cmd.ErrOrStderr())
+	// Cron schedules (issue #610) carry the same cross-file references mappings do, plus one
+	// internal/config cannot reach at all: the target formula's declared variables. A schedule
+	// fires with no issue, no positional task and no hooked bead, so an unsatisfiable or misspelled
+	// var is not a bad run — it is a schedule that fails identically at every fire, for as long as
+	// the cadence lasts. Rejecting here keeps every failure strictly before the compare-and-set
+	// precondition and the write, so a rejected document leaves dispatch.json byte-unchanged and
+	// does not consume the CAS.
+	if err := checkCronRefs(cfg.Crons, agents, models, root); err != nil {
+		return err
+	}
 	if err := config.ValidateDispatchConfig(&cfg, agents, models); err != nil {
 		return err
 	}
-
 	if err := checkContentPrecondition(cmd, config.DispatchConfigPath(root)); err != nil {
 		return err
 	}
@@ -216,6 +225,15 @@ func runConfigDispatchSet(cmd *cobra.Command, _ []string) error {
 	// SaveDispatchConfig re-runs struct validation, then writes atomically.
 	if err := config.SaveDispatchConfig(config.DispatchConfigPath(root), &cfg); err != nil {
 		return err
+	}
+	// Advisories, not errors: both describe a document that is valid but will not do what the
+	// operator likely expects. They come after the write, not before, because every path above this
+	// line can still abort — a lost compare-and-set race would otherwise print "your crons will not
+	// fire" about a document that was never written. Gated on the presence of crons so a cron-free
+	// write, which is every pre-#610 caller, produces byte-identical output to before.
+	if len(cfg.Crons) > 0 {
+		warnSubTickCrons(cmd.ErrOrStderr(), &cfg)
+		warnDispatcherNotRunning(cmd.ErrOrStderr())
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "Dispatch configuration saved.")
 	return nil
@@ -442,7 +460,7 @@ func runConfigModelsSet(cmd *cobra.Command, _ []string) error {
 	// that runs after the write: it acts on what was actually persisted.
 	invalidateStaleFitnessAttestations(root, profilesBefore, cfg.Models, cmd.ErrOrStderr())
 
-	// Both lints fire on a profile that is incoherent or incomplete, not invalid, so they run
+	// All three lints fire on a profile that is incoherent or incomplete, not invalid, so they run
 	// after the write and change neither the return value nor the exit code. The validation
 	// chain is error-only, which is why the warnings are emitted here rather than in the
 	// validator. Sorted so repeated runs of the same registry print the same lines.
@@ -452,11 +470,18 @@ func runConfigModelsSet(cmd *cobra.Command, _ []string) error {
 	// long before an unserved class kills a spawn. It never rejects, because a derived class is
 	// legal — only worth knowing about — and whether the gateway actually serves the derived id is
 	// a question only `af config models check` can answer.
+	//
+	// The capacity lint (#673) is the same idea aimed at the dispatch gate: a capacity key the loader
+	// accepts but the runtime ignores is invisible in exactly the way a hook's silence is, because a
+	// cap that never fires and a cap that was never armed look identical from outside.
 	for _, name := range sortedMapKeys(cfg.Models) {
 		if warning, ok := config.PairingLintProfile(name, cfg.Models[name]); ok {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warning)
 		}
 		if warning, ok := config.CoverageLintProfile(name, cfg.Models[name]); ok {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warning)
+		}
+		if warning, ok := config.CapacityLintProfile(name, cfg.Models[name]); ok {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warning)
 		}
 	}

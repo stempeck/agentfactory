@@ -107,6 +107,11 @@ func (s *Store) List(_ context.Context, filter issuestore.Filter) ([]issuestore.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	createdAfter, err := parseCreatedAfter(filter.CreatedAfter)
+	if err != nil {
+		return nil, err
+	}
+
 	// Stable order: by id (mem-1, mem-2, ...) for determinism in tests.
 	ids := make([]string, 0, len(s.issues))
 	for id := range s.issues {
@@ -120,9 +125,27 @@ func (s *Store) List(_ context.Context, filter issuestore.Filter) ([]issuestore.
 		if !s.matchesFilter(iss, filter) {
 			continue
 		}
+		if !createdAfter.IsZero() && iss.CreatedAt.Before(createdAfter) {
+			continue
+		}
 		out = append(out, iss)
 	}
 	return out, nil
+}
+
+// parseCreatedAfter turns a Filter.CreatedAfter bound into a comparable
+// instant. Empty means "no bound" (zero time). A non-empty value that will not
+// parse is surfaced as an error rather than silently dropped: a swallowed bound
+// reintroduces the unbounded read this field exists to prevent (#679/T7).
+func parseCreatedAfter(v string) (time.Time, error) {
+	if v == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, v)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("memstore: invalid CreatedAfter %q: %w", v, err)
+	}
+	return t.UTC(), nil
 }
 
 func (s *Store) matchesFilter(iss issuestore.Issue, f issuestore.Filter) bool {

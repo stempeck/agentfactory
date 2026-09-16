@@ -70,7 +70,7 @@ func TestBuildNudge_WithDirective(t *testing.T) {
 
 	nudge := mgr.BuildNudge()
 
-	if !strings.Contains(nudge, "Run `af prime` to check mail and begin work.") {
+	if !strings.Contains(nudge, "Run `af prime` to load your context and begin work.") {
 		t.Error("nudge should contain the base startup instruction")
 	}
 	if !strings.Contains(nudge, scaffoldDirective) {
@@ -84,7 +84,7 @@ func TestBuildNudge_WithoutDirective(t *testing.T) {
 
 	nudge := mgr.BuildNudge()
 
-	if nudge != "Run `af prime` to check mail and begin work." {
+	if nudge != "Run `af prime` to load your context and begin work." {
 		t.Errorf("nudge without directive = %q, want base instruction only", nudge)
 	}
 }
@@ -819,7 +819,7 @@ func TestEndpointConstants_NoDuplicateStrings(t *testing.T) {
 
 // TestBuildStartupCommand_ClearsAPIKey is the deliberate inverse of
 // TestBuildStartupCommand_NoAPIKey: when a profile sets ANTHROPIC_API_KEY:"" the
-// command MUST emit ANTHROPIC_API_KEY=” to clear an ambient cloud key.
+// command MUST emit ANTHROPIC_API_KEY='' to clear an ambient cloud key.
 func TestBuildStartupCommand_ClearsAPIKey(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
 	mgr := NewManager("/tmp/factory", "testagent", entry)
@@ -1012,8 +1012,8 @@ func TestBuildStartupCommand_FileRefDerefsSecret(t *testing.T) {
 }
 
 // TestBuildStartupCommand_NoEndpoint_EmitsStructuralClears proves the structural clear
-// (AC-4): a no-endpoint / no-legacy resolved set emits explicit ANTHROPIC_BASE_URL=”
-// and ANTHROPIC_AUTH_TOKEN=” so a stale redirect var inherited on a reused session is
+// (AC-4): a no-endpoint / no-legacy resolved set emits explicit ANTHROPIC_BASE_URL=''
+// and ANTHROPIC_AUTH_TOKEN='' so a stale redirect var inherited on a reused session is
 // overwritten. The set carries a model + a default var but no ANTHROPIC_BASE_URL.
 func TestBuildStartupCommand_NoEndpoint_EmitsStructuralClears(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
@@ -1123,7 +1123,7 @@ func isRedirectFamilyEnvOp(op string) bool {
 // so the isolation guarantee is:
 //   - A's session carries A's real ANTHROPIC_BASE_URL + the raw file: token placeholder
 //     (the tmux twin verbatim, never a resolved secret);
-//   - B's session emits the explicit ANTHROPIC_BASE_URL=” / ANTHROPIC_AUTH_TOKEN=”
+//   - B's session emits the explicit ANTHROPIC_BASE_URL='' / ANTHROPIC_AUTH_TOKEN=''
 //     structural clears and unsets its stale redirect var (the hygiene pass);
 //   - NO op tagged with B's session ever carries A's endpoint URL or token (A cannot
 //     leak into B), and NO op tagged with A's session is the empty clear (B starting

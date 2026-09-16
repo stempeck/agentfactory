@@ -241,6 +241,19 @@ func runConfigModelsCheck(cmd *cobra.Command, args []string) error {
 		sort.Strings(names)
 	}
 
+	// Swept over EVERY profile, not the endpoint-filtered `names` above, and before the transport
+	// probes rather than beside them. A capacity misconfiguration is a fact about the document, not
+	// about a network: it is equally wrong on a profile this run is not probing, and reporting it
+	// only for the probed subset would make `check <one-profile>` quietly narrower than `check`.
+	//
+	// Safe to read here because loadModelsForRead already succeeded — the lint speaks only about
+	// files that load, which is what makes its narrow warn band the whole of what survives validation.
+	for _, name := range sortedMapKeys(cfg.Models) {
+		if warning, ok := config.CapacityLintProfile(name, cfg.Models[name]); ok {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warning)
+		}
+	}
+
 	out := cmd.OutOrStdout()
 	fmt.Fprintln(out, "af config models check — transport-level only (necessary, not sufficient for fitness).")
 

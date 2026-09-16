@@ -8,7 +8,7 @@ Create an instruction set workflow (formula) with `/formula-create /path/to/your
 **Audience:**
 This guide is the human operator's manual: the `af` commands and configuration needed to set
 up and USE agentfactory. Agents and formulas are one system, so both live here. Deep guides
-for the measurement and model subsystems are split out — see [Feature Guides](#feature-guides).
+for the measurement, model, and token-economics subsystems are split out — see [Feature Guides](#feature-guides).
 
 ## Prerequisites
 
@@ -126,7 +126,7 @@ af mail read <id>                               # Read message
 af mail reply <id> -m <message>                 # Reply
 af mail delete <id>                             # Delete/acknowledge
 af mail check                                   # Check for mail (exit 0/1)
-af prime                                        # Re-inject identity + formula context (automatic when active)
+af prime                                        # Re-inject identity + formula context (the SessionStart hook injects formula context only)
 af root                                         # Print factory root
 ```
 
@@ -137,16 +137,46 @@ af fidelity status                                        # Toggle state, per-ag
 af fidelity off --agent <name>                            # Record an operator-scoped override for one agent
 af fidelity on --agent <name>                             # Clear that agent's override
 af turn evidence --transcript <path> [--format text|json] # This turn's tool-call evidence
+af turn interventions --since <ts> --agent <name>         # Harness actions recorded during this turn
+af subagent-observe                                       # PostToolUse Task|Agent hook: relay the gate's recorded refusal
 ```
 
 `af fidelity off` is an operator action — it is refused inside an af-managed agent session, so run it
 from a host shell. `af turn evidence` is what both Stop hooks call to build the evidence block they
 hand the judge; it exits 0 whatever the transcript looks like and reports any shortfall in its output.
 
+`af turn interventions` reads af's own record log — not the transcript — and prints one line per
+tokenomics mechanism that fired at or after the turn boundary, so the judge does not grade a handoff
+or a serialized fan-out the harness itself asked for as a deviation. It prints nothing and exits 0
+when the turn had none, when `--since` names no parsable boundary, or when the log cannot be read.
+
+`af subagent-observe` is a hook, not something to run by hand: Claude Code invokes it on every `Task`
+or `Agent` completion with the hook payload on stdin. It computes no capacity verdict of its own —
+when the `af dispatch-admit` gate has recorded a refusal within the last fan-out latch window, it
+delivers one urgent self-addressed `TOKENOMICS_DISPATCH` bead restating the figures that refusal
+recorded and counselling that further sub-agents go out one at a time. A session that the gate never
+refused hears nothing from it, however full that session is. It never blocks and always exits 0
+(ADR-007).
+
+`af dispatch-admit` is its pre-act sibling and the one hook that may refuse: Claude Code invokes it on
+every `Task` launch, before the sub-agent starts. It is the sole enumerated exception to "hooks never
+block" (ADR-007 amendment, 2026-08-31) — when the sub-agents already sharing the launcher's declared
+backend pool, plus a bounded reservation for this launch, would oversubscribe it, the gate returns a
+PreToolUse `deny` telling the agent to launch one at a time. It refuses by arithmetic alone, records
+the refusal with its operands regardless of the telemetry toggle, and is inert by construction on any
+profile that declares no shared backend (every cloud profile) — where it admits, silently, always
+exiting 0.
+
+What each of those mechanisms is permitted to do to a run, which of the two objectives it answers to —
+`capacity`, which is window-driven and inert wherever no capacity fact is declared, or `efficiency`,
+which is baseline-driven and applies on every profile — and what it records when it fires, is written
+down in [Token economics](USING_TOKENOMICS.md#token-economics).
+
 ### Formula Commands
 
 ```bash
 af sling --formula <name> --var key=val --agent <agent>    # Instantiate a formula on an agent
+af sling --formula <name> --input-digest <64 hex>          # Attest the run's on-disk inputs — see USING_TOKENOMICS.md
 af sling --agent <name> "task description"                 # Dispatch a task to a specialist agent
 af done                                                    # Close current formula step and advance
 af done --phase-complete --gate <id>                       # Complete a gate step (session ends)
@@ -260,6 +290,60 @@ mapping whose agent has a formula; phases run top-to-bottom; a phase label may n
 the `trigger_label` or the workflow's own label; and in v1 all phases of one workflow
 must be the same `source` (all `issue` or all `pr`).
 
+#### Crons (recurring scheduled slings)
+
+A **cron** is an operator-owned recurring sling: on its normal polling tick the dispatcher
+re-slings a named agent on a fixed cadence, with no triggering issue or PR behind it. Each
+fire is a bare re-sling — the same shape as `af sling --agent <name> --bare` — so it carries
+no task text and creates no assignment bead, only the `vars` the schedule declares. Cadence
+belongs to the operator, so schedules live in `dispatch.json`, not in formulas. Add a `crons`
+array alongside `mappings`:
+
+```json
+{
+  "repos": ["myorg/myrepo"],
+  "trigger_label": "agentic",
+  "notify_on_complete": "manager",
+  "interval_seconds": 300,
+  "retry_after_seconds": 1800,
+  "remove_trigger_after_dispatch": true,
+  "mappings": [
+    {
+      "labels": ["bug"],
+      "source": "issue",
+      "agent": "rapid-implement"
+    }
+  ],
+  "crons": [
+    {
+      "name": "daily-pr-review",
+      "agent": "ultra-review",
+      "every": "1d",
+      "vars": {
+        "pr_uri": "https://github.com/myorg/myrepo/pull/42"
+      }
+    },
+    {
+      "name": "twice-daily-increment",
+      "agent": "rapid-increment",
+      "every": "12h",
+      "vars": {
+        "pr_uri": "https://github.com/myorg/myrepo/pull/42"
+      }
+    }
+  ]
+}
+```
+
+Each schedule needs a unique `name` (its durable identity — timing state and the status row
+both key off it), an `agent` that exists in `agents.json` and carries a formula, and an
+`every` cadence: a positive whole number plus one unit — `m`, `h` or `d` (`30m`, `4h`, `14d`).
+Put any var the target formula requires under `vars`; omit `vars` entirely for a bare wake.
+Cadence is a floor rounded up to a whole `interval_seconds` tick, so `1m` under the default
+300s tick fires roughly every five minutes. `af config dispatch set` validates the whole
+document — agent, formula, cadence grammar and var keys — before writing, and `af dispatch
+status` grows a `Schedules:` block showing each schedule's last fire and next due time.
+
 ### Adding more agents manually (not recommended. use: agent-gen or agent-gen-all.sh)
 
 Edit `.agentfactory/agents.json` at the project root:
@@ -291,11 +375,43 @@ Then: `af install researcher && af up researcher`
 
 | Hook | Trigger | Action |
 |------|---------|--------|
-| `SessionStart` | Session opens | `af prime --hook` — inject identity. Autonomous agents also run `af mail check --inject` to pick up queued work. Both role types then run `af memory check --inject` to deliver the agent's own learnings vault; on a fresh factory it emits nothing at all. |
-| `PreCompact` | Context compaction | `af compact-handoff` (interactive agents: `af compact-handoff --interactive`) — checkpoint and recycle the session so the fresh session re-injects identity and formula step context. |
-| `UserPromptSubmit` | Each prompt | `af mail check --inject` — deliver new mail |
+| `SessionStart` | Session opens | Three independent entries, identical for both role types, listed in the order the settings declare them. `af prime --hook` — session header, worktree block, startup directive, current formula step, checkpoint, and the economics/advisory blocks; it renders **no** identity, because the harness already loaded the agent's `CLAUDE.md`. `af mail check --inject` — messages not yet delivered to this session, ≤ 4.6 KB. `af memory check --inject` — the agent's top notes from its own learnings vault, ≤ 4.7 KB; on a fresh factory it emits nothing at all. Each writer is budgeted separately because any single hook string longer than roughly 10,000 characters is spilled to a file and replaced in the session by a short preview, so its content never arrives — an observed limit, not a documented one. Matching hooks run in parallel, so declaration order is not execution order and no entry may depend on another having run ([ADR-023](docs/architecture/adrs/ADR-023-sessionstart-context-surface.md)). |
+| `PreCompact` | Context compaction | `af compact-handoff` (interactive agents: `af compact-handoff --interactive`) — checkpoint and recycle the session. The fresh session gets its identity from `CLAUDE.md`, which the harness loads the way it does for any session, and the recycle prompt's `af prime` restores the current formula step. |
+| `UserPromptSubmit` | Each prompt | `af mail check --inject` — deliver mail not yet delivered to this session |
 | `Stop` | Each response | `quality-gate.sh` — haiku grades against 7 generic principles, mails verdict on failure. **Off by default** — `af quality on` (or `echo on > "$(af root)/.agentfactory/.quality-gate"`) to enable. |
 | `Stop` | Each response | `fidelity-gate.sh` — haiku grades against the *current formula step's* title + description (ground truth from the step bead, not `af prime` output). Mails `STEP_FIDELITY` verdict on failure. Self-gates on `.runtime/hooked_formula` — generic supervisors with no active formula are unaffected. **On by default** (`af install --init` creates `.agentfactory/.fidelity-gate` with "on") — `af fidelity off` to disable, which is an operator action and is refused inside an af-managed agent session. `af fidelity off --agent <name>` records a per-agent override that `af fidelity status` lists, and every toggle write `af` makes — by `af fidelity`, by `af up` applying a startup gate, or by `af install --init` seeding a new factory — is appended to `.agentfactory/.fidelity-gate.log`. |
+
+**Re-provision after upgrading the binary.** Because each SessionStart writer now emits its own
+JSON envelope, a session that starts against a **stale** `settings.json` — one still chaining
+`af prime --hook && af mail check --inject && af memory check --inject` in a single entry — puts
+three concatenated JSON objects on one stdout, which is not a single JSON document; the harness then
+falls back to plain-text handling of the raw envelopes (subject to the ~10 KB cap). This only
+affects sessions started **without re-provisioning** after `make install` — an interactive `/clear`
+or `--resume` in a worktree whose agent has not been relaunched, or a hand-launched session in a
+factory-root dir before `af install --init`. Worktree agents pick up the new settings on the next
+`af up` / `af sling` / recycle; after upgrading, re-provision with `af up` (or `af install --init`)
+so the split-entry settings are in place ([ADR-023](docs/architecture/adrs/ADR-023-sessionstart-context-surface.md)).
+
+### Step descriptions and the per-string cap
+
+The harness does not deliver any single SessionStart hook string longer than roughly 10,000
+characters: over-cap output is spilled to a file and replaced in the session by a short preview.
+That is observed behaviour, not documented behaviour ([ADR-023](docs/architecture/adrs/ADR-023-sessionstart-context-surface.md)
+E1). Whether the cap counts bytes or Unicode code points is not determined by anything observable —
+the measurements are consistent with both — so af budgets in **bytes**, the conservative reading.
+Mail and memory are budgeted well under the cap either way (≤ 4.6 KB and ≤ 4.7 KB), but
+`af prime --hook` embeds the current formula step's `description` **verbatim** — it is the formula
+author's contract, and af does not trim it. A step description long enough to push that entry past
+the cap gets the entry replaced by the preview, and the step body never reaches the session.
+
+**The rule:** a step description longer than the per-string cap is delivered whole only by the
+tool-result `af prime` — the one an agent runs itself. Because the three entries are independent,
+prime's entry spilling costs nothing from mail or memory. Keep step descriptions short enough to fit,
+and treat a long one as a formula-authoring smell rather than a delivery guarantee.
+
+Some shipped formulas already have a first step over the cap, so this is not hypothetical. The
+measurement is deliberately not transcribed here, because it changes with every formula edit; see
+[ADR-023](docs/architecture/adrs/ADR-023-sessionstart-context-surface.md) for how to recompute it.
 
 ### Continuous improvement hook
 
@@ -468,6 +584,7 @@ Runtime state lives in the agent's `.runtime/` directory:
 | `hooked_formula` | `af sling` | Bead ID of the current formula instance |
 | `formula_caller` | `af sling` | Address of who dispatched the formula (for WORK_DONE mail) |
 | `session_id` | `af prime --hook` | Claude session ID (persisted at SessionStart) |
+| `mail_delivered` | `af mail check --inject` | per-session delivered mail ids (deleting the file re-delivers everything once — fail-open) |
 
 This state enables crash recovery: when an agent restarts, `af prime` reads the
 hooked formula ID and resumes from the last unclosed step.
@@ -584,9 +701,9 @@ without requiring TTY detection or interactive input.
 
 ## Generating Specialist Agents from Formulas
 
-A generic supervisor can execute any formula, but it has a problem: when Claude's context fills up and compresses, `af prime` re-injects the supervisor's identity — which knows nothing about the formula. The agent forgets its sling command, step structure, gate protocol, and behavioral discipline. It stalls.
+A generic supervisor can execute any formula, but it has a problem: when Claude's context fills up and compresses, the session recycles and comes back holding the supervisor identity the harness reloads from `CLAUDE.md` — which knows nothing about the formula. The agent forgets its sling command, step structure, gate protocol, and behavioral discipline. It stalls.
 
-`af formula agent-gen` solves this by creating a **specialist agent** — one whose identity IS the formula. The agent's role template contains the full operational playbook (sling command, step structure, gate protocol, behavioral discipline) plus standard agent capabilities (mail, startup, constraints). Context compression re-injects this specialist template, so the agent never forgets what it is or how to work.
+`af formula agent-gen` solves this by creating a **specialist agent** — one whose identity IS the formula. The agent's role template contains the full operational playbook (sling command, step structure, gate protocol, behavioral discipline) plus standard agent capabilities (mail, startup, constraints). That template is rendered into the agent's own `CLAUDE.md`, which the harness reloads after every compression, so the agent never forgets what it is or how to work.
 
 ### When to create a specialist
 
@@ -599,7 +716,7 @@ A generic supervisor can execute any formula, but it has a problem: when Claude'
 # 1. Generate the specialist agent (writes template + provisions workspace)
 af formula agent-gen investigate
 
-# 2. Rebuild the binary so af prime can use the new template
+# 2. Rebuild the binary so the next identity render uses the new template
 make build
 
 # 3. Start the agent
@@ -616,12 +733,12 @@ af up investigate
 Step 1 does four things:
 - Writes a Go template to `internal/templates/roles/investigate.md.tmpl` — the formula's identity baked into the template system
 - Renders that template to `.agentfactory/agents/investigate/CLAUDE.md` — the workspace is immediately usable
-- Writes `.agentfactory/agents/investigate/.claude/settings.json` — hooks for identity injection, mail delivery, and quality gate
+- Writes `.agentfactory/agents/investigate/.claude/settings.json` — hooks for formula-step context, mail delivery, memory delivery, and quality gate
 - Registers the agent in `.agentfactory/agents.json` with its formula name
 
-Step 2 compiles the template into the `af` binary. This is required because `go:embed` is compile-time — `af prime` reads templates from the compiled binary, not from disk. Skip this step and the agent falls back to `supervisor.md.tmpl` on context compression.
+Step 2 compiles the template into the `af` binary. This is required because `go:embed` is compile-time — the identity render that writes each agent's `CLAUDE.md` reads templates from the compiled binary, not from disk. Skip this step and the next re-render falls back to `supervisor.md.tmpl`.
 
-Step 3 starts the agent. On SessionStart, `af prime` detects `investigate.md.tmpl` in the embedded template set and renders it instead of `supervisor.md.tmpl`. On every PreCompact (context compression), the same specialist template is re-injected.
+Step 3 starts the agent. Its `CLAUDE.md` was rendered from `investigate.md.tmpl` rather than `supervisor.md.tmpl`, and the harness loads that file at the start of every session — including the fresh one a PreCompact recycle opens. The SessionStart `af prime --hook` adds the current formula step on top of it.
 
 ### What the specialist knows (and doesn't)
 
@@ -632,7 +749,7 @@ The specialist template gives the agent **procedural identity** — what it is a
 - Behavioral discipline (the formula's `description` field, verbatim)
 - Standard agent capabilities (mail protocol, startup protocol, constraints)
 
-The template does NOT contain **operational state** — which step the agent is on right now. That comes from `af prime`, which injects both identity and current formula context automatically. After context compression, the PreCompact hook runs `af compact-handoff`, which checkpoints and recycles the session; the fresh session's SessionStart then runs `af prime`, restoring both the specialist identity and the current step instructions. No manual command is needed.
+The template does NOT contain **operational state** — which step the agent is on right now. That comes from `af prime`, which reports the current formula context automatically. After context compression, the PreCompact hook runs `af compact-handoff`, which checkpoints and recycles the session; the harness loads the specialist `CLAUDE.md` into the fresh session, and that session's SessionStart `af prime --hook` restores the current step instructions on top of it. No manual command is needed.
 
 ### Dry run
 
@@ -687,7 +804,7 @@ cp .agentfactory/store/formulas/my-agent.formula.toml ~/projects/agentfactory/in
 af up my-agent
 ```
 
-Step 2 writes the template directly to the AF source tree (`--af-src`) and rebuilds the binary (`--build`). The agent functions immediately via its workspace CLAUDE.md even before the rebuild completes — `--build` ensures `af prime` uses the specialist template instead of falling back to `supervisor.md.tmpl` on context compression.
+Step 2 writes the template directly to the AF source tree (`--af-src`) and rebuilds the binary (`--build`). The agent functions immediately via its workspace CLAUDE.md even before the rebuild completes — `--build` ensures the next identity re-render uses the specialist template instead of falling back to `supervisor.md.tmpl`.
 
 Step 3 is the reverse flow (ADR-015): promoting the formula TOML to ship with agentfactory. The template is already in the AF source tree from step 2 thanks to `--af-src`.
 
@@ -707,7 +824,7 @@ af up
 
 **Customer formulas are safe — with one rule.** The redeploy loop is data-safe for **new** customer formulas (those not in the AF source's `internal/cmd/install_formulas/` are preserved). But **edits to shipped formulas must be made (and promoted) in `internal/cmd/install_formulas/`** (ADR-015) — otherwise the `-nt` sync overwrites your edits with the AF source copy on the next redeploy.
 
-**About `--no-build`.** `quickstart.sh` always rebuilds and reinstalls the `af` binary (it has no build-skip flag), so every successful `af install --agents` lands a fresh binary and `af prime`'s embedded identity is always current — a reliability win, not a stale-identity risk. `--no-build` skips **only** `agent-gen-all.sh`'s *duplicate* rebuild (the binary is then built once by quickstart instead of twice); it is not a "skip the rebuild" lever.
+**About `--no-build`.** `quickstart.sh` always rebuilds and reinstalls the `af` binary (it has no build-skip flag), so every successful `af install --agents` lands a fresh binary and re-renders every agent's `CLAUDE.md` from it, which means the identity the harness loads at session start is always current — a reliability win, not a stale-identity risk. `--no-build` skips **only** `agent-gen-all.sh`'s *duplicate* rebuild (the binary is then built once by quickstart instead of twice); it is not a "skip the rebuild" lever.
 
 **Bootstrap options.** `--litellm` also sets up the gateway for running agents on OpenAI models (see `USING_LITELLM.md`); it asks for your OpenAI API key the first time and reuses the stored key on later runs. `--no-telemetry` skips the telemetry backend and turns recording off; without it, a successful redeploy turns recording **on**. Every redeploy resets recording to match the flag — even if you toggled it by hand with `af telemetry` in between, so keep passing `--no-telemetry` on redeploys if you want it to stay off.
 
@@ -719,13 +836,14 @@ Each repository is its own independent factory. Agents in `~/src/myproject/.agen
 
 ## Feature Guides
 
-Deep guides for the factory's measurement and model subsystems live beside this one:
+Deep guides for the factory's measurement, model, and token-economics subsystems live beside this one:
 
 - [USING_TELEMETRY.md](USING_TELEMETRY.md) — run measurement: the telemetry backend, its dashboards, and the session statusline
 - [USING_RECOVERY.md](USING_RECOVERY.md) — the watchdog, context-exhaustion recovery, and the step-context ladder
 - [USING_MEMORY.md](USING_MEMORY.md) — the per-agent memory vault: what survives teardown, export/import, host mounts
 - [USING_MODELS.md](USING_MODELS.md) — model profiles and classes (`.agentfactory/models.json`)
 - [USING_LITELLM.md](USING_LITELLM.md) — running agents on non-Anthropic models through a gateway
+- [USING_TOKENOMICS.md](USING_TOKENOMICS.md) — the af tokenomics behavior contract: the `capacity` and `efficiency` objectives, guarantees, permitted interventions, per-mechanism records, and how an improvement is proven
 - [web/README.md](web/README.md) — the optional web console
 
 ## Troubleshooting

@@ -265,6 +265,14 @@ def _list_filter_clause(args):
         )
         params[key] = lv
 
+    # created_after: inclusive lower bound on creation time (#679/T7). Both the
+    # bound and the stored created_at are RFC-3339 UTC strings ("...Z"), so a
+    # lexical >= is a chronological >= (idx_issues_created_at, schema.py:70).
+    created_after = args.get("created_after")
+    if created_after:
+        clauses.append("created_at >= :created_after")
+        params["created_after"] = created_after
+
     where = " AND ".join(clauses) if clauses else "1=1"
     return where, params
 

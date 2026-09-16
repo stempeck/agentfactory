@@ -18,10 +18,10 @@ Two sibling packages, `internal/claude/` and `internal/templates/`, each use `go
 
 Only two files (`ls internal/claude/config/`):
 
-- `settings-autonomous.json` — Claude Code hooks config for autonomous agents. Adds `af mail check --inject` to the `SessionStart` command and installs a second `Stop` hook running `hooks/fidelity-gate.sh` alongside `hooks/quality-gate.sh` (`internal/claude/config/settings-autonomous.json:9, 42-47`).
-- `settings-interactive.json` — Claude Code hooks config for interactive agents. `SessionStart` runs `af prime --hook` only (no mail inject). Single `Stop` hook runs `hooks/quality-gate.sh` (`internal/claude/config/settings-interactive.json:9, 42`).
+- `settings-autonomous.json` — Claude Code hooks config for autonomous agents. `SessionStart` runs three **separate** hook entries — `af prime --hook`, `af mail check --inject`, `af memory check --inject` (one per writer, never `&&`-chained; ADR-023 K3) — and installs a second `Stop` hook running `hooks/fidelity-gate.sh` alongside `hooks/quality-gate.sh` (`internal/claude/config/settings-autonomous.json`).
+- `settings-interactive.json` — Claude Code hooks config for interactive agents. Its `SessionStart` writers are identical to the autonomous file (`af prime --hook`, `af mail check --inject`, `af memory check --inject`, as separate entries); it differs only in a single `Stop` hook (`hooks/quality-gate.sh`) and an `--interactive` `PreCompact` (`internal/claude/config/settings-interactive.json`).
 
-Both files wire four hooks: `SessionStart`, `PreCompact` (always `af prime`), `UserPromptSubmit` (always `af mail check --inject`), and `Stop`. Both `Stop` commands use `"${AF_ROOT}/hooks/..."` so they resolve against tmux-exported env for worktree isolation (`settings-interactive.json:42`, `settings-autonomous.json:42,46`).
+Both files wire seven hooks: `PreToolUse` (two matcher groups — `Bash|Write|Edit` for the #386 containment guard, and `Task|Agent` → `af dispatch-admit`, the #672 pre-act sub-agent-dispatch capacity gate), `PostToolUse` (matcher `Task|Agent`, the #668 K18 sub-agent observer), `SubagentStop` (`af dispatch-retire`, which frees the launcher's reservation slot when a sub-agent ends), `SessionStart`, `PreCompact`, `UserPromptSubmit` (always `af mail check --inject`), and `Stop`. Both `Stop` commands use `"${AF_ROOT}/hooks/..."` so they resolve against tmux-exported env for worktree isolation (`settings-interactive.json:42`, `settings-autonomous.json:42,46`).
 
 ### Hook-rendering contract
 
@@ -88,7 +88,7 @@ NOTE: `CLAUDE.md` (project-root) still lists `deacon`, `refinery`, `witness` und
 
 - Rendered hook bash scripts MUST resolve `ROLE` via `${AF_ROLE:-...}` env fallback and `FACTORY_ROOT` via `${AF_ROOT:-...}` env fallback (`internal/cmd/hook_envvar_test.go:38, 43`).
 - Embedded `settings-*.json` Stop-hook commands MUST reference `${AF_ROOT}` (never `$(af root)`) so worktree-running agents resolve the factory root via tmux-exported env (`internal/claude/settings_test.go:80-85, 132-137`; constraint tag "C12").
-- Autonomous `SessionStart` MUST chain `af prime --hook && af mail check --inject`; interactive `SessionStart` MUST NOT contain `af mail check` (`settings_test.go:70-72, 110-124`).
+- `SessionStart` MUST declare its context writers as **separate hook entries, never `&&`-chained** — `af prime --hook`, `af mail check --inject`, `af memory check --inject` — because the harness budgets each hook's stdout separately (ADR-023 K3, so a chained writer would tax the others' byte budget); the same three writers apply to both role types (`settings_test.go` `sessionStartWriters` / `assertSessionStartWriters`).
 - Both settings files MUST reference `quality-gate.sh` in a Stop hook (`settings_test.go:75, 127`). Autonomous additionally has `fidelity-gate.sh` (`settings-autonomous.json:46`).
 - `RoleTypeFor` default for unknown roles is `Interactive`, not an error (`settings.go:25-28`; test at `settings_test.go:37-45`).
 - Template-fallback order: agent-specific template → type default (`manager` for interactive, `supervisor` for autonomous). Implemented identically in install (`install.go:239-248`) and prime (`prime.go:130-139`).

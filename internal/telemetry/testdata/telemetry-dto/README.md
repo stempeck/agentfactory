@@ -78,7 +78,7 @@ The prefix before the first `-` is the FAMILY, and it is load-bearing rather tha
 | `status-healthy-all-green.json` | every axis healthy — the only `state: "ok"` status payload |
 | `status-error-infra.json` | the infrastructure-failure envelope, which still exits 0 |
 | `report-empty.json` | healthy with no data yet — `state: "ok"`, `rows: []`, zero stats |
-| `report-rows.json` | one closed step and one open step, with numeric durations; also the two context stories (#622 C6) — the closed row pins measured figures and both verdicts, the open row pins the shape of absence, `null` per column and `consumption_state: "unmeasurable"` |
+| `report-rows.json` | one closed step and one open step, with numeric durations; also the two context stories (#622 C6) and the generation story (#668 K10) — the closed row pins measured figures, both verdicts and what the step produced (`out_tokens`, `think_tokens_est`, the derived `thinking_share`, `peak_ctx_tokens`, `subagent_tokens`) plus the two authoring-waste signals K10 ranks steps by (`sessions` spanned, `repeat_reads` — the latter `null` on this fixture, which never recorded one), the open row pins the shape of absence, `null` per column and `consumption_state: "unmeasurable"` |
 | `report-corrupt.json` | zero rows **and** non-zero stats — never rendered as "no records yet" |
 | `usage-ok.json` | a healthy query — both halves `ok`, token rows and metric rows present, `truncated` false; the metric row also pins the label ALLOWLIST, since the live backend returns `user_email` / `session_id` on those series and this payload reaches a browser |
 

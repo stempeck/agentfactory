@@ -329,6 +329,47 @@ func TestRunUp_OmitsSupervisorEscalationTarget_Warns(t *testing.T) {
 	}
 }
 
+// TestRunUp_UnreachableEscalationRecipient_LoudlyWarns is #672 AC-5's startup half: factory startup
+// must refuse OR LOUDLY warn when the escalation route's recipient cannot receive — not the generic
+// "a sink is omitted from the startup set" line, but a prominent, escalation-specific signal, because
+// the baseline failure was five "RECOVERY HALTED (escalation undelivered)" lines accumulating with
+// nothing reaching a human. Here supervisor is in agents.json but is neither live nor in
+// startup.json's agents, so recoveryRecipientReachable is false — the recovery path cannot deliver a
+// halt escalation. The pre-#672 warnOmittedSinks emits only the neutral "mail/notify target" line,
+// which does not distinguish "will run later" from "cannot receive"; this asserts the stronger line.
+func TestRunUp_UnreachableEscalationRecipient_LoudlyWarns(t *testing.T) {
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
+	writeAFFile(t, root, "agents.json",
+		`{"agents":{"manager":{"type":"autonomous","description":"m"},"supervisor":{"type":"autonomous","description":"s"}}}`)
+	// supervisor exists in the roster but is not in the startup set and (hermetic sessions) is not
+	// live: recoveryRecipientReachable(root,"supervisor") == false — the escalation route is broken.
+	writeAFFile(t, root, "startup.json", `{"agents":["manager"]}`)
+
+	t.Setenv("AF_WORKTREE", "")
+	t.Setenv("AF_WORKTREE_ID", "")
+	t.Chdir(root)
+
+	setupHermeticSessions(t)
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	_ = runUp(cmd, nil)
+	out := strings.ToLower(buf.String())
+
+	if !strings.Contains(out, "supervisor") {
+		t.Fatalf("startup must name the unreachable escalation recipient; out=%q", out)
+	}
+	if !strings.Contains(out, "escalation") || !strings.Contains(out, "cannot receive") {
+		t.Errorf("an UNREACHABLE escalation recipient must draw a loud, escalation-specific "+
+			"'cannot receive' warning at startup, not only the neutral omitted-sink line; out=%q", out)
+	}
+}
+
 // The fidelity active-formula guard must check the af-up-RESOLVED root, not the
 // raw cwd. A formula hooked at the root must block fidelity:"off" even when
 // `af up` is invoked from a subdirectory (wd != root).

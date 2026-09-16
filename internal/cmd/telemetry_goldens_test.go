@@ -343,6 +343,11 @@ func TestTelemetryReportGoldenReproducesTheEmitter(t *testing.T) {
 			CtxTokensTotal: i64p(200000), CtxObservedAt: "2026-07-27T09:15:06.388Z",
 			CumTokens: i64p(171500), CtxTokensStart: i64p(42000), CumTokensDelta: i64p(53500),
 			CtxBoundTokens: 120000,
+			// #668 K10 gave the golden a third story: what the step GENERATED. Seeded only on the
+			// closed record, because only a close carries these — which is what makes the open row
+			// below the pin for the shape of absence on the generation columns too.
+			OutTokens: i64p(12400), ThinkTokensEst: i64p(9300),
+			PeakCtxTokens: i64p(98500), SubagentTokens: i64p(21000),
 		},
 		{
 			V: telemetry.SchemaVersion, Event: telemetry.EventStepStart,
