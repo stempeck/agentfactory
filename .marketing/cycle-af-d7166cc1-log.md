@@ -85,3 +85,47 @@ package, new CLI verbs, closes #110. Operator stempeck CONFIRMED YES to a v0.4.0
 via `gh issue view 112 --json comments`, not trusted from the manager relay). Tag is still cut ONLY
 after the PR merges (never on a red main; main greenness re-verified at step 5), at the deliver gate
 (step 17) — this step notes the decision, it does not execute it.
+
+## GATE-3 — Every public claim verified against source
+
+Full branch diff reviewed: `git diff origin/main...HEAD` (README.md, CHANGELOG.md + 3 `.marketing`
+records; 342 insertions). The mandatory 4-item pre-draft checklist was run over every added line;
+each item resolves to NONE-unverified.
+
+**1. Commands / flags / subcommands asserted but NOT proven this session — NONE.**
+- `af telemetry band|compare|rebuild|usage` and `af telemetry on|off|status|report|usage` —
+  `internal/cmd/telemetry.go:20` `Use: "telemetry [on|off|status|report|band|usage|compare|rebuild]"`;
+  implementations `telemetry_band.go`, `telemetry_compare.go`, `telemetry_digest.go` (rebuild),
+  `telemetry_usage.go`.
+- `[--json]` on band/compare — `internal/cmd/telemetry.go:138`: "status, report, band and compare
+  have both a human and a machine-readable form … where --json picks between them". `rebuild` is
+  documented WITHOUT `--json` on purpose (not in that set).
+- `af tokenomics on|off|status` — `internal/cmd/tokenomics.go:23` `Use: "tokenomics [on|off|status]"`;
+  cases at `:204`/`:213`.
+- `af dispatch status` — `internal/cmd/dispatch.go:30` `Use: "dispatch"` + `:76` `Use: "status"`.
+- `af turn interventions` — `internal/cmd/turn.go:124` `Use: "interventions"`.
+- Env keys `AF_BACKEND_POOL_TOKENS`, `AF_BACKEND_CHILD_FLOOR_TOKENS`, `AF_DISABLE_PARALLEL_SUBAGENTS`
+  — `internal/config/models.go`. `crons` — `internal/config/dispatch.go`. Package `internal/tokenomics/` present.
+- Skills `/improve-solution`, `/perfeval-agent` — `.claude/skills/{improve-solution,perfeval-agent}/`
+  and identical dirs under `internal/cmd/install_skills/`.
+- (`--gate`, `--phase-complete`, `--oneline` appearing in log prose are process/git flags in evidence
+  text, not public product claims.)
+
+**2. Counts asserted but NOT recounted from the filesystem — NONE.**
+- "Twelve skills" (README) / "(10 → 12)" (CHANGELOG) — `ls -d .claude/skills/*/ | wc -l` = 12; the
+  same 12 exist under `internal/cmd/install_skills/`.
+- "Twenty-four formulas ship" (README context, unchanged line) — `ls internal/cmd/install_formulas/*.toml | wc -l` = 24.
+
+**3. URLs not fetched or constructed from a verified pattern — NONE.**
+- `USING_TOKENOMICS.md` (relative link, README) — file present (`ls -la` = 38307 bytes).
+- `https://github.com/stempeck/agentfactory/issues/112` and `…#issuecomment-5706340238` (`.marketing`
+  records) — real; fetched live via `gh issue view 112 --json comments`.
+- The two stale issue URLs (#73, #75) were REMOVED from the diff, not added.
+
+**4. Unshipped promises ("coming soon") outside a Roadmap section — NONE.**
+- `grep -iE 'coming soon|will ship|planned|future|tbd|wip'` over added README/CHANGELOG lines = none.
+  Every documented feature ships in #111 (merged: `8d1a0066` on origin/main). Two shipped items were
+  REMOVED from Roadmap; the Roadmap retains only genuinely-future items (GoReleaser binaries, richer
+  formula library, web-console growth).
+
+GATE-3 VERDICT: PASS
