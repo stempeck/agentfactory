@@ -158,3 +158,15 @@ published — Tier B is operator-published.
   fix mechanics only, enumerate, preserve replaced text as reference (committed mode still: keep the
   audit trail), and record their edit as the new Voice calibration source in approach.md. Close #113
   when both are resolved.
+- **CORRECTION 2026-09-17 — delivery method changed to a PR.** The operator rejected the worktree-form
+  mechanism (verbatim via manager relay, verified: "I'm not going to go into the agent branch, it
+  needs to communicate what I need via PR or Github issues. It should probably have put up a PR for me
+  to review the content and whatever edits happen up until approval can happen in that branch/push/PR
+  process."). FIXED: pushed `af/marketing-cycle-cd14d3`, opened **PR #114**
+  (https://github.com/stempeck/agentfactory/pull/114) as the single review surface — Tier A changes +
+  both Tier B drafts presented inline in the PR body. Closed #113, redirected to the PR. Review + edits
+  now happen on the PR (READY/EDITED/SKIP as PR replies, or pushes to the branch). Runbook updated
+  (approach.md §0 + failure-modes) so future cycles open the review PR early and never point at a
+  worktree path. Formula-improvement candidate recorded in memory (GATE 2/4 + notify steps hardcode
+  worktree Decision forms). STILL HOLDING at GATE 4 for the operator's PR review; NOT advancing
+  af-c97a09b7 until both drafts are resolved on the PR.

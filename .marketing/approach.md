@@ -13,6 +13,13 @@ here is a scar, not a hypothetical. Follow the steps in order. When a step says 
 - **Repo:** github.com/stempeck/agentfactory. Branch protection on main. You open PRs;
   ONLY the operator merges them. Never merge a PR, never push to main — no exceptions,
   regardless of urgency or CI status.
+- **Review surface = GitHub, always (learned cycle-af-d7166cc1).** The operator reviews ALL
+  cycle output — Tier A changes AND Tier B drafts — on GitHub, via a **PR** (or an issue that
+  contains the content inline). He will NOT open files in an agent worktree/branch. His words:
+  "I'm not going to go into the agent branch, it needs to communicate what I need via PR or
+  Github issues." So: push the branch and open the review PR EARLY (at the draft-approval gate),
+  present the drafts IN the PR (inline), and take his READY/EDITED/SKIP + edits as PR replies or
+  pushes. NEVER ask him to edit a `## Operator Decision` form inside a worktree file.
 - **Auth preflight:** `gh api user -q .login` must return `stempeck`. Repo edits need `repo`
   scope; profile edits need `user` scope. If a call 404s with a scope hint, tell the operator to
   run `gh auth refresh -h github.com -s <scope>` — you cannot do the browser dance for him.
@@ -161,6 +168,7 @@ files left in the working tree.
 | Draft file lost content after your edit | this dir has no git history | additive replacement only; keep superseded text as reference |
 | Edit tool rejects: "file modified since read" | Glenn edited while you worked | re-read, apply against HIS text; his edits win |
 | Your rewrite "sounds like AI" | you smoothed his cadence | revert to his words; mechanics-only; enumerate changes |
+| Operator: "am I supposed to reach into the worktree?" | you pointed him at a worktree file path for review | push the branch, open a PR, present the content IN the PR; deliver ALL review on GitHub, never a worktree path (cycle-af-d7166cc1) |
 
 ## Machine-read sections (marketing-cycle v2 compatibility)
 
