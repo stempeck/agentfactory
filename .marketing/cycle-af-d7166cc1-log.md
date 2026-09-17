@@ -129,3 +129,32 @@ each item resolves to NONE-unverified.
   formula library, web-console growth).
 
 GATE-3 VERDICT: PASS
+
+## Phase 4 — Tier B drafts (operator's voice)
+
+Voice recalibrated FIRST against the operator's published finals (cycle-3 Medium published version +
+cycle-3 LinkedIn approved-as-written + cycle-2 edited-short LinkedIn) before writing a word.
+
+- `cycle-af-d7166cc1-medium.md` — long-form, flagship token economics. Structure: failure-mode hook →
+  See / Bound / Prove → honest limits ("won't do, on purpose") → repo + USING_TOKENOMICS.md → motto
+  close. No fragile numeric claim in the title (so no number-landing obligation). Alt titles staged.
+- `cycle-af-d7166cc1-linkedin.md` — short-form, ~140 words, plain text (CAPS not asterisks — LinkedIn
+  renders no markdown), multi-question hook, `Read more: … | Get it: …` footer. Medium URL is a
+  publish-time placeholder (Phase 5 sequences Medium first).
+- `cycle-af-d7166cc1-diagram.png` — optional see→bound→prove card, rendered via bundled Playwright
+  chromium (branded chrome absent in this Linux container) and pixel-checked (no label collisions,
+  nothing clipped). Filename matches the cleanup gate's `cycle-*-diagram.png` pattern.
+
+Every command/flag/limit in both drafts is source-verified (same evidence as GATE-3). Nothing
+published — Tier B is operator-published.
+
+## GATE-4 — Operator draft approval (HOLD)
+
+- Both drafts end with a blank `## Operator Decision` form (READY / EDITED / SKIP), one per draft.
+- Operator notified: GitHub issue **#113** (https://github.com/stempeck/agentfactory/issues/113).
+- State: **UNRESOLVED — HOLDING.** Per the cycle-3 gotcha, `af done --phase-complete --gate af-c97a09b7`
+  advances UNCONDITIONALLY (registers a waiter; does NOT grep the forms), so the HOLD is behavioral.
+  NOT advancing until BOTH draft Decision lines are resolved. On EDITED: their text is canonical —
+  fix mechanics only, enumerate, preserve replaced text as reference (committed mode still: keep the
+  audit trail), and record their edit as the new Voice calibration source in approach.md. Close #113
+  when both are resolved.
