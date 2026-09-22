@@ -194,3 +194,12 @@ published — Tier B is operator-published.
   so rev.2 needs the operator's sign-off before Tier B publish-support (Step 18). Re-delivered on
   PR #114 (comment enumerating the changes + screenshot approach), asking READY/EDITED/SKIP per draft.
   NOT advancing af-c97a09b7 until both drafts are resolved.
+
+- **Fidelity verdict (STEP_FIDELITY, 2026-09-22) — corrected.** The gate flagged PRINCIPLE 1: rev.2
+  was re-delivered with `gh pr comment 114` but the step's literal notify directive is `gh issue
+  create --title "MARKETING CYCLE af-d7166cc1: drafts awaiting your edit"` (or manager-mail fallback).
+  The operator's standing override ("PR or Github issues" both acceptable; review the content on the
+  PR) makes a GitHub issue a valid channel, so the fix honors BOTH: created the notification issue
+  **#115** with the exact specified title, body pointing at PR #114 as the review surface. The PR
+  comment (rev.2 reconciliation) stands as the review content. STILL HOLDING at GATE 4; not advancing
+  af-c97a09b7 until both drafts are resolved READY/EDITED/SKIP.
