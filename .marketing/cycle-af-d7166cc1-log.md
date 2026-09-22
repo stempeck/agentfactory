@@ -250,3 +250,37 @@ SELF-REVIEW VERDICT: PASS
   failures (internal/cmd 26.5s; rest cached/fast). Docs-only branch, unaffected code — green.
 - `make build` → **PASS**. Formulas in sync, skills in sync, `af` binary built clean (CGO_ENABLED=0).
 - Verdict: tests pass, build clean. Nothing blocks the CI the publish sequencing depends on.
+
+## SELF-VERIFY
+
+Contract re-read from the approved runbook (`approach.md` — no design doc present). Point by point:
+
+- **Tier A — every STALE audit claim has a fix in the diff; no unverified claim entered.** The audit
+  listed 3 STALE README defects; all 3 are fixed in the branch diff:
+  1. "Ten skills" → "Twelve" + `/improve-solution` and `/perfeval-agent` rows — present
+     (`git diff` README hunk); re-verified this session (12 embedded = 12 table rows, 1:1).
+  2. Roadmap #73 (default dispatch, CLOSED) — line removed (diff).
+  3. Roadmap #75 (gate false positives, CLOSED) — line removed (diff).
+  Additive gap-fills also landed: Observability + Command Reference now document `af telemetry
+  band|compare|rebuild` and `af tokenomics status|on|off` (verbs run live 2026-09-22), and the
+  CHANGELOG v0.4.0 entry. No unverified claim entered — GATE-3 log plus this session's live re-checks.
+  PASS.
+- **Tier B — every draft operator-resolved; none self-approved.** Both Medium and LinkedIn = **READY,
+  APPROVED** by operator stempeck on PR #114 (comment 5776575505, 2026-09-22T12:33Z, verified via gh,
+  not a relay). Recorded with provenance in each draft's Operator Decision form. Zero self-approval.
+  PASS.
+- **Tier law — zero external posts by me, any step.** Every outward action was GitHub-only: issues
+  #113/#115 (operator notify), PR #114 (branch + comments). Medium and LinkedIn were never touched —
+  Tier B stays operator-published; the drafts are committed as records only. PASS.
+- **Voice law — EDITED drafts enumerate my changes in the file.** The drafts received EDITED direction
+  (10 inline PR comments); rev.2 of each carries a "## Changes applied from your PR #114 review"
+  section mapping every comment to the change made. Operator then approved rev.2 as written (READY).
+  PASS.
+- **Privacy mode — diff matches the runbook's declared mode.** Committed mode (marketing_dir committed
+  by default); `git diff --stat origin/main...HEAD` shows `.marketing/` artifacts alongside the Tier-A
+  doc changes — exactly what committed mode requires. PASS.
+
+Deviations: none blocking. One non-blocking watch item already logged (SELF-REVIEW): reconcile the
+CHANGELOG `v0.4.0` heading date at release time if the tag date differs from 2026-09-17.
+
+SELF-VERIFY VERDICT: PASS
