@@ -210,3 +210,36 @@ published — Tier B is operator-published.
   mechanics pass needed. Both drafts' Operator Decision forms updated to READY with provenance. Tier B
   stays operator-published; this READY approves the COPY only, it publishes nothing. Notification
   issue #115 closed. Advancing af-c97a09b7 → Step 14 (Self-review changes).
+
+## SELF-REVIEW
+
+Reviewed the full branch diff (`git diff origin/main...HEAD`, 9 files, +688/-3) before tests.
+
+**Scope / privacy mode.** Committed mode: `.marketing/` cycle artifacts appear alongside the Tier-A
+doc changes (README.md, CHANGELOG.md) — correct for committed mode. No source/code files touched; no
+web/ or internal/ changes. PASS.
+
+**Findings and fixes:**
+- **README skills count** — "Ten" → "Twelve" with `/improve-solution` + `/perfeval-agent` rows.
+  Cross-checked the table against `internal/cmd/install_skills/`: 12 listed = 12 embedded, 1:1, no
+  stale row, none missing. Accurate. No fix needed.
+- **README link `[USING_TOKENOMICS.md](USING_TOKENOMICS.md)`** — target exists at repo root (38 KB).
+  Link valid. No fix needed.
+- **README roadmap** — removed #73 (default dispatch) and #75 (gate false positives); both CLOSED/
+  shipped. Correct removal. No fix needed.
+- **README/CHANGELOG new verbs** — `af telemetry band|compare|rebuild`, `af tokenomics status|on|off`
+  all run live on this machine 2026-09-22 (real output). No invented flags. No fix needed.
+- **CHANGELOG null-vs-0 wording** — kept ("unmeasured figures kept as `null`, never `0`"). This is a
+  factual technical record; the operator's "drop the honest-un-measurables pitch" note governs the
+  Tier-B MARKETING copy (Medium/LinkedIn), not the changelog. No conflict. No fix needed.
+- **Tier B drafts (Medium + LinkedIn)** — reconciled to operator-approved rev.2 (PR #114 READY,
+  APPROVED); Decision forms record READY with provenance. Markdown fences and the `[DIAGRAM]` mark
+  render cleanly; two REAL captured-output blocks are labelled as live captures, not mocks. Tier B =
+  records only, not shipped on merge. No fix needed.
+- **Cruft** — no TODO/FIXME/debug/console.log added anywhere in the diff. Clean.
+
+**Watch item (non-blocking, for the release step):** the `v0.4.0` CHANGELOG heading is dated
+`2026-09-17` (authored date). The tag is cut after the Tier-A PR merges; if the actual release date
+differs, reconcile the heading date at release time.
+
+SELF-REVIEW VERDICT: PASS
