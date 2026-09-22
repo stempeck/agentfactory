@@ -284,3 +284,18 @@ Deviations: none blocking. One non-blocking watch item already logged (SELF-REVI
 CHANGELOG `v0.4.0` heading date at release time if the tag date differs from 2026-09-17.
 
 SELF-VERIFY VERDICT: PASS
+
+## DELIVER — Tier A PR (Step 17, GATE, step af-9a830290)
+
+- Branch pushed; PR #114 is the operator surface. Delivery comment posted (5776722582) with CI status,
+  merge state, and the release recommendation; manager given the org record via af mail.
+- **CI: 6/6 functional checks green** — integration, unit, web-unit, regen, supply-chain-lint,
+  toml-conformance. Local `make test` + `make build` green.
+- **Merge state: MERGEABLE (no conflicts) but BLOCKED** by the required `license/cla` check (pending,
+  not failing): commits authored by `agentfactory`/`agentfactory-cli`, which are not GitHub users, so
+  the CLA bot can't auto-verify. OPERATOR-side: sign/re-check the CLA, or override as repo owner. I
+  cannot sign a CLA as a non-user.
+- **Release recommendation: cut v0.4.0 after merge** (operator said YES on #112; flagship #111 is the
+  release theme). I'll cut the tag post-merge with See/Bound/Prove notes unless the operator prefers to.
+- **State: HOLDING at the delivery gate.** Not running `af done --phase-complete --gate` until the PR
+  is merged — Step 18 publish-support must point at merged main. Blocked on operator merge.
