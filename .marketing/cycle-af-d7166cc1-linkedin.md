@@ -30,9 +30,9 @@ Read more: <MEDIUM ARTICLE URL — paste after publishing the Medium piece> | Ge
    middle around the three switches operators actually type. Reverting either is a one-word "no."
 
 ## Operator Decision
-- Decision: ______
+- Decision: **READY, APPROVED** — operator stempeck on PR #114, comment 5776575505, 2026-09-22T12:33Z
+  (verified directly via gh, not a relay). No inline edits on rev.2; approved as written.
   (READY to approve for publishing; EDITED — I changed the text, re-check mechanics only;
    SKIP to drop this piece this cycle.)
-- Notes: ______
-  (Too long? Wrong angle? If you rewrite it, your version becomes canonical and the new LinkedIn
-   voice-calibration source - I only fix mechanics after, enumerated.)
+- Notes: Tier B — still operator-published; this READY approves the COPY, it does not post anything.
+  Footer's Medium URL still gets filled after the Medium piece is published (Phase 5 sequences it).

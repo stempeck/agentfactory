@@ -151,9 +151,9 @@ used it verbatim; the rest I rewrote to your direction and am flagging here so y
 Open question for you: is `compare` worth its own section, or fold it into telemetry? Your call.
 
 ## Operator Decision
-- Decision: ______
+- Decision: **READY, APPROVED** — operator stempeck on PR #114, comment 5776575505, 2026-09-22T12:33Z
+  (verified directly via gh, not a relay). No inline edits on rev.2; approved as written.
   (READY to approve for publishing; EDITED — I changed the text, re-check mechanics only;
    SKIP to drop this piece this cycle.)
-- Notes: ______
-  (Anything you want reframed, cut, or dialed up/down. If you rewrite any passage, your text
-   becomes canonical and the new voice-calibration source - I only fix mechanics after, enumerated.)
+- Notes: Two open questions (compare section; keep diagram) were left to my discretion — kept both as
+  drafted. Tier B: still operator-published; this READY approves the COPY, it does not post anything.

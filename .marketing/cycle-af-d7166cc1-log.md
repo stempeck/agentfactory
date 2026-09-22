@@ -203,3 +203,10 @@ published — Tier B is operator-published.
   **#115** with the exact specified title, body pointing at PR #114 as the review surface. The PR
   comment (rev.2 reconciliation) stands as the review content. STILL HOLDING at GATE 4; not advancing
   af-c97a09b7 until both drafts are resolved READY/EDITED/SKIP.
+
+- **GATE 4 RESOLVED — READY, APPROVED (2026-09-22T12:33Z).** Operator stempeck approved both rev.2
+  drafts on PR #114 (comment 5776575505: "READY, APPROVED."), verified directly via gh (not a relay).
+  Checked for EDITED signals: ZERO new inline review comments after the rev.2 push — clean READY, no
+  mechanics pass needed. Both drafts' Operator Decision forms updated to READY with provenance. Tier B
+  stays operator-published; this READY approves the COPY only, it publishes nothing. Notification
+  issue #115 closed. Advancing af-c97a09b7 → Step 14 (Self-review changes).
