@@ -243,3 +243,10 @@ web/ or internal/ changes. PASS.
 differs, reconcile the heading date at release time.
 
 SELF-REVIEW VERDICT: PASS
+
+## TESTS & BUILD (Step 15)
+
+- `make test` (runbook command; never test-integration locally) → **PASS**. All packages ok, zero
+  failures (internal/cmd 26.5s; rest cached/fast). Docs-only branch, unaffected code — green.
+- `make build` → **PASS**. Formulas in sync, skills in sync, `af` binary built clean (CGO_ENABLED=0).
+- Verdict: tests pass, build clean. Nothing blocks the CI the publish sequencing depends on.
