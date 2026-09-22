@@ -1,99 +1,154 @@
-<!-- DRAFT — cycle-af-d7166cc1 flagship (Token economics, #111). Long-form / Medium.
-     Written in Glenn's voice (calibration: cycle-af-c967c569-medium.md published final,
-     cycle-af-50cdad6b finals, live articles). Tier B: YOU publish by pasting into Medium
-     yourself — I never post. Your edits are canonical; if you change the text I re-check
-     mechanics only and enumerate every change. Every command/flag/limit below was verified
-     against source this cycle (see cycle-af-d7166cc1-log.md GATE-3). -->
+<!-- DRAFT (rev.2) — cycle-af-d7166cc1 flagship (Token economics, #111). Long-form / Medium.
+     Rewritten 2026-09-22 against your PR #114 inline review (10 comments). Calibration now: your
+     review comments themselves (they are the newest, most specific voice signal we have) + prior
+     published finals. Tier B: YOU publish by pasting into Medium yourself — I never post. Your
+     edits are canonical; if you change the text I re-check mechanics only and enumerate every change.
+     Every command/flag/number below was run live on 2026-09-22 or verified against source (GATE-3). -->
 <!-- The italic line under the title goes in Medium's SUBTITLE field, not the body (it is also
      Google's meta description — it carries the search phrases). -->
 <!-- Optional visual: a see→bound→prove diagram is staged at cycle-af-d7166cc1-diagram.png.
      Insert it at the [DIAGRAM] mark if you want it; drop the mark if you don't. -->
+<!-- The three fenced blocks marked "REAL OUTPUT" are live captures from this machine on
+     2026-09-22 — real, not mocked. Say the word (or approve the copy) and I'll render them as
+     clean PNG figures for Medium; I didn't render images of text you might still change. -->
 
-# In my factory of AI agents, I finally know what a run costs - and whether my "fixes" actually help.
+# Knowing what a run costs and whether my "fixes" actually help.
 
-*Token economics for autonomous Claude Code agents: see what a run generates, bound what a sub-agent can spend, and prove a change helped. Off by default, honest about what it can't measure.*
+*Token economics for autonomous Claude Code agents: see what a run generates, bound what a sub-agent can spend, and prove a change helped. Off by default.*
 
-You hand an autonomous agent a context window and walk away. It fills it. And for the longest
-time, that was the end of what I actually knew.
+You hand an autonomous agent a context window and walk away. It fills it. Then the questions start.
+What did that run actually cost? Was that normal for this step? And the formula tweak I shipped last
+week to make it leaner - did it work, or did I just tell myself it did?
 
-I couldn't tell you what a run GENERATED to get where it got. I couldn't stop one greedy
-sub-agent from starving the orchestrator that launched it on a cramped local backend. And when I
-"fixed" a formula to make it leaner, I couldn't prove the fix did anything - I squinted at two
-runs and told myself a story I wanted to believe. You gave an agent a window, it filled it, and
-you had no instrument panel at all.
+This release answers all three, and it does it with three switches you turn ON when you want the
+numbers and OFF when you don't. The factory never gets to quietly decide to throttle itself - that
+call stays yours:
 
-This release is me refusing to squint. The factory can now SEE, BOUND, and PROVE what a run costs
-its own context window. It's off by default - you turn it on when you want the numbers, and the
-factory never gets to quietly decide to throttle itself.
+```
+af telemetry on      # collect what each run costs
+af tokenomics on     # spend those numbers - bound a run before it overspends
+af improvement on    # let a finished agent propose a leaner version of itself
+```
 
-## See - what a run actually generated
+Here is what each one buys a human operator.
 
-Every closed step now records what it GENERATED - output, thinking, peak occupancy, and what its
-sub-agents spent - right next to how long it took. And the figure it never had before is honest:
-if something wasn't measured, it reads `null`, not `0`. A zero means "I measured, and it was
-zero." A null means "I don't know, and I won't pretend." That distinction is the whole ballgame
-when you're deciding whether to trust a number.
+## `af telemetry on` - see what a run actually cost
 
-Then `af telemetry band` takes that history and tells you whether a step's latest run sits inside
-its own learned range - and it PRINTS the band it's judging against, so the verdict isn't a black
-box you're asked to trust. `af telemetry rebuild` keeps that learned range alive even after the
-raw records rotate away.
+Turn on telemetry and every closed step writes down what it spent - the real figures, not a guess.
+Run `af telemetry report` and you get a per-step ledger: how much of the context window each step was
+holding when it closed, and how many tokens it added. Live output from this repo:
 
-## Bound - a spend limit an agent can't argue with
+```
+[REAL OUTPUT - af telemetry report, live 2026-09-22]
+STEP                                                CTX_PCT   DELTA (tokens)   OCCUPANCY
+Phase 1: Audit surfaces and mine development         12%          20,811       under-bound
+GATE 1: Audit checklist                              12%           4,651       under-bound
+Phase 2: Rank the untold list and propose the story  13%           3,657       under-bound
+```
 
-This is the part I'm proudest of. On a shared backend, a model profile can declare its pool
-(`AF_BACKEND_POOL_TOKENS`). When an agent tries to launch a sub-agent that would oversubscribe
-that pool, the launch is refused BEFORE it starts - and the agent is shown the arithmetic,
-through the same permission channel it already understands, never a mystery crash or a silent
-non-zero exit. A floor (`AF_BACKEND_CHILD_FLOOR_TOKENS`) protects the first child near the
-ceiling; a switch (`AF_DISABLE_PARALLEL_SUBAGENTS`) forces one-at-a-time when you want it. And it
-fails OPEN: if it can't resolve the numbers, it gets out of the way rather than blocking your
-work over its own confusion.
+That is the number I never used to have. Not "the run finished" - but "Phase 1 alone added twenty
+thousand tokens, and the whole run never crossed 13% of the window." Now I can point at the expensive
+step instead of guessing which one it was. And `af telemetry usage` goes one further: it puts a real
+dollar cost on each session, per model, so "what did that cost?" stops being rhetorical.
 
-Beside it, adaptive effort quietly trims the effort level of a step that has a history of
-generating more than it needs - never above the ceiling you set, and bounded so a run can't burn
-itself relaunching. And session-start context budgets mean a giant step body can no longer shove
-your mail out of the window: formula context, mail, and memory each get their own room, and every
-message reaches the session once.
+## `af tokenomics on` - spend those numbers before a run overspends
+
+Telemetry that only reports is a receipt. `af tokenomics on` puts the numbers to work while the run is
+still happening, and it exists for one reason: on a shared or local backend, one greedy sub-agent can
+starve the orchestrator that launched it, and you find out only when something crashes halfway through
+a workflow.
+
+So it caps that. You set the backend's token pool once (`AF_BACKEND_POOL_TOKENS`); after that, when an
+agent tries to launch a sub-agent that would oversubscribe the pool, the launch is refused BEFORE it
+starts - and the agent is handed the arithmetic through the same permission prompt it already
+understands, not a mystery stall. On a managed cloud backend, where there's no local pool to blow, it
+stays out of your way.
+
+The part you feel over time: adaptive effort reads each step's own history and dials down the effort on
+steps that have always generated more than they needed - never above the ceiling you set. A workflow
+you run every week gets cheaper as the factory learns which steps were overspending, and you never
+touched the formula to make that happen.
+
+```
+[REAL OUTPUT - af tokenomics status, live 2026-09-22]
+tokenomics: on
+mechanisms: budget=on thrift=on dispatch=on interview=on effort=on escalate=off
+admission margin: 16% (a step is admitted up to 84% projected occupancy)
+interview: eligible=2  fired=3  advise=3      <- ran 3 times this cycle, all advisory
+self-test: live - every gate this surface depends on is on
+```
 
 [DIAGRAM - see→bound→prove: cycle-af-d7166cc1-diagram.png]
 
-## Prove - the one verb allowed to say "it worked"
+## `af telemetry compare` - prove the fix worked, or don't claim it
 
-Here's the honesty valve, and it's my favorite thing in the release. `af telemetry compare` is
-the ONLY command in the whole system permitted to claim a change helped. You hand it two arms of
-runs - before and after - and it returns a verdict. But if the two arms weren't actually
-comparable (different inputs, mixed conditions), it does not fudge a win to please you. It VOIDS
-the comparison and tells you why. A measurement tool that would rather say "I can't prove this"
-than hand you a flattering lie is the only kind I'll trust near a decision.
+This is the command I reach for after every optimization, because it's the ONLY one in the system
+allowed to say a change helped. You give it two arms of runs - before your change and after - and it
+returns a verdict.
 
-## What it won't do (on purpose)
+The reason I trust it: if the two arms weren't actually comparable - different inputs, mixed conditions
+- it does not manufacture a win to make me feel good about last week's work. It VOIDS the comparison
+and tells me why. A tool that would rather say "I can't prove this" than hand me a flattering number is
+the only kind I'll let near a decision about what to ship. "Did my optimization help?" finally has an
+answer that isn't me squinting at two runs.
 
-Two honest limits, told plainly, because a maturity story that hides its edges isn't one:
+## `af improvement on` - let the run improve itself
 
-- The bounding half is structurally INERT on any profile that declares no backend pool - which is
-  every cloud profile. No pool, no ceiling, no refusal; on a managed cloud backend this whole arm
-  simply never fires. `af tokenomics status` will tell you exactly that, by name, rather than
-  leaving you to guess whether it's working.
-- The policy surface is off by default, and turning it on is an operator-only move. An agent
-  can't arm its own throttle, and - because self-edits from the improvement loop are checked - a
-  formula can't buy itself more tokens by quietly deleting one of its own gates.
+The last switch closes the loop. With the improvement hook on, an agent that finishes a dispatched job
+proposes an edit to its OWN formula based on what the run just taught it, then hands you a validated
+verdict by mail - changed or unchanged, passed or FAILED. Nothing lands until you promote it. The
+factory gets to say "here's how I'd run this leaner next time," and you keep the final say over every
+line of every formula.
 
 ## Get it
 
-It's on GitHub, Go, AGPL-3.0: github.com/stempeck/agentfactory. The full model - every knob,
-every failure mode, every "here's why it's inert" - is in `USING_TOKENOMICS.md`.
+It's on GitHub, Go, AGPL-3.0: github.com/stempeck/agentfactory. Every knob, every default, and the
+exact contract for each switch is in `USING_TOKENOMICS.md`.
 
-If you're running autonomous agents on long workflows and you've ever closed the laptop wondering
-what they were spending in there - this is the instrument panel I wish I'd had a year ago. Can you
-prove your last optimization actually worked? Happy to help if you're stuck.
+Turn on telemetry for one run this week and read the receipt. If you run agents on long workflows,
+that's the first time "what did that cost, and was my fix real?" has an answer you can point at instead
+of a shrug.
 
 Learn it, Live it, Share it!
 
 <!-- Alt titles if this one isn't your taste:
-     - "I run a factory of AI agents. I finally gave it a fuel gauge."
-     - "In my factory of AI agents, 'did that fix help?' used to be unanswerable. Not anymore."
-     - "Token economics for autonomous agents: see it, bound it, prove it - or void the claim." -->
+     - "Three switches that tell you what your AI agents cost - and whether your fixes are real."
+     - "I stopped guessing what my agent runs cost. Here's the receipt." -->
+
+## Changes applied from your PR #114 review (2026-09-21/22)
+Each of your inline comments, and what I did. Your text is canonical; where you gave exact wording I
+used it verbatim; the rest I rewrote to your direction and am flagging here so you can audit me.
+
+1. **Title (was "In my factory of AI agents, I finally know...")** — you said we've over-used "in my
+   factory of agents." New title is your exact wording: *Knowing what a run costs and whether my
+   "fixes" actually help.*
+2. **Subtitle** — removed "honest about what it can't measure," per your note. Kept "Off by default"
+   (it's a real thing operators care about - no surprise throttling).
+3. **Null / "honest un-measurables" (old See section)** — deleted entirely. No more "null vs zero /
+   I won't pretend" pitch. You're right: "we did nothing and were honest about it" is not a win.
+4. **band / rebuild** — dropped as headline verbs. The article now leads with the switches operators
+   actually type - `af telemetry on`, `af tokenomics on`, `af improvement on` - and the loop: collect
+   the numbers, spend them to run leaner, prove a change helped. (`compare` earns a section because
+   it's the switch you reach for to answer "did my fix work?")
+5. **Bound "the part I'm proudest of"** — cut. The section now says WHY it exists (a greedy sub-agent
+   starving the orchestrator on a shared/local backend) and the operator benefit (predictable spend, no
+   mid-workflow crash), not how I feel about an env var.
+6. **Prove "honesty valve / my favorite thing"** — cut. No randomized happiness; just what the verb
+   does and why VOID-not-fudge is the reason to trust it.
+7. **"What it won't do (on purpose)" section** — removed. The two genuinely operator-relevant facts
+   are folded in as benefits where they belong: "stays out of your way on cloud" (Bound) and "nothing
+   lands until you promote it" (improvement). No more writing about non-features.
+8. **"Screenshots of the amazing outcomes / SHOW IT"** — added two REAL live captures (`af telemetry
+   report` per-step occupancy + token delta; `af tokenomics status` mechanisms firing). Both are real
+   output from this machine on 2026-09-22, not mocks. On your OK I'll render them as clean PNGs for
+   Medium - I held off rendering images of copy you might still change. A dollar-cost capture from
+   `af telemetry usage` is available too; I left it out of the fixed copy because its query window
+   shifts per call, so I won't pin a number I can't reproduce - happy to add a live screenshot at
+   publish time.
+9. **Overall "AI on repeat / no idea what we released"** — restructured the whole piece around the
+   three switches so a reader finishes knowing exactly what shipped and what each switch does for them.
+
+Open question for you: is `compare` worth its own section, or fold it into telemetry? Your call.
 
 ## Operator Decision
 - Decision: ______

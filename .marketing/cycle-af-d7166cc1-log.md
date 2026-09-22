@@ -170,3 +170,27 @@ published — Tier B is operator-published.
   worktree path. Formula-improvement candidate recorded in memory (GATE 2/4 + notify steps hardcode
   worktree Decision forms). STILL HOLDING at GATE 4 for the operator's PR review; NOT advancing
   af-c97a09b7 until both drafts are resolved on the PR.
+
+- **RESUME 2026-09-22 (session recycled at context pressure; af prime → GATE 4).** Operator stempeck
+  DID review PR #114: 10 inline review comments (2 on LinkedIn 2026-09-17, 8 on Medium 2026-09-21/22),
+  all "COMMENTED" (empty top-level bodies — decisions live in the line comments). This is an **EDITED**
+  resolution with substantial directional feedback, NOT untouched and NOT a bare READY/SKIP. Verbatim
+  themes: kill self-congratulatory emotion ("proudest of," "favorite thing," "honesty valve" =
+  "randomized happiness" / "AI slopping emotions alongside environment variables"); stop celebrating
+  non-features ("what it won't do," "honest about what it can't measure," null-vs-zero — "not a win");
+  "in my factory of AI agents" is over-used; lead with the switches operators type
+  (`af telemetry on` / `af tokenomics on` / `af improvement on`) and the collect→improve→prove loop;
+  and "SHOW IT" — real screenshots of outcomes, not "AI on repeat" generalities.
+- **Action taken (rev.2, this session):** rewrote both drafts against all 10 comments (exact wording
+  used verbatim where given: new Medium title, new LinkedIn ending, subtitle cut). Embedded 2 REAL
+  live captures in Medium (`af telemetry report` per-step CTX_PCT+DELTA; `af tokenomics status`
+  mechanisms) — captured on this machine 2026-09-22, offered as PNGs on approval. Enumerated every
+  change at the foot of each draft (voice law) and recorded the new calibration in approach.md Voice §.
+  Honesty guard: did NOT pin a dollar figure from `af telemetry usage` — its query window shifts per
+  call, so the number isn't reproducible; described cost qualitatively and offered a live capture at
+  publish time. Verified the improvement loop against source before writing it (promotion is the
+  operator's; nothing auto-lands).
+- State: **STILL HOLDING at GATE 4.** EDITED feedback was a substantive rejection of rev.1's substance,
+  so rev.2 needs the operator's sign-off before Tier B publish-support (Step 18). Re-delivered on
+  PR #114 (comment enumerating the changes + screenshot approach), asking READY/EDITED/SKIP per draft.
+  NOT advancing af-c97a09b7 until both drafts are resolved.

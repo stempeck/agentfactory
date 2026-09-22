@@ -51,6 +51,22 @@ are DEFECTS in his content — they read as AI and undercut the "I built this" c
 edits your draft, his edit becomes the new calibration source. Before drafting anything, reread
 his latest published finals (cycle-1-linkedin.md top block, the live Medium article).
 
+**Voice calibration — 2026-09-22 (PR #114 review, cycle af-d7166cc1).** Glenn's inline review of the
+token-economics drafts is now the sharpest voice signal we have. What he cut, and the standing rule:
+- NO self-congratulatory emotion attached to features — "the part I'm proudest of," "my favorite
+  thing in the release," "the honesty valve." He named it "randomized happiness" and "AI slopping
+  emotions alongside environment variables." Features earn their place by WHY they exist and what the
+  operator gets, not by how the author feels about them.
+- NO celebrating non-features — a "What it won't do" section, "honest about what it can't measure,"
+  the null-vs-zero pitch. "We did nothing and were honest about it" is not a win. State a genuine limit
+  once, inline, as an operator benefit ("stays out of your way on cloud") — never as its own set piece.
+- NO reused signature framings — "in my factory of AI agents" is spent; don't open every piece with it.
+- LEAD with the switches an operator actually types and the outcome they get. For this release that was
+  `af telemetry on` / `af tokenomics on` / `af improvement on` + `af telemetry compare`: collect the
+  numbers, spend them to run leaner, prove a change helped.
+- SHOW IT. He wants real screenshots/output of outcomes ("the amazing outcomes we get TODAY"), not
+  prose generalities and buzzwords. Capture live command output; render figures on approval.
+
 **Honesty:** verify every URL, flag, command, and number against code or a live fetch before it
 enters content; omit and flag what you can't verify. State limitations plainly. Be precise, not
 harsh, about other tools ("no workflow-aware crash recovery", not "no crash recovery" — Claude
