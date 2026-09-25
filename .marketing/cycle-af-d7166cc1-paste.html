@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>agentfactory — token economics — paste into Medium</title>
+<!-- PASTE VEHICLE for cycle-af-d7166cc1 (flagship: Token economics, #111).
+     Body text is the operator-APPROVED rev.2 copy (PR #114, READY 2026-09-22), verbatim —
+     only markdown was converted to semantic HTML (h2/strong/a/pre/code) and the three figures
+     embedded via relative src. Figures live beside this file:
+       cycle-af-d7166cc1-telemetry-report.png   (af telemetry report, live 2026-09-22)
+       cycle-af-d7166cc1-tokenomics-status.png   (af tokenomics status, live 2026-09-22)
+       cycle-af-d7166cc1-diagram.png             (see -> bound -> prove)
+     Tier B: YOU publish by pasting this into Medium; nothing is posted for you. -->
+<style>
+  body { font: 18px/1.6 -apple-system, Georgia, "Times New Roman", serif;
+         max-width: 720px; margin: 40px auto; padding: 0 20px; color: #222; }
+  h1 { font-size: 2em; line-height: 1.2; margin: 0 0 .2em; }
+  h2 { font-size: 1.4em; margin: 1.6em 0 .4em; }
+  p.subtitle { font-size: 1.25em; color: #6b6b6b; margin: 0 0 1.2em; }
+  figure { margin: 1.6em 0; }
+  figure img { max-width: 100%; border: 1px solid #e2e2e2; border-radius: 6px; }
+  figcaption { font-size: .85em; color: #6b6b6b; text-align: center; margin-top: .4em; }
+  pre { background: #f6f8fa; border: 1px solid #e2e2e2; border-radius: 6px;
+        padding: 14px 16px; overflow: auto; font: .82em/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  code { font: .9em/1 ui-monospace, Menlo, Consolas, monospace;
+         background: #f2f2f2; padding: .1em .35em; border-radius: 4px; }
+  pre code { background: none; padding: 0; font-size: 1em; }
+  a { color: #1a8917; }
+  .paste-banner { font-family: -apple-system, sans-serif; font-size: 14px; background:#fffbe6;
+        border:1px solid #ffe58f; border-radius:6px; padding:10px 14px; margin-bottom:28px; color:#614700; }
+</style>
+</head>
+<body>
+<div class="paste-banner">PASTE VEHICLE — not the published page. Open this file, click into the
+article text, Select All (Cmd/Ctrl-A), Copy, then Paste into Medium's story body. Medium turns the
+first line into the TITLE and the italic line into the SUBTITLE; the three figures upload with the
+paste. This banner sits outside the article — click into the text first and it won't be selected.
+Delete it if it rides along.</div>
+
+<h1>Knowing what a run costs and whether my "fixes" actually help.</h1>
+<p class="subtitle"><em>Token economics for autonomous Claude Code agents: see what a run generates, bound what a sub-agent can spend, and prove a change helped. Off by default.</em></p>
+
+<p>You hand an autonomous agent a context window and walk away. It fills it. Then the questions start.
+What did that run actually cost? Was that normal for this step? And the formula tweak I shipped last
+week to make it leaner - did it work, or did I just tell myself it did?</p>
+
+<p>This release answers all three, and it does it with three switches you turn ON when you want the
+numbers and OFF when you don't. The factory never gets to quietly decide to throttle itself - that
+call stays yours:</p>
+
+<pre><code>af telemetry on      # collect what each run costs
+af tokenomics on     # spend those numbers - bound a run before it overspends
+af improvement on    # let a finished agent propose a leaner version of itself</code></pre>
+
+<p>Here is what each one buys a human operator.</p>
+
+<h2><code>af telemetry on</code> - see what a run actually cost</h2>
+<p>Turn on telemetry and every closed step writes down what it spent - the real figures, not a guess.
+Run <code>af telemetry report</code> and you get a per-step ledger: how much of the context window each step was
+holding when it closed, and how many tokens it added. Live output from this repo:</p>
+
+<figure>
+  <img src="cycle-af-d7166cc1-telemetry-report.png" alt="af telemetry report — per-step context percentage, token delta, and occupancy verdict, live 2026-09-22"/>
+  <figcaption><code>af telemetry report</code> — live from this repo, 2026-09-22.</figcaption>
+</figure>
+
+<p>That is the number I never used to have. Not "the run finished" - but "Phase 1 alone added twenty
+thousand tokens, and the whole run never crossed 13% of the window." Now I can point at the expensive
+step instead of guessing which one it was. And <code>af telemetry usage</code> goes one further: it puts a real
+dollar cost on each session, per model, so "what did that cost?" stops being rhetorical.</p>
+
+<h2><code>af tokenomics on</code> - spend those numbers before a run overspends</h2>
+<p>Telemetry that only reports is a receipt. <code>af tokenomics on</code> puts the numbers to work while the run is
+still happening, and it exists for one reason: on a shared or local backend, one greedy sub-agent can
+starve the orchestrator that launched it, and you find out only when something crashes halfway through
+a workflow.</p>
+
+<p>So it caps that. You set the backend's token pool once (<code>AF_BACKEND_POOL_TOKENS</code>); after that, when an
+agent tries to launch a sub-agent that would oversubscribe the pool, the launch is refused BEFORE it
+starts - and the agent is handed the arithmetic through the same permission prompt it already
+understands, not a mystery stall. On a managed cloud backend, where there's no local pool to blow, it
+stays out of your way.</p>
+
+<p>The part you feel over time: adaptive effort reads each step's own history and dials down the effort on
+steps that have always generated more than they needed - never above the ceiling you set. A workflow
+you run every week gets cheaper as the factory learns which steps were overspending, and you never
+touched the formula to make that happen.</p>
+
+<figure>
+  <img src="cycle-af-d7166cc1-tokenomics-status.png" alt="af tokenomics status — mechanisms on, admission margin, interview firings, and live self-test, 2026-09-22"/>
+  <figcaption><code>af tokenomics status</code> — live from this repo, 2026-09-22.</figcaption>
+</figure>
+
+<figure>
+  <img src="cycle-af-d7166cc1-diagram.png" alt="see, bound, prove: telemetry sees what a run costs, tokenomics bounds what a sub-agent can spend, compare proves a change helped"/>
+  <figcaption>See &rarr; bound &rarr; prove — the loop the three switches close.</figcaption>
+</figure>
+
+<h2><code>af telemetry compare</code> - prove the fix worked, or don't claim it</h2>
+<p>This is the command I reach for after every optimization, because it's the ONLY one in the system
+allowed to say a change helped. You give it two arms of runs - before your change and after - and it
+returns a verdict.</p>
+
+<p>The reason I trust it: if the two arms weren't actually comparable - different inputs, mixed conditions
+- it does not manufacture a win to make me feel good about last week's work. It VOIDS the comparison
+and tells me why. A tool that would rather say "I can't prove this" than hand me a flattering number is
+the only kind I'll let near a decision about what to ship. "Did my optimization help?" finally has an
+answer that isn't me squinting at two runs.</p>
+
+<h2><code>af improvement on</code> - let the run improve itself</h2>
+<p>The last switch closes the loop. With the improvement hook on, an agent that finishes a dispatched job
+proposes an edit to its OWN formula based on what the run just taught it, then hands you a validated
+verdict by mail - changed or unchanged, passed or FAILED. Nothing lands until you promote it. The
+factory gets to say "here's how I'd run this leaner next time," and you keep the final say over every
+line of every formula.</p>
+
+<h2>Get it</h2>
+<p>It's on GitHub, Go, AGPL-3.0: <a href="https://github.com/stempeck/agentfactory">github.com/stempeck/agentfactory</a>. Every knob, every default, and the
+exact contract for each switch is in <code>USING_TOKENOMICS.md</code>.</p>
+
+<p>Turn on telemetry for one run this week and read the receipt. If you run agents on long workflows,
+that's the first time "what did that cost, and was my fix real?" has an answer you can point at instead
+of a shrug.</p>
+
+<p>Learn it, Live it, Share it!</p>
+
+</body>
+</html>
