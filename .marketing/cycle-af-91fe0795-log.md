@@ -66,4 +66,6 @@ GATE-1 VERDICT: PASS
   recorded to memory; flagged for an improve-agent pass (step text should gate
   `--phase-complete` on the recorded decision keyword).
 
-GATE-2 STATUS: HOLDING for operator decision on issue #118
+GATE-2 STATUS: RESOLVED — operator `stempeck` replied APPROVE on #118
+(2026-10-05T22:14:47Z). Verified author + keyword via `gh issue view`. Flagship = Plugins
+as written; transcribed into story Decision form. Proceeding to Phase 3.
