@@ -69,3 +69,21 @@ GATE-1 VERDICT: PASS
 GATE-2 STATUS: RESOLVED — operator `stempeck` replied APPROVE on #118
 (2026-10-05T22:14:47Z). Verified author + keyword via `gh issue view`. Flagship = Plugins
 as written; transcribed into story Decision form. Proceeding to Phase 3.
+
+## Phase 3 — Tier A refresh (committed 35ec58c5)
+
+Flagship APPROVED = Plugins. Changes (all commands verified against source before writing):
+- **S1** README formula count 24 → 26; added `rapid-soldesign` (Design) and `lineage`
+  (Utility) with source-verified purposes (TOML: rapid-soldesign "ends at the design PR";
+  lineage "Read what was inherited — without acting on it").
+- **S2** README skills count 12 → 13; added `/architecture-diagram`.
+- **S3/S4** README new "Plugins & the model gateway" command block (`af plugin
+  list/install/verify/check/remove`, `af gateway auth import/status`) + quickstart
+  `--litellm --litellm-auth=codex-subscription` (verified install.go:88/92/102, quickstart.sh:865-869).
+- **S5** CHANGELOG `## Unreleased` section for #117 (extend / gateway / stale-config / also).
+- **S6 (release decision — NOTED, not executed):** CHANGELOG carries `## v0.4.0 — 2026-09-17`
+  with no tag, and #117 is now under `## Unreleased`. Version labeling for both is the
+  operator's call at deliver-tier-a (issue #118 asked; no preference given yet).
+- Issues filed: NONE — audit found doc staleness (fixed) + the release gap (operator
+  decision), no product bugs; main is green. No manufactured activity.
+- Doc tests green (`go test ./internal/cmd -run 'PR724|IntegrationDocs|Doc'`).
