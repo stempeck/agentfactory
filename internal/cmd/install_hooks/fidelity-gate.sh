@@ -224,9 +224,9 @@ fi
 #
 # Read through `af turn interventions` rather than reconstructed here: the records are af's
 # own append-only log, and a second jq-shaped copy of that read would drift from the writer.
-# Every failure rides in the command's OUTPUT and still exits 0 (ADR-007), and a boundary of
-# "unknown" makes it decline — so an older binary without the subcommand, an unreadable log
-# and a turn with no interventions all produce the same empty string.
+# Every failure rides in the command's OUTPUT and still exits 0 (ADR-007); an older binary
+# without the subcommand prints nothing. A boundary of "unknown", an unreadable log or a turn
+# with no interventions omits only the per-turn records, never the standing effort line.
 #
 # The section is a VARIABLE spliced into EVAL_INPUT rather than an edit to it, because with
 # the section empty the prompt below must be byte-identical to the one this gate has always
@@ -239,6 +239,15 @@ System interventions this turn:
 $INTERVENTIONS
 "
 fi
+
+# How many intervention lines the judge was shown, and the session's standing effort level, so a
+# section that came back empty is visible in the audit log and the run record after the fact.
+# grep prints 0 AND exits 1 on no match; a fallback that printed its own 0 would make the count a
+# two-line value that jq rejects, silently dropping the record on every empty-section turn.
+INTERVENTION_LINES=$(printf '%s' "$INTERVENTIONS" | grep -c '^- ' || true)
+case "$INTERVENTION_LINES" in ''|*[!0-9]*) INTERVENTION_LINES=0 ;; esac
+EFFORT_STANDING=$(printf '%s' "$INTERVENTIONS" | sed -n 's/.*effort: reduce_effort.*(effort_level=\([a-z]*\)).*/\1/p' | head -1)
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) INTERVENTIONS: interventions=$INTERVENTION_LINES effort=${EFFORT_STANDING:-none}" >> "$AGENT_RUNTIME/fidelity_debug.log" 2>/dev/null
 
 # FIDELITY-DELTA 5: prepend "Current step:" header to EVAL_INPUT. Description
 # is interpolated as a quoted bash variable; bash variable expansion does
@@ -386,7 +395,9 @@ if [ "$VERDICT_STATE" != "unparsed" ]; then
         --argjson calls_shown "$CALLS_SHOWN" \
         --argjson violations_after "$COUNT" \
         --argjson escalated "$ESCALATED" \
-        '{ts: $ts, step_id: $step_id, verdict_ok: $verdict_ok, calls_total: $calls_total, calls_shown: $calls_shown, violations_after: $violations_after, escalated: $escalated}' 2>/dev/null)
+        --argjson interventions "$INTERVENTION_LINES" \
+        --arg effort_level "$EFFORT_STANDING" \
+        '{ts: $ts, step_id: $step_id, verdict_ok: $verdict_ok, calls_total: $calls_total, calls_shown: $calls_shown, violations_after: $violations_after, escalated: $escalated, interventions: $interventions, effort_level: $effort_level}' 2>/dev/null)
     if [ -n "$RECORD_LINE" ]; then
         printf '%s\n' "$RECORD_LINE" >> "$RUN_RECORD" 2>/dev/null
     fi

@@ -12,7 +12,7 @@ import (
 
 func TestNewManager(t *testing.T) {
 	entry := config.AgentEntry{Type: "interactive", Description: "test"}
-	mgr := NewManager("/tmp/factory", "manager", entry)
+	mgr := newTestManager("/tmp/factory", "manager", entry)
 
 	if mgr.SessionID() != "af-manager" {
 		t.Errorf("SessionID = %q, want %q", mgr.SessionID(), "af-manager")
@@ -21,9 +21,9 @@ func TestNewManager(t *testing.T) {
 
 func TestBuildStartupCommand_Interactive(t *testing.T) {
 	entry := config.AgentEntry{Type: "interactive", Description: "test"}
-	mgr := NewManager("/tmp/factory", "manager", entry)
+	mgr := newTestManager("/tmp/factory", "manager", entry)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, "--dangerously-skip-permissions") {
 		t.Error("interactive command should contain --dangerously-skip-permissions")
@@ -44,9 +44,9 @@ func TestBuildStartupCommand_Interactive(t *testing.T) {
 
 func TestBuildStartupCommand_Autonomous(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "supervisor", entry)
+	mgr := newTestManager("/tmp/factory", "supervisor", entry)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, "--dangerously-skip-permissions") {
 		t.Error("autonomous command should contain --dangerously-skip-permissions")
@@ -66,7 +66,7 @@ func TestBuildNudge_WithDirective(t *testing.T) {
 		Description: "test",
 		Directive:   scaffoldDirective,
 	}
-	mgr := NewManager("/tmp/factory", "manager", entry)
+	mgr := newTestManager("/tmp/factory", "manager", entry)
 
 	nudge := mgr.BuildNudge()
 
@@ -80,7 +80,7 @@ func TestBuildNudge_WithDirective(t *testing.T) {
 
 func TestBuildNudge_WithoutDirective(t *testing.T) {
 	entry := config.AgentEntry{Type: "interactive", Description: "test"}
-	mgr := NewManager("/tmp/factory", "manager", entry)
+	mgr := newTestManager("/tmp/factory", "manager", entry)
 
 	nudge := mgr.BuildNudge()
 
@@ -92,7 +92,7 @@ func TestBuildNudge_WithoutDirective(t *testing.T) {
 func TestStartNotProvisioned(t *testing.T) {
 	entry := config.AgentEntry{Type: "interactive", Description: "test"}
 	// Use a directory that definitely doesn't exist
-	mgr := NewManager("/tmp/af-test-nonexistent-factory-12345", "af-test-not-provisioned", entry)
+	mgr := newTestManager("/tmp/af-test-nonexistent-factory-12345", "af-test-not-provisioned", entry)
 	// Satisfy the ErrWorktreeNotSet precondition so the test reaches the
 	// ErrNotProvisioned check; the worktree path is intentionally the same
 	// nonexistent directory so workDir stays non-provisioned.
@@ -111,7 +111,7 @@ func TestStartNotProvisioned(t *testing.T) {
 
 func TestStopNotRunning(t *testing.T) {
 	entry := config.AgentEntry{Type: "interactive", Description: "test"}
-	mgr := NewManager("/tmp/factory", "af-test-not-running-agent", entry)
+	mgr := newTestManager("/tmp/factory", "af-test-not-running-agent", entry)
 
 	err := mgr.Stop()
 	if err == nil {
@@ -124,7 +124,7 @@ func TestStopNotRunning(t *testing.T) {
 
 func TestIsRunningNoSession(t *testing.T) {
 	entry := config.AgentEntry{Type: "interactive", Description: "test"}
-	mgr := NewManager("/tmp/factory", "af-test-no-session-agent", entry)
+	mgr := newTestManager("/tmp/factory", "af-test-no-session-agent", entry)
 
 	running, err := mgr.IsRunning()
 	if err != nil {
@@ -140,8 +140,8 @@ func TestBuildStartupCommand_NoAPIKey(t *testing.T) {
 	for _, agentType := range types {
 		t.Run(agentType, func(t *testing.T) {
 			entry := config.AgentEntry{Type: agentType, Description: "test"}
-			mgr := NewManager("/tmp/factory", "testagent", entry)
-			cmd := mgr.BuildStartupCommand()
+			mgr := newTestManager("/tmp/factory", "testagent", entry)
+			cmd := startupLine(t, mgr)
 
 			if strings.Contains(cmd, "ANTHROPIC_API_KEY") {
 				t.Errorf("startup command must not contain ANTHROPIC_API_KEY; Claude authenticates via CLI auth, got: %s", cmd)
@@ -170,10 +170,10 @@ func TestQuickdockerNoAPIKey(t *testing.T) {
 
 func TestBuildStartupCommand_WithInitialPrompt(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "ultraimplement", entry)
+	mgr := newTestManager("/tmp/factory", "ultraimplement", entry)
 	mgr.SetInitialPrompt("implement issue #42")
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, "--dangerously-skip-permissions") {
 		t.Error("command should contain --dangerously-skip-permissions")
@@ -191,15 +191,15 @@ func TestBuildStartupCommand_WithInitialPrompt(t *testing.T) {
 
 func TestBuildStartupCommand_WithoutInitialPrompt_Unchanged(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "ultraimplement", entry)
+	mgr := newTestManager("/tmp/factory", "ultraimplement", entry)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	// The baseline now includes the telemetry-off hygiene clears (issue #329): the inline
 	// KEY='' loop is the only hygiene a respawn emits, so it runs on every launch and clears
 	// the whole OTel family when telemetry is off — carrying no telemetry data, only empties.
 	expected := "export AF_ROOT='/tmp/factory' AF_ROLE='ultraimplement' AF_ACTOR='ultraimplement'" +
-		telemetryOffClears + " && claude --dangerously-skip-permissions"
+		telemetryOffClears + gatewayUpstreamAuthClears + effortAttestationClears + " && claude --dangerously-skip-permissions"
 	if cmd != expected {
 		t.Errorf("command without prompt should be unchanged.\ngot:  %s\nwant: %s", cmd, expected)
 	}
@@ -211,12 +211,23 @@ func TestBuildStartupCommand_WithoutInitialPrompt_Unchanged(t *testing.T) {
 // the same string.
 const telemetryOffClears = " CLAUDE_CODE_ENABLE_TELEMETRY='' OTEL_METRICS_EXPORTER='' OTEL_LOGS_EXPORTER='' OTEL_EXPORTER_OTLP_PROTOCOL='' OTEL_EXPORTER_OTLP_ENDPOINT='' OTEL_EXPORTER_OTLP_HEADERS='' OTEL_RESOURCE_ATTRIBUTES=''"
 
+// gatewayUpstreamAuthClears is the exact inline suffix the gateway upstream-auth hygiene
+// appends to every launch command (issue #686 K2): an empty structural clear for each of the
+// five afGatewayUpstreamAuthVars, in that slice's order, emitted immediately after
+// telemetryOffClears. Pinned here so every "unchanged"-baseline test asserts the same string.
+const gatewayUpstreamAuthClears = " OPENAI_API_KEY='' CHATGPT_TOKEN_DIR='' CHATGPT_AUTH_FILE='' CHATGPT_API_BASE='' CODEX_HOME=''"
+
+// effortAttestationClears is the exact inline suffix a launch that selected no effort level emits
+// (issue #709 K2), immediately after gatewayUpstreamAuthClears: a running session's attestation is
+// whatever its launch line said, so a line that says nothing must say it explicitly.
+const effortAttestationClears = " AF_EFFORT_OBJECTIVE='' AF_EFFORT_STEP_LABEL='' AF_EFFORT_FORMULA=''"
+
 func TestBuildStartupCommand_PromptWithQuotes(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "ultraimplement", entry)
+	mgr := newTestManager("/tmp/factory", "ultraimplement", entry)
 	mgr.SetInitialPrompt(`implement "issue #42" with 'special' chars`)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	// The prompt should be shell-safe (not break the command)
 	if !strings.Contains(cmd, "claude") {
@@ -237,7 +248,7 @@ func TestBuildNudge_SkippedWithInitialPrompt(t *testing.T) {
 		Description: "test",
 		Directive:   "Run af prime to load formula context.",
 	}
-	mgr := NewManager("/tmp/factory", "ultraimplement", entry)
+	mgr := newTestManager("/tmp/factory", "ultraimplement", entry)
 	mgr.SetInitialPrompt("implement issue #42")
 
 	nudge := mgr.BuildNudge()
@@ -326,10 +337,10 @@ func TestShellQuote_ShellMetachars(t *testing.T) {
 
 func TestBuildStartupCommand_PromptWithShellMetachars(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "ultraimplement", entry)
+	mgr := newTestManager("/tmp/factory", "ultraimplement", entry)
 	mgr.SetInitialPrompt("fix $(echo hack) and `rm -rf /` issues; drop table")
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, "claude --dangerously-skip-permissions") {
 		t.Error("command should contain claude invocation")
@@ -346,9 +357,9 @@ func TestBuildStartupCommand_PromptWithShellMetachars(t *testing.T) {
 
 func TestBuildStartupCommand_FactoryRootWithSpaces(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/my factory", "ultraimplement", entry)
+	mgr := newTestManager("/tmp/my factory", "ultraimplement", entry)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, "AF_ROOT='/tmp/my factory'") {
 		t.Errorf("factory root with spaces should be quoted, got: %s", cmd)
@@ -361,8 +372,8 @@ func TestBuildStartupCommand_AllAgentsGetPermissionsFlag(t *testing.T) {
 	for _, agentType := range types {
 		t.Run(agentType, func(t *testing.T) {
 			entry := config.AgentEntry{Type: agentType, Description: "test"}
-			mgr := NewManager("/tmp/factory", "testagent", entry)
-			cmd := mgr.BuildStartupCommand()
+			mgr := newTestManager("/tmp/factory", "testagent", entry)
+			cmd := startupLine(t, mgr)
 
 			if !strings.Contains(cmd, "--dangerously-skip-permissions") {
 				t.Errorf("%s agent command should contain --dangerously-skip-permissions, got: %s", agentType, cmd)
@@ -373,10 +384,10 @@ func TestBuildStartupCommand_AllAgentsGetPermissionsFlag(t *testing.T) {
 
 func TestSetWorktree_WorkDirOverride(t *testing.T) {
 	entry := config.AgentEntry{Type: "interactive", Description: "test"}
-	mgr := NewManager("/tmp/factory", "researcher", entry)
+	mgr := newTestManager("/tmp/factory", "researcher", entry)
 
 	// Before SetWorktree, workDir should return factory agent dir
-	cmdBefore := mgr.BuildStartupCommand()
+	cmdBefore := startupLine(t, mgr)
 	_ = cmdBefore // used below after we verify workDir indirectly
 
 	// Set worktree
@@ -398,7 +409,7 @@ func TestSetWorktree_WorkDirOverride(t *testing.T) {
 
 func TestSetWorktree_WorkDirDefault(t *testing.T) {
 	entry := config.AgentEntry{Type: "interactive", Description: "test"}
-	mgr := NewManager("/tmp/factory", "researcher", entry)
+	mgr := newTestManager("/tmp/factory", "researcher", entry)
 
 	// Without SetWorktree, workDir should return factory agent dir
 	got := mgr.WorkDir()
@@ -410,12 +421,12 @@ func TestSetWorktree_WorkDirDefault(t *testing.T) {
 
 func TestBuildStartupCommand_WithWorktree(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "researcher", entry)
+	mgr := newTestManager("/tmp/factory", "researcher", entry)
 	if err := mgr.SetWorktree("/tmp/factory/.worktrees/wt-abc123", "wt-abc123"); err != nil {
 		t.Fatalf("SetWorktree: %v", err)
 	}
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, "AF_WORKTREE='/tmp/factory/.worktrees/wt-abc123'") {
 		t.Errorf("command should export AF_WORKTREE, got: %s", cmd)
@@ -434,9 +445,9 @@ func TestBuildStartupCommand_WithWorktree(t *testing.T) {
 
 func TestBuildStartupCommand_WithoutWorktree_NoWorktreeVars(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "researcher", entry)
+	mgr := newTestManager("/tmp/factory", "researcher", entry)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if strings.Contains(cmd, "AF_WORKTREE") {
 		t.Errorf("command without worktree should NOT contain AF_WORKTREE, got: %s", cmd)
@@ -448,12 +459,12 @@ func TestBuildStartupCommand_WithoutWorktree_NoWorktreeVars(t *testing.T) {
 
 func TestBuildStartupCommand_WorktreePathWithSpaces(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/my factory", "researcher", entry)
+	mgr := newTestManager("/tmp/my factory", "researcher", entry)
 	if err := mgr.SetWorktree("/tmp/my factory/.worktrees/wt-abc123", "wt-abc123"); err != nil {
 		t.Fatalf("SetWorktree: %v", err)
 	}
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, "AF_WORKTREE='/tmp/my factory/.worktrees/wt-abc123'") {
 		t.Errorf("worktree path with spaces should be quoted, got: %s", cmd)
@@ -480,7 +491,7 @@ func TestStart_ErrorsWithoutWorktree(t *testing.T) {
 
 func TestSetWorktree_RejectsEmptyPath(t *testing.T) {
 	entry := config.AgentEntry{Type: "interactive", Description: "test"}
-	mgr := NewManager("/tmp/factory", "agent", entry)
+	mgr := newTestManager("/tmp/factory", "agent", entry)
 
 	err := mgr.SetWorktree("", "any-id")
 	if err == nil {
@@ -511,9 +522,9 @@ func TestCheckAvailableMemory_ReturnsValue(t *testing.T) {
 
 func TestBuildStartupCommand_WithModel(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test", Model: "sonnet"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, "--model 'sonnet'") {
 		t.Errorf("command should contain --model 'sonnet', got: %s", cmd)
@@ -525,10 +536,10 @@ func TestBuildStartupCommand_WithModel(t *testing.T) {
 
 func TestBuildStartupCommand_WithModelAndPrompt(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test", Model: "sonnet"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 	mgr.SetInitialPrompt("do work")
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, "--model 'sonnet'") {
 		t.Errorf("command should contain --model 'sonnet', got: %s", cmd)
@@ -545,9 +556,9 @@ func TestBuildStartupCommand_WithModelAndPrompt(t *testing.T) {
 
 func TestBuildStartupCommand_WithoutModel_NoModelFlag(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if strings.Contains(cmd, "--model") {
 		t.Errorf("command without model should NOT contain --model, got: %s", cmd)
@@ -556,9 +567,9 @@ func TestBuildStartupCommand_WithoutModel_NoModelFlag(t *testing.T) {
 
 func TestBuildStartupCommand_ModelWithShellMetachars(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test", Model: `"; rm -rf /`}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, "--model") {
 		t.Errorf("command should contain --model flag, got: %s", cmd)
@@ -579,12 +590,12 @@ func TestBuildStartupCommand_WithEndpoint(t *testing.T) {
 		Type: "autonomous", Description: "test",
 		BaseURL: "http://localhost:1234/v1/messages", AuthToken: "tok123",
 	}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 	if err := mgr.SetWorktree("/tmp/wt", "wt-1"); err != nil {
 		t.Fatal(err)
 	}
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, "ANTHROPIC_BASE_URL='http://localhost:1234/v1/messages'") {
 		t.Errorf("command should contain ANTHROPIC_BASE_URL export, got: %s", cmd)
@@ -599,12 +610,12 @@ func TestBuildStartupCommand_WithEndpointAndModel(t *testing.T) {
 		Type: "autonomous", Description: "test",
 		Model: "sonnet", BaseURL: "http://localhost:1234", AuthToken: "tok",
 	}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 	if err := mgr.SetWorktree("/tmp/wt", "wt-1"); err != nil {
 		t.Fatal(err)
 	}
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, "ANTHROPIC_BASE_URL='http://localhost:1234'") {
 		t.Errorf("command should contain ANTHROPIC_BASE_URL, got: %s", cmd)
@@ -628,13 +639,13 @@ func TestBuildStartupCommand_WithEndpointAndModel(t *testing.T) {
 
 func TestBuildStartupCommand_WithoutEndpoint_Unchanged(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "ultraimplement", entry)
+	mgr := newTestManager("/tmp/factory", "ultraimplement", entry)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	// Baseline includes the telemetry-off hygiene clears (issue #329) — see telemetryOffClears.
 	expected := "export AF_ROOT='/tmp/factory' AF_ROLE='ultraimplement' AF_ACTOR='ultraimplement'" +
-		telemetryOffClears + " && claude --dangerously-skip-permissions"
+		telemetryOffClears + gatewayUpstreamAuthClears + effortAttestationClears + " && claude --dangerously-skip-permissions"
 	if cmd != expected {
 		t.Errorf("command without endpoint should be unchanged.\ngot:  %s\nwant: %s", cmd, expected)
 	}
@@ -645,9 +656,9 @@ func TestBuildStartupCommand_NoEndpoint_NoAuthTokenExport(t *testing.T) {
 	for _, agentType := range types {
 		t.Run(agentType, func(t *testing.T) {
 			entry := config.AgentEntry{Type: agentType, Description: "test"}
-			mgr := NewManager("/tmp/factory", "testagent", entry)
+			mgr := newTestManager("/tmp/factory", "testagent", entry)
 
-			cmd := mgr.BuildStartupCommand()
+			cmd := startupLine(t, mgr)
 
 			if strings.Contains(cmd, "ANTHROPIC_BASE_URL") {
 				t.Errorf("command without endpoint must not contain ANTHROPIC_BASE_URL, got: %s", cmd)
@@ -664,9 +675,9 @@ func TestBuildStartupCommand_EndpointWithShellMetachars(t *testing.T) {
 		Type: "autonomous", Description: "test",
 		BaseURL: "http://localhost:1234/v1?key=val&other=yes",
 	}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	quoted := shellQuote("http://localhost:1234/v1?key=val&other=yes")
 	if !strings.Contains(cmd, "ANTHROPIC_BASE_URL="+quoted) {
@@ -679,9 +690,9 @@ func TestBuildStartupCommand_AuthTokenWithShellMetachars(t *testing.T) {
 		Type: "autonomous", Description: "test",
 		AuthToken: `"; rm -rf /`,
 	}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if strings.Contains(cmd, `ANTHROPIC_AUTH_TOKEN="; rm`) {
 		t.Error("auth token should be quoted, not bare — shell injection possible")
@@ -723,15 +734,15 @@ func TestStart_PartialEndpointWarning(t *testing.T) {
 
 func TestBuildStartupCommand_WithBuildHost(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-	mgr.SetBuildHost(&config.BuildHostConfig{
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
+	mgr.c.BuildHost = &config.BuildHostConfig{
 		Mode:      "ssh",
 		Host:      "mac-mini.local",
 		User:      "builder",
 		MountPath: "/Volumes/build",
-	})
+	}
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, "AF_BUILD_MODE='ssh'") {
 		t.Errorf("command should contain AF_BUILD_MODE='ssh', got: %s", cmd)
@@ -752,9 +763,9 @@ func TestBuildStartupCommand_WithBuildHost(t *testing.T) {
 
 func TestBuildStartupCommand_WithoutBuildHost(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if strings.Contains(cmd, "AF_BUILD_") {
 		t.Errorf("command without build host should NOT contain AF_BUILD_, got: %s", cmd)
@@ -763,10 +774,10 @@ func TestBuildStartupCommand_WithoutBuildHost(t *testing.T) {
 
 func TestBuildStartupCommand_BuildHostLocalMode(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-	mgr.SetBuildHost(&config.BuildHostConfig{Mode: "local"})
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
+	mgr.c.BuildHost = &config.BuildHostConfig{Mode: "local"}
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, "AF_BUILD_MODE='local'") {
 		t.Errorf("command should contain AF_BUILD_MODE='local', got: %s", cmd)
@@ -822,10 +833,10 @@ func TestEndpointConstants_NoDuplicateStrings(t *testing.T) {
 // command MUST emit ANTHROPIC_API_KEY='' to clear an ambient cloud key.
 func TestBuildStartupCommand_ClearsAPIKey(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-	mgr.SetModelEnv([]config.EnvVar{{Key: "ANTHROPIC_API_KEY", Value: ""}})
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
+	mgr.c.ModelEnv = []config.EnvVar{{Key: "ANTHROPIC_API_KEY", Value: ""}}
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, "ANTHROPIC_API_KEY=''") {
 		t.Errorf("empty-value profile entry should emit ANTHROPIC_API_KEY='' to clear it, got: %s", cmd)
@@ -841,15 +852,15 @@ func TestProfile_EmitsFullSet(t *testing.T) {
 		Type: "autonomous", Description: "test",
 		Model: "legacy-model", BaseURL: "http://legacy", AuthToken: "legacy-tok",
 	}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-	mgr.SetModelEnv([]config.EnvVar{
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
+	mgr.c.ModelEnv = []config.EnvVar{
 		{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"},
 		{Key: "ANTHROPIC_BASE_URL", Value: "http://localhost:1234"},
 		{Key: "ANTHROPIC_AUTH_TOKEN", Value: "tok123"},
 		{Key: "ANTHROPIC_DEFAULT_OPUS_MODEL", Value: "claude-opus-4"},
-	})
+	}
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	for _, want := range []string{
 		"ANTHROPIC_MODEL='claude-opus-4'",
@@ -883,11 +894,11 @@ func TestBuildStartupCommand_ModelOnlySet_KeepsLegacyEndpoint(t *testing.T) {
 		Type: "autonomous", Description: "test",
 		Model: "legacy-model", BaseURL: "http://legacy:1234", AuthToken: "legacy-tok",
 	}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 	// Raw-id passthrough set (no matching profile / no models.json): ANTHROPIC_MODEL only.
-	mgr.SetModelEnv([]config.EnvVar{{Key: "ANTHROPIC_MODEL", Value: "legacy-model"}})
+	mgr.c.ModelEnv = []config.EnvVar{{Key: "ANTHROPIC_MODEL", Value: "legacy-model"}}
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	for _, want := range []string{
 		"ANTHROPIC_MODEL='legacy-model'",
@@ -908,10 +919,10 @@ func TestBuildStartupCommand_ModelOnlySet_KeepsLegacyEndpoint(t *testing.T) {
 // A NON-EMPTY endpoint value must still never travel.
 func TestBuildStartupCommand_ModelOnlySet_NoLegacyEndpoint_EmitsNoEndpoint(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test", Model: "legacy-model"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-	mgr.SetModelEnv([]config.EnvVar{{Key: "ANTHROPIC_MODEL", Value: "legacy-model"}})
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
+	mgr.c.ModelEnv = []config.EnvVar{{Key: "ANTHROPIC_MODEL", Value: "legacy-model"}}
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	for _, want := range []string{"ANTHROPIC_BASE_URL=''", "ANTHROPIC_AUTH_TOKEN=''"} {
 		if !strings.Contains(cmd, want) {
@@ -929,10 +940,10 @@ func TestBuildStartupCommand_ModelOnlySet_NoLegacyEndpoint_EmitsNoEndpoint(t *te
 func TestProfile_ShellInjectionInert(t *testing.T) {
 	const payload = `'; rm -rf / #`
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-	mgr.SetModelEnv([]config.EnvVar{{Key: "ANTHROPIC_AUTH_TOKEN", Value: payload}})
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
+	mgr.c.ModelEnv = []config.EnvVar{{Key: "ANTHROPIC_AUTH_TOKEN", Value: payload}}
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	quoted := shellQuote(payload)
 	if !strings.Contains(cmd, "ANTHROPIC_AUTH_TOKEN="+quoted) {
@@ -949,15 +960,15 @@ func TestProfile_ShellInjectionInert(t *testing.T) {
 // state is the in-package guarantee that start and respawn agree.
 func TestHandoff_ModelEnvParity(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-	mgr.SetModelEnv([]config.EnvVar{
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
+	mgr.c.ModelEnv = []config.EnvVar{
 		{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"},
 		{Key: "ANTHROPIC_BASE_URL", Value: "http://localhost:1234"},
 		{Key: "ANTHROPIC_AUTH_TOKEN", Value: "tok123"},
-	})
+	}
 
-	first := mgr.BuildStartupCommand()
-	second := mgr.BuildStartupCommand()
+	first := startupLine(t, mgr)
+	second := startupLine(t, mgr)
 
 	if first != second {
 		t.Errorf("respawn must re-emit an identical command.\nfirst:  %s\nsecond: %s", first, second)
@@ -983,14 +994,14 @@ func TestHandoff_ModelEnvParity(t *testing.T) {
 func TestBuildStartupCommand_FileRefDerefsSecret(t *testing.T) {
 	const secret = "sk-super-secret-gateway-value-DO-NOT-LEAK"
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-	mgr.SetModelEnv([]config.EnvVar{
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
+	mgr.c.ModelEnv = []config.EnvVar{
 		{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"},
 		{Key: "ANTHROPIC_BASE_URL", Value: "https://gateway.internal"},
 		{Key: "ANTHROPIC_AUTH_TOKEN", Value: "file:secrets/gw.tok"},
-	})
+	}
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	if !strings.Contains(cmd, `ANTHROPIC_AUTH_TOKEN="$(cat '`) {
 		t.Errorf("file:-ref token must be dereferenced to \"$(cat '<path>')\", got: %s", cmd)
@@ -1017,13 +1028,13 @@ func TestBuildStartupCommand_FileRefDerefsSecret(t *testing.T) {
 // overwritten. The set carries a model + a default var but no ANTHROPIC_BASE_URL.
 func TestBuildStartupCommand_NoEndpoint_EmitsStructuralClears(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-	mgr.SetModelEnv([]config.EnvVar{
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
+	mgr.c.ModelEnv = []config.EnvVar{
 		{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"},
 		{Key: "ANTHROPIC_DEFAULT_OPUS_MODEL", Value: "claude-opus-4"},
-	})
+	}
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	for _, want := range []string{"ANTHROPIC_BASE_URL=''", "ANTHROPIC_AUTH_TOKEN=''"} {
 		if !strings.Contains(cmd, want) {
@@ -1032,58 +1043,29 @@ func TestBuildStartupCommand_NoEndpoint_EmitsStructuralClears(t *testing.T) {
 	}
 }
 
-// TestStart_NoEndpointProfile_UnsetsStaleRedirect proves the Start() hygiene twin (AC-8):
-// a no-endpoint model-only profile clears ANTHROPIC_BASE_URL and unsets the other
-// redirect-family vars on the (reused) session, so a profile switch leaves no stale
-// redirect var. It drives the full Start() path through the recording hermetic fake.
+// TestStart_NoEndpointProfile_UnsetsStaleRedirect proves the Start() hygiene (AC-8): a
+// no-endpoint model-only profile clears ANTHROPIC_BASE_URL and the other redirect-family vars on
+// the line typed into the (reused) session, so a profile switch leaves no stale redirect var. tmux
+// carries none of them, so there is no second copy to go stale. It drives the full Start() path
+// through the recording hermetic fake.
 func TestStart_NoEndpointProfile_UnsetsStaleRedirect(t *testing.T) {
 	mgr, fake := startMouseAgent(t, nil)
-	mgr.SetModelEnv([]config.EnvVar{{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"}})
+	mgr.c.ModelEnv = []config.EnvVar{{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"}}
 
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: unexpected error: %v", err)
 	}
 
-	sessionID := mgr.SessionID()
-	staleBaseURLSet := "SetEnvironment " + sessionID + " ANTHROPIC_BASE_URL="
-	unsetBaseURL := "UnsetEnvironment " + sessionID + " ANTHROPIC_BASE_URL"
-	unsetStaleModel := "UnsetEnvironment " + sessionID + " ANTHROPIC_DEFAULT_OPUS_MODEL"
-
-	var baseURLCleared, staleModelUnset bool
-	for _, op := range fake.ops {
-		// A non-empty base_url set on a no-endpoint profile is a contamination bug.
-		if strings.HasPrefix(op, staleBaseURLSet) && op != staleBaseURLSet {
-			t.Errorf("no-endpoint profile must not set a non-empty ANTHROPIC_BASE_URL; got op %q", op)
+	line := sentLine(t, fake.ops, mgr.SessionID())
+	for _, key := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_DEFAULT_OPUS_MODEL"} {
+		if !strings.Contains(line, " "+key+"=''") {
+			t.Errorf("the hygiene pass must clear %s, absent from the effective set, on the launch line; got: %s", key, line)
 		}
-		if op == staleBaseURLSet || op == unsetBaseURL {
-			baseURLCleared = true
+		if strings.Contains(line, " "+key+"='") && !strings.Contains(line, " "+key+"=''") {
+			t.Errorf("a no-endpoint profile must not export a non-empty %s; got: %s", key, line)
 		}
-		if op == unsetStaleModel {
-			staleModelUnset = true
-		}
+		assertNoTmuxEnvKey(t, fake.ops, mgr.SessionID(), key)
 	}
-	if !baseURLCleared {
-		t.Errorf("expected an empty-value clear or unset of ANTHROPIC_BASE_URL; ops=%v", fake.ops)
-	}
-	// A redirect var NOT in the effective set must be unset by the hygiene pass so a
-	// prior profile's value cannot survive the switch.
-	if !staleModelUnset {
-		t.Errorf("hygiene pass must unset a redirect var absent from the effective set (ANTHROPIC_DEFAULT_OPUS_MODEL); ops=%v", fake.ops)
-	}
-}
-
-// envOpsForSession returns the SetEnvironment/UnsetEnvironment ops the recorder
-// tagged with exactly sess (the op's session field is fields[1]). Used by the
-// two-manager isolation test to partition one shared recorder's ops per session.
-func envOpsForSession(ops []string, sess string) []string {
-	var out []string
-	for _, op := range ops {
-		f := strings.Fields(op)
-		if len(f) >= 2 && (f[0] == "SetEnvironment" || f[0] == "UnsetEnvironment") && f[1] == sess {
-			out = append(out, op)
-		}
-	}
-	return out
 }
 
 // hasOp reports whether ops contains an exact match for want.
@@ -1096,40 +1078,19 @@ func hasOp(ops []string, want string) bool {
 	return false
 }
 
-// isRedirectFamilyEnvOp reports whether op is a Set/Unset of a redirect-family var
-// (the ANTHROPIC_* / CLAUDE_CODE_SUBAGENT_MODEL set the hygiene pass governs).
-func isRedirectFamilyEnvOp(op string) bool {
-	f := strings.Fields(op)
-	if len(f) < 3 || (f[0] != "SetEnvironment" && f[0] != "UnsetEnvironment") {
-		return false
-	}
-	key := f[2]
-	if f[0] == "SetEnvironment" {
-		key = strings.SplitN(f[2], "=", 2)[0]
-	}
-	for _, rk := range redirectFamilyVars {
-		if key == rk {
-			return true
-		}
-	}
-	return false
-}
-
 // TestStart_TwoManagers_NoRedirectCrossContamination is the literal two-manager
 // isolation proof the AC-9 session row names (issue #508 AC-4). Two managers with
 // DIFFERENT profiles — an OpenAI-via-LiteLLM endpoint profile (A) and a no-endpoint
 // Anthropic model-only profile (B) — are started against ONE shared hermetic tmux
-// recorder. Each Manager writes env only to its OWN session (SessionName(agentName)),
-// so the isolation guarantee is:
-//   - A's session carries A's real ANTHROPIC_BASE_URL + the raw file: token placeholder
-//     (the tmux twin verbatim, never a resolved secret);
-//   - B's session emits the explicit ANTHROPIC_BASE_URL='' / ANTHROPIC_AUTH_TOKEN=''
-//     structural clears and unsets its stale redirect var (the hygiene pass);
-//   - NO op tagged with B's session ever carries A's endpoint URL or token (A cannot
-//     leak into B), and NO op tagged with A's session is the empty clear (B starting
-//     never clobbers A's live endpoint);
-//   - every redirect-family env op is tagged with exactly one of the two DISTINCT
-//     session IDs (no op escapes to a shared or third session).
+// recorder. Each Manager types its launch line only into its OWN session
+// (SessionName(agentName)), so the isolation guarantee is:
+//   - A's line carries A's real ANTHROPIC_BASE_URL and the $(cat …) deref of its file: token
+//     (never the resolved secret);
+//   - B's line emits the explicit ANTHROPIC_BASE_URL='' / ANTHROPIC_AUTH_TOKEN=''
+//     structural clears and clears its stale redirect var (the hygiene pass);
+//   - B's line never carries A's endpoint URL or token (A cannot leak into B), and A's line
+//     never carries the empty clear (B starting never clobbers A's live endpoint);
+//   - neither session's tmux env carries any redirect-family var.
 //
 // The AC-4 substance (no stale redirect survives a switch; every value is shell-inert)
 // is already covered by TestStart_NoEndpointProfile_UnsetsStaleRedirect and
@@ -1152,11 +1113,11 @@ func TestStart_TwoManagers_NoRedirectCrossContamination(t *testing.T) {
 		if err := os.MkdirAll(config.AgentDir(wtPath, name), 0o755); err != nil {
 			t.Fatalf("creating agent dir for %s: %v", name, err)
 		}
-		mgr := NewManager(tmpDir, name, config.AgentEntry{Type: "autonomous", Description: "test"})
+		mgr := newTestManager(tmpDir, name, config.AgentEntry{Type: "autonomous", Description: "test"})
 		if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
 			t.Fatalf("SetWorktree(%s): %v", name, err)
 		}
-		mgr.SetModelEnv(env)
+		mgr.c.ModelEnv = env
 		if err := mgr.Start(); err != nil {
 			t.Fatalf("Start(%s): unexpected error: %v", name, err)
 		}
@@ -1170,7 +1131,7 @@ func TestStart_TwoManagers_NoRedirectCrossContamination(t *testing.T) {
 		{Key: "ANTHROPIC_AUTH_TOKEN", Value: gatewayTok},
 	})
 	// B: a no-endpoint Anthropic model-only profile — its ANTHROPIC_DEFAULT_OPUS_MODEL
-	// is absent from the effective set, so the hygiene pass must unset it.
+	// is absent from the effective set, so the hygiene pass must clear it.
 	mgrB := startManager("manager-b", []config.EnvVar{
 		{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"},
 	})
@@ -1180,97 +1141,65 @@ func TestStart_TwoManagers_NoRedirectCrossContamination(t *testing.T) {
 		t.Fatalf("two managers must have distinct session IDs; both were %q", sessA)
 	}
 
-	opsA := envOpsForSession(fake.ops, sessA)
-	opsB := envOpsForSession(fake.ops, sessB)
-	if len(opsA) == 0 || len(opsB) == 0 {
-		t.Fatalf("non-vacuity: both sessions must record env ops; A=%d B=%d\nops=%v", len(opsA), len(opsB), fake.ops)
-	}
+	lineA := sentLine(t, fake.ops, sessA)
+	lineB := sentLine(t, fake.ops, sessB)
 
-	// A carries its real endpoint + the raw file: token placeholder (tmux twin).
-	for _, want := range []string{
-		"SetEnvironment " + sessA + " ANTHROPIC_BASE_URL=" + gatewayURL,
-		"SetEnvironment " + sessA + " ANTHROPIC_AUTH_TOKEN=" + gatewayTok,
-	} {
-		if !hasOp(opsA, want) {
-			t.Errorf("manager A session missing %q; opsA=%v", want, opsA)
+	tokDeref := `ANTHROPIC_AUTH_TOKEN="$(cat '` + filepath.Join(tmpDir, "secrets", "a.tok") + `')"`
+	for _, want := range []string{" ANTHROPIC_BASE_URL='" + gatewayURL + "'", " " + tokDeref} {
+		if !strings.Contains(lineA, want) {
+			t.Errorf("manager A line missing %q; got: %s", want, lineA)
 		}
 	}
 
-	// B emits the explicit structural clears and unsets its stale redirect (hygiene).
-	for _, want := range []string{
-		"SetEnvironment " + sessB + " ANTHROPIC_BASE_URL=",
-		"SetEnvironment " + sessB + " ANTHROPIC_AUTH_TOKEN=",
-	} {
-		if !hasOp(opsB, want) {
-			t.Errorf("manager B session missing structural clear %q; opsB=%v", want, opsB)
+	for _, want := range []string{" ANTHROPIC_BASE_URL=''", " ANTHROPIC_AUTH_TOKEN=''", " ANTHROPIC_DEFAULT_OPUS_MODEL=''"} {
+		if !strings.Contains(lineB, want) {
+			t.Errorf("manager B line missing the hygiene clear %q; got: %s", want, lineB)
 		}
-	}
-	if !hasOp(opsB, "UnsetEnvironment "+sessB+" ANTHROPIC_DEFAULT_OPUS_MODEL") {
-		t.Errorf("manager B hygiene must unset the stale ANTHROPIC_DEFAULT_OPUS_MODEL; opsB=%v", opsB)
 	}
 
-	// Isolation A→B: A's endpoint URL / token never appear under B's session.
-	for _, op := range opsB {
-		if strings.Contains(op, gatewayURL) {
-			t.Errorf("manager A endpoint URL leaked into manager B session: %q", op)
-		}
-		if strings.Contains(op, gatewayTok) {
-			t.Errorf("manager A token leaked into manager B session: %q", op)
+	// Isolation A→B: A's endpoint URL / token never appear on B's line.
+	for _, leak := range []string{gatewayURL, "a.tok"} {
+		if strings.Contains(lineB, leak) {
+			t.Errorf("manager A's %q leaked into manager B's line: %s", leak, lineB)
 		}
 	}
 	// Isolation B→A: B's empty structural clear never lands on A's live endpoint.
-	for _, op := range opsA {
-		if op == "SetEnvironment "+sessA+" ANTHROPIC_BASE_URL=" ||
-			op == "SetEnvironment "+sessA+" ANTHROPIC_AUTH_TOKEN=" {
-			t.Errorf("manager B structural clear clobbered manager A's live endpoint: %q", op)
+	for _, clear := range []string{" ANTHROPIC_BASE_URL=''", " ANTHROPIC_AUTH_TOKEN=''"} {
+		if strings.Contains(lineA, clear) {
+			t.Errorf("manager B's structural clear %q clobbered manager A's live endpoint: %s", clear, lineA)
 		}
 	}
 
-	// Completeness: every redirect-family env op belongs to exactly one of the two
-	// distinct sessions — none escaped to a shared or third session name.
-	for _, op := range fake.ops {
-		if !isRedirectFamilyEnvOp(op) {
-			continue
-		}
-		sess := strings.Fields(op)[1]
-		if sess != sessA && sess != sessB {
-			t.Errorf("redirect-family op escaped to an unexpected session %q: %q", sess, op)
+	for _, sess := range []string{sessA, sessB} {
+		for _, key := range redirectFamilyVars {
+			assertNoTmuxEnvKey(t, fake.ops, sess, key)
 		}
 	}
 }
 
-// TestStart_TmuxTwinCarriesFileRefPlaceholder locks the deliberate twin asymmetry
-// (issue #508 W2): the Start() tmux twin mirrors a file:-ref ANTHROPIC_AUTH_TOKEN as the
-// RAW placeholder verbatim — never the "$(cat …)" deref (tmux set-environment does no
-// shell evaluation, so it would be stored literally) and never a resolved secret (it
-// would be readable via `tmux show-environment`). The deref lives ONLY in the inline
-// command that buildStartupCommand types into the pane.
-func TestStart_TmuxTwinCarriesFileRefPlaceholder(t *testing.T) {
+// TestStart_TmuxCarriesNoFileRefValue locks issue #508 W2's invariant in its strongest form: tmux
+// holds no ANTHROPIC_AUTH_TOKEN at all — neither the file: placeholder nor a $(cat …) deref,
+// either of which `tmux show-environment` would print. The deref lives ONLY in the line Start
+// types into the pane, where the pane shell reads the secret at exec time.
+func TestStart_TmuxCarriesNoFileRefValue(t *testing.T) {
 	mgr, fake := startMouseAgent(t, nil)
-	mgr.SetModelEnv([]config.EnvVar{
+	mgr.c.ModelEnv = []config.EnvVar{
 		{Key: "ANTHROPIC_BASE_URL", Value: "https://gateway.internal"},
 		{Key: "ANTHROPIC_AUTH_TOKEN", Value: "file:secrets/gw.tok"},
-	})
+	}
 
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: unexpected error: %v", err)
 	}
 
-	sessionID := mgr.SessionID()
-	want := "SetEnvironment " + sessionID + " ANTHROPIC_AUTH_TOKEN=file:secrets/gw.tok"
-	var found bool
 	for _, op := range fake.ops {
-		if op == want {
-			found = true
-		}
-		// The tmux twin (a SetEnvironment op) must never carry the $(cat …) deref.
-		// (The SendKeysDelayed op legitimately carries the inline deref — exclude it.)
-		if strings.HasPrefix(op, "SetEnvironment ") &&
-			strings.Contains(op, "ANTHROPIC_AUTH_TOKEN") && strings.Contains(op, "$(cat") {
-			t.Errorf("tmux twin must carry the raw file: placeholder, not the $(cat …) deref; got op %q", op)
+		if strings.HasPrefix(op, "SetEnvironment ") && strings.Contains(op, "ANTHROPIC_AUTH_TOKEN") {
+			t.Errorf("tmux must carry no ANTHROPIC_AUTH_TOKEN in any form; got op %q", op)
 		}
 	}
-	if !found {
-		t.Errorf("tmux twin must SetEnvironment the raw file: placeholder verbatim; want op %q, ops=%v", want, fake.ops)
+	line := sentLine(t, fake.ops, mgr.SessionID())
+	want := `ANTHROPIC_AUTH_TOKEN="$(cat '` + filepath.Join(mgr.factoryRoot, "secrets", "gw.tok") + `')"`
+	if !strings.Contains(line, want) {
+		t.Errorf("the launch line must carry the inline deref %q; got: %s", want, line)
 	}
 }

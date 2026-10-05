@@ -10,7 +10,7 @@ import (
 
 // contentCaptureGates are the five OTel content-capture switches the design forbids this
 // launch path from ever setting (design-doc Privacy Posture). They must never appear in any
-// emitted environment — not in the tmux twin and not in the inline startup command.
+// emitted environment: not in the tmux env and not on the launch line.
 var contentCaptureGates = []string{
 	"OTEL_LOG_USER_PROMPTS",
 	"OTEL_LOG_ASSISTANT_RESPONSES",
@@ -25,7 +25,7 @@ var contentCaptureGates = []string{
 // test pins the actual seven the session is launched with (AC #3).
 func TestTelemetryEnvFullSetOn(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 	cfg := config.TelemetryConfig{
 		Protocol: "http/json",
 		Endpoint: "https://otel.example.com",
@@ -35,9 +35,9 @@ func TestTelemetryEnvFullSetOn(t *testing.T) {
 		FactoryID: "fac", Agent: "testagent", WorktreeID: "wt-1",
 		FormulaInstance: "inst-1", ModelProfile: "opus",
 	}
-	mgr.SetTelemetryEnv(telemetry.LaunchEnv(cfg, keys))
+	mgr.c.TelemetryEnv = telemetry.LaunchEnv(cfg, keys)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	for _, want := range []string{
 		"CLAUDE_CODE_ENABLE_TELEMETRY='1'",
@@ -65,15 +65,14 @@ func TestTelemetryEnvFullSetOn(t *testing.T) {
 	}
 }
 
-// TestTelemetryEnvZeroVarsWhenOff proves a telemetry-off launch (the cmd layer never calls
-// SetTelemetryEnv) carries zero OTel vars: the enable flag never turns on, no exporter value
+// TestTelemetryEnvZeroVarsWhenOff proves a telemetry-off launch (the composer leaves
+// TelemetryEnv empty) carries zero OTel vars: the enable flag never turns on, no exporter value
 // travels, and every family var is emitted only as the empty structural clear (AC #3).
 func TestTelemetryEnvZeroVarsWhenOff(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-	// Gate off ⇒ SetTelemetryEnv is never called; telemetryEnv stays empty.
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	for _, banned := range []string{
 		"CLAUDE_CODE_ENABLE_TELEMETRY='1'",
@@ -97,11 +96,11 @@ func TestTelemetryEnvZeroVarsWhenOff(t *testing.T) {
 // what turns one on (AC #3, design-doc Privacy Posture).
 func TestTelemetryEnvContentGatesNeverSet(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 	cfg := config.TelemetryConfig{Protocol: "http/json", Endpoint: "https://otel.example.com"}
-	mgr.SetTelemetryEnv(telemetry.LaunchEnv(cfg, telemetry.CorrelationKeys{FactoryID: "fac", Agent: "testagent"}))
+	mgr.c.TelemetryEnv = telemetry.LaunchEnv(cfg, telemetry.CorrelationKeys{FactoryID: "fac", Agent: "testagent"})
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 	for _, gate := range contentCaptureGates {
 		if strings.Contains(cmd, gate) {
 			t.Errorf("content-capture gate %q must never be emitted; got: %s", gate, cmd)
@@ -109,79 +108,54 @@ func TestTelemetryEnvContentGatesNeverSet(t *testing.T) {
 	}
 }
 
-// TestTelemetryHeadersFileRefVerbatimInTmuxEnv locks the telemetry twin asymmetry (AC #3): a
-// file: header ref is mirrored into tmux env as the RAW placeholder verbatim (tmux does no
-// shell evaluation and a resolved secret would be readable via `tmux show-environment`), while
-// the $(cat …) deref appears ONLY in the inline startup command. Drives the full Start() path.
-func TestTelemetryHeadersFileRefVerbatimInTmuxEnv(t *testing.T) {
+// TestTelemetryHeadersFileRefOnlyOnLaunchLine locks the file: header ref's secrecy (AC #3):
+// tmux holds no OTEL_EXPORTER_OTLP_HEADERS in any form, because `tmux show-environment` would
+// print it, and the $(cat …) deref appears only on the launch line Start types into the pane.
+func TestTelemetryHeadersFileRefOnlyOnLaunchLine(t *testing.T) {
 	mgr, fake := startMouseAgent(t, nil)
 	cfg := config.TelemetryConfig{
 		Protocol: "http/json", Endpoint: "https://otel.example.com",
 		Headers: map[string]string{"Authorization": "file:secrets/otel.tok"},
 	}
-	mgr.SetTelemetryEnv(telemetry.LaunchEnv(cfg, telemetry.CorrelationKeys{Agent: "mouseagent"}))
+	mgr.c.TelemetryEnv = telemetry.LaunchEnv(cfg, telemetry.CorrelationKeys{Agent: "mouseagent"})
 
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: unexpected error: %v", err)
 	}
 
-	sessionID := mgr.SessionID()
-	wantTwin := "SetEnvironment " + sessionID + " OTEL_EXPORTER_OTLP_HEADERS=Authorization=file:secrets/otel.tok"
-	var foundTwin bool
 	for _, op := range fake.ops {
-		if op == wantTwin {
-			foundTwin = true
+		if strings.HasPrefix(op, "SetEnvironment ") && strings.Contains(op, "OTEL_EXPORTER_OTLP_HEADERS") {
+			t.Errorf("tmux must carry no OTEL_EXPORTER_OTLP_HEADERS in any form; got op %q", op)
 		}
-		if strings.HasPrefix(op, "SetEnvironment ") &&
-			strings.Contains(op, "OTEL_EXPORTER_OTLP_HEADERS") && strings.Contains(op, "$(cat") {
-			t.Errorf("tmux twin must carry the raw file: placeholder, not the $(cat …) deref; got op %q", op)
-		}
-	}
-	if !foundTwin {
-		t.Errorf("tmux twin must SetEnvironment the raw file: placeholder verbatim; want %q, ops=%v", wantTwin, fake.ops)
 	}
 
-	// The inline command dereferences the secret with $(cat …), preserving the header name.
-	inline := mgr.BuildStartupCommand()
-	if !strings.Contains(inline, "OTEL_EXPORTER_OTLP_HEADERS='Authorization='\"$(cat ") {
-		t.Errorf("inline command must deref the headers file: ref with $(cat …); got: %s", inline)
+	line := sentLine(t, fake.ops, mgr.SessionID())
+	if !strings.Contains(line, "OTEL_EXPORTER_OTLP_HEADERS='Authorization='\"$(cat ") {
+		t.Errorf("the launch line must deref the headers file: ref with $(cat …); got: %s", line)
 	}
-	if strings.Contains(inline, "OTEL_EXPORTER_OTLP_HEADERS=Authorization=file:") {
-		t.Errorf("inline command must not carry the raw headers file: ref; got: %s", inline)
+	if strings.Contains(line, "OTEL_EXPORTER_OTLP_HEADERS=Authorization=file:") {
+		t.Errorf("the launch line must not carry the raw headers file: ref; got: %s", line)
 	}
 }
 
-// TestTelemetryOffRelaunchClearsFamily proves the Start() hygiene twin for telemetry: a launch
-// with no telemetry env (gate off) unsets every one of the seven family vars on the reused tmux
-// session AND emits the inline KEY='' clear for each, so a session that previously ran with
-// telemetry on carries none of its OTel vars after a telemetry-off relaunch (AC #3).
+// TestTelemetryOffRelaunchClearsFamily proves a launch with no telemetry env (gate off) clears
+// every one of the seven family vars with KEY='' on the launch line, so a process relaunched in
+// a session that previously ran with telemetry on inherits none of its OTel vars (AC #3). tmux
+// is never the carrier, so it holds none of the family either.
 func TestTelemetryOffRelaunchClearsFamily(t *testing.T) {
 	mgr, fake := startMouseAgent(t, nil)
-	// No SetTelemetryEnv: models a telemetry-off (re)launch of a reused session.
 
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: unexpected error: %v", err)
 	}
 
 	sessionID := mgr.SessionID()
+	line := sentLine(t, fake.ops, sessionID)
 	for _, key := range telemetryFamilyVars {
-		wantUnset := "UnsetEnvironment " + sessionID + " " + key
-		var found bool
-		for _, op := range fake.ops {
-			if op == wantUnset {
-				found = true
-			}
+		if !strings.Contains(line, key+"=''") {
+			t.Errorf("telemetry-off launch line must clear %q; got: %s", key, line)
 		}
-		if !found {
-			t.Errorf("telemetry-off Start must unset stale telemetry var %q; ops=%v", key, fake.ops)
-		}
-	}
-	// The inline twin (the only clear a respawn emits) clears the whole family too.
-	inline := mgr.BuildStartupCommand()
-	for _, key := range telemetryFamilyVars {
-		if !strings.Contains(inline, key+"=''") {
-			t.Errorf("telemetry-off inline command must clear %q; got: %s", key, inline)
-		}
+		assertNoTmuxEnvKey(t, fake.ops, sessionID, key)
 	}
 }
 
@@ -221,18 +195,18 @@ func TestTelemetryFamilyVarsMatchLaunchEnv(t *testing.T) {
 // model var — the separate effective maps hold.
 func TestTelemetryAndModelEnvCoexist(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-	mgr.SetModelEnv([]config.EnvVar{
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
+	mgr.c.ModelEnv = []config.EnvVar{
 		{Key: "ANTHROPIC_MODEL", Value: "gpt-4o"},
 		{Key: "ANTHROPIC_BASE_URL", Value: "http://localhost:1234"},
 		{Key: "ANTHROPIC_AUTH_TOKEN", Value: "tok"},
-	})
-	mgr.SetTelemetryEnv(telemetry.LaunchEnv(
+	}
+	mgr.c.TelemetryEnv = telemetry.LaunchEnv(
 		config.TelemetryConfig{Protocol: "http/json", Endpoint: "https://otel.example.com"},
 		telemetry.CorrelationKeys{Agent: "testagent", ModelProfile: "gpt-4o"},
-	))
+	)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	for _, want := range []string{
 		"ANTHROPIC_MODEL='gpt-4o'",
@@ -268,14 +242,14 @@ func TestTelemetryEnvSeparateFromModelEnv(t *testing.T) {
 		Type: "autonomous", Description: "test",
 		Model: "legacy-model", BaseURL: "http://legacy:1234", AuthToken: "legacy-tok",
 	}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 	// Telemetry ON, no model profile resolved (modelEnv empty).
-	mgr.SetTelemetryEnv(telemetry.LaunchEnv(
+	mgr.c.TelemetryEnv = telemetry.LaunchEnv(
 		config.TelemetryConfig{Protocol: "http/json", Endpoint: "https://otel.example.com"},
 		telemetry.CorrelationKeys{Agent: "testagent"},
-	))
+	)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	// The legacy fields must still emit — telemetry must not have tripped the modelEnv gate.
 	for _, want := range []string{

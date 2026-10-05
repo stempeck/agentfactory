@@ -23,7 +23,7 @@ const execCapableMarker = "af-test-exec-ok"
 // $HOME/.cache/af-test (Makefile:55-59) — never reaches it. A bare `go test` on a machine with a noexec
 // /tmp does, and then builds binaries under internal/cmd/testdata/<prefix>*. The Cleanup below removes
 // them, so only a hard kill leaves any behind — and every prefix passed here must therefore also be
-// listed in .gitignore, or that survivor is a staged 16 MB binary. Both current prefixes are.
+// listed in .gitignore, or that survivor is a staged 16 MB binary.
 //
 // Non-fatal by design: some callers only want to HARDEN an existing test, while others cannot prove
 // anything at all without it. The distinction — and the reason for it — belongs at the call site.

@@ -531,6 +531,13 @@ func runFormulaAgentGenInDir(t *testing.T, dir string, args ...string) (stdout, 
 	rootCmd.SetOut(&outBuf)
 	rootCmd.SetErr(&errBuf)
 	rootCmd.SetArgs(append([]string{"formula", "agent-gen"}, args...))
+	// rootCmd's writers are inherited by every subcommand, so a later test reading os.Stdout
+	// (captureStdout) would see nothing if they stayed pointed at these buffers.
+	t.Cleanup(func() {
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+		rootCmd.SetArgs(nil)
+	})
 
 	err = rootCmd.Execute()
 	return outBuf.String(), errBuf.String(), err
@@ -1335,9 +1342,11 @@ func TestFormulaAgentGen_RegeneratesRoster(t *testing.T) {
 
 // TestFormulaAgentGen_PreservesOperatorFields pins CFG-2 (issue #483, design Gap 6):
 // re-running agent-gen for an existing agent must NOT wipe operator-owned fields
-// (SparsePaths / BaseURL / AuthToken / ContinuousImprovement). Before the fix,
+// (SparsePaths / BaseURL / AuthToken / ContinuousImprovement / Model). Before the fix,
 // runFormulaAgentGen rebuilt a fresh AgentEntry with only Type/Description/
 // Directive/Formula and saved it, silently dropping everything the operator had set.
+// Model is the #538/#527-class field (config.go:52) an `af plugin install` must also
+// preserve — its regen path runs this exact agent-gen merge (formula.go:245).
 func TestFormulaAgentGen_PreservesOperatorFields(t *testing.T) {
 	dir := setupFormulaFactory(t)
 	agentsPath := filepath.Join(dir, ".agentfactory", "agents.json")
@@ -1359,6 +1368,7 @@ func TestFormulaAgentGen_PreservesOperatorFields(t *testing.T) {
 	entry.BaseURL = "http://localhost:1234/v1/messages"
 	entry.AuthToken = "sk-operator-secret"
 	entry.ContinuousImprovement = true
+	entry.Model = "claude-opus-4-8"
 	cfg.Agents["investigate"] = entry
 	if err := config.SaveAgentConfig(agentsPath, cfg); err != nil {
 		t.Fatalf("save operator fields: %v", err)
@@ -1387,6 +1397,9 @@ func TestFormulaAgentGen_PreservesOperatorFields(t *testing.T) {
 	}
 	if !got.ContinuousImprovement {
 		t.Error("ContinuousImprovement = false, want true — clobbered by regen")
+	}
+	if got.Model != "claude-opus-4-8" {
+		t.Errorf("Model = %q, want claude-opus-4-8 — clobbered by regen (#527/#538 class)", got.Model)
 	}
 
 	// The regenerated fields are still refreshed from the formula.

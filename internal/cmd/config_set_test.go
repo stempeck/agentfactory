@@ -26,6 +26,14 @@ func setupConfigFactory(t *testing.T) string {
 	os.WriteFile(filepath.Join(afDir, "agents.json"),
 		[]byte(`{"agents":{"debugger":{"type":"autonomous","description":"d"},"manager":{"type":"interactive","description":"m"}}}`), 0o644)
 	t.Chdir(root)
+
+	// PR #688 F9: the /model/info routing cross-check now runs for every gateway profile (both
+	// modes), so a check test that does not stub modelInfoProbe would otherwise make a live network
+	// call (ADR-018). Default it to "no routing advertised" — a true no-op that reports no lane, so a
+	// test opts in to a specific lane only when it targets the cross-check.
+	origModelInfo := modelInfoProbe
+	modelInfoProbe = func(string, string) (map[string]string, error) { return map[string]string{}, nil }
+	t.Cleanup(func() { modelInfoProbe = origModelInfo })
 	return root
 }
 

@@ -206,6 +206,7 @@ func TestProductionSessionsSurviveDefaultSuite(t *testing.T) {
 			t.Fatalf("mkdir agent workspace: %v", err)
 		}
 		mgr := session.NewManager("", "manager", config.AgentEntry{})
+		mgr.SetLaunchContributions(&session.LaunchContributions{})
 		if err := mgr.SetWorktree(wt, ""); err != nil {
 			t.Fatalf("SetWorktree: %v", err)
 		}

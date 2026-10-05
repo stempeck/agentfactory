@@ -58,7 +58,7 @@ class can only be covered there — see [USING_LITELLM.md](USING_LITELLM.md).
 
 ### What else `af config models set` refuses
 
-Beyond validating the document, `af config models set` enforces three extra rules; each names the
+Beyond validating the document, `af config models set` enforces these extra rules; each names the
 offending profile and the fix:
 
 - **A profile still pinned by `dispatch.json` cannot be dropped or renamed.** Define the profile,
@@ -67,25 +67,54 @@ offending profile and the fix:
   a real secret. Send the real value or a `file:` reference.
 - **A rewritten profile loses its fitness attestation.** Re-run `af config models attest <profile>`
   after verifying the new endpoint. Editing only the `agents` map or `default` clears nothing.
+- **A profile cannot name an upstream gateway credential.** `OPENAI_API_KEY`, `CHATGPT_TOKEN_DIR`,
+  `CHATGPT_AUTH_FILE`, `CHATGPT_API_BASE` and `CODEX_HOME` are reserved — the gateway reads them
+  from `.agentfactory/secrets/` (see [USING_LITELLM.md](USING_LITELLM.md)), never from a profile,
+  because a profile key rides into every agent's launch line. **Migration note:** this is enforced
+  at *load*, not only at write, so an existing `models.json` that already names one of these five
+  keys makes every `af` verb fail until you remove the key from the offending profile.
+- **A profile cannot name `CLAUDE_CODE_PLUGIN_DIRS` or `CLAUDE_CONFIG_DIR`**, whatever the value
+  (even `""`). The plugin channel owns them: plugin dirs reach a session only through an installed
+  integration (see [USING_PLUGINS.md](USING_PLUGINS.md)), and a profile key would ride into every
+  agent's launch line and replace the agent's plugins or Claude config dir. Install an integration
+  instead. **Migration note:** this is enforced at *load*, not only at write. An existing
+  `models.json` that names either key is rejected: a launch that selects a profile (`--model`)
+  fails, and any other launch warns `ignoring models.json` and starts with the global default
+  model — no profile applies — until you remove the key from the offending profile.
 
-### One key a profile does not own outright: `CLAUDE_CODE_EFFORT_LEVEL`
+`attest` is a transport claim only — it records that the operator verified a non-loopback
+endpoint's transport, nothing about upstream auth. A subscription-mode gateway's credential health
+is measured live by `af config models check` / `af gateway auth status`, never by `attest`.
 
-Every other key in a profile is exported verbatim. This one is filtered: a launch carries it only
-when the tokenomics effort arm is on — `af tokenomics on` for the umbrella, plus `"effort"` not set
-to `"off"` in `startup.json`'s `tokenomics` block. And when a launch does carry it, the value is
-not always the one the profile declared: with the arm on, the effort actuator can replace it in
-place with a lower level chosen from the next step's learned history — it never raises the declared
-level, and the profile's declaration stands only when the actuator selects nothing. With the arm off
-the key is dropped from the launch env and, on a reused pane, actively unset. `af tokenomics status`
-names which half is dark.
+### One key tokenomics may lower: `CLAUDE_CODE_EFFORT_LEVEL`
 
-It is filtered because it is one arm of a running experiment (#668 D16), and an experiment whose
-control group receives the treatment measures nothing. The filter applies to every launch path — `af
-sling`, `af up`, and every handoff / compact / watchdog relaunch — not only the relaunch the arm
-acts on, so an agent cannot carry the treatment in from its first turn and never be relaunched out
-of it.
+A declared `CLAUDE_CODE_EFFORT_LEVEL` is exported verbatim like every other key, on every launch
+path — `af sling`, `af up`, and every handoff / compact / watchdog relaunch — with one exception:
+while the tokenomics effort arm is on (`af tokenomics on` for the umbrella, plus `"effort"` not set to
+`"off"` in `startup.json`'s `tokenomics` block), the effort actuator can replace it in place with a
+lower level chosen from the next step's learned history. It never raises the declared level, and the
+declaration stands whenever the actuator selects nothing. `af tokenomics status` names which half is
+dark.
 
-If you want a fixed effort level for reasons unrelated to tokenomics, set it in your shell rc rather
-than a profile: with the effort arm off the session inherits it untouched. With the arm on, though,
-the actuator can append its own chosen level to the launch and override the inherited value for that
-session — shell rc is not a way around the experiment.
+With the arm off the declared level is untouched, whichever way it is off: no
+`.agentfactory/.tokenomics` file (a fresh factory), `af tokenomics off`, `tokenomics.enabled: "off"`,
+or `tokenomics.effort: "off"`. A `startup.json` that cannot be read also leaves the arm off for any
+launch that still happens — `af sling` or a handoff — but `af up` refuses to start any agent until it
+loads. The arm gates the actuator's reduction, never your configuration (#707). Omit the key rather
+than declaring it `""`: an empty value is exported as `CLAUDE_CODE_EFFORT_LEVEL=''` whenever the
+actuator selects nothing, how the host reads an empty level is unverified, and omission is what
+defers to the host. Telemetry keeps the two apart without touching the key: `session_start` and
+`step_end` carry the level the session ran at, and a `reduce_effort` record is written only for a
+launch at which the actuator chose the level. That launch also exports `AF_EFFORT_OBJECTIVE`,
+`AF_EFFORT_STEP_LABEL` and `AF_EFFORT_FORMULA` beside the level; they are factory-owned names, and a
+profile that declares one is rejected as reserved for the session manager.
+
+A fixed effort level belongs in the profile, not your shell rc. Once any profile in `models.json`
+declares the key, an agent whose own profile does not declare it has it `unset` at launch — the same
+factory-owned-key hygiene as the compaction keys ([USING_RECOVERY.md](USING_RECOVERY.md)) — so a
+shell-rc value reaches only a factory where no profile declares it. `quickstart.sh` writes one
+(`export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL:-xhigh}"`) into your shell rc; it is
+the default only until a profile declares the key, after which every launch replaces it with the
+agent's declared level or unsets it. With the arm on, the actuator can
+also export a level it chose for an agent whose profile declares none: there is no ceiling to stay
+under.

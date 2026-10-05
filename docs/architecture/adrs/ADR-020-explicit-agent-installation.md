@@ -6,10 +6,10 @@
 ## Context
 
 One source tree feeds two distributions: this repo, and the OSS repo
-published through an allowlist (`todos/public_repo_files.md:87-106`
+published through an allowlist (`todos/public_repo_files.md:126-145`
 carves pro-only formulas out of an otherwise-wholesale `internal/`
 sync). The publish script hard-fails if `install_formulas/` exceeds the
-expected formula count (`todos/stempeck_publish_oss.sh:208-213`), so
+expected formula count (`todos/stempeck_publish_oss.sh:237-242`), so
 every shipped formula is a deliberate pro/OSS decision.
 
 Embedded formulas are a distribution channel (ADR-015): they place
@@ -24,7 +24,7 @@ likewise refuses unregistered agents (`internal/cmd/sling.go:273`).
 
 The gap between "formula embedded" and "agent registered" is tempting
 to close automatically at init. Because `internal/` ships to OSS
-wholesale (`todos/public_repo_files.md:36`), that would register every
+wholesale (`todos/public_repo_files.md:53`), that would register every
 embedded formula as an agent in the customer's repository on first
 install — agents the customer never chose, source-controlled in their
 tree.
@@ -48,7 +48,7 @@ tree.
    new shipped formula must be dispositioned in
    `todos/public_repo_files.md` — included or excluded — when it is
    created. The formula-count guard
-   (`todos/stempeck_publish_oss.sh:208-213`) turns a forgotten
+   (`todos/stempeck_publish_oss.sh:237-242`) turns a forgotten
    disposition into a loud publish failure instead of a silent leak.
 
 ## Consequences
@@ -71,5 +71,5 @@ tree.
 - `internal/cmd/formula.go:252` — agent-gen registers via `AddAgentEntry`
 - `internal/config/config.go:357-360` — `AddAgentEntry` refuses to clobber manual agents
 - `internal/cmd/sling.go:273` — dispatch requires prior registration
-- `todos/public_repo_files.md:87-106` — pro/OSS formula disposition list
-- `todos/stempeck_publish_oss.sh:208-213` — formula-count publish guard
+- `todos/public_repo_files.md:77-105`, `:126-145` — pro/OSS formula disposition list
+- `todos/stempeck_publish_oss.sh:237-242` — formula-count publish guard

@@ -134,6 +134,12 @@ func TestWatchdog_PollAgentsFunctionBodyNeverReferencesPollOccupancy(t *testing.
 		t.Error("pollAgents's function body references pollOccupancy — the occupancy sweep must sit " +
 			"BESIDE pollAgents in watchdogTick, never inside it")
 	}
+	// Design 695 Phase 2 (K10): the integration service trigger likewise sits beside pollAgents,
+	// never inside its per-agent loop.
+	if got := functionBody(t, body, "func pollAgents("); strings.Contains(got, "IntegrationServices") {
+		t.Error("pollAgents's function body references the integration service ensure — it must sit " +
+			"BESIDE pollAgents in watchdogTick, never inside it")
+	}
 
 	tick := functionBody(t, body, "func watchdogTick(")
 	for _, needle := range []string{"pollAgents(", "pollOccupancy"} {
@@ -169,6 +175,8 @@ func TestWatchdog_HeartbeatAdvancesPerTick(t *testing.T) {
 	writeTestAgentsConfig(t, root, `{"agents":{"alpha":{"type":"autonomous","description":"a"}}}`)
 	setupHermeticSessions(t)
 	stubTelemetryBackendGuard(t, nil)
+	stubGatewayBackendGuard(t, nil)
+	stubIntegrationServicesGuard(t, nil)
 
 	oldTmux := newWatchdogTmux
 	newWatchdogTmux = func() watchdogTmux { return &fakeWatchdogTmux{output: "working"} }
@@ -343,6 +351,8 @@ func TestWatchdog_RecoveredAgentIsNotNudgedByTheSilencePath(t *testing.T) {
 			writeTestAgentsConfig(t, root, `{"agents":{"alpha":{"type":"autonomous","description":"a"}}}`)
 			setupHermeticSessions(t)
 			stubTelemetryBackendGuard(t, nil)
+			stubGatewayBackendGuard(t, nil)
+			stubIntegrationServicesGuard(t, nil)
 			stubOccupancy(t, tc.decisions...)
 
 			oldTmux := newWatchdogTmux

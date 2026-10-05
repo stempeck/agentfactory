@@ -867,16 +867,16 @@ func TestFreshFits_UsesAbsolutePeak(t *testing.T) {
 	}
 }
 
-// TestBreadcrumbOnlyWhenReduced pins that withEffortLevel writes the objective=efficiency reduce_effort
-// breadcrumb only when a reduction genuinely happened. capEffortLevel returns the profile's DECLARED
-// level when the profile declares a shallower ceiling than the plan chose, so a profile declaring `low`
-// under a `medium` plan exports `low` — which equals what it declared, so nothing was reduced — and must
-// write NO attestation; an undeclared profile whose exported level differs from its declared one DID
-// receive a reduction and must still write one. The breadcrumb is the attestation af prime reads, so a
-// stale one records a treatment the session never received.
+// TestAttestationOnlyWhenReduced pins that withEffortLevel exports the objective=efficiency attestation
+// only when a reduction genuinely happened. capEffortLevel returns the profile's DECLARED level when the
+// profile declares a shallower ceiling than the plan chose, so a profile declaring `low` under a `medium`
+// plan exports `low` — which equals what it declared, so nothing was reduced — and must attest NOTHING;
+// an undeclared profile whose exported level differs from its declared one DID receive a reduction and
+// must still attest it. The attestation is what af prime reads, so a stale one records a treatment the
+// session never received.
 //
 // These tests do not run in parallel, for efficiency_actuator_test.go:28's reason.
-func TestBreadcrumbOnlyWhenReduced(t *testing.T) {
+func TestAttestationOnlyWhenReduced(t *testing.T) {
 	const nextStep = "step-2"
 
 	setup := func(t *testing.T) lifecycleFixture {
@@ -892,40 +892,38 @@ func TestBreadcrumbOnlyWhenReduced(t *testing.T) {
 
 	// A profile declaring `low` under a `medium` plan exports `low` — capped to the declared level, so
 	// nothing was reduced. No treatment happened, so no attestation may be written.
-	t.Run("a launch whose export equals the profile's declared level writes no breadcrumb", func(t *testing.T) {
+	t.Run("a launch whose export equals the profile's declared level attests nothing", func(t *testing.T) {
 		fx := setup(t)
 
 		got := withEffortLevel(fx.root, fx.workDir, launchEnv("low"), nextStep, "")
 
 		if lvl := effortLevelIn(got); lvl != "low" {
-			t.Fatalf("the export is %q, want the declared low; the breadcrumb assertion below only "+
+			t.Fatalf("the export is %q, want the declared low; the attestation assertion below only "+
 				"means anything when the exported level equals the declared one", lvl)
 		}
-		if crumb := readEffortBreadcrumb(fx.workDir); crumb != (effortBreadcrumb{}) {
-			t.Errorf("breadcrumb = %+v after a launch whose export (low) equals the profile's declared "+
-				"level; nothing was reduced, so af prime must have no reduce_effort attestation to read — "+
-				"a stale attestation records a treatment the session never received", crumb)
-		}
+		// Nothing was reduced, so af prime must have no reduce_effort attestation to read — a stale
+		// attestation records a treatment the session never received.
+		assertEnvAttestsNothing(t, got)
 	})
 
 	// PROTECT. An undeclared profile whose exported level (medium) genuinely differs from the declared
 	// one ("") DID receive a reduction, so the attestation must still be written. Mirrors
 	// efficiency_actuator_test.go:193-212.
-	t.Run("an undeclared profile whose export differs still writes the breadcrumb", func(t *testing.T) {
+	t.Run("an undeclared profile whose export differs still attests", func(t *testing.T) {
 		fx := setup(t)
 
-		if lvl := effortLevelIn(withEffortLevel(fx.root, fx.workDir, launchEnv(""), nextStep, "")); lvl != "medium" {
+		crumb := attestationOf(withEffortLevel(fx.root, fx.workDir, launchEnv(""), nextStep, ""))
+		if crumb.Level != "medium" {
 			t.Fatalf("the export is %q, want medium; without a real reduction the attestation below "+
-				"proves nothing", lvl)
+				"proves nothing", crumb.Level)
 		}
-		crumb := readEffortBreadcrumb(fx.workDir)
-		if crumb.Level != "medium" || crumb.Objective != string(tokenomics.ObjectiveEfficiency) {
-			t.Errorf("breadcrumb = %+v, want level=medium objective=efficiency — the exported level "+
-				"differs from the undeclared profile, so a reduction genuinely happened and af prime "+
-				"reads its attestation from here", crumb)
+		if crumb.Objective != string(tokenomics.ObjectiveEfficiency) {
+			t.Errorf("attestation = %+v, want objective=efficiency — the exported level differs from the "+
+				"undeclared profile, so a reduction genuinely happened and af prime reads its attestation "+
+				"from here", crumb)
 		}
 		if crumb.StepLabel != nextStep {
-			t.Errorf("breadcrumb step_label = %q, want %q", crumb.StepLabel, nextStep)
+			t.Errorf("attested step label = %q, want %q", crumb.StepLabel, nextStep)
 		}
 	})
 }
@@ -970,10 +968,10 @@ func TestFirstSessionSelectsLevel(t *testing.T) {
 				"reduction and the actuator must not wait for the first af done to apply it",
 				config.EnvEffortLevel, lvl)
 		}
-		crumb := readEffortBreadcrumb(fx.workDir)
-		if crumb.Level != "medium" || crumb.Objective != string(tokenomics.ObjectiveEfficiency) {
-			t.Errorf("breadcrumb = %+v, want level=medium objective=efficiency — af prime reads the "+
-				"first session's treatment from here and nowhere else", crumb)
+		crumb := attestationOf(got)
+		if crumb.Level != "medium" || crumb.Objective != string(tokenomics.ObjectiveEfficiency) || crumb.Formula != formula {
+			t.Errorf("attestation = %+v, want level=medium objective=efficiency formula=%s — af prime reads "+
+				"the first session's treatment from here and nowhere else", crumb, formula)
 		}
 	})
 
@@ -1004,8 +1002,6 @@ func TestFirstSessionSelectsLevel(t *testing.T) {
 			t.Errorf("%s = %q with neither a plumbed formula nor a last_closed_step, want empty — the "+
 				"actuator reduced against a formula it had no source for", config.EnvEffortLevel, lvl)
 		}
-		if crumb := readEffortBreadcrumb(fx.workDir); crumb != (effortBreadcrumb{}) {
-			t.Errorf("a breadcrumb was written for a selection that could not have happened: %+v", crumb)
-		}
+		assertEnvAttestsNothing(t, got)
 	})
 }

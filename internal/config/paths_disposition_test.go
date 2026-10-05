@@ -32,6 +32,7 @@ var configFileDispositions = map[string]string{
 	"TelemetryConfigPath":  "secret",
 	"StatuslineConfigPath": "raw",
 	"BuildHostConfigPath":  "raw",
+	"PluginsConfigPath":    "raw",
 }
 
 // Two rows in the design's tier table — litellm.yaml and .agentfactory/secrets/ — have NO

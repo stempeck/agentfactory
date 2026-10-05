@@ -248,16 +248,18 @@ func outputEconomicsContext(ctx context.Context, out io.Writer, factoryRoot, rol
 		// Two conjuncts, because they answer two different questions and neither implies the other.
 		//
 		// The arm is the operator's switch, honoured at the READ site rather than trusted to have been
-		// honoured at the write site — a level applied before the switch was thrown leaves a breadcrumb
-		// behind it, and a control-group session must not be told it was treated.
+		// honoured at the write site — a session launched reduced before the switch was thrown still
+		// carries its attestation, and a control-group session must not be told it was treated.
 		//
-		// The breadcrumb is whether a level was applied to THIS session, which the arm is no evidence
-		// of. The launch leg needs a resolvable formula to read the step's learned peak, and the first
-		// session of an instance has none — nothing has closed a step yet — so it launches at the host
-		// default and would otherwise still be told its effort was reduced. Its step label is what makes
-		// the attestation about the step being primed rather than a neighbouring one.
-		crumb := readEffortBreadcrumb(workDir)
-		if adm.policy.On(tokenomics.MechanismEffort) && crumb.Level != "" && crumb.StepLabel == primed.stepLabel {
+		// The launch's attestation is whether a level was applied to THIS session, which the arm is no
+		// evidence of. The launch leg needs a resolvable formula to read the step's learned peak, and the
+		// first session of an instance has none — nothing has closed a step yet — so it launches at the
+		// host default and would otherwise still be told its effort was reduced. Its step label and
+		// formula are what make the attestation about the step being primed rather than a neighbouring
+		// one — or, from an operator shell, whatever session that shell happens to be running inside.
+		crumb := readLaunchEffort()
+		if adm.policy.On(tokenomics.MechanismEffort) && crumb.Level != "" && crumb.StepLabel == primed.stepLabel &&
+			crumb.Formula == telemetryFormulaName(primed.formula) {
 			fmt.Fprintln(out, "Reasoning effort is reduced for a step this size, because no session on this profile can hold it. "+
 				"Match the depth of the work to the headroom that is actually left.")
 			recordIntervention(ctx, factoryRoot, workDir, role, primed.instanceID, func(ev *telemetry.StepEvent) {

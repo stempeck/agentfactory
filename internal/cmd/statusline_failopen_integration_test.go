@@ -129,6 +129,7 @@ func TestStatuslineRenderFailOpen(t *testing.T) {
 
 		entry := config.AgentEntry{Type: "autonomous", Description: "failopen"}
 		mgr := session.NewManager(tmpDir, "failopen", entry)
+		mgr.SetLaunchContributions(&session.LaunchContributions{})
 		if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
 			t.Fatal(err)
 		}

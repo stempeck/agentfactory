@@ -59,7 +59,8 @@ func TestFormulaShow_JSON_SchemaSnapshot(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &top); err != nil {
 		t.Fatalf("unmarshal %q: %v", out, err)
 	}
-	wantTop := map[string]bool{"name": true, "description": true, "type": true, "inputs": true, "vars": true}
+	wantTop := map[string]bool{"name": true, "description": true, "type": true, "inputs": true, "vars": true,
+		"integrations": true, "integrations_optional": true}
 	if len(top) != len(wantTop) {
 		t.Errorf("top-level key count = %d (%v), want %d", len(top), keysOf(top), len(wantTop))
 	}
@@ -71,6 +72,12 @@ func TestFormulaShow_JSON_SchemaSnapshot(t *testing.T) {
 	for k := range top {
 		if !wantTop[k] {
 			t.Errorf("unexpected top-level key %q in %q", k, out)
+		}
+	}
+
+	for _, k := range []string{"integrations", "integrations_optional"} {
+		if got := strings.TrimSpace(string(top[k])); got != "[]" {
+			t.Errorf("%s = %q for a formula declaring none, want [] (never null)", k, got)
 		}
 	}
 
@@ -147,5 +154,27 @@ func TestFormulaShow_MissingFormula_ErrorState(t *testing.T) {
 	}
 	if env["state"] != "error" {
 		t.Errorf("state = %q, want \"error\" for a missing formula (output %q)", env["state"], out)
+	}
+}
+
+func TestFormulaShow_JSON_IntegrationsRoundTrip(t *testing.T) {
+	toml := "formula = \"withint\"\ntype = \"workflow\"\nversion = 1\n" +
+		"integrations = [\"a\", \"z-first\"]\nintegrations_optional = [\"b-c\"]\n\n[[steps]]\nid = \"s1\"\ntitle = \"S1\"\n"
+	root, _ := createTestFormulaFactoryWithTOML(t, "withint", "worker", toml)
+	t.Chdir(root)
+
+	out := invokeFormulaShow(t, "withint")
+	var got struct {
+		Integrations         []string `json:"integrations"`
+		IntegrationsOptional []string `json:"integrations_optional"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil {
+		t.Fatalf("unmarshal %q: %v", out, err)
+	}
+	if strings.Join(got.Integrations, ",") != "a,z-first" {
+		t.Errorf("integrations = %q, want [a z-first] in declared order", got.Integrations)
+	}
+	if strings.Join(got.IntegrationsOptional, ",") != "b-c" {
+		t.Errorf("integrations_optional = %q, want [b-c]", got.IntegrationsOptional)
 	}
 }

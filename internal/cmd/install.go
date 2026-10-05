@@ -3,17 +3,23 @@ package cmd
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/claude"
@@ -38,6 +44,7 @@ var installAgentsFlag bool
 var installNoBuildFlag bool
 var installLitellmFlag bool
 var installNoTelemetryFlag bool
+var installLitellmAuthFlag string
 
 var installCmd = &cobra.Command{
 	Use:   "install [role]",
@@ -86,6 +93,14 @@ func init() {
 		"With --agents: also set up the gateway for running agents on OpenAI models (asks for your OpenAI API key the first time; see USING_LITELLM.md)")
 	installCmd.Flags().BoolVar(&installNoTelemetryFlag, "no-telemetry", false,
 		"With --agents: skip the telemetry backend and turn recording off (without it, a successful redeploy turns recording on)")
+	// Default is "" (unset), NOT "api-key": an empty sentinel distinguishes "no
+	// flag passed" from an explicit "--litellm-auth=api-key" without depending on
+	// cmd.Flags().Changed(), whose underlying pflag.Flag.Changed bit is never
+	// reset across repeated Execute() calls on the same long-lived *cobra.Command
+	// (harmless in real usage — one process, one Execute — but see decisions.md D9
+	// for why a Changed()-based design broke test-suite reuse of installCmd).
+	installCmd.Flags().StringVar(&installLitellmAuthFlag, "litellm-auth", "",
+		"With --agents: choose the upstream auth mode for the LiteLLM gateway (api-key or codex-subscription); requires --litellm. Overrides the persisted gateway auth mode record and any inferred default.")
 	rootCmd.AddCommand(installCmd)
 }
 
@@ -101,8 +116,8 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		}
 		return runInstallAgents(cmd)
 	}
-	if installLitellmFlag || installNoTelemetryFlag {
-		return fmt.Errorf("--litellm and --no-telemetry require --agents")
+	if installLitellmFlag || installNoTelemetryFlag || installLitellmAuthFlag != "" {
+		return fmt.Errorf("--litellm, --litellm-auth and --no-telemetry require --agents")
 	}
 	if installInitFlag {
 		return runInstallInit(cmd)
@@ -639,9 +654,9 @@ func runInstallRole(cmd *cobra.Command, role string) error {
 // launches does not re-enter the re-exec and loop.
 const selfExecEnv = "AF_INSTALL_SELFEXEC"
 
-// relinkSelfForReinstall makes `af install --agents` survive reinstalling the very
-// `af` it runs as. The operation IS a reinstall of af: agent-gen-all.sh's `make
-// install` and quickstart.sh's install_af both `cp` a freshly built af over
+// relinkSelfForReinstall makes `af install --agents` and `af plugin install` survive
+// reinstalling the very `af` they run as. The operation IS a reinstall of af:
+// agent-gen-all.sh's `make install` and quickstart.sh's install_af both `cp` a freshly built af over
 // ~/.local/bin/af. Linux refuses to open a file for writing while its inode has an
 // active text (exec) mapping — ETXTBSY, "Text file busy" — so a `cp` over the inode
 // THIS process is executing fails. The kernel guards the inode's mapping, not the
@@ -654,8 +669,9 @@ const selfExecEnv = "AF_INSTALL_SELFEXEC"
 // thus this process, alive until exit) so nothing lingers on disk. Best-effort
 // throughout: any failure falls through to the original flow, which is no worse than
 // today. No-op under `go test` (would exec a copy of the test binary) and once the
-// re-exec has already happened (env guard).
-func relinkSelfForReinstall(cmd *cobra.Command) {
+// re-exec has already happened (env guard). A package-var seam (ADR-009) so unit tests
+// can observe when each verb relinks relative to its first write.
+var relinkSelfForReinstall = func(cmd *cobra.Command) {
 	if os.Getenv(selfExecEnv) != "" {
 		if exe, err := os.Executable(); err == nil {
 			os.Remove(exe)
@@ -689,21 +705,193 @@ func relinkSelfForReinstall(cmd *cobra.Command) {
 	}
 }
 
-// runInstallAgents implements `af install --agents`: redeploy ALL formula-derived
-// agents by running the two repo-root scripts in order. It resolves the operator's
-// CWD (project dir) and the AF source tree, then runs agent-gen-all.sh FIRST and,
-// only on success, quickstart.sh SECOND. Aborting before quickstart on a non-zero
-// agent-gen exit avoids stacking a half-bootstrap on a failed regen (design G8:
-// no cross-script rollback). Both scripts are invoked through ADR-009 package-var
-// seams so unit tests can assert dispatch without executing the real scripts.
+// runInstallAgents implements `af install --agents`. It re-execs from a throwaway
+// self-copy FIRST — ETXTBSY safety so the scripts run below can reinstall the very af
+// we run as — then runs the shared refusals (preflightInstallAgents), this verb's
+// flag-derived policy, the shared installAgentsPipeline body, the telemetry gate
+// write, and finally the verb's post-bootstrap K15 report. The flag-derived policy
+// and the gate write live here, not in the pipeline, because `af plugin install` runs
+// the same pipeline and must not override the operator's telemetry or gateway choices.
+// relinkSelfForReinstall MUST stay in this caller ahead of the pipeline: it is a no-op
+// under `go test` but in production can syscall.Exec and replace the process, so it
+// cannot move into the body.
+// With --litellm, it also runs preflightGatewayPort and (for codex-subscription
+// mode) preflightCodexSubscription — including the D24 pre-teardown device-auth
+// login — before agent-gen-all.sh, so a codex-subscription redeploy never takes
+// agents down only to fail on a preventable auth/port problem afterward.
 func runInstallAgents(cmd *cobra.Command) error {
 	// Re-exec from a throwaway self-copy BEFORE any work, so the scripts below can
 	// reinstall the very af we run as (ETXTBSY otherwise — see relinkSelfForReinstall).
 	relinkSelfForReinstall(cmd)
 
-	cwd, err := getWd() // helpers.go
+	cwd, factoryRoot, afSrc, err := preflightInstallAgents(cmd, "af install --agents")
 	if err != nil {
 		return err
+	}
+	// PR #688 Phase 3: --litellm-auth=<mode> is the upstream-auth selector, but it
+	// REQUIRES --litellm (IMPLREADME_PHASE3.md, "Required change" bullet 1, stated
+	// twice, verbatim, with no accompanying ambiguity marker) — passing it alone is
+	// a usage error, not an implicit gateway request. See decisions.md D10 for why
+	// an earlier iteration read this as "implies" and the correction.
+	if installLitellmAuthFlag != "" && !installLitellmFlag {
+		return fmt.Errorf("--litellm-auth requires --litellm")
+	}
+	// Mode resolution runs the same ladder as quickstart.sh: explicit flag >
+	// AF_LITELLM_AUTH env (D5, fails loud on an invalid value rather than silently
+	// falling through — the silent-fallback anti-pattern this formula exists to
+	// prevent) > single existing auth handle > both-handles-without-a-flag
+	// refusal (E9) > neither handle exists, default to api-key.
+	litellmRequested := installLitellmFlag
+	litellmMode := "api-key"
+	litellmModeExplicit := false
+	if litellmRequested {
+		mode, explicit, err := resolveLitellmAuthMode(cmd, factoryRoot)
+		if err != nil {
+			return err
+		}
+		litellmMode = mode
+		litellmModeExplicit = explicit
+	}
+
+	// --litellm key acquisition, UP FRONT. setup_litellm runs LAST in the
+	// bootstrap and its stdin is /dev/null through af (ADR-014), so the script's
+	// own TTY prompt is unreachable — without this block a cold factory would
+	// burn the full non-transactional bootstrap (agents down) and fail only at
+	// the very end. Same source precedence as setup_litellm (secret file > env >
+	// prompt); a prompted key is exported so quickstart's env branch receives and
+	// persists it exactly as a directly-typed one. Subscription mode never needs
+	// an OpenAI key at all (frame-lift invariant: the two auth modes are disjoint
+	// code paths) — this block is skipped entirely, never falls back to it.
+	if litellmRequested && litellmMode == "api-key" && os.Getenv("OPENAI_API_KEY") == "" {
+		keyFile := filepath.Join(config.ConfigDir(factoryRoot), "secrets", "openai.key")
+		if fi, err := os.Stat(keyFile); err != nil || fi.Size() == 0 {
+			key, err := promptOpenAIKey(cmd.ErrOrStderr(), keyFile)
+			if err != nil {
+				return fmt.Errorf("cannot run af install --agents --litellm without an OpenAI API key: export OPENAI_API_KEY or create %s (%v)", keyFile, err)
+			}
+			os.Setenv("OPENAI_API_KEY", key)
+		}
+	}
+
+	// K3/C-15 (T16, decisions.md D12): the stale-quickstart refusals must run BEFORE the K6 preflight.
+	// preflightCodexSubscription (below) runs the consent prompt and an up-to-15-minute device-auth
+	// login, so a stale checkout whose quickstart.sh cannot parse the forwarded mode must refuse here —
+	// before that cost is spent — not only when the quickstart args are assembled further down. The
+	// --litellm-auth marker is gated exactly like that assembly, which forwards the flag only when the
+	// mode is explicit or non-default. The reconcile marker is checked on every --litellm run, because
+	// setup_litellm reconciles the gateway in every mode. The asserts read afSrc source text alone, so
+	// none depends on any preflight state.
+	if litellmRequested {
+		if litellmModeExplicit || litellmMode != "api-key" {
+			if err := assertQuickstartSupports(afSrc, "--litellm-auth", "--litellm-auth"); err != nil {
+				return err
+			}
+		}
+		if err := assertQuickstartSupports(afSrc, "_reconcile_gateway", "the gateway reconcile path"); err != nil {
+			return err
+		}
+		if litellmMode == "codex-subscription" {
+			if err := assertQuickstartSupports(afSrc, "_ensure_codex_cli", "the codex CLI install/consent flow"); err != nil {
+				return err
+			}
+		}
+	}
+
+	// K6 preflight, UP FRONT — symmetric to the api-key key-acquisition block above.
+	// agent-gen-all.sh is expensive and non-transactional (it takes agents down
+	// before quickstart.sh brings the gateway back up), so anything that would make
+	// the bootstrap fail must refuse here rather than burn that whole run and fail
+	// only when quickstart.sh gets to it, last (design-doc.md:120, decisions.md D4).
+	// preflightGatewayPort runs for either auth mode; preflightCodexSubscription is
+	// specific to codex-subscription (CLI install/consent + D24 pre-teardown login).
+	if litellmRequested {
+		if err := preflightGatewayPort(factoryRoot); err != nil {
+			return err
+		}
+	}
+	if litellmRequested && litellmMode == "codex-subscription" {
+		if err := preflightCodexSubscription(cmd); err != nil {
+			return err
+		}
+	}
+
+	var quickstartArgs []string
+	if litellmRequested {
+		quickstartArgs = append(quickstartArgs, "--litellm")
+		// Forward the resolved mode explicitly only when it was actually
+		// disambiguated (an explicit flag, an explicit AF_LITELLM_AUTH env value, or
+		// a non-default inferred mode) — the plain default case (no flag, no env, no
+		// handle) stays byte-identical to the pre-Phase-3 wire format so an
+		// unmodified quickstart.sh keeps working. litellmModeExplicit (not just
+		// "flag != default") matters here: quickstart.sh's own ladder has no env-var
+		// tier, so an operator-set AF_LITELLM_AUTH that happens to resolve to the
+		// api-key default must still be forwarded, or quickstart.sh would silently
+		// re-derive a different mode from disk handles alone.
+		// The stale-quickstart refusals for these same markers already ran UP FRONT, above the
+		// K6 preflight (T16/decisions.md D12), so a stale checkout was rejected before any consent
+		// or device-auth cost; here the resolved mode is simply forwarded.
+		if litellmModeExplicit || litellmMode != "api-key" {
+			quickstartArgs = append(quickstartArgs, "--litellm-auth="+litellmMode)
+		}
+	}
+	if installNoTelemetryFlag {
+		quickstartArgs = append(quickstartArgs, "--no-telemetry")
+	}
+	if err := installAgentsPipeline(cmd, cwd, afSrc, quickstartArgs); err != nil {
+		return err
+	}
+
+	// The redeploy drives the telemetry gate: --no-telemetry means the operator
+	// chose no measurement, its absence means they chose measurement (the backend
+	// was just provisioned). The flag is the source of truth on EVERY run —
+	// deliberately overwriting a manual `af telemetry on|off` from before — and
+	// only after a successful bootstrap, from the operator-only context the
+	// console can never reach (telemetry.go's on/off restriction); quickstart
+	// itself never touches the gate by contract (setup_telemetry header).
+	gate := "on"
+	if installNoTelemetryFlag {
+		gate = "off"
+	}
+	if err := os.WriteFile(telemetryGateFile(factoryRoot), []byte(gate+"\n"), 0644); err != nil {
+		return fmt.Errorf("setting telemetry %s: %w", gate, err)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "telemetry: %s\n", gate)
+
+	// K15 (issue #538) — report-only plugin re-verify against the FRESHLY rebuilt
+	// binary. GATED on plugins.json presence so a zero-plugin factory is byte-identical
+	// to before this phase (AC-6): the Phase-2 TestInstallAgents* gate stays green.
+	// Living in this verb covers both the direct `af install --agents` re-run and the
+	// web console's detached subprocess (job.go:72) with no change to job.go, while
+	// `af plugin install` keeps its own K9 verify as the one verify it runs. It NEVER
+	// changes the exit code.
+	// Gate on the manifest at the resolved factoryRoot (NOT cwd — a subdir invocation
+	// has cwd != factoryRoot, and plugins.json lives at the factory root).
+	if _, err := os.Stat(config.PluginsConfigPath(factoryRoot)); err == nil {
+		runPluginVerifyReport(cmd, factoryRoot)
+	}
+	return nil
+}
+
+// refuseWorktreeCwd is Guard 1: install surfaces write the factory's store and record, which a
+// worktree only mirrors, so they run from the main checkout.
+func refuseWorktreeCwd(cwd, surface string) error {
+	if data, err := os.ReadFile(filepath.Join(config.ConfigDir(cwd), ".factory-root")); err == nil {
+		return fmt.Errorf("cannot run %s inside a worktree (factory root: %s); run from the main project checkout, not a worktree", surface, strings.TrimSpace(string(data)))
+	}
+	return nil
+}
+
+// preflightInstallAgents runs every REFUSAL a verb that ends in installAgentsPipeline
+// needs, before that verb makes its first write: worktree, factory root, AF source tree
+// and script presence, and the operator gate. surface names the verb in each refusal
+// ("af install --agents", "af plugin install"). Guard 3's source-repo warning also
+// prints here, between the script check and the operator gate, so `af install --agents`
+// keeps its original output order. It returns the operator's cwd, the
+// resolved factory root and the AF source tree for the caller to hand to the body.
+func preflightInstallAgents(cmd *cobra.Command, surface string) (cwd, factoryRoot, afSrc string, err error) {
+	cwd, err = getWd() // helpers.go
+	if err != nil {
+		return "", "", "", err
 	}
 
 	// Guard 1 (R2/G4) — REFUSE inside a worktree, BEFORE FindFactoryRoot. Mirrors
@@ -711,13 +899,13 @@ func runInstallAgents(cmd *cobra.Command) error {
 	// operator-facing message that points to the main checkout. This is a clearer,
 	// earlier error for the specific worktree case; the script's own CWD check
 	// (agent-gen-all.sh:39-42) still streams for other CWD problems.
-	if data, err := os.ReadFile(filepath.Join(config.ConfigDir(cwd), ".factory-root")); err == nil {
-		return fmt.Errorf("cannot run af install --agents inside a worktree (factory root: %s); run from the main project checkout, not a worktree", strings.TrimSpace(string(data)))
+	if err := refuseWorktreeCwd(cwd, surface); err != nil {
+		return "", "", "", err
 	}
 
-	factoryRoot, err := resolveInvokerRoot(cwd) // as runInstallRole
+	factoryRoot, err = resolveInvokerRoot(cwd) // as runInstallRole
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 
 	afSrc, fallback := resolveAFSource(factoryRoot) // formula.go
@@ -728,11 +916,11 @@ func runInstallAgents(cmd *cobra.Command) error {
 	// checkout that still passes validateAFSource's go.mod substring test but no
 	// longer has the scripts. Both scripts must be present before either seam runs.
 	if fallback {
-		return fmt.Errorf("cannot run af install --agents: agentfactory source tree not found (resolved to %q); set AF_SOURCE_ROOT to your agentfactory checkout or run from a built install", afSrc)
+		return "", "", "", fmt.Errorf("cannot run %s: agentfactory source tree not found (resolved to %q); set AF_SOURCE_ROOT to your agentfactory checkout or run from a built install", surface, afSrc)
 	}
 	for _, script := range []string{"agent-gen-all.sh", "quickstart.sh"} {
 		if _, err := os.Stat(filepath.Join(afSrc, script)); err != nil {
-			return fmt.Errorf("cannot run af install --agents: %s missing under source tree %q; set AF_SOURCE_ROOT to a complete agentfactory checkout or run from a built install", script, afSrc)
+			return "", "", "", fmt.Errorf("cannot run %s: %s missing under source tree %q; set AF_SOURCE_ROOT to a complete agentfactory checkout or run from a built install", surface, script, afSrc)
 		}
 	}
 
@@ -745,33 +933,26 @@ func runInstallAgents(cmd *cobra.Command) error {
 	}
 
 	// K6 (#541) — REFUSE in agent context, replacing Guard 5's WARN. This fires
-	// BEFORE the runAgentGenScript seam (below), whose agent-gen-all.sh runs
-	// `af down --all` and would SIGKILL every agent including this one. Gating in
-	// runInstallAgents (the shared pipeline) means a future `af plugin install`
-	// (#538) inherits the guard on rebase. Operator context returns nil and falls
-	// through to the byte-for-byte regeneration (AC-7 regen safety).
-	if err := requireOperatorTeardown("af install --agents"); err != nil {
-		return err
+	// BEFORE the runAgentGenScript seam, whose agent-gen-all.sh runs `af down --all`
+	// and would SIGKILL every agent including this one. Operator context returns nil
+	// and falls through to the byte-for-byte regeneration (AC-7 regen safety).
+	if err := requireOperatorTeardown(surface); err != nil {
+		return "", "", "", err
 	}
+	return cwd, factoryRoot, afSrc, nil
+}
 
-	// --litellm key acquisition, UP FRONT. setup_litellm runs LAST in the
-	// bootstrap and its stdin is /dev/null through af (ADR-014), so the script's
-	// own TTY prompt is unreachable — without this block a cold factory would
-	// burn the full non-transactional bootstrap (agents down) and fail only at
-	// the very end. Same source precedence as setup_litellm (secret file > env >
-	// prompt); a prompted key is exported so quickstart's env branch receives and
-	// persists it exactly as a directly-typed one.
-	if installLitellmFlag && os.Getenv("OPENAI_API_KEY") == "" {
-		keyFile := filepath.Join(config.ConfigDir(factoryRoot), "secrets", "openai.key")
-		if fi, err := os.Stat(keyFile); err != nil || fi.Size() == 0 {
-			key, err := promptOpenAIKey(cmd.ErrOrStderr(), keyFile)
-			if err != nil {
-				return fmt.Errorf("cannot run af install --agents --litellm without an OpenAI API key: export OPENAI_API_KEY or create %s (%v)", keyFile, err)
-			}
-			os.Setenv("OPENAI_API_KEY", key)
-		}
-	}
-
+// installAgentsPipeline redeploys ALL formula-derived agents by running the two
+// repo-root scripts in order: agent-gen-all.sh FIRST and, only on success,
+// quickstart.sh SECOND. Aborting before quickstart on a non-zero agent-gen exit
+// avoids stacking a half-bootstrap on a failed regen (design G8: no cross-script
+// rollback). Both scripts are invoked through ADR-009 package-var seams so unit tests
+// can assert dispatch without executing the real scripts. This is the shared body
+// only — it emits the non-blocking warnings and runs the scripts. Every verb caller
+// must first relinkSelfForReinstall (it can syscall.Exec and replay the caller, so it
+// cannot live here) and then preflightInstallAgents for the refusals, and it owns its
+// own verb policy, including the quickstartArgs it passes here for quickstart.sh.
+func installAgentsPipeline(cmd *cobra.Command, cwd, afSrc string, quickstartArgs []string) error {
 	// Guard 6 (R9/H1) — WARN when a locally-edited shipped formula would be
 	// clobbered by agent-gen-all.sh's unconditional, mtime-based -nt cp
 	// (agent-gen-all.sh:72-81). Compares each project formula by CONTENT against
@@ -792,33 +973,101 @@ func runInstallAgents(cmd *cobra.Command) error {
 	if err := runAgentGenScript(cmd, afSrc, cwd, installNoBuildFlag); err != nil {
 		return err // abort before quickstart on non-zero (no half-bootstrap)
 	}
-	var quickstartArgs []string
-	if installLitellmFlag {
-		quickstartArgs = append(quickstartArgs, "--litellm")
-	}
-	if installNoTelemetryFlag {
-		quickstartArgs = append(quickstartArgs, "--no-telemetry")
-	}
 	if err := runQuickstartScript(cmd, afSrc, cwd, quickstartArgs); err != nil { // stdin←/dev/null (exec-bash mitigation)
 		return err
 	}
-
-	// The redeploy drives the telemetry gate: --no-telemetry means the operator
-	// chose no measurement, its absence means they chose measurement (the backend
-	// was just provisioned). The flag is the source of truth on EVERY run —
-	// deliberately overwriting a manual `af telemetry on|off` from before — and
-	// only after a successful bootstrap, from the operator-only context the
-	// console can never reach (telemetry.go's on/off restriction); quickstart
-	// itself never touches the gate by contract (setup_telemetry header).
-	gate := "on"
-	if installNoTelemetryFlag {
-		gate = "off"
-	}
-	if err := os.WriteFile(telemetryGateFile(factoryRoot), []byte(gate+"\n"), 0644); err != nil {
-		return fmt.Errorf("setting telemetry %s: %w", gate, err)
-	}
-	fmt.Fprintf(cmd.OutOrStdout(), "telemetry: %s\n", gate)
 	return nil
+}
+
+// resolveLitellmAuthMode implements the --litellm-auth mode-resolution ladder
+// (PR #688 Phase 3 / issue #693 Phase 2a K5, decisions D1/D5/D6/D7/D9): explicit
+// --litellm-auth flag (via the installLitellmAuthFlag != "" sentinel check, NOT
+// cmd.Flags().Changed — D9 found Changed()'s underlying pflag bit is never reset
+// across repeated Execute() calls on the same long-lived *cobra.Command, so a ""
+// default is used instead to distinguish "unset" from an explicit "api-key" —
+// D1) wins; else AF_LITELLM_AUTH, validated and failed loud on an invalid value
+// rather than silently ignored (D5); else K1's gatewayAuthMode(factoryRoot)
+// record+migration ladder (decisions.md D1 — delegate, never reimplement; D2 —
+// this function never writes the record; D3 — its both-handles-no-record
+// refusal is propagated verbatim).
+//
+// The second return value reports whether the mode came from an explicit
+// source (flag, env, or a present record) rather than migration inference.
+// quickstart.sh's own ladder has no env-var tier, so a caller must forward the
+// mode whenever it was explicit — even when it happens to equal the "api-key"
+// default — or an AF_LITELLM_AUTH override (or a recorded mode) can silently
+// diverge from what quickstart.sh independently re-derives from disk handles
+// alone. A migration-inferred non-default mode is still forwarded by the
+// caller's own separate "mode != api-key" check (decisions.md D7 case (e)), so
+// this function does not need to special-case it here.
+func resolveLitellmAuthMode(cmd *cobra.Command, factoryRoot string) (string, bool, error) {
+	validate := func(mode, source string) (string, bool, error) {
+		if mode != "api-key" && mode != "codex-subscription" {
+			return "", false, fmt.Errorf("invalid %s value %q: must be api-key or codex-subscription", source, mode)
+		}
+		return mode, true, nil
+	}
+	if installLitellmAuthFlag != "" {
+		return validate(installLitellmAuthFlag, "--litellm-auth")
+	}
+	if env := os.Getenv("AF_LITELLM_AUTH"); env != "" {
+		return validate(env, "AF_LITELLM_AUTH")
+	}
+
+	mode, migrated, err := gatewayAuthMode(factoryRoot)
+	if err != nil {
+		return "", false, err
+	}
+	return mode, !migrated, nil
+}
+
+// assertQuickstartSupports guards against forwarding a feature to a
+// version-skewed quickstart.sh: its unknown-flag arm only warns-and-ignores
+// (quickstart.sh's `*)` case), so a stale script would silently fall through to
+// api-key-mode behavior — or, for the function markers below, silently run an
+// old code path lacking the guarded behavior entirely — instead of failing
+// loud. Phase 1 of issue #693 renamed this from
+// assertQuickstartSupportsLitellmAuth (single-argument, single-marker); Phase 2a
+// generalizes it to this two-argument marker+feature form (design-doc.md K3).
+//
+// marker is either a literal flag ("--litellm-auth"), matched as a substring
+// (a mention in a comment satisfies it, matching pre-Phase-2a behavior and the
+// existing fixtures), or a bash function name ("_ensure_codex_cli",
+// "_reconcile_gateway"), matched only as an actual function definition line —
+// a comment mentioning the name does not satisfy it (cross-review HIGH-2).
+// feature names the capability in the returned error.
+func assertQuickstartSupports(afSrc, marker, feature string) error {
+	scriptPath := filepath.Join(afSrc, "quickstart.sh")
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return fmt.Errorf("cannot verify %s support: reading %s: %w", feature, scriptPath, err)
+	}
+	var found bool
+	if strings.HasPrefix(marker, "-") {
+		found = bytes.Contains(data, []byte(marker))
+	} else {
+		found = regexp.MustCompile(`(?m)^[ \t]*` + regexp.QuoteMeta(marker) + `\(\)[ \t]*\{`).Match(data)
+	}
+	if !found {
+		return fmt.Errorf("cannot forward %s: %s does not recognize it (stale agentfactory source tree?); update the checkout at %s and retry", feature, scriptPath, afSrc)
+	}
+	return nil
+}
+
+// runPluginVerifyReport execs the freshly rebuilt af to re-verify every recorded
+// plugin (`af plugin verify --all`). It is REPORT-ONLY (K15): a missing af on PATH or
+// a failing verify is surfaced to the operator but never propagated as a pipeline
+// error. A package-var seam so unit tests neither exec a binary nor hit noexec /tmp.
+var runPluginVerifyReport = func(cmd *cobra.Command, projectDir string) {
+	afPath, err := exec.LookPath("af")
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "plugin verify (report-only): af not found on PATH: %v\n", err)
+		return
+	}
+	c := exec.Command(afPath, "plugin", "verify", "--all")
+	c.Dir = projectDir
+	out, _ := c.CombinedOutput()
+	fmt.Fprintf(cmd.OutOrStdout(), "plugin verify (report-only, %s):\n%s", afPath, out)
 }
 
 // warnShippedFormulaClobber prints Guard 6's warning for each project formula
@@ -903,6 +1152,229 @@ var promptOpenAIKey = func(errW io.Writer, keyFile string) (string, error) {
 		return "", fmt.Errorf("no key provided")
 	}
 	return key, nil
+}
+
+// promptCodexInstallConsent is the K4 (issue #693 Phase 1) ADR-009 seam gating a privileged Codex
+// CLI install: same "stdin is not a terminal" refusal shape as promptOpenAIKey above. It is
+// unwired in Phase 1 (Phase 2a/K6 calls it before the install).
+var promptCodexInstallConsent = func(errW io.Writer) (bool, error) {
+	fi, err := os.Stdin.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return false, fmt.Errorf("stdin is not a terminal, cannot prompt")
+	}
+	fmt.Fprint(errW, "This will INSTALL the codex cli, are you sure? y/N ")
+	line, readErr := bufio.NewReader(os.Stdin).ReadString('\n')
+	if readErr != nil && line == "" {
+		return false, fmt.Errorf("could not read consent: %v", readErr)
+	}
+	ans := strings.TrimSpace(line)
+	return ans == "y" || ans == "Y", nil
+}
+
+// lookPathCodex is the K4 seam wrapping exec.LookPath("codex").
+var lookPathCodex = func() (string, error) {
+	return exec.LookPath("codex")
+}
+
+// sudoNonInteractiveOK is the K4 seam probing `sudo -n true`.
+var sudoNonInteractiveOK = func() bool {
+	return exec.Command("sudo", "-n", "true").Run() == nil
+}
+
+// npmGlobalRootWritable is the K4 seam: `npm root -g`, then an O_CREATE|O_EXCL probe file removed
+// immediately after.
+var npmGlobalRootWritable = func() bool {
+	out, err := exec.Command("npm", "root", "-g").Output()
+	if err != nil {
+		return false
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return false
+	}
+	probe := filepath.Join(root, ".af-npm-writable-probe")
+	f, err := os.OpenFile(probe, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	os.Remove(probe)
+	return true
+}
+
+// codexHomeWritable is the K4 seam: $CODEX_HOME (or ~/.codex) is created if absent, then checked
+// for write access.
+var codexHomeWritable = func() bool {
+	dir := os.Getenv("CODEX_HOME")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		dir = filepath.Join(home, ".codex")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return false
+	}
+	probe := filepath.Join(dir, ".af-writable-probe")
+	f, err := os.OpenFile(probe, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	os.Remove(probe)
+	return true
+}
+
+// codexSessionValid is the K4 Go twin of K8's bash predicate: it reads $CODEX_HOME/auth.json (or
+// ~/.codex/auth.json) directly — never shelling out to `codex login status`, so an upstream wording
+// change to the CLI's human status text can never invalidate a genuine session (D7/T14) — and keys
+// on the two facts import itself keys on: a ChatGPT auth_mode (a NON-empty api-key auth_mode reads
+// invalid, matching the bash side) plus a present refresh token. An absent auth_mode with tokens is
+// treated as ChatGPT, mirroring import (gateway_auth.go:482-487) and Codex's own Option<AuthMode>.
+var codexSessionValid = func() bool {
+	dir := os.Getenv("CODEX_HOME")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		dir = filepath.Join(home, ".codex")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "auth.json"))
+	if err != nil {
+		return false
+	}
+	var auth codexAuthDotJSON
+	if err := json.Unmarshal(data, &auth); err != nil {
+		return false
+	}
+	if auth.AuthMode != "" && !isChatGPTAuthMode(auth.AuthMode) {
+		return false
+	}
+	return auth.Tokens != nil && auth.Tokens.RefreshToken != ""
+}
+
+// runCodexDeviceAuth is the K4 seam execing `codex login --device-auth` with stdout/stderr
+// forwarded and stdin nil (the login needs no stdin), under a 15-minute deadline, then polling
+// codexSessionValid every 2s until valid or the deadline (design-doc.md K4 row). Unwired in
+// Phase 1; Phase 2a/6 call it.
+var runCodexDeviceAuth = func(ctx context.Context, out, errW io.Writer) error {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "codex", "login", "--device-auth")
+	cmd.Stdin = nil
+	cmd.Stdout = out
+	cmd.Stderr = errW
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("codex login --device-auth: %w", err)
+	}
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		if codexSessionValid() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("codex device-auth login did not complete within the deadline")
+		case <-ticker.C:
+		}
+	}
+}
+
+// preflightCodexSubscription is K6 (issue #693 Phase 2a, design-doc.md:120,
+// decisions.md D4/D5/D6/D9): it replaces the deleted E2 block in the same slot,
+// before runAgentGenScript. Two disjoint branches on lookPathCodex:
+//
+//   - CLI absent: refuse before even offering to install unless the container
+//     can actually install it (passwordless sudo or a writable npm global root)
+//     and $CODEX_HOME is writable; otherwise gate on operator consent
+//     (AF_CODEX_INSTALL_CONSENT=yes, or an interactive prompt when unset) before
+//     forwarding consent to the quickstart.sh child process env (D6) — the
+//     actual `npm install -g` + login happen in quickstart.sh's K7/K8 (Phase
+//     2b), never here.
+//   - CLI present: D24's pre-teardown login — if the session is not valid, log
+//     in now (runCodexDeviceAuth), before runAgentGenScript takes agents down,
+//     so the common redeploy case (installed, session expired) completes login
+//     with agents still up.
+func preflightCodexSubscription(cmd *cobra.Command) error {
+	if _, err := lookPathCodex(); err != nil {
+		if !sudoNonInteractiveOK() && !npmGlobalRootWritable() {
+			return fmt.Errorf("cannot install the Codex CLI: the npm global prefix is root-owned and passwordless sudo is unavailable in this container")
+		}
+		if !codexHomeWritable() {
+			dir := os.Getenv("CODEX_HOME")
+			if dir == "" {
+				if home, herr := os.UserHomeDir(); herr == nil {
+					dir = filepath.Join(home, ".codex")
+				}
+			}
+			return fmt.Errorf("cannot install the Codex CLI: %s is not writable", dir)
+		}
+		switch consent := os.Getenv("AF_CODEX_INSTALL_CONSENT"); consent {
+		case "yes":
+			// Pre-granted non-interactively; nothing to prompt.
+		case "":
+			ok, perr := promptCodexInstallConsent(cmd.ErrOrStderr())
+			if perr != nil {
+				return fmt.Errorf("cannot prompt for codex CLI install consent (%v): set AF_CODEX_INSTALL_CONSENT=yes to consent non-interactively", perr)
+			}
+			if !ok {
+				return fmt.Errorf("codex CLI install declined — subscription mode cannot run without the Codex CLI; nothing was installed and no agents were touched")
+			}
+		default:
+			return fmt.Errorf("invalid AF_CODEX_INSTALL_CONSENT value %q: must be unset or exactly %q", consent, "yes")
+		}
+		os.Setenv("AF_CODEX_INSTALL_CONSENT", "yes")
+		return nil
+	}
+	if !codexSessionValid() {
+		if err := runCodexDeviceAuth(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// preflightGatewayPort is K6's mode-independent half (design-doc.md:120): the
+// gateway profile's ANTHROPIC_BASE_URL (gatewayAuthProfileName in models.json),
+// when loopback, must not already be served by a process outside the "litellm"
+// tmux session — af never stops a process it did not start. No profile, no
+// base URL, a non-loopback endpoint, or a free port are all no-ops: there is
+// nothing to conflict with yet (first bootstrap, or the port genuinely idle).
+func preflightGatewayPort(factoryRoot string) error {
+	cfg, err := config.LoadModelsConfig(factoryRoot)
+	if err != nil || cfg == nil {
+		return nil // malformed/missing models.json is not this preflight's concern
+	}
+	// T4/K6: dial every gateway-endpoint profile (a file: ANTHROPIC_AUTH_TOKEN), not only the seeded
+	// codex-subscription name — an api-key factory names its gateway profile "codex", and its foreign
+	// listener must be refused too. Mirrors removeStaleGatewayCoverageRecord's enumeration
+	// (gateway_auth.go:265-272): the seed name is always checked, plus every file:-token profile.
+	for name, profile := range cfg.Models {
+		if name != gatewayAuthProfileName && !strings.HasPrefix(profile[authTokenKey], secretPrefix) {
+			continue
+		}
+		base := profile["ANTHROPIC_BASE_URL"]
+		if base == "" || !config.IsLoopbackEndpoint(base) {
+			continue
+		}
+		u, err := url.Parse(base)
+		if err != nil || u.Port() == "" {
+			continue
+		}
+		conn, dialErr := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", u.Port()), 500*time.Millisecond)
+		if dialErr != nil {
+			continue // port free
+		}
+		conn.Close()
+		if running, _ := newCmdTmux().HasSession("litellm"); running {
+			continue
+		}
+		return fmt.Errorf("port %s is served by a process outside the 'litellm' tmux session; af does not stop processes it did not start", u.Port())
+	}
+	return nil
 }
 
 // runQuickstartScript is the ADR-009 seam for quickstart.sh. Stdin is /dev/null

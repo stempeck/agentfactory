@@ -351,6 +351,9 @@ if [[ $# -lt 1 ]] || [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
     echo "  --shell                Open a shell in an ALREADY-RUNNING container."
     echo "                         Acts on the existing container only — never creates or"
     echo "                         modifies it."
+    echo "  --codex-auth           Relay ~/.codex/auth.json into an ALREADY-RUNNING container."
+    echo "                         Acts on the existing container only — never creates or"
+    echo "                         modifies it."
     echo ""
     echo "Example:"
     echo "  $0 stempeck/myproject"
@@ -393,6 +396,20 @@ for _arg in "$@"; do
             # Target THIS repo's factory root inside the container (WORKSPACE_DIR/<repo basename>),
             # so the bridge serves agentfactory-pro's console — not a sibling factory under /home/dev/af.
             _web_bridge "$CONTAINER_NAME" "${WORKSPACE_DIR}/${REPO_PATH##*/}"
+            exit 0
+            ;;
+        --codex-auth)
+            CONTAINER_NAME="af_$(echo "$REPO_PATH" | sed 's/[^a-zA-Z0-9_.-]/_/g')"
+            # Relay the operator's Codex CLI ChatGPT-subscription login into an ALREADY-RUNNING
+            # container, mirroring the SSH-key idiom below (mkdir -p, docker cp, chown, chmod 600).
+            # mkdir -p is required, not optional: this feature's primary use case is a container
+            # where /home/dev/.codex has never been created (npm-installing the codex CLI does not
+            # create it; only an interactive `codex login` does, which is exactly the step this
+            # relay exists to avoid running a second time inside the container).
+            docker exec -u dev "$CONTAINER_NAME" mkdir -p /home/dev/.codex
+            docker cp ~/.codex/auth.json "$CONTAINER_NAME:/home/dev/.codex/auth.json"
+            docker exec "$CONTAINER_NAME" chown dev:dev /home/dev/.codex/auth.json
+            docker exec "$CONTAINER_NAME" chmod 600 /home/dev/.codex/auth.json
             exit 0
             ;;
     esac
@@ -566,6 +583,20 @@ if [[ -n "${AF_MEMORY_HOST_DIR:-}" ]]; then
     echo "  Memory vault: $AF_MEMORY_HOST_DIR -> ${WORKSPACE_DIR}/${REPO_NAME}/.agentfactory/memory"
 fi
 
+# Optional host persistence for a Codex CLI ChatGPT-subscription login (#686 Phase 4), a sibling
+# of the memory-vault mount above but read-only: unlike the vault, this directory is the
+# operator's own ~/.codex, never written to by anything running inside the container. Opt-in and
+# CREATION-TIME ONLY, same rationale as AF_MEMORY_HOST_DIR — an already-running container uses
+# --codex-auth's docker-cp relay above instead. Mounted at /home/dev/.codex, the same path
+# `af gateway auth import`'s zero-config default (no --from, no CODEX_HOME) already reads, so the
+# two delivery mechanisms converge on one container-side location.
+CODEX_DOCKER_ARGS=""
+if [[ -n "${AF_CODEX_HOST_DIR:-}" ]]; then
+    mkdir -p "$AF_CODEX_HOST_DIR"
+    CODEX_DOCKER_ARGS="-v ${AF_CODEX_HOST_DIR}:/home/dev/.codex:ro"
+    echo "  Codex auth: $AF_CODEX_HOST_DIR -> /home/dev/.codex (read-only)"
+fi
+
 docker run -dit \
     --memory="$CONTAINER_MEMORY" \
     --memory-swap="24g" \
@@ -573,6 +604,7 @@ docker run -dit \
     --shm-size=256m \
     $IOS_DOCKER_ARGS \
     $MEMORY_DOCKER_ARGS \
+    $CODEX_DOCKER_ARGS \
     --name "$CONTAINER_NAME" \
     "$BASE_IMAGE" bash --login
 

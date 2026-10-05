@@ -76,11 +76,12 @@ func isSecretRef(tok string) bool {
 
 // validateSecretRefShape is a PURE shape check — it never stats the referenced
 // file, so validateModelsConfig stays pure and deterministic. A file: reference
-// must carry a non-empty path free of shell metacharacters.
-func validateSecretRefShape(name, tok string) error {
+// must carry a non-empty path free of shell metacharacters. subject names the owner of key
+// (`model "m"`, an integration manifest's [env]) for the refusal text.
+func validateSecretRefShape(subject, key, tok string) error {
 	path := strings.TrimPrefix(tok, secretRefPrefix)
 	if path == "" || strings.ContainsAny(path, secretRefShellMetacharacters) {
-		return fmt.Errorf("%w: model %q has an invalid %s %q: a file: reference must be a non-empty path with no shell metacharacters", ErrInvalidType, name, envAuthToken, tok)
+		return fmt.Errorf("%w: %s has an invalid %s %q: a file: reference must be a non-empty path with no shell metacharacters", ErrInvalidType, subject, key, tok)
 	}
 	return nil
 }

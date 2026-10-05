@@ -22,7 +22,7 @@ func gatewayModelsForLaunch() *config.ModelsConfig {
 }
 
 // TestLaunchLine_EndpointProfile_CarriesDerivedClassExports is the end-to-end pin for issue #598
-// Phase 2: registry → ResolveModelEnv → SetModelEnv → launch line. Every layer above this one can
+// Phase 2: registry → ResolveModelEnv → LaunchContributions.ModelEnv → launch line. Every layer above this one can
 // be correct while the launch line still carries KEY='' for a class the gateway must serve, which
 // is the incident shape — so the assertion that matters is made here, on the emitted command.
 //
@@ -36,13 +36,13 @@ func TestLaunchLine_EndpointProfile_CarriesDerivedClassExports(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("fixture must resolve: ok=%v err=%v", ok, err)
 	}
-	mgr.SetModelEnv(env)
-	mgr.SetModelKeyUniverse([]string{"ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_DEFAULT_HAIKU_MODEL"})
+	mgr.c.ModelEnv = env
+	mgr.c.ModelKeyUniverse = []string{"ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_DEFAULT_HAIKU_MODEL"}
 
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	inline := mgr.BuildStartupCommand()
+	inline := startupLine(t, mgr)
 
 	for key, val := range map[string]string{
 		"ANTHROPIC_SMALL_FAST_MODEL":     "gw-haiku-v2",
@@ -56,9 +56,7 @@ func TestLaunchLine_EndpointProfile_CarriesDerivedClassExports(t *testing.T) {
 		if hasUnsetToken(inline, key) || strings.Contains(inline, key+"=''") {
 			t.Errorf("%s is emitted by this launch, so the hygiene pass must not also clear it; got: %s", key, inline)
 		}
-		if want := "SetEnvironment " + mgr.SessionID() + " " + key + "=" + val; !hasOp(fake.ops, want) {
-			t.Errorf("the tmux twin must carry %q too, or `tmux show-environment` and the launch line disagree; ops=%v", want, fake.ops)
-		}
+		assertNoTmuxEnvKey(t, fake.ops, mgr.SessionID(), key)
 	}
 
 	// SUBAGENT is a redirectFamilyVars member that derivation never fills, so the correct state is
@@ -80,9 +78,9 @@ func TestLaunchLine_DirectProfile_ExportsNoDerivedClasses(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("fixture must resolve: ok=%v err=%v", ok, err)
 	}
-	mgr.SetModelEnv(env)
+	mgr.c.ModelEnv = env
 
-	inline := mgr.BuildStartupCommand()
+	inline := startupLine(t, mgr)
 	if !strings.Contains(inline, " ANTHROPIC_MODEL='claude-opus-5'") {
 		t.Fatalf("positive control failed: the direct profile's own model must still be exported; got: %s", inline)
 	}

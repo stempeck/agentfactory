@@ -200,14 +200,18 @@ func TestEffortSelectedAtLaunchLegs(t *testing.T) {
 				"and a 1,000,000-token window at 5%% must not be able to switch it off",
 				config.EnvEffortLevel, lvl, "medium")
 		}
-		crumb := readEffortBreadcrumb(fx.workDir)
-		if crumb.Level != "medium" || crumb.Objective != string(tokenomics.ObjectiveEfficiency) {
-			t.Errorf("breadcrumb = %+v, want level=medium objective=efficiency — af prime reads the "+
-				"objective from here and nowhere else", crumb)
+		crumb := attestationOf(got)
+		if crumb.Objective != string(tokenomics.ObjectiveEfficiency) {
+			t.Errorf("attestation = %+v, want objective=efficiency — af prime reads the objective from "+
+				"here and nowhere else", crumb)
 		}
 		if crumb.StepLabel != nextStep {
-			t.Errorf("breadcrumb step_label = %q, want %q; af done compares the next step's plan "+
+			t.Errorf("attested step label = %q, want %q; af done compares the next step's plan "+
 				"against the level in force and cannot without it", crumb.StepLabel, nextStep)
+		}
+		if crumb.Formula != "offpath" {
+			t.Errorf("attested formula = %q, want offpath; the capacity advice matches the primed step "+
+				"on it", crumb.Formula)
 		}
 	})
 
@@ -239,20 +243,19 @@ func TestEffortSelectedAtLaunchLegs(t *testing.T) {
 		}
 	})
 
-	t.Run("with the arm off the leg keeps today's drop-only behaviour", func(t *testing.T) {
+	t.Run("with the arm off the leg selects nothing and the declared level stands", func(t *testing.T) {
 		fx, _ := setup(t)
 		armEfficiency(t, fx.root, map[string]any{"effort": "off"})
 
-		for _, kv := range withEffortLevel(fx.root, fx.workDir, launchEnv("low"), nextStep, "") {
-			if kv.Key == config.EnvEffortLevel {
-				t.Errorf("the arm is off and the launch still exports %s=%q; the control group would "+
-					"receive the treatment", kv.Key, kv.Value)
-			}
+		// "high" sits ABOVE the "medium" this fixture's history warrants, so the arm on would lower it:
+		// "high" surviving proves no selection ran, and it surviving at all proves nothing was dropped.
+		got := withEffortLevel(fx.root, fx.workDir, launchEnv("high"), nextStep, "")
+		if lvl := effortLevelIn(got); lvl != "high" {
+			t.Errorf("%s = %q with the arm off, want the profile's own high — the arm governs the "+
+				"actuator's selection, not the operator's configuration (#707)", config.EnvEffortLevel, lvl)
 		}
-		if _, err := os.Stat(effortBreadcrumbPath(fx.workDir)); !os.IsNotExist(err) {
-			t.Errorf("the arm is off and a breadcrumb was written (stat err %v); af prime would then "+
-				"record a treatment nothing applied", err)
-		}
+		// Otherwise af prime would record a treatment nothing applied.
+		assertEnvAttestsNothing(t, got)
 	})
 
 	t.Run("with no learned data the leg exports nothing and removes nothing", func(t *testing.T) {
@@ -268,9 +271,7 @@ func TestEffortSelectedAtLaunchLegs(t *testing.T) {
 			t.Errorf("%s = %q with no learned data, want the profile's own high — an unmeasured step "+
 				"is not evidence for anything", config.EnvEffortLevel, lvl)
 		}
-		if _, err := os.Stat(effortBreadcrumbPath(fx.workDir)); !os.IsNotExist(err) {
-			t.Errorf("a breadcrumb was written for a selection that never happened (stat err %v)", err)
-		}
+		assertEnvAttestsNothing(t, got)
 	})
 
 	// The record half. The treatment is applied at launch and reported by the session it was applied
@@ -280,7 +281,7 @@ func TestEffortSelectedAtLaunchLegs(t *testing.T) {
 		fx, _ := setup(t)
 		gateOn(t, fx.root)
 
-		withEffortLevel(fx.root, fx.workDir, launchEnv(""), nextStep, "")
+		inheritLaunch(t, withEffortLevel(fx.root, fx.workDir, launchEnv(""), nextStep, ""))
 
 		origHook := primeHookMode
 		primeHookMode = true
@@ -332,6 +333,9 @@ func TestEffortSelectedAtLaunchLegs(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(fx.workDir, ".runtime", "effort_next")); !os.IsNotExist(err) {
 			t.Errorf("an effort_next marker exists (stat err %v); the launch line is the only channel", err)
 		}
+		if _, err := os.Stat(filepath.Join(fx.workDir, ".runtime", "effort_level")); !os.IsNotExist(err) {
+			t.Errorf("an effort_level file exists (stat err %v); the launch line is the only channel", err)
+		}
 	})
 
 	// The wiring. TestEffortArmWiredAtEveryModelEnvSite owns the universal ("no site is unwrapped");
@@ -339,22 +343,22 @@ func TestEffortSelectedAtLaunchLegs(t *testing.T) {
 	// through are all present, so a rename that removed one leg while leaving the interlock vacuously
 	// green still fails here.
 	t.Run("all three launch legs select", func(t *testing.T) {
-		hits := grepPackage(t, ".", "mgr.SetModelEnv(withEffortLevel(")
-		if len(hits) < 3 {
-			t.Errorf("withEffortLevel is wired at %d model-env sites (%v), want at least 3 — the "+
-				"watchdog respawn (helpers.go), af sling and af up", len(hits), hits)
-		}
+		hits := grepPackage(t, ".", "launchContributions(")
 		for _, leg := range []string{"helpers.go", "sling.go", "up.go"} {
 			var found bool
 			for _, hit := range hits {
-				if strings.Contains(hit, leg) {
+				if filepath.Base(strings.Split(hit, ":")[0]) == leg {
 					found = true
 				}
 			}
 			if !found {
-				t.Errorf("%s does not select an effort level; a session started through that leg runs "+
-					"at the host default and the arm has a hole exactly where it is least visible", leg)
+				t.Errorf("%s does not compose its launch through launchContributions; a session started "+
+					"through that leg runs at the host default and the arm has a hole exactly where it is least visible", leg)
 			}
+		}
+		if armed := grepPackage(t, ".", "c.ModelEnv = withEffortLevel("); len(armed) == 0 {
+			t.Error("the launch composer does not select an effort level; every leg reaches the model env " +
+				"through it, so no session would select one")
 		}
 	})
 }
@@ -392,11 +396,11 @@ func TestCapacityLastResortEffort(t *testing.T) {
 	t.Run("a step that fits no session on this profile runs reduced", func(t *testing.T) {
 		fx := setup(t, tightWindowTokens)
 
-		if lvl := effortLevelIn(withEffortLevel(fx.root, fx.workDir, launchEnv(""), nextStep, "")); lvl != "medium" {
+		crumb := attestationOf(withEffortLevel(fx.root, fx.workDir, launchEnv(""), nextStep, ""))
+		if lvl := crumb.Level; lvl != "medium" {
 			t.Errorf("%s = %q on a %d-token window against a %d-token learned peak, want medium",
 				config.EnvEffortLevel, lvl, tightWindowTokens, tightPeakTokens)
 		}
-		crumb := readEffortBreadcrumb(fx.workDir)
 		if crumb.Objective != string(tokenomics.ObjectiveCapacity) {
 			t.Errorf("objective = %q, want %q — this reduction is a capacity last resort and filing "+
 				"it as efficiency would credit this issue with a step nothing can hold",
@@ -407,14 +411,13 @@ func TestCapacityLastResortEffort(t *testing.T) {
 	t.Run("the same step on a roomy window does nothing", func(t *testing.T) {
 		fx := setup(t, roomyWindowTokens)
 
-		if lvl := effortLevelIn(withEffortLevel(fx.root, fx.workDir, launchEnv(""), nextStep, "")); lvl != "" {
+		got := withEffortLevel(fx.root, fx.workDir, launchEnv(""), nextStep, "")
+		if lvl := effortLevelIn(got); lvl != "" {
 			t.Errorf("%s = %q on a %d-token window, want no level at all — a step that fits is not a "+
 				"capacity emergency, and the efficiency half declined for want of a generation baseline",
 				config.EnvEffortLevel, lvl, roomyWindowTokens)
 		}
-		if _, err := os.Stat(effortBreadcrumbPath(fx.workDir)); !os.IsNotExist(err) {
-			t.Errorf("a breadcrumb was written for a selection that never happened (stat err %v)", err)
-		}
+		assertEnvAttestsNothing(t, got)
 	})
 }
 
@@ -682,18 +685,15 @@ func TestEfficiencyRelaunchBound(t *testing.T) {
 		armEfficiency(t, fx.root, nil)
 
 		bumpEfficiencyRelaunches(fx.workDir, "inst-1")
-		writeEffortBreadcrumb(fx.workDir, effortBreadcrumb{Level: "medium", Objective: "efficiency"})
 		if _, err := os.Stat(efficiencyRelaunchPath(fx.workDir)); err != nil {
 			t.Fatalf("the fixture wrote no counter, so the sweep below proves nothing: %v", err)
 		}
 
 		cleanupRuntimeArtifacts(fx.workDir)
 
-		for _, path := range []string{efficiencyRelaunchPath(fx.workDir), effortBreadcrumbPath(fx.workDir)} {
-			if _, err := os.Stat(path); !os.IsNotExist(err) {
-				t.Errorf("%s survived the formula's runtime cleanup (stat err %v); a stale count or a "+
-					"stale level would then answer for the next formula", filepath.Base(path), err)
-			}
+		if _, err := os.Stat(efficiencyRelaunchPath(fx.workDir)); !os.IsNotExist(err) {
+			t.Errorf("the counter survived the formula's runtime cleanup (stat err %v); a stale count "+
+				"would then answer for the next formula", err)
 		}
 	})
 }
@@ -722,7 +722,7 @@ func TestEfficiencyInterventionRecorded(t *testing.T) {
 	// opening hook prime opens the session and fires the thrift; the first plain prime renders identity
 	// (count 1, not slimmed); the second plain prime is the same-session re-prime that slims and
 	// records the interview reduction (count > 1). Three efficiency acts, three mechanisms.
-	withEffortLevel(fx.root, fx.workDir, launchEnv(""), "step-2", "")
+	inheritLaunch(t, withEffortLevel(fx.root, fx.workDir, launchEnv(""), "step-2", ""))
 	origHook := primeHookMode
 	primeHookMode = true
 	t.Cleanup(func() { primeHookMode = origHook })
@@ -798,7 +798,7 @@ func TestReduceEffortRecordJoinsReducedArm(t *testing.T) {
 	// record equals the step_end.StepID closed below.
 	seedEfficiency(t, fx.root, formula, stepLabelOf(step), model, reducibleAggregate())
 
-	withEffortLevel(fx.root, fx.workDir, launchEnv(""), stepLabelOf(step), "")
+	inheritLaunch(t, withEffortLevel(fx.root, fx.workDir, launchEnv(""), stepLabelOf(step), ""))
 	origHook := primeHookMode
 	primeHookMode = true
 	t.Cleanup(func() { primeHookMode = origHook })
@@ -862,12 +862,10 @@ func TestReducedSessionStepLessPrimeJoinsReducedArm(t *testing.T) {
 	armEfficiency(t, fx.root, nil)
 	model, _ := resolveRecordModel(fx.root, fx.workDir, fx.agent, "")
 
-	// The attestation the launch leg leaves on disk: this session was launched at a reduced level for
-	// an efficiency reason. It is written whether or not a step is in flight, which is the whole shape
-	// the step-less prime must not drop on the floor.
-	writeEffortBreadcrumb(fx.workDir, effortBreadcrumb{
-		Level: "medium", Objective: string(tokenomics.ObjectiveEfficiency),
-	})
+	// The attestation the launch line exported: this session was launched at a reduced level for an
+	// efficiency reason. It is exported whether or not a step is in flight, which is the whole shape the
+	// step-less prime must not drop on the floor.
+	plantLaunchEffort(t, "medium", string(tokenomics.ObjectiveEfficiency), "", "")
 
 	origHook := primeHookMode
 	primeHookMode = true
@@ -998,20 +996,22 @@ func TestDispatchCapStaysLocalGated(t *testing.T) {
 	})
 }
 
-// TestEffortBreadcrumbIsNotStale is the regression test for the defect the Phase 2 review found, and
-// the reason it existed is worth stating: every test above asserted that a NON-selecting launch writes
-// no breadcrumb into a FRESH fixture. None of them put a breadcrumb there first. The one shape that
-// matters — a real factory, where the previous step DID warrant a reduction and the next one does not
-// — was the shape nothing covered.
+// TestEffortAttestationIsNotStale is the regression test for the defect the Phase 2 review found, and
+// the reason it existed is worth stating: every test above asserted that a NON-selecting launch
+// attests nothing from a FRESH fixture. None of them had a previous launch attest first. The one shape
+// that matters — a real factory, where the previous step DID warrant a reduction and the next one does
+// not — was the shape nothing covered.
 //
-// The breadcrumb is an attestation, not a cache. af prime reads it and writes a record saying THIS
-// session ran at a reduced level for an efficiency reason. Left stale, the next session attests a
-// treatment it never received, into an append-only log, and Phase 7 counts a control run as a firing.
-func TestEffortBreadcrumbIsNotStale(t *testing.T) {
+// The attestation is not a cache. af prime reads it and writes a record saying THIS session ran at a
+// reduced level for an efficiency reason, and a relaunch reuses the pane's environment. Left standing,
+// the next session attests a treatment it never received, into an append-only log, and Phase 7 counts
+// a control run as a firing.
+func TestEffortAttestationIsNotStale(t *testing.T) {
 	const measured, unmeasured = "step-1", "step-2"
 
 	// A factory where the CLOSING step has learned history and the next one has none, which is what
-	// makes the second launch a non-selecting one.
+	// makes the second launch a non-selecting one. The session the fixture leaves running is the first
+	// launch's.
 	setup := func(t *testing.T) lifecycleFixture {
 		t.Helper()
 		fx, _, _ := primedFixture(t, roomyOccupancyPct)
@@ -1021,43 +1021,35 @@ func TestEffortBreadcrumbIsNotStale(t *testing.T) {
 		model, _ := resolveRecordModel(fx.root, fx.workDir, fx.agent, "")
 		seedEfficiency(t, fx.root, "offpath", measured, model, reducibleAggregate())
 
-		if lvl := effortLevelIn(withEffortLevel(fx.root, fx.workDir, launchEnv(""), measured, "")); lvl != "medium" {
-			t.Fatalf("the fixture's FIRST launch selected %q, want medium; without a breadcrumb on disk "+
-				"the staleness assertions below prove nothing", lvl)
+		first := withEffortLevel(fx.root, fx.workDir, launchEnv(""), measured, "")
+		if crumb := attestationOf(first); crumb.Level != "medium" || crumb.Objective == "" {
+			t.Fatalf("the fixture's FIRST launch attested %+v, want a medium reduction; without one the "+
+				"staleness assertions below prove nothing", crumb)
 		}
+		inheritLaunch(t, first)
 		return fx
 	}
 
 	t.Run("a launch that selects nothing clears the previous launch's attestation", func(t *testing.T) {
 		fx := setup(t)
 
-		withEffortLevel(fx.root, fx.workDir, launchEnv(""), unmeasured, "")
-
-		if crumb := readEffortBreadcrumb(fx.workDir); crumb.Level != "" {
-			t.Errorf("the breadcrumb still says %+v after a launch that applied no level; the next "+
-				"session would attest a treatment it never received", crumb)
-		}
+		// The next session would otherwise attest a treatment it never received.
+		assertEnvAttestsNothing(t, withEffortLevel(fx.root, fx.workDir, launchEnv(""), unmeasured, ""))
 	})
 
 	t.Run("turning the arm off clears it too", func(t *testing.T) {
 		fx := setup(t)
 		armEfficiency(t, fx.root, map[string]any{"effort": "off"})
 
-		// Same step, still warranted by the digest — only the switch changed. This is the control
-		// group, and a control group carrying the treatment's own attestation is the one failure that
-		// makes the whole experiment unreadable.
-		withEffortLevel(fx.root, fx.workDir, launchEnv(""), measured, "")
-
-		if crumb := readEffortBreadcrumb(fx.workDir); crumb.Level != "" {
-			t.Errorf("the arm is off and the breadcrumb still says %+v; this session is in the control "+
-				"group and would be recorded as treated", crumb)
-		}
+		// Same step, still warranted by the digest — only the switch changed. Nothing was selected, so
+		// a surviving attestation would have af prime attest a reduction this session never received.
+		assertEnvAttestsNothing(t, withEffortLevel(fx.root, fx.workDir, launchEnv(""), measured, ""))
 	})
 
-	t.Run("af prime attests nothing after a cleared breadcrumb", func(t *testing.T) {
+	t.Run("af prime attests nothing after a cleared attestation", func(t *testing.T) {
 		fx := setup(t)
 		gateOn(t, fx.root)
-		withEffortLevel(fx.root, fx.workDir, launchEnv(""), unmeasured, "")
+		inheritLaunch(t, withEffortLevel(fx.root, fx.workDir, launchEnv(""), unmeasured, ""))
 
 		origHook := primeHookMode
 		primeHookMode = true
@@ -1096,7 +1088,7 @@ func TestEfficiencyRelaunchWarrantedOnlyByAChange(t *testing.T) {
 
 	for _, tc := range []struct {
 		name  string
-		crumb effortBreadcrumb
+		crumb launchEffort
 		plan  tokenomics.EfficiencyPlan
 		next  string
 		want  bool
@@ -1104,13 +1096,13 @@ func TestEfficiencyRelaunchWarrantedOnlyByAChange(t *testing.T) {
 	}{
 		{
 			name:  "a session running deeper than the plan is recycled",
-			crumb: effortBreadcrumb{Level: "high", StepLabel: "step-1"},
+			crumb: launchEffort{Level: "high", StepLabel: "step-1"},
 			plan:  plan("medium"), next: "step-2", want: true,
 			why: "this is the whole point of the branch: high > medium, so the recycle buys a reduction",
 		},
 		{
 			name:  "a profile-capped level is not a change",
-			crumb: effortBreadcrumb{Level: "low", StepLabel: "step-1"},
+			crumb: launchEffort{Level: "low", StepLabel: "step-1"},
 			plan:  plan("medium"), next: "step-2", want: false,
 			why: "the launch leg caps its selection by what the profile declares, so a profile " +
 				"declaring low under a medium plan applies low again on every relaunch — warranting one " +
@@ -1119,35 +1111,35 @@ func TestEfficiencyRelaunchWarrantedOnlyByAChange(t *testing.T) {
 		},
 		{
 			name:  "an equal level is not a change",
-			crumb: effortBreadcrumb{Level: "medium", StepLabel: "step-1"},
+			crumb: launchEffort{Level: "medium", StepLabel: "step-1"},
 			plan:  plan("medium"), next: "step-2", want: false,
 			why: "the session is already running what the plan asks for",
 		},
 		{
-			name:  "an absent breadcrumb is not a change",
-			crumb: effortBreadcrumb{},
+			name:  "an absent attestation is not a change",
+			crumb: launchEffort{},
 			plan:  plan("medium"), next: "step-2", want: false,
-			why: "no breadcrumb means the launch leg selected nothing — the arm is off, the step has no " +
+			why: "no attestation means the launch leg selected nothing — the arm is off, the step has no " +
 				"history, or the leg was skipped for an empty model env. A leg that did not run cannot " +
 				"be made to run by recycling into it again",
 		},
 		{
-			name:  "a breadcrumb for the step about to open is not a change",
-			crumb: effortBreadcrumb{Level: "high", StepLabel: "step-2"},
+			name:  "an attestation for the step about to open is not a change",
+			crumb: launchEffort{Level: "high", StepLabel: "step-2"},
 			plan:  plan("medium"), next: "step-2", want: false,
 			why: "that session was launched targeting this very step, so its level already reflects " +
-				"this plan; this is what the breadcrumb carries a step label for",
+				"this plan; this is what the attestation carries a step label for",
 		},
 		{
 			name:  "an unranked plan warrants nothing",
-			crumb: effortBreadcrumb{Level: "high", StepLabel: "step-1"},
+			crumb: launchEffort{Level: "high", StepLabel: "step-1"},
 			plan:  plan(config.EffortLevelAuto), next: "step-2", want: false,
 			why: "auto is the host's own default and has no position in the order, so no comparison " +
 				"against it can prove a reduction",
 		},
 		{
 			name:  "no plan warrants nothing",
-			crumb: effortBreadcrumb{Level: "high", StepLabel: "step-1"},
+			crumb: launchEffort{Level: "high", StepLabel: "step-1"},
 			plan:  plan(""), next: "step-2", want: false,
 			why: "there is nothing to move toward",
 		},
@@ -1169,12 +1161,12 @@ func TestEfficiencyRelaunchWarrantedOnlyByAChange(t *testing.T) {
 
 		adm := admission{policy: policy, stepLabel: "step-2", efficiency: plan("medium")}
 
-		writeEffortBreadcrumb(fx.workDir, effortBreadcrumb{Level: "low", StepLabel: "step-1"})
+		plantLaunchEffort(t, "low", string(tokenomics.ObjectiveEfficiency), "step-1", "offpath")
 		if eff := boundaryEfficiencyRelaunch(fx.workDir, "inst-1", adm); eff.warranted {
 			t.Error("a capped level warranted a relaunch that could not change it")
 		}
 
-		writeEffortBreadcrumb(fx.workDir, effortBreadcrumb{Level: "high", StepLabel: "step-1"})
+		plantLaunchEffort(t, "high", string(tokenomics.ObjectiveEfficiency), "step-1", "offpath")
 		eff := boundaryEfficiencyRelaunch(fx.workDir, "inst-1", adm)
 		if !eff.warranted {
 			t.Fatal("a session running deeper than the plan was not recycled; the refusal above proves nothing")
@@ -1329,14 +1321,10 @@ func TestCapacityCounselOnTheNoFitPath(t *testing.T) {
 		armEfficiency(t, fx.root, extra)
 		model, _ := resolveRecordModel(fx.root, fx.workDir, fx.agent, "")
 		seedAppetite(t, fx.root, "offpath", stepLabelOf(step), model, noFreshFitPeak, advisoryPriorRuns)
-		// What the launch leg leaves behind when the capacity last resort fires. The sentence attests
-		// to a level that was actually applied, so without this the fixture is the first-session shape
-		// the last subtest covers rather than the one this one is about.
-		writeEffortBreadcrumb(fx.workDir, effortBreadcrumb{
-			Level:     "medium",
-			Objective: string(tokenomics.ObjectiveCapacity),
-			StepLabel: stepLabelOf(step),
-		})
+		// What the launch line exports when the capacity last resort fires. The sentence attests to a
+		// level that was actually applied, so without this the fixture is the first-session shape the
+		// last subtest covers rather than the one this one is about.
+		plantLaunchEffort(t, "medium", string(tokenomics.ObjectiveCapacity), stepLabelOf(step), "offpath")
 		return fx, model
 	}
 
@@ -1381,9 +1369,7 @@ func TestCapacityCounselOnTheNoFitPath(t *testing.T) {
 		// The first session of a formula instance: nothing has closed a step, so the launch leg could
 		// resolve no formula, read no learned peak, and applied nothing. The step still does not fit —
 		// the sentence's REASON is true — but the reduction it reports never happened.
-		if err := os.Remove(effortBreadcrumbPath(fx.workDir)); err != nil {
-			t.Fatalf("removing the breadcrumb: %v", err)
-		}
+		plantLaunchEffort(t, "", "", "", "")
 
 		out := runPrimeCapturing(t)
 		if strings.Contains(out, counsel) {
@@ -1395,16 +1381,29 @@ func TestCapacityCounselOnTheNoFitPath(t *testing.T) {
 		}
 	})
 
-	t.Run("a breadcrumb for a different step is not this step's attestation", func(t *testing.T) {
-		fx, _ := setup(t, nil)
-		writeEffortBreadcrumb(fx.workDir, effortBreadcrumb{
-			Level:     "medium",
-			Objective: string(tokenomics.ObjectiveCapacity),
-			StepLabel: "step-2",
-		})
+	t.Run("an attestation for a different step is not this step's attestation", func(t *testing.T) {
+		setup(t, nil)
+		plantLaunchEffort(t, "medium", string(tokenomics.ObjectiveCapacity), "step-2", "offpath")
 
 		if out := runPrimeCapturing(t); strings.Contains(out, counsel) {
 			t.Errorf("a level applied for a neighbouring step was reported as this step's:\n%s", out)
+		}
+	})
+
+	t.Run("an attestation for another formula is not this formula's attestation", func(t *testing.T) {
+		fx, _, step := primedFixture(t, advisoryOccupancyPct)
+		gateOn(t, fx.root)
+		armEfficiency(t, fx.root, nil)
+		model, _ := resolveRecordModel(fx.root, fx.workDir, fx.agent, "")
+		seedAppetite(t, fx.root, "offpath", stepLabelOf(step), model, noFreshFitPeak, advisoryPriorRuns)
+		plantLaunchEffort(t, "medium", string(tokenomics.ObjectiveCapacity), stepLabelOf(step), "other-formula")
+
+		if out := runPrimeCapturing(t); strings.Contains(out, counsel) {
+			t.Errorf("a level another formula's launch applied under the same step label was reported as "+
+				"this formula's:\n%s", out)
+		}
+		if got := len(interventionsByMechanism(t, fx.root, fx.agent)[string(tokenomics.MechanismEffort)]); got != 0 {
+			t.Errorf("effort intervention records = %d for another formula's attestation", got)
 		}
 	})
 
@@ -1415,11 +1414,7 @@ func TestCapacityCounselOnTheNoFitPath(t *testing.T) {
 		model, _ := resolveRecordModel(fx.root, fx.workDir, fx.agent, "")
 		// Fits an empty window, does not fit the current one: the handoff branch, not this one.
 		seedAppetite(t, fx.root, "offpath", stepLabelOf(step), model, 100000, advisoryPriorRuns)
-		writeEffortBreadcrumb(fx.workDir, effortBreadcrumb{
-			Level:     "medium",
-			Objective: string(tokenomics.ObjectiveCapacity),
-			StepLabel: stepLabelOf(step),
-		})
+		plantLaunchEffort(t, "medium", string(tokenomics.ObjectiveCapacity), stepLabelOf(step), "offpath")
 
 		if out := runPrimeCapturing(t); strings.Contains(out, counsel) {
 			t.Errorf("a step that fits a fresh session was told no session can hold it:\n%s", out)
@@ -1428,8 +1423,8 @@ func TestCapacityCounselOnTheNoFitPath(t *testing.T) {
 }
 
 // TestRecordObjectiveRefusesAnUnknownLabel pins the import edge at the one place it is enforced rather
-// than assumed. internal/telemetry must never learn what a decision looks like, so a breadcrumb
-// written by a binary whose vocabulary this one does not share must produce no record at all — an
+// than assumed. internal/telemetry must never learn what a decision looks like, so an attestation
+// exported by a binary whose vocabulary this one does not share must produce no record at all — an
 // absent record is a gap, a wrong one is a false claim about which arm a session ran in.
 func TestRecordObjectiveRefusesAnUnknownLabel(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
@@ -1602,7 +1597,7 @@ func TestEfficiencyRelaunchRecordAtTheBoundary(t *testing.T) {
 		seedEfficiency(t, fx.root, "offpath", next, model, reducibleAggregate())
 		// The session is running deeper than the next step's plan asks for, which is the one shape a
 		// level-driven relaunch acts on.
-		writeEffortBreadcrumb(fx.workDir, effortBreadcrumb{Level: "high", StepLabel: stepLabelOf(step)})
+		plantLaunchEffort(t, "high", string(tokenomics.ObjectiveEfficiency), stepLabelOf(step), "offpath")
 
 		tmuxPaneEnv(t)
 		(&mailRecorder{}).install(t)
@@ -1700,4 +1695,14 @@ func TestEfficiencyRelaunchRecordAtTheBoundary(t *testing.T) {
 			t.Errorf("effort intervention records = %d with tokenomics off", got)
 		}
 	})
+}
+
+// plantLaunchEffort states an attestation directly, for a fixture that does not want to derive it
+// from a real launch line.
+func plantLaunchEffort(t *testing.T, level, objective, stepLabel, formula string) {
+	t.Helper()
+	t.Setenv("CLAUDE_CODE_EFFORT_LEVEL", level)
+	t.Setenv("AF_EFFORT_OBJECTIVE", objective)
+	t.Setenv("AF_EFFORT_STEP_LABEL", stepLabel)
+	t.Setenv("AF_EFFORT_FORMULA", formula)
 }

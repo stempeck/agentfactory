@@ -12,9 +12,10 @@ and what is NOT trusted (even though it may look authoritative).
     │
     ▼
 [session.Manager] ← THIS is the trust anchor for identity
-    │             writes: AF_ROLE, AF_ROOT, BD_ACTOR, BEADS_DIR
-    │             via: tmux SetEnvironment (session.go:116)
-    │                  shell export in claude-launch cmd (session.go:159)
+    │             writes: AF_ROOT AF_ROLE AF_ACTOR AF_WORKTREE AF_WORKTREE_ID
+    │             via: tmux SetEnvironment (session.go:524-529)
+    │                  shell export in claude-launch cmd (session.go:586-590)
+    │             config-derived env: launch-line export only
     ▼
 [cobra cmd layer: internal/cmd/] ← reads env, reads cwd, validates
     │                              against agents.json membership
@@ -42,10 +43,8 @@ producer is an architectural change requiring a trust-model justification.
 
 | Value | Writer | Mechanism | Anchor |
 |-------|--------|-----------|--------|
-| `AF_ROLE` | `session.Manager` only | tmux `SetEnvironment` + shell export in claude-launch command | `internal/session/session.go:116, 159` |
-| `AF_ROOT` | `session.Manager` only | shell export | `internal/session/session.go:159` |
-| `BD_ACTOR` | `session.Manager` only | shell export | `internal/session/session.go:159` |
-| `BEADS_DIR` | `session.Manager` only | shell export | `internal/session/session.go:159` |
+| `AF_ROOT`, `AF_ROLE`, `AF_ACTOR`, `AF_WORKTREE`, `AF_WORKTREE_ID` | `session.Manager` only | tmux `SetEnvironment` + shell export in claude-launch command | `internal/session/session.go:524-529, 586-590` |
+| Config-derived env (model, endpoint, telemetry, git identity, build host) | `session.Manager` only | shell export in claude-launch command; never tmux | `internal/session/session.go:585` (`buildStartupCommand`) |
 | `agents.json` membership | `af install` | filesystem write during setup | `internal/cmd/install.go` |
 | `factory root` marker | `af install --init` | creates `.agentfactory/` directory | `internal/cmd/install.go` |
 
@@ -157,8 +156,9 @@ live sessions** — needs review.
 
 ### Go ↔ claude CLI (subprocess in session)
 
-**Trust model:** Claude Code inherits all env vars (AF_ROLE, AF_ROOT,
-BD_ACTOR, BEADS_DIR) from the shell-export setup at `session.go:159`.
+**Trust model:** Claude Code inherits all env vars (the identity quintet
+`AF_ROOT AF_ROLE AF_ACTOR AF_WORKTREE AF_WORKTREE_ID` and every
+config-derived value) from the shell-export setup at `session.go:586-590`.
 The agent running inside Claude sees these as the outside-world context.
 
 **Anti-pattern:** Claude agent code reading `os.Getenv("AF_ROLE")` to

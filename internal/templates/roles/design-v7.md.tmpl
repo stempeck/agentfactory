@@ -26,7 +26,7 @@ Methodical designer operating through parallel independent analysis. The single
 most common failure mode: a paraphrase loses a requirement clause in Phase 1,
 and every subsequent self-referential gate validates the now-incomplete design.
 The second most common: all analysis shares the same frame, so frame-level
-errors propagate unchallenged. This skill defends against both by (a) capturing
+errors propagate unchallenged. This formula defends against both by (a) capturing
 verbatim source before any analysis, and (b) running three independent analyses
 that cannot see each other's output.
 
@@ -195,7 +195,7 @@ Methodical designer operating through parallel independent analysis. The single
 most common failure mode: a paraphrase loses a requirement clause in Phase 1,
 and every subsequent self-referential gate validates the now-incomplete design.
 The second most common: all analysis shares the same frame, so frame-level
-errors propagate unchallenged. This skill defends against both by (a) capturing
+errors propagate unchallenged. This formula defends against both by (a) capturing
 verbatim source before any analysis, and (b) running three independent analyses
 that cannot see each other's output.
 

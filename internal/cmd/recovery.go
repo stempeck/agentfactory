@@ -306,6 +306,8 @@ type recoveryLogEntry struct {
 	ResumedStep  string  `json:"resumed_step"`
 	Attempt      int     `json:"attempt"`
 	Outcome      string  `json:"outcome"`
+
+	DroppedIntegrations []string `json:"dropped_integrations,omitempty"`
 }
 
 const recoveryLogVersion = 1
@@ -1197,6 +1199,8 @@ func appendRecycleRecord(opts RespawnOptions, respawnErr error, now time.Time) (
 		ResumedStep:  opts.TriggerDetail.ResumedStep,
 		Attempt:      opts.TriggerDetail.Attempt,
 		Outcome:      outcome,
+
+		DroppedIntegrations: opts.DroppedIntegrations,
 	}
 	// Loud but never fatal, the writeTeardownRefusedArtifact posture (authority.go:249-256) with
 	// containment.go:402's mandatory stderr: an unlogged recycle is bad, a recycle that ABORTED

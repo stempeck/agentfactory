@@ -10,7 +10,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/session"
 )
 
-// teardownRefusalSurfaces are the four command surfaces that emit the K1 refusal.
+// teardownRefusalSurfaces are the five command surfaces that emit the K1 refusal.
 // The body is identical across all of them; only the parenthesized surface token on
 // the first line varies (ux.md Option U1).
 var teardownRefusalSurfaces = []string{
@@ -18,6 +18,7 @@ var teardownRefusalSurfaces = []string{
 	"af down --reset",
 	"af install --agents",
 	"af dispatch stop",
+	"af plugin install",
 }
 
 func refusalFirstLine(s string) string {

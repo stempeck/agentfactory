@@ -7,9 +7,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -36,22 +34,23 @@ var endpointClassInventory = []string{
 //
 // It carries two assertions, and both are load-bearing because they fail under DIFFERENT mutations:
 //
-//   - The SUBSET half (EndpointClassKeys ⊆ session.redirectFamilyVars) catches a key dropped from
-//     the session-side family — design-doc.md:398's mutation.
+//   - The SUBSET half (EndpointClassKeys ⊆ config.RedirectFamilyEnvVars) catches a key dropped from
+//     the redirect family the launch chokepoint clears — design-doc.md:398's mutation.
 //   - The EXACT-SET half catches a key dropped from, or added to, EndpointClassKeys itself. A
 //     subset relation gets strictly EASIER to satisfy as the left-hand set shrinks, so a
 //     subset-only test stays green when a member is deleted from the inventory — which is the
 //     mutation the phase's acceptance criteria actually prescribe. The exact-set half is the
 //     "+ explicit membership assertions" clause of Decision 11, and it is not decoration.
 //
-// The subset half deliberately does NOT assert equality of the two lists: redirectFamilyVars is
+// The subset half deliberately does NOT assert equality of the two lists: RedirectFamilyEnvVars is
 // wider on purpose (it also carries ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_MODEL and
 // ANTHROPIC_DEFAULT_FABLE_MODEL). Whole-list byte-parity would structurally freeze the Fable key
 // out of hygiene, which is exactly why Decision 11 revised the shape to subset.
 //
-// The session side is read from SOURCE via go/parser rather than imported: internal/session
-// imports internal/config (session.go:15), so a test in package config that imported it back would
-// be an import cycle. Same motive as reserved_parity_test.go and internal/cmd/kill_scope_drift_test.go.
+// The family is read directly from config.RedirectFamilyEnvVars (Lift B, #695 Phase 2): the list
+// is now owned here and session derives its redirectFamilyVars from it, so the go/parser read of
+// session.go this test used to need is gone. The session-side order and the absence of a second
+// copy are pinned by internal/session's TestRedirectFamilyVarsOrderPinned.
 func TestEndpointClassKeysSubsetOfRedirectFamilyVars(t *testing.T) {
 	// --- EXACT-SET half: the inventory is the contracted five, no more and no fewer. ---
 	got := map[string]bool{}
@@ -85,18 +84,21 @@ func TestEndpointClassKeysSubsetOfRedirectFamilyVars(t *testing.T) {
 	}
 
 	// --- SUBSET half: every inventory member is cleared by the launch chokepoint. ---
-	family := redirectFamilyVarsFromSource(t, sessionGoPathForParity(t))
+	family := map[string]bool{}
+	for _, k := range RedirectFamilyEnvVars {
+		family[k] = true
+	}
 	if len(family) == 0 {
-		t.Fatal("parsed zero redirectFamilyVars members from session.go — the scan matches nothing, so it guards nothing")
+		t.Fatal("config.RedirectFamilyEnvVars is empty — the subset check matches nothing, so it guards nothing")
 	}
 	// Anchor: a member every version of the list has carried. Without it a walker that latched onto
 	// the wrong var could return a non-empty set and still be reading something else entirely.
 	if !family["ANTHROPIC_MODEL"] {
-		t.Fatalf("the parsed set does not contain ANTHROPIC_MODEL, so the extractor is reading the wrong declaration; got %v", sortedKeys(family))
+		t.Fatalf("RedirectFamilyEnvVars does not contain ANTHROPIC_MODEL, so it is not the redirect family; got %v", sortedKeys(family))
 	}
 	for _, k := range EndpointClassKeys {
 		if !family[k] {
-			t.Errorf("class key %q is in config.EndpointClassKeys but MISSING from session.redirectFamilyVars — the launch chokepoint would not clear it, so a value derived under a previous profile survives a profile switch on a reused session (issue #508's failure class, reopened for a derived value)", k)
+			t.Errorf("class key %q is in config.EndpointClassKeys but MISSING from config.RedirectFamilyEnvVars — the launch chokepoint would not clear it, so a value derived under a previous profile survives a profile switch on a reused session (issue #508's failure class, reopened for a derived value)", k)
 		}
 	}
 }
@@ -136,123 +138,6 @@ func TestEndpointClassDerivationTablesAgreeWithInventory(t *testing.T) {
 			t.Error("CLAUDE_CODE_SUBAGENT_MODEL must never be derived (Decision 14): the sub-agent class is chosen by the caller, not inherited from the main model")
 		}
 	}
-}
-
-// sessionGoPathForParity resolves internal/session/session.go relative to THIS file via
-// runtime.Caller, so the test is independent of the working directory. Deliberately a distinct
-// helper from reserved_parity_test.go's webValidateGoPath: the two parity tests guard unrelated
-// boundaries and must not become coupled by a shared path helper.
-func sessionGoPathForParity(t *testing.T) string {
-	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed — cannot locate this test's directory")
-	}
-	// this file: <root>/internal/config/endpoint_class_parity_test.go → <root>/internal/session/session.go
-	return filepath.Join(filepath.Dir(thisFile), "..", "session", "session.go")
-}
-
-// redirectFamilyVarsFromSource go/parser-parses path and returns the member SET of its top-level
-// `redirectFamilyVars` []string composite literal.
-//
-// It cannot reuse reserved_parity_test.go's reservedNamesFromSource: that helper reads a
-// map[string]bool and casts every element to *ast.KeyValueExpr, which every element of a []string
-// fails — copied verbatim it would return an empty set and the parity check would silently guard
-// nothing. redirectFamilyVars mixes two element shapes: *ast.BasicLit for the six string literals
-// and *ast.Ident for the two that use consts (envBaseURL, envAuthToken). Identifiers are resolved
-// through the file's own string consts rather than skipped, so the test can never quietly stop
-// covering a member that a future refactor turns into a const.
-func redirectFamilyVarsFromSource(t *testing.T, path string) map[string]bool {
-	t.Helper()
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, path, nil, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
-	consts := stringConstsFromFile(f)
-
-	keys := map[string]bool{}
-	found := false
-	for _, decl := range f.Decls {
-		gd, ok := decl.(*ast.GenDecl)
-		if !ok || gd.Tok != token.VAR {
-			continue
-		}
-		for _, spec := range gd.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok {
-				continue
-			}
-			for i, name := range vs.Names {
-				if name.Name != "redirectFamilyVars" || i >= len(vs.Values) {
-					continue
-				}
-				lit, ok := vs.Values[i].(*ast.CompositeLit)
-				if !ok {
-					t.Fatalf("redirectFamilyVars is no longer a composite literal (%T) — repoint this extractor rather than letting it read nothing", vs.Values[i])
-				}
-				found = true
-				for _, elt := range lit.Elts {
-					switch e := elt.(type) {
-					case *ast.BasicLit:
-						if e.Kind != token.STRING {
-							t.Fatalf("redirectFamilyVars holds a non-string literal %s", e.Value)
-						}
-						s, err := strconv.Unquote(e.Value)
-						if err != nil {
-							t.Fatalf("unquote %q: %v", e.Value, err)
-						}
-						keys[s] = true
-					case *ast.Ident:
-						s, ok := consts[e.Name]
-						if !ok {
-							t.Fatalf("redirectFamilyVars member %q is an identifier this extractor cannot resolve to a string const in %s — resolve it, do not skip it, or the parity check silently stops covering that member", e.Name, path)
-						}
-						keys[s] = true
-					default:
-						t.Fatalf("redirectFamilyVars holds an unexpected element type %T", elt)
-					}
-				}
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("no redirectFamilyVars declaration found in %s — it was renamed or moved to another file, and this test guards nothing until the extractor is repointed", path)
-	}
-	return keys
-}
-
-// stringConstsFromFile returns every `name = "value"` const declared at the top level of f, so an
-// identifier used inside a composite literal can be resolved to the string it stands for.
-func stringConstsFromFile(f *ast.File) map[string]string {
-	out := map[string]string{}
-	for _, decl := range f.Decls {
-		gd, ok := decl.(*ast.GenDecl)
-		if !ok || gd.Tok != token.CONST {
-			continue
-		}
-		for _, spec := range gd.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok {
-				continue
-			}
-			for i, name := range vs.Names {
-				if i >= len(vs.Values) {
-					continue
-				}
-				bl, ok := vs.Values[i].(*ast.BasicLit)
-				if !ok || bl.Kind != token.STRING {
-					continue
-				}
-				s, err := strconv.Unquote(bl.Value)
-				if err != nil {
-					continue
-				}
-				out[name.Name] = s
-			}
-		}
-	}
-	return out
 }
 
 // sortedKeys sorts because it feeds a t.Fatalf diagnostic: an unsorted dump of a Go map varies

@@ -54,31 +54,27 @@ func assertShellParses(t *testing.T, script string) {
 const respawnPrefix = "sleep 60 && "
 
 // TestUniverseHygiene_ProfileSwitchClearsWindow is the core issue #602 proof: an agent
-// relaunched under a profile that does NOT carry a universe key must leave no stale value
-// at EITHER twin. The tmux twin covers a fresh Start on a reused session; the inline twin
-// is the only clear a respawn ever emits.
+// relaunched under a profile that does NOT carry a universe key must leave no stale value.
+// The launch line is the only carrier, so its true `unset` is the clear on every path.
 func TestUniverseHygiene_ProfileSwitchClearsWindow(t *testing.T) {
 	mgr, fake := startMouseAgent(t, nil)
 	// Windowless relaunch: the resolved profile carries a model but not the window, while
 	// the universe still knows the key exists because some profile in models.json defines it.
-	mgr.SetModelEnv([]config.EnvVar{{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"}})
-	mgr.SetModelKeyUniverse([]string{"ANTHROPIC_MODEL", universeTestKey})
+	mgr.c.ModelEnv = []config.EnvVar{{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"}}
+	mgr.c.ModelKeyUniverse = []string{"ANTHROPIC_MODEL", universeTestKey}
 
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: unexpected error: %v", err)
 	}
 
-	wantUnset := "UnsetEnvironment " + mgr.SessionID() + " " + universeTestKey
-	if !hasOp(fake.ops, wantUnset) {
-		t.Errorf("profile switch must unset the stale universe key at the tmux twin; want %q, ops=%v", wantUnset, fake.ops)
-	}
+	assertNoTmuxEnvKey(t, fake.ops, mgr.SessionID(), universeTestKey)
 
-	inline := mgr.BuildStartupCommand()
+	inline := sentLine(t, fake.ops, mgr.SessionID())
 	if !hasUnsetToken(inline, universeTestKey) {
-		t.Errorf("inline twin must emit a true `unset %s`; got: %s", universeTestKey, inline)
+		t.Errorf("the launch line must emit a true `unset %s`; got: %s", universeTestKey, inline)
 	}
 	if strings.Contains(inline, universeTestKey+"=") {
-		t.Errorf("inline twin must clear %s by true unset, never by an assignment; got: %s", universeTestKey, inline)
+		t.Errorf("the launch line must clear %s by true unset, never by an assignment; got: %s", universeTestKey, inline)
 	}
 	assertShellParses(t, respawnPrefix+inline)
 }
@@ -89,60 +85,50 @@ func TestUniverseHygiene_ProfileSwitchClearsWindow(t *testing.T) {
 // stale value — which is the exact bug for an agent switched off its profile entirely.
 func TestUniverseHygiene_SwitchToNoProfileClears(t *testing.T) {
 	mgr, fake := startMouseAgent(t, nil)
-	mgr.SetModelKeyUniverse([]string{universeTestKey})
+	mgr.c.ModelKeyUniverse = []string{universeTestKey}
 
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: unexpected error: %v", err)
 	}
 
-	wantUnset := "UnsetEnvironment " + mgr.SessionID() + " " + universeTestKey
-	if !hasOp(fake.ops, wantUnset) {
-		t.Errorf("switch to no profile must still unset the stale key at the tmux twin; want %q, ops=%v", wantUnset, fake.ops)
-	}
+	assertNoTmuxEnvKey(t, fake.ops, mgr.SessionID(), universeTestKey)
 
-	inline := mgr.BuildStartupCommand()
+	inline := sentLine(t, fake.ops, mgr.SessionID())
 	if !hasUnsetToken(inline, universeTestKey) {
-		t.Errorf("switch to no profile must still emit a true `unset %s` inline; got: %s", universeTestKey, inline)
+		t.Errorf("switch to no profile must still emit a true `unset %s` on the launch line; got: %s", universeTestKey, inline)
 	}
 	assertShellParses(t, respawnPrefix+inline)
 }
 
-// TestUniverseHygiene_EmitsWindowBothTwins is the non-vacuity companion: a launch that DOES
+// TestUniverseHygiene_EmitsWindowOnLaunchLine is the non-vacuity companion: a launch that DOES
 // carry the key must emit it and must never clear it. Without this, a loop that unset the key
 // unconditionally would pass the switch test while breaking every window-bearing agent.
-func TestUniverseHygiene_EmitsWindowBothTwins(t *testing.T) {
+func TestUniverseHygiene_EmitsWindowOnLaunchLine(t *testing.T) {
 	mgr, fake := startMouseAgent(t, nil)
-	mgr.SetModelEnv([]config.EnvVar{
+	mgr.c.ModelEnv = []config.EnvVar{
 		{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"},
 		{Key: universeTestKey, Value: "220000"},
-	})
-	mgr.SetModelKeyUniverse([]string{"ANTHROPIC_MODEL", universeTestKey})
+	}
+	mgr.c.ModelKeyUniverse = []string{"ANTHROPIC_MODEL", universeTestKey}
 
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: unexpected error: %v", err)
 	}
 
-	sessionID := mgr.SessionID()
-	wantSet := "SetEnvironment " + sessionID + " " + universeTestKey + "=220000"
-	if !hasOp(fake.ops, wantSet) {
-		t.Errorf("a carried universe key must be set at the tmux twin; want %q, ops=%v", wantSet, fake.ops)
-	}
-	if hasOp(fake.ops, "UnsetEnvironment "+sessionID+" "+universeTestKey) {
-		t.Errorf("a carried universe key must never be unset at the tmux twin; ops=%v", fake.ops)
-	}
+	assertNoTmuxEnvKey(t, fake.ops, mgr.SessionID(), universeTestKey)
 
-	inline := mgr.BuildStartupCommand()
+	inline := sentLine(t, fake.ops, mgr.SessionID())
 	if !strings.Contains(inline, universeTestKey+"='220000'") {
-		t.Errorf("a carried universe key must be exported inline; got: %s", inline)
+		t.Errorf("a carried universe key must be exported on the launch line; got: %s", inline)
 	}
 	if hasUnsetToken(inline, universeTestKey) {
-		t.Errorf("a carried universe key must never be inline-unset; got: %s", inline)
+		t.Errorf("a carried universe key must never be unset on the launch line; got: %s", inline)
 	}
 	assertShellParses(t, respawnPrefix+inline)
 }
 
-// TestUniverseHygiene_NeverClearsAPIKey is the pr509_redirect_test.go guard's twin for the new
-// channel. ANTHROPIC_API_KEY is a LEGAL profile key (its "" is the explicit-clear idiom), so it
+// TestUniverseHygiene_NeverClearsAPIKey is the pr509_redirect_test.go guard's counterpart for the
+// new channel. ANTHROPIC_API_KEY is a LEGAL profile key (its "" is the explicit-clear idiom), so it
 // WILL appear in the raw union the cmd layer computes — the carve-out that keeps it from being
 // swept lives inside this package. security.md I2: it is never auto-cleared, because a
 // default-profile agent may legitimately authenticate via an ambient key.
@@ -151,18 +137,14 @@ func TestUniverseHygiene_EmitsWindowBothTwins(t *testing.T) {
 // only for the empty-string assignment, which a universe bug emitting a true unset would slip past.
 func TestUniverseHygiene_NeverClearsAPIKey(t *testing.T) {
 	mgr, fake := startMouseAgent(t, nil)
-	mgr.SetModelEnv([]config.EnvVar{{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"}})
-	mgr.SetModelKeyUniverse([]string{"ANTHROPIC_MODEL", "ANTHROPIC_API_KEY", universeTestKey})
+	mgr.c.ModelEnv = []config.EnvVar{{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"}}
+	mgr.c.ModelKeyUniverse = []string{"ANTHROPIC_MODEL", "ANTHROPIC_API_KEY", universeTestKey}
 
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: unexpected error: %v", err)
 	}
 
-	if hasOp(fake.ops, "UnsetEnvironment "+mgr.SessionID()+" ANTHROPIC_API_KEY") {
-		t.Errorf("universe hygiene must never unset ANTHROPIC_API_KEY at the tmux twin (security.md I2); ops=%v", fake.ops)
-	}
-
-	inline := mgr.BuildStartupCommand()
+	inline := sentLine(t, fake.ops, mgr.SessionID())
 	if strings.Contains(inline, "ANTHROPIC_API_KEY=''") {
 		t.Errorf("universe hygiene must never emit ANTHROPIC_API_KEY=''; got: %s", inline)
 	}
@@ -183,14 +165,14 @@ func TestUniverseHygiene_NeverClearsCarvedOutFamilies(t *testing.T) {
 	// A non-family model-env key opens the model-env gate (the redirect family's inline
 	// empty-string clears live inside it) while leaving every family key un-carried, so both
 	// families' own hygiene is observable in the same command as the universe's.
-	mgr.SetModelEnv([]config.EnvVar{{Key: "ANTHROPIC_BETA", Value: "context-1m"}})
-	mgr.SetModelKeyUniverse(universe)
+	mgr.c.ModelEnv = []config.EnvVar{{Key: "ANTHROPIC_BETA", Value: "context-1m"}}
+	mgr.c.ModelKeyUniverse = universe
 
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: unexpected error: %v", err)
 	}
 
-	inline := mgr.BuildStartupCommand()
+	inline := sentLine(t, fake.ops, mgr.SessionID())
 	for _, key := range append(append([]string{}, redirectFamilyVars...), telemetryFamilyVars...) {
 		if hasUnsetToken(inline, key) {
 			t.Errorf("universe hygiene must not true-unset carved-out family key %q; got: %s", key, inline)
@@ -199,11 +181,8 @@ func TestUniverseHygiene_NeverClearsCarvedOutFamilies(t *testing.T) {
 			t.Errorf("carved-out family key %q must keep its own KEY='' clear; got: %s", key, inline)
 		}
 	}
-	// The tmux twin's own family loops still own these keys, so an UnsetEnvironment op is
-	// expected there; what must not happen is the universe loop reaching the carve-outs
-	// inline, asserted above. Guard the one key the universe does own.
-	if !hasOp(fake.ops, "UnsetEnvironment "+mgr.SessionID()+" "+universeTestKey) {
-		t.Errorf("universe key must still be unset at the tmux twin; ops=%v", fake.ops)
+	if !hasUnsetToken(inline, universeTestKey) {
+		t.Errorf("the one key the universe does own must still be true-unset; got: %s", inline)
 	}
 }
 
@@ -222,12 +201,12 @@ func TestUniverseHygiene_NeverClearsManagerOwnedVars(t *testing.T) {
 	}
 
 	mgr, _ := startMouseAgent(t, nil)
-	mgr.SetGitIdentity("Agent Factory", "agentfactory@example.com")
-	mgr.SetGitTrailer("/tmp/githooks", "Claude", "noreply@example.com")
-	mgr.SetBuildHost(&config.BuildHostConfig{Mode: "remote", Host: "buildbox", User: "dev", MountPath: "/mnt/af"})
-	mgr.SetModelKeyUniverse(append([]string{universeTestKey}, managerOwned...))
+	mgr.c.GitAuthorName, mgr.c.GitAuthorEmail = "Agent Factory", "agentfactory@example.com"
+	mgr.c.GitHooksDir, mgr.c.CoauthorName, mgr.c.CoauthorEmail = "/tmp/githooks", "Claude", "noreply@example.com"
+	mgr.c.BuildHost = &config.BuildHostConfig{Mode: "remote", Host: "buildbox", User: "dev", MountPath: "/mnt/af"}
+	mgr.c.ModelKeyUniverse = append([]string{universeTestKey}, managerOwned...)
 
-	inline := mgr.BuildStartupCommand()
+	inline := startupLine(t, mgr)
 	for _, key := range managerOwned {
 		if hasUnsetToken(inline, key) {
 			t.Errorf("universe hygiene must not unset Manager-owned var %q it just exported; got: %s", key, inline)
@@ -246,7 +225,7 @@ func TestUniverseHygiene_NeverClearsManagerOwnedVars(t *testing.T) {
 func TestUniverseHygiene_EmptyUniverseZeroDelta(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
 	expected := "export AF_ROOT='/tmp/factory' AF_ROLE='ultraimplement' AF_ACTOR='ultraimplement'" +
-		telemetryOffClears + " && claude --dangerously-skip-permissions"
+		telemetryOffClears + gatewayUpstreamAuthClears + effortAttestationClears + " && claude --dangerously-skip-permissions"
 
 	for _, tc := range []struct {
 		name     string
@@ -257,10 +236,10 @@ func TestUniverseHygiene_EmptyUniverseZeroDelta(t *testing.T) {
 		{"universe of only carved-out keys", []string{"ANTHROPIC_API_KEY", envBaseURL, envOTelHeaders}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			mgr := NewManager("/tmp/factory", "ultraimplement", entry)
-			mgr.SetModelKeyUniverse(tc.universe)
+			mgr := newTestManager("/tmp/factory", "ultraimplement", entry)
+			mgr.c.ModelKeyUniverse = tc.universe
 
-			cmd := mgr.BuildStartupCommand()
+			cmd := startupLine(t, mgr)
 			if cmd != expected {
 				t.Errorf("empty-universe launch line must be byte-identical to the baseline.\ngot:  %s\nwant: %s", cmd, expected)
 			}
@@ -282,9 +261,9 @@ func TestUniverseHygiene_UnsetOrderIsDeterministic(t *testing.T) {
 
 	var first string
 	for i := 0; i < 5; i++ {
-		mgr := NewManager("/tmp/factory", "ultraimplement", config.AgentEntry{Type: "autonomous"})
-		mgr.SetModelKeyUniverse(universe)
-		cmd := mgr.BuildStartupCommand()
+		mgr := newTestManager("/tmp/factory", "ultraimplement", config.AgentEntry{Type: "autonomous"})
+		mgr.c.ModelKeyUniverse = universe
+		cmd := startupLine(t, mgr)
 		if i == 0 {
 			first = cmd
 			continue

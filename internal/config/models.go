@@ -40,6 +40,11 @@ const (
 	envBaseURL       = "ANTHROPIC_BASE_URL"
 	envAuthToken     = "ANTHROPIC_AUTH_TOKEN"
 	envCompactWindow = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+
+	// The plugin channel's keys (#695 B34): the integration seam is the only way plugin dirs
+	// reach a session, and the per-agent config dir is session.Manager's.
+	envClaudePluginDirs = "CLAUDE_CODE_PLUGIN_DIRS"
+	envClaudeConfigDir  = "CLAUDE_CONFIG_DIR"
 )
 
 // EnvMaxContextTokens is the operator's declaration of a foreign backend's REAL context window —
@@ -76,12 +81,12 @@ const EnvBackendChildFloorTokens = "AF_BACKEND_CHILD_FLOOR_TOKENS"
 const EnvDisableParallelSubagents = "AF_DISABLE_PARALLEL_SUBAGENTS"
 
 // EnvEffortLevel is how hard the host is asked to think (#668 D16). Exported because the cmd layer
-// needs the same spelling twice: to drop the key from a relaunch when the experiment's arm is off,
-// and to record which arm the relaunch ran.
+// needs the same spelling twice: to lower a declared level at launch when the effort actuator selects
+// one, and to record the level a session ran at.
 //
 // It is deliberately in NEITHER EndpointClassKeys NOR session.redirectFamilyVars. The second is the
-// live one: that family is cleared unconditionally on every launch, quickstart.sh:567 exports this
-// key into every operator shell, and nothing re-derives an effort level the way
+// live one: that family is cleared unconditionally on every launch, quickstart.sh's shell-rc block
+// exports this key into every operator shell, and nothing re-derives an effort level the way
 // CompleteEndpointProfile re-derives the family's other members — so membership would silently
 // downshift every agent in every existing factory. The #602 profile-key universe does the same
 // hygiene without the collateral, because it only unsets keys some profile actually declares.
@@ -90,12 +95,27 @@ const EnvDisableParallelSubagents = "AF_DISABLE_PARALLEL_SUBAGENTS"
 // Source: https://code.claude.com/docs/en/env-vars, observed 2026-08-30 against claude 2.1.224.
 const EnvEffortLevel = "CLAUDE_CODE_EFFORT_LEVEL"
 
+// The effort attestation (#709): what a launch that SELECTED a level tells the session it started
+// about why, exported on its launch line beside EnvEffortLevel and empty on every other launch. The
+// session's own environment is the only carrier, so nothing in the agent directory can change what a
+// running session is attested as.
+const (
+	EnvEffortObjective = "AF_EFFORT_OBJECTIVE"
+	EnvEffortStepLabel = "AF_EFFORT_STEP_LABEL"
+	EnvEffortFormula   = "AF_EFFORT_FORMULA"
+)
+
+// EnvIntegrationHookFailModes carries each bound integration's hook fail mode (`<name>=<mode>,…`) on the
+// launch line. It is the one fixed key af derives for integrations; a key derived from an integration name
+// would let a hyphenated name produce an invalid or colliding identifier.
+const EnvIntegrationHookFailModes = "AF_INTEGRATION_HOOK_FAIL_MODES"
+
 // effortLevels is the host's vocabulary, and an unrecognised value is DROPPED in favour of the
 // host's default rather than rejected. That is why this is validated at the write boundary and not
-// merely documented: a profile saved with "maximum" would run at the host's full effort while the
-// operator's file and this feature's own records both claimed the arm was reduced — the experiment
-// D16 exists to run, silently comparing a thing against itself. Same rule and same pinned source as
-// the compaction-window bounds above.
+// merely documented: a profile saved with "maximum" would run at the host's default while the
+// operator's file named a level, and the effort actuator, finding no level it can rank, would treat
+// the profile as declaring none. Same rule and same pinned source as the compaction-window bounds
+// above.
 var effortLevels = []string{"low", "medium", "high", "xhigh", "max", "auto"}
 
 // IsEffortLevel reports whether a value is in the host's vocabulary. Exported for the cmd layer,
@@ -151,14 +171,55 @@ const foreignModelWindow = 200000
 
 // afIdentityKeys are the identity vars session.Manager owns (ADR-003/ADR-004). A
 // profile that named one would spoof agent identity, so they are denylisted from
-// every profile's export keys.
+// every profile's export keys. The effort attestation joins them for the same reason:
+// a profile that exported it would attest every session it launches as reduced, and so
+// does the integration hook-fail-mode key: a manifest that set it would rewrite every
+// integration's fail mode.
 var afIdentityKeys = map[string]bool{
-	"AF_ROLE":        true,
-	"AF_ACTOR":       true,
-	"AF_ROOT":        true,
-	"AF_WORKTREE":    true,
-	"AF_WORKTREE_ID": true,
+	"AF_ROLE":          true,
+	"AF_ACTOR":         true,
+	"AF_ROOT":          true,
+	"AF_WORKTREE":      true,
+	"AF_WORKTREE_ID":   true,
+	EnvEffortObjective: true,
+	EnvEffortStepLabel: true,
+	EnvEffortFormula:   true,
+
+	EnvIntegrationHookFailModes: true,
 }
+
+// IsAFIdentityKey reports whether key is one af owns on every launch line, so no integration may export it.
+func IsAFIdentityKey(key string) bool { return afIdentityKeys[key] }
+
+// afLaunchKeys are the keys af's launch line exports on its own authority: git identity, the trailer
+// hook and its co-author, the build host and the effort level. They stay out of afIdentityKeys because a
+// profile may legally name them; only an integration is denied them. GIT_CONFIG_PARAMETERS joins them
+// because its command-scope git config outranks af's GIT_CONFIG_COUNT entries and would re-point
+// core.hooksPath, and ANTHROPIC_API_KEY because an integration exporting even "" would wipe the ambient
+// key a default-profile agent authenticates with. Must stay a superset of session.managerOwnedVars (the
+// two packages cannot share a literal across the ADR-004 boundary).
+var afLaunchKeys = map[string]bool{
+	"GIT_AUTHOR_NAME":     true,
+	"GIT_AUTHOR_EMAIL":    true,
+	"GIT_COMMITTER_NAME":  true,
+	"GIT_COMMITTER_EMAIL": true,
+	"GIT_CONFIG_COUNT":    true,
+	"GIT_CONFIG_KEY_0":    true,
+	"GIT_CONFIG_VALUE_0":  true,
+	"AF_COAUTHOR_NAME":    true,
+	"AF_COAUTHOR_EMAIL":   true,
+	"AF_BUILD_MODE":       true,
+	"AF_BUILD_HOST":       true,
+	"AF_BUILD_USER":       true,
+	"AF_HOST_MOUNT":       true,
+	EnvEffortLevel:        true,
+
+	"GIT_CONFIG_PARAMETERS": true,
+	envAPIKey:               true,
+}
+
+// IsAFLaunchKey reports whether key is one af's launch line owns, so no integration may set it at any value.
+func IsAFLaunchKey(key string) bool { return afLaunchKeys[key] }
 
 // afTelemetryKeys are the OTel launch-env family session.Manager owns as the single writer
 // (issue #329 K5). A profile that named one could inject telemetry env at the launch chokepoint
@@ -173,6 +234,55 @@ var afTelemetryKeys = map[string]bool{
 	"OTEL_EXPORTER_OTLP_ENDPOINT":  true,
 	"OTEL_EXPORTER_OTLP_HEADERS":   true,
 	"OTEL_RESOURCE_ATTRIBUTES":     true,
+}
+
+// afGatewayUpstreamKeys are the gateway upstream-auth vars owned by the factory-managed
+// `.agentfactory/secrets/chatgpt/auth.json` handle (`af gateway auth import`) — a profile that
+// named one could smuggle upstream-auth material into a launch line, the exact conduit this
+// denylist closes (issue #686 K2). Must stay byte-identical to session.afGatewayUpstreamAuthVars
+// (the two packages cannot share a literal across the ADR-004 boundary).
+var afGatewayUpstreamKeys = map[string]bool{
+	"OPENAI_API_KEY":    true,
+	"CHATGPT_TOKEN_DIR": true,
+	"CHATGPT_AUTH_FILE": true,
+	"CHATGPT_API_BASE":  true,
+	"CODEX_HOME":        true,
+}
+
+// RedirectFamilyEnvVars enumerates the endpoint/model redirect env the launch chokepoint owns, in
+// the order session's launch-line hygiene pass (issue #508) clears them. It is the single owner of
+// these names (#695 Lift B): session derives its redirectFamilyVars from it, and the integration
+// [env] denylist refuses every member.
+//
+// ANTHROPIC_API_KEY is deliberately EXCLUDED: security.md I2 decides it is never auto-cleared, since
+// default-profile agents may legitimately authenticate via an ambient Anthropic key.
+// ANTHROPIC_DEFAULT_FABLE_MODEL was cleared by no hygiene pass before issue #598, so a value exported
+// from an operator's shell rc silently redirected fable-class requests on every profile. It is NOT an
+// EndpointClassKeys member: that inventory waits on a live observation of the deployed CLI, while
+// clearing an inherited value is right either way.
+var RedirectFamilyEnvVars = []string{
+	envBaseURL,
+	envAuthToken,
+	envModel,
+	"ANTHROPIC_SMALL_FAST_MODEL",
+	"ANTHROPIC_DEFAULT_OPUS_MODEL",
+	"ANTHROPIC_DEFAULT_SONNET_MODEL",
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+	"ANTHROPIC_DEFAULT_FABLE_MODEL",
+	"CLAUDE_CODE_SUBAGENT_MODEL",
+}
+
+// ShellCriticalEnvVars belong to the shell and loader the bare `claude` command runs under. It is the
+// single owner of these names (#695 Lift B): session never unsets them in its profile-universe
+// hygiene (issue #602 P1), and the integration [env] denylist refuses every member.
+var ShellCriticalEnvVars = []string{
+	"PATH",
+	"HOME",
+	"SHELL",
+	"IFS",
+	"LD_LIBRARY_PATH",
+	"LD_PRELOAD",
+	"LD_AUDIT",
 }
 
 // LoadModelsConfig loads and validates .agentfactory/models.json. An absent file
@@ -246,6 +356,12 @@ func validateModelProfile(name string, profile map[string]string) error {
 		if afTelemetryKeys[key] {
 			return fmt.Errorf("%w: model %q sets telemetry var %q reserved for the session manager (telemetry env has one writer)", ErrInvalidType, name, key)
 		}
+		if afGatewayUpstreamKeys[key] {
+			return fmt.Errorf("%w: model %q sets %s, an upstream gateway credential; profile keys ride into every agent's launch line — the gateway reads it from .agentfactory/secrets/, never from a profile", ErrInvalidType, name, key)
+		}
+		if key == envClaudePluginDirs || key == envClaudeConfigDir {
+			return fmt.Errorf("%w: model %q sets %s, which the plugin channel owns; a profile may not replace an agent's plugins or Claude config dir (install an integration instead)", ErrInvalidType, name, key)
+		}
 		if key == envAPIKey && val != "" {
 			return fmt.Errorf("%w: model %q sets a non-empty %s; a real key must not appear in a launch line (use \"\" to clear)", ErrInvalidType, name, envAPIKey)
 		}
@@ -264,7 +380,7 @@ func validateModelProfile(name string, profile map[string]string) error {
 	// The file: convention plus the Phase-2 dereference is the actual secret-exposure
 	// guarantee — the sk- guard below is a defense-in-depth backstop, not the barrier.
 	if tok := profile[envAuthToken]; isSecretRef(tok) {
-		if err := validateSecretRefShape(name, tok); err != nil {
+		if err := validateSecretRefShape(fmt.Sprintf("model %q", name), envAuthToken, tok); err != nil {
 			return err
 		}
 	} else if looksLikeCredential(tok) && !IsLoopbackEndpoint(profile[envBaseURL]) {
@@ -515,14 +631,13 @@ func PairingLintProfile(name string, profile map[string]string) (warning string,
 // Exactly FIVE members. ANTHROPIC_MODEL is deliberately absent: it is the derivation SOURCE, not a
 // target, so listing it here would report the key everything else is derived from as missing.
 // ANTHROPIC_DEFAULT_FABLE_MODEL is also absent, pending a live observation of whether the deployed
-// CLI honors it; it is nonetheless a member of session.redirectFamilyVars, because clearing an
+// CLI honors it; it is nonetheless a member of RedirectFamilyEnvVars, because clearing an
 // ambient value is correct either way. CLAUDE_CODE_SUBAGENT_MODEL is a member here but is NOT
 // derived — see derivedEndpointClassKeys.
 //
-// Every member must also be a session.redirectFamilyVars member, or a value derived under one
+// Every member must also be a RedirectFamilyEnvVars member, or a value derived under one
 // profile would survive a switch to another on a reused session. TestEndpointClassKeysSubsetOfRedirectFamilyVars
-// enforces that against session.go's source, since internal/session imports this package and so
-// cannot be imported back.
+// enforces that.
 //
 // Source: the class-key set documented for Claude Code at code.claude.com/docs/en/model-config,
 // recorded in .designs/598 from a fetch on 2026-08-07. Same pinned-comment idiom as the

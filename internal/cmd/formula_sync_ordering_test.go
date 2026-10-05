@@ -55,6 +55,58 @@ func TestAgentGenAllSyncsBeforeLoop(t *testing.T) {
 	}
 }
 
+// TestAgentGenAllOrphanDeletionGuardedBySourceRepo is a Gap-15 characterization
+// test (issue #538). It pins the CURRENT orphan/sync behavior of agent-gen-all.sh
+// that Phase 4 will edit, so an accidental change flips it red. It complements the
+// already-present pins (TestAgentGenAllSyncsBeforeLoop pins sync-before-regen +
+// orphan-removal presence; TestAgentGenAllRegenLoopDoesNotDeleteExistingAgent pins
+// the regen loop) by covering the passes those do NOT: the is_source_repo guard on
+// orphan deletion, the realpath-equality detection (not the old go.mod heuristic),
+// the customer-formula preservation branch, and the template-orphan builtin skip.
+//
+// It is a hermetic content assertion, not a script invocation: agent-gen-all.sh runs
+// `af down --all` and `af formula agent-gen` (needs af on PATH), so the behavioral
+// e2e lives in the //go:build integration lane instead.
+func TestAgentGenAllOrphanDeletionGuardedBySourceRepo(t *testing.T) {
+	data, err := os.ReadFile("../../agent-gen-all.sh")
+	if err != nil {
+		t.Fatalf("read agent-gen-all.sh: %v", err)
+	}
+	body := string(data)
+
+	// Detection is realpath-equality of PROJECT vs AF_SRC, not the go.mod heuristic
+	// that was too broad (it deleted customer formulas as orphans).
+	for _, marker := range []string{"proj_real", "afsrc_real", "is_source_repo=true"} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("agent-gen-all.sh no longer detects the source repo via %q — orphan deletion may run against customer factories", marker)
+		}
+	}
+
+	// Orphan deletion must be GUARDED by is_source_repo: the guard has to appear
+	// before the first "removed orphan:" so a non-source factory never deletes.
+	guardIdx := strings.Index(body, `if [ "$is_source_repo" = true ]`)
+	if guardIdx == -1 {
+		t.Fatal("agent-gen-all.sh missing the is_source_repo guard around orphan deletion")
+	}
+	orphanIdx := strings.Index(body, "removed orphan:")
+	if orphanIdx == -1 {
+		t.Fatal("agent-gen-all.sh missing the 'removed orphan:' formula-orphan removal")
+	}
+	if guardIdx >= orphanIdx {
+		t.Errorf("agent-gen-all.sh: is_source_repo guard (offset %d) must precede orphan removal (offset %d) — else orphan deletion runs ungated", guardIdx, orphanIdx)
+	}
+
+	// The non-source-repo branch preserves customer formulas instead of deleting them.
+	if !strings.Contains(body, "preserving") || !strings.Contains(body, "customer formula") {
+		t.Error("agent-gen-all.sh no longer preserves customer formulas in the non-source-repo branch")
+	}
+
+	// The template-orphan pass skips builtin roles (they have no formula by design).
+	if !strings.Contains(body, "manager|supervisor") {
+		t.Error("agent-gen-all.sh template-orphan pass no longer skips builtin roles (manager|supervisor) — builtins would be deleted as orphans")
+	}
+}
+
 func TestSyncFormulasIncrementalCopy(t *testing.T) {
 	data, err := os.ReadFile("../../Makefile")
 	if err != nil {

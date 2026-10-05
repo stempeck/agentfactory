@@ -1,0 +1,7 @@
+formula = "parity-ns-skill-valid"
+type = "workflow"
+skills = ["acme:review"]
+
+[[steps]]
+id = "run"
+title = "Run"

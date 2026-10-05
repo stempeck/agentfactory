@@ -46,6 +46,18 @@ The orchestrator never busy-waits. When an action says "wait for signal X":
    re-run the check. Unprocessed completion mails accumulate in the inbox, so on each
    wake you can tell exactly which signals have arrived.
 
+**NEVER probe dispatch/liveness with a mutating command.** Verifying "is the sub-agent
+already dispatched / still alive" during an await — including when a STEP_FIDELITY verdict
+claims the dispatch step was skipped — uses READ-ONLY checks ONLY: `tmux has-session`,
+`tmux capture-pane`, `af mail inbox`. `af sling` is ALWAYS a real dispatch: it has no
+preview or dry-run mode, and an unknown flag is silently ignored rather than erroring, so
+tacking an invented preview flag onto a `--reset` re-dispatch does NOT preview — it
+re-dispatches the named agent with `--reset`, closing its in-progress beads and wiping a
+live agent's accumulated work (observed: ~11 min of Phase-7 work destroyed on a
+dispatch-impl await). If a
+post-dispatch STEP_FIDELITY claims a prior-session dispatch was skipped, reply-with-artifact
+using those read-only checks — never re-run `af sling` to "confirm" state.
+
 ## Working Directory Discipline (applies to EVERY step that runs `cd`)
 `af done`, `af prime`, and `af mail` resolve formula state from the CURRENT WORKING
 DIRECTORY. Several actions below `cd "${AF_WORKTREE:-$AF_ROOT}"` to run git/gh commands.
@@ -134,6 +146,10 @@ already push, and pushing on every progress edit races the sub-agents pushing to
 branch. `git -C` keeps the working directory from moving (see Working Directory
 Discipline), the staged-diff guard makes the commit a no-op when nothing changed, and the
 `.agentfactory/` reset keeps agent workspace files out of the design PR.
+
+A commit survives a sub-agent's working-tree cleanup but NOT a `git reset --hard
+origin/<branch>`, which {{impl_name}}'s branch setup runs. So dispatch-impl commits AND
+pushes its dispatch rows BEFORE `af sling` — the one intermediate site that pushes.
 
 ## !IMPORTANT - MANDATORY Exact Step Execution
 Execute each formula step EXACTLY as written, in order, with no modifications.
@@ -298,6 +314,18 @@ The orchestrator never busy-waits. When an action says "wait for signal X":
    re-run the check. Unprocessed completion mails accumulate in the inbox, so on each
    wake you can tell exactly which signals have arrived.
 
+**NEVER probe dispatch/liveness with a mutating command.** Verifying "is the sub-agent
+already dispatched / still alive" during an await — including when a STEP_FIDELITY verdict
+claims the dispatch step was skipped — uses READ-ONLY checks ONLY: `tmux has-session`,
+`tmux capture-pane`, `af mail inbox`. `af sling` is ALWAYS a real dispatch: it has no
+preview or dry-run mode, and an unknown flag is silently ignored rather than erroring, so
+tacking an invented preview flag onto a `--reset` re-dispatch does NOT preview — it
+re-dispatches the named agent with `--reset`, closing its in-progress beads and wiping a
+live agent's accumulated work (observed: ~11 min of Phase-7 work destroyed on a
+dispatch-impl await). If a
+post-dispatch STEP_FIDELITY claims a prior-session dispatch was skipped, reply-with-artifact
+using those read-only checks — never re-run `af sling` to "confirm" state.
+
 ## Working Directory Discipline (applies to EVERY step that runs `cd`)
 `af done`, `af prime`, and `af mail` resolve formula state from the CURRENT WORKING
 DIRECTORY. Several actions below `cd "${AF_WORKTREE:-$AF_ROOT}"` to run git/gh commands.
@@ -386,6 +414,10 @@ already push, and pushing on every progress edit races the sub-agents pushing to
 branch. `git -C` keeps the working directory from moving (see Working Directory
 Discipline), the staged-diff guard makes the commit a no-op when nothing changed, and the
 `.agentfactory/` reset keeps agent workspace files out of the design PR.
+
+A commit survives a sub-agent's working-tree cleanup but NOT a `git reset --hard
+origin/<branch>`, which {{impl_name}}'s branch setup runs. So dispatch-impl commits AND
+pushes its dispatch rows BEFORE `af sling` — the one intermediate site that pushes.
 
 ## !IMPORTANT - MANDATORY Exact Step Execution
 Execute each formula step EXACTLY as written, in order, with no modifications.

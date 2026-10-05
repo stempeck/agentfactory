@@ -144,15 +144,22 @@ func runContainmentCheckCore(out io.Writer, p containmentPayload) error {
 	}
 
 	// 4. Decide via the pure primitive. A compound command ESCAPES if ANY decidable
-	//    segment is out of bounds — an in-bounds prefix (`cd <in>`) must never mask a
-	//    later escaping segment (`&& cd <parent>`). Report the FIRST out-of-bounds
-	//    target. clearDedup runs ONLY when EVERY segment stays in bounds, so an escaping
+	//    segment is out of bounds and not inside a snapshot the agent's integration pin
+	//    binds — a pinned-snapshot target is exempt, neither an escape nor reported.
+	//    Neither an in-bounds prefix (`cd <in>`) nor a pinned-snapshot prefix may mask a
+	//    later escaping segment (`&& cd <parent>`). Report the FIRST escaping target.
+	//    clearDedup runs ONLY when EVERY segment stays in bounds, so an escaping
 	//    compound can neither be judged in-bounds nor wipe a prior escape marker.
+	allowlisted := false
 	for _, target := range targets {
 		inBounds, err := worktree.Contains(boundary, target)
 		if err != nil {
 			failObservable(runtimeDir, fmt.Sprintf("worktree.Contains(%q,%q) error: %v", boundary, target, err))
 			return nil
+		}
+		if !inBounds && underPinnedSnapshot(boundary, agentDir, target) {
+			allowlisted = true
+			continue
 		}
 		if !inBounds {
 			// 5. Out of bounds → corrective (deduped, PID-locked, observable). Always exit 0.
@@ -162,9 +169,37 @@ func runContainmentCheckCore(out io.Writer, p containmentPayload) error {
 	}
 
 	// All decidable targets are in bounds → return-in-bounds clears the dedup markers
-	// so a later re-escape re-notifies.
-	clearDedup(runtimeDir)
+	// so a later re-escape re-notifies. A pinned snapshot is exempt from being an escape
+	// but is not a return in bounds, so it leaves a prior escape's marker in place.
+	if !allowlisted {
+		clearDedup(runtimeDir)
+	}
 	return nil
+}
+
+// underPinnedSnapshot reports whether target lies in a snapshot the agent's integration pin binds. The
+// consumed snapshots live under the factory's IntegrationsDir, outside any worktree, yet the session loads
+// them as plugins. Each pinned dir is re-validated as the content-addressed IntegrationsDir/<name>/<sha>, so
+// a forged pin cannot widen the allowlist; an unreadable pin allowlists nothing.
+func underPinnedSnapshot(boundary, agentDir, target string) bool {
+	pin, found, err := readIntegrationPin(agentDir)
+	if !found || err != nil {
+		return false
+	}
+	root, err := resolveInvokerRootWarn(boundary, io.Discard)
+	if err != nil {
+		return false
+	}
+	for _, b := range pin.Bindings {
+		dir, ok := config.IntegrationSnapshotPath(root, b.Name, b.ContentSHA256, b.SnapshotDir)
+		if !ok {
+			continue
+		}
+		if in, err := worktree.Contains(dir, target); err == nil && in {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveBoundary returns the worktree boundary and whether it came from the session

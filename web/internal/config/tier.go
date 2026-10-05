@@ -11,7 +11,7 @@ import "sort"
 // place to add a file (design-doc.md:73, security.md:66-68).
 //
 // It is the web-side half of a contract whose root-side half already exists:
-// internal/config/paths_disposition_test.go pins the same nine helper-backed files in af-core and
+// internal/config/paths_disposition_test.go pins the same ten helper-backed files in af-core and
 // names TestSettings_DispositionComplete — below, in tier_test.go — as its counterpart.
 //
 // Adding a config file? Add its paths.go helper in af-core AND a row here, in the same change.
@@ -154,10 +154,24 @@ var tierRows = []Row{
 		EffectiveWhen: "build time",
 	},
 	{
+		File:          "plugins",
+		Tier:          TierExcluded,
+		Writable:      false,
+		Reason:        "not read — plugin provenance record written only by `af plugin install|remove`; inspect it with `af plugin list|verify`",
+		EffectiveWhen: "next `af plugin` command or `af install --agents`",
+	},
+	{
 		File:          "litellm.yaml",
 		Tier:          TierExcluded,
 		Writable:      false,
 		Reason:        "not read — secret-bearing YAML owned by the gateway, not by af; there is no af seam for it",
+		EffectiveWhen: "gateway-defined",
+	},
+	{
+		File:          "litellm-auth-mode",
+		Tier:          TierExcluded,
+		Writable:      false,
+		Reason:        "not read — the gateway's auth-mode record (.agentfactory/litellm-auth-mode), written only by the bootstrap (`af install --agents --litellm`); af reads it through gatewayAuthMode (install, sling, watchdog, the gateway backend, `af config models`) and the generated relaunch script, and `af gateway auth status --json` reports it as selected_mode",
 		EffectiveWhen: "gateway-defined",
 	},
 	{
@@ -169,13 +183,13 @@ var tierRows = []Row{
 	},
 }
 
-// tierRowsWithoutPathHelper records the two rows af-core's paths.go cannot discover, mirroring
-// internal/config/paths_disposition_test.go:37-41. Neither litellm.yaml nor the secrets directory
-// has a paths.go helper, so no path-derived enumeration can find them and TestSettings_Disposition-
-// Complete must assert CONTAINMENT of the helper set rather than equality with it. Recorded here so
-// a future reader does not "fix" the apparent asymmetry — and asserted, so it cannot be quietly
-// deleted as unused.
-var tierRowsWithoutPathHelper = []string{"litellm.yaml", ".agentfactory/secrets/"}
+// tierRowsWithoutPathHelper records the rows af-core's paths.go cannot discover, mirroring
+// internal/config/paths_disposition_test.go:37-41. None of litellm.yaml, the gateway auth-mode
+// record, or the secrets directory has a paths.go helper, so no path-derived enumeration can find
+// them and TestSettings_DispositionComplete must assert CONTAINMENT of the helper set rather than
+// equality with it. Recorded here so a future reader does not "fix" the apparent asymmetry — and
+// asserted, so it cannot be quietly deleted as unused.
+var tierRowsWithoutPathHelper = []string{"litellm.yaml", "litellm-auth-mode", ".agentfactory/secrets/"}
 
 // rowFor returns the disposition row for a file noun.
 func rowFor(file string) (Row, bool) {

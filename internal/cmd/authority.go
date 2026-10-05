@@ -15,9 +15,9 @@ import (
 // teardownRefusalFormat is the ux.md Option U1 (L18-27) contract text every teardown
 // gate emits when an agent context attempts a factory-wide teardown (AC-6). Like
 // mismatchError it is a raw multi-line const consumed through fmt.Sprintf; %[1]s is the
-// refused surface — "af down", "af down --reset", "af install --agents", or
-// "af dispatch stop" — the ONLY token that varies. The body is identical across every
-// surface so all gates assert one contract: the blast radius (YOU, every sibling agent,
+// refused surface — "af down", "af down --reset", "af install --agents",
+// "af dispatch stop", or "af plugin install" — the ONLY token that varies. The body is
+// identical across every surface so all gates assert one contract: the blast radius (YOU, every sibling agent,
 // the interactive manager), the do-not-retry / skip-and-continue directive, and the
 // operator-redirect. It deliberately never names the detection mechanism (AF_ROLE, the
 // tmux session identity, the session env): ux.md L36-39 forbids handing the agent a
@@ -104,6 +104,16 @@ func requireOperatorTeardown(surface string) error {
 	}
 	writeTeardownRefusedArtifact(surface)
 	return errors.New(teardownRefusal(surface))
+}
+
+// requireOperator gates the surfaces that change what third-party code agents run (af plugin
+// install of an integration batch, acquire, remove). Its text is deliberately not the teardown
+// refusal: nothing is being torn down.
+func requireOperator(surface string) error {
+	if callerAuthority() == AuthorityOperator {
+		return nil
+	}
+	return fmt.Errorf("af %s is operator-only: it changes what third-party code agents run", surface)
 }
 
 // isSelfSession reports whether target is the caller's own session — the agent-legitimate

@@ -549,6 +549,7 @@ function mount(files, opts) {
     models: view(null, { tier: 'excluded', writable: false, reason: 'credential-bearing', effective_when: 'next launch' }),
     telemetry: view(null, { tier: 'excluded', writable: false, reason: 'gate file', effective_when: 'next launch' }),
     'build-host': view(null, { tier: 'excluded', writable: false, reason: 'host', effective_when: 'next build' }),
+    plugins: view(null, { tier: 'excluded', writable: false, reason: 'provenance record', effective_when: 'next af plugin command' }),
     'litellm.yaml': view(null, { tier: 'excluded', writable: false, reason: 'gateway', effective_when: 'gateway reload' }),
     // The row the server really does serve, tagged so its ABSENCE from the screen is provable.
     '.agentfactory/secrets/': view(null, { tier: 'excluded', writable: false, reason: 'MUST-NEVER-RENDER', effective_when: 'MUST-NEVER-RENDER' }),
@@ -575,14 +576,20 @@ function mount(files, opts) {
   ok('U1 the unmanaged panel lists telemetry.json', text.indexOf('telemetry.json') >= 0, text);
   ok('U1 the unmanaged panel lists build-host.json', text.indexOf('build-host.json') >= 0, text);
   ok('U1 the unmanaged panel lists litellm.yaml', text.indexOf('litellm.yaml') >= 0, text);
+  ok('U1 the unmanaged panel lists plugins.json', text.indexOf('plugins.json') >= 0, text);
   // C-1. The secrets row IS served (web/internal/config/tier.go:163-169); the allow-list is what
   // keeps it off the screen. A panel built from `!writable` or from `tier === 'excluded'` renders it.
   const all = JSON.stringify(un.querySelectorAll('span').map((s) => s.textContent)) + text;
   ok('U1 the unmanaged panel NEVER names the secrets directory',
     all.indexOf('secrets') < 0 && all.indexOf('MUST-NEVER-RENDER') < 0, all);
-  eq('U1 the unmanaged panel lists exactly the four unmanaged files',
-    un.querySelectorAll('div.set-unmanaged-item').length, 4);
+  eq('U1 the unmanaged panel lists exactly the five unmanaged files',
+    un.querySelectorAll('div.set-unmanaged-item').length, 5);
   ok('U1 the unmanaged panel names the CLI that does manage each file', all.indexOf('af config models set') >= 0, all);
+  const managedBy = JSON.stringify(un.querySelectorAll('span').map((s) => s.textContent));
+  ok('U1 the unmanaged panel names af plugin list as the plugins.json inspector',
+    managedBy.indexOf('af plugin list') >= 0, managedBy);
+  ok('U1 the unmanaged panel names both plugins.json writers as af plugin install|remove',
+    managedBy.indexOf('af plugin install|remove') >= 0, managedBy);
 
   ok('U1 factory.json renders read-only', h.byId('set-factory').textContent.indexOf('"root"') >= 0);
   ok('U1 there is no factory save button', h.byId('set-save-factory') === null);

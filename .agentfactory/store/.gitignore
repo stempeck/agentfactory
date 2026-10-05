@@ -16,3 +16,11 @@
 # These files are machine-specific and should not be shared across clones
 .sync.lock
 sync_base.jsonl
+
+# Acquired plugin repositories (cloned under store/plugins/) stay untracked;
+# installed flat formula copies under store/formulas/ remain tracked (issue #538 K11)
+plugins/
+
+# Consumed integration snapshots (store/integrations/<name>/<sha>/, staged by
+# af plugin install) stay untracked like plugins/ (design 695 Phase 2)
+integrations/

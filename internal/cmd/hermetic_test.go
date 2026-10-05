@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,11 +15,10 @@ import (
 )
 
 // fakeTmux is the single hermetic tmux double for issue #309 Phase 2. It
-// satisfies BOTH the internal/session tmuxClient (14 methods, incl. the #412
-// Phase-4 ShowOption read-back and the #508 UnsetEnvironment) and the internal/cmd
-// cmdTmux (11 methods, incl. the #541 K2 CurrentSessionName) seam interfaces — the
-// 20-method distinct union — recording every would-be op in order and returning
-// benign values. It performs NO real I/O, never sleeps, and never shells out; a
+// satisfies BOTH the internal/session tmuxClient (13 methods, incl. the #412
+// Phase-4 ShowOption read-back) and the internal/cmd cmdTmux (11 methods, incl. the
+// #541 K2 CurrentSessionName) seam interfaces — the 19-method distinct union — recording
+// every would-be op in order and returning benign values. It performs NO real I/O, never sleeps, and never shells out; a
 // default-suite test that installs it via setupHermeticSessions cannot reach the
 // real tmux server.
 //
@@ -68,6 +69,11 @@ func (f *fakeTmux) NewSession(name, workDir string) error {
 	return nil
 }
 
+func (f *fakeTmux) NewSessionWithCommand(name, workDir, command string) error {
+	f.record(fmt.Sprintf("NewSessionWithCommand %s %s %s", name, workDir, command))
+	return nil
+}
+
 func (f *fakeTmux) KillSession(name string) error {
 	f.record("KillSession " + name)
 	return nil
@@ -80,11 +86,6 @@ func (f *fakeTmux) SendKeysDelayed(sess, keys string, delayMs int) error {
 
 func (f *fakeTmux) SetEnvironment(sess, key, value string) error {
 	f.record(fmt.Sprintf("SetEnvironment %s %s=%s", sess, key, value))
-	return nil
-}
-
-func (f *fakeTmux) UnsetEnvironment(sess, key string) error {
-	f.record(fmt.Sprintf("UnsetEnvironment %s %s", sess, key))
 	return nil
 }
 
@@ -189,8 +190,16 @@ func hashName(name string) string {
 // Every swap is reverted via t.Cleanup (LIFO). Call this AFTER any t.TempDir()
 // so the seam restores run before the temp-dir delete (design R-7). The
 // helper-using test MUST NOT call t.Parallel — the seams are package globals.
+//
+// It also points CLAUDE_CONFIG_DIR at an empty per-test temp dir when the test has not
+// set one (D52): TestMain's tmuxisolation.Setup wipes the CLAUDE_* family, so
+// claudeConfigDir() would otherwise read the developer's real ~/.claude, whose
+// enabledPlugins the user-scope detector in af up reports. A caller's own fixture wins.
 func setupHermeticSessions(t *testing.T) (*fakeTmux, *memstore.Store) {
 	t.Helper()
+	if os.Getenv(claudeConfigDirEnv) == "" {
+		t.Setenv(claudeConfigDirEnv, t.TempDir())
+	}
 	fake := newFakeTmux()
 	prefix := "af-test-" + hashName(t.Name()) + "-"
 
@@ -263,5 +272,60 @@ func TestSetupHermeticSessions(t *testing.T) {
 	fake.present["af-test-probe"] = true
 	if ok, _ := fake.HasSession("af-test-probe"); !ok {
 		t.Fatal("present[...]=true must make HasSession return true")
+	}
+}
+
+// TestSetupHermeticSessions_ClaudeConfigDirIsEmptyTempDir (D52, spec L866-867): TestMain's
+// tmuxisolation.Setup wipes the CLAUDE_* family, so without the helper claudeConfigDir() falls
+// back to the developer's real ~/.claude and the user-scope detector wired into af up would read
+// its enabledPlugins. setupHermeticSessions points CLAUDE_CONFIG_DIR at an empty per-test temp
+// dir. ("Not the real one" is judged against HOME/.claude, not HOME: TMPDIR itself may live
+// under HOME, e.g. ~/.cache.)
+func TestSetupHermeticSessions_ClaudeConfigDirIsEmptyTempDir(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	realClaude := filepath.Join(home, ".claude")
+	within := func(path, dir string) bool {
+		rel, err := filepath.Rel(dir, path)
+		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	}
+
+	setupHermeticSessions(t)
+
+	dir := os.Getenv(claudeConfigDirEnv)
+	if dir == "" {
+		t.Fatalf("setupHermeticSessions must point %s at an empty temp dir (D52); it is unset, so claudeConfigDir() reads %s", claudeConfigDirEnv, claudeConfigDir())
+	}
+	if got := claudeConfigDir(); got != dir {
+		t.Errorf("claudeConfigDir() = %q, want the hermetic %s %q", got, claudeConfigDirEnv, dir)
+	}
+	if home != "" && within(dir, realClaude) {
+		t.Errorf("%s = %q is the developer's real Claude config dir %s", claudeConfigDirEnv, dir, realClaude)
+	}
+	if !within(dir, os.TempDir()) {
+		t.Errorf("%s = %q must be a temp dir under %s", claudeConfigDirEnv, dir, os.TempDir())
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("%s = %q must name an existing directory (err %v)", claudeConfigDirEnv, dir, err)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Errorf("%s = %q must be empty; entries %v (err %v)", claudeConfigDirEnv, dir, entries, err)
+	}
+	scope, err := readClaudeUserScope()
+	if err != nil || len(scope.Plugins) != 0 || scope.HasHooks {
+		t.Errorf("the user-scope reader must see nothing under the hermetic dir; scope=%+v err=%v", scope, err)
+	}
+}
+
+// TestSetupHermeticSessions_KeepsCallerClaudeConfigDir is protective for D52: a test that pins its
+// own CLAUDE_CONFIG_DIR fixture before calling the helper (the detector and install tests do)
+// keeps it; the helper only fills an unset value.
+func TestSetupHermeticSessions_KeepsCallerClaudeConfigDir(t *testing.T) {
+	fixture := t.TempDir()
+	t.Setenv(claudeConfigDirEnv, fixture)
+
+	setupHermeticSessions(t)
+
+	if got := os.Getenv(claudeConfigDirEnv); got != fixture {
+		t.Errorf("setupHermeticSessions replaced the caller's %s fixture %q with %q", claudeConfigDirEnv, fixture, got)
 	}
 }

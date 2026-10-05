@@ -661,7 +661,7 @@
    * { lamp: 'parse'|'ids'|'needs'|'cycles', message, ref: {stepId?, line?} } */
 
   var VALID_VAR_SOURCES = ['', 'cli', 'env', 'literal', 'hook_bead', 'bead_title', 'bead_description', 'deferred'];
-  var VALID_SKILL_NAME = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
+  var VALID_SKILL_NAME = /^[a-zA-Z][a-zA-Z0-9_-]*(:[a-zA-Z][a-zA-Z0-9_-]*)?$/;
 
   function inferType(js) {
     if (js.type) return js.type;

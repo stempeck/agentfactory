@@ -1,0 +1,7 @@
+formula = "parity-ns-skill-too-deep"
+type = "workflow"
+skills = ["a:b:c"]
+
+[[steps]]
+id = "run"
+title = "Run"

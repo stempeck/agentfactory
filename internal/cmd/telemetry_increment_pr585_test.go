@@ -254,10 +254,12 @@ func TestIncrementPR585_T6_SingleFlightScopeIsStatedHonestly(t *testing.T) {
 // third question with a mechanism rather than a promise.
 //
 // The proposed "no `return 0` precedes the write" scan FAILS against today's CORRECT file:
-// setup_telemetry contains nine `return 0`, and the first — _port_in_use's, at the top of
-// the function — is a nested helper's BOOLEAN answer, not an early-exit failure path, and it
-// legitimately precedes the recovery writes. The repo already carved this exact exception
-// for the seeding block (telemetry_views_test.go:270-271).
+// setup_telemetry contains eight `return 0`, all early-exit failure paths preceding the
+// recovery writes. (Prior to issue #693 Phase 1's K11 hoist, a ninth `return 0` belonged to
+// _port_in_use, a nested helper's BOOLEAN answer defined inside this function; K11 moved
+// _port_in_use to top-level scope so setup_litellm can reach it too, removing that `return 0`
+// from this function's body — decisions.md D7, telemetry_increment_pr585_test.go's own
+// original comment flagged this exact count as coupled to K11's hoist.)
 //
 // So the enumerate-and-check contract stays, and this tripwire closes the gap it cannot see:
 // the eight-anchor table catches a DELETED branch; this catches an ADDED one. A ninth
@@ -268,8 +270,9 @@ func TestIncrementPR585_BODY3_SetupTelemetryEarlyReturnCountTripwire(t *testing.
 		t.Fatal("could not extract setup_telemetry()")
 	}
 
-	// Inventory at PR head bc88aeeb: 1 boolean helper answer + 8 early-exit failure paths.
-	const wantReturnZero = 9
+	// Inventory post issue #693 Phase 1 (K11 hoisted _port_in_use out of this function): 8
+	// early-exit failure paths.
+	const wantReturnZero = 8
 	if got := strings.Count(body, "return 0"); got != wantReturnZero {
 		t.Errorf("setup_telemetry has %d `return 0` sites, want %d.\n"+
 			"If a NINTH early-exit path was added: the relaunch.sh write and the login-guard "+

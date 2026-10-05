@@ -12,7 +12,8 @@ const (
 	barFull  = "█"
 	barEmpty = "░"
 	sep      = " | "
-	// halfSep joins the two halves of the session/daily elements — `$ 21.95 · 352k tok` (ux.md C2.1).
+	// halfSep joins the two halves of the model, session and daily elements — `Opus 5.5 · high`,
+	// `$ 21.95 · 352k tok` (ux.md C2.1).
 	halfSep = " · "
 )
 
@@ -155,6 +156,9 @@ func renderElement(el string, p Payload, branch string, daily DailyTotals, opts 
 	switch el {
 	case "model":
 		s := sanitize(p.Model.DisplayName)
+		if effort := sanitize(p.Effort.Level); s != "" && effort != "" {
+			s = capMiddle(s + halfSep + effort)
+		}
 		return paint(opts.Color, sgrModel, s), s != ""
 	case "dir":
 		s := sanitize(resolveDir(p))

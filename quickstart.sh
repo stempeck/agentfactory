@@ -27,11 +27,19 @@ set -euo pipefail
 # Cleanup trap for temporary files
 CLEANUP_DIRS=()
 cleanup() {
-    for dir in "${CLEANUP_DIRS[@]}"; do
+    # The ${…+…} guard: macOS's bash 3.2 treats an empty array as unbound under `set -u`.
+    for dir in ${CLEANUP_DIRS[@]+"${CLEANUP_DIRS[@]}"}; do
         rm -rf "$dir" 2>/dev/null || true
     done
+    # _gateway_stop's reconcile marker (K12/D22, issue #693 Phase 4): bash EXIT traps do not
+    # stack, so the marker's removal is folded into this single existing trap rather than a
+    # second, competing `trap … EXIT` inside _reconcile_gateway (decisions.md D9). SIGTERM gets
+    # its own exiting handler (below) so a killed bootstrap runs cleanup and then exits 143
+    # instead of resuming mid-reconcile with the marker cleared (decisions.md D10).
+    rm -f .runtime/gateway/reconciling 2>/dev/null || true
 }
 trap cleanup EXIT
+trap 'cleanup; exit 143' TERM
 
 #------------------------------------------------------------------------------
 # Configuration
@@ -44,8 +52,10 @@ GIT_MIN_VERSION="2.20"
 TMUX_MIN_VERSION="3.0"
 CHECK_ONLY=false
 WITH_LITELLM=false
+LITELLM_AUTH_MODE=""
 LITELLM_VERSION="1.93.0"
 LITELLM_PORT=4000
+CODEX_LOGIN_TIMEOUT=900
 
 # Telemetry backend (OpenObserve). Provisioned by DEFAULT — operator decision O-1 is opt-out
 # (--no-telemetry), the design's recommendation (design-doc.md:315; ux.md F1). Pinned version +
@@ -381,7 +391,7 @@ install_claude() {
         npm install -g @anthropic-ai/claude-code 2>&1 || {
             # Try with sudo if npm global fails
             if command_exists sudo; then
-                sudo npm install -g @anthropic-ai/claude-code 2>&1 || {
+                sudo -n npm install -g @anthropic-ai/claude-code 2>&1 || {
                     log_error "Failed to install Claude Code via npm"
                     return 1
                 }
@@ -442,7 +452,7 @@ install_playwright() {
                 return 0
             }
         elif command_exists sudo && sudo -n true 2>/dev/null; then
-            sudo npm install -g playwright >>"$pw_log" 2>&1 || {
+            sudo -n npm install -g playwright >>"$pw_log" 2>&1 || {
                 tail -20 "$pw_log"
                 log_warn "npm install playwright failed; skipping — visual checks will escalate to the human gate"
                 return 0
@@ -491,6 +501,146 @@ install_playwright() {
     fi
     rm -f "$probe" 2>/dev/null || true
     return 0
+}
+
+_ensure_codex_cli() {
+    if command_exists codex; then
+        log_success "codex CLI present: $(codex --version 2>/dev/null || echo codex-cli)"
+        return 0
+    fi
+
+    local consent="${AF_CODEX_INSTALL_CONSENT:-}"
+    case "$consent" in
+        yes)
+            ;;
+        "")
+            if [ -t 0 ]; then
+                local _consent_ans=""
+                read -r -p "This will INSTALL the codex cli, are you sure? y/N " _consent_ans
+                if [ "$_consent_ans" != "y" ] && [ "$_consent_ans" != "Y" ]; then
+                    log_error "codex CLI install declined — subscription mode cannot run without the Codex CLI; nothing was installed" >&2
+                    exit 1
+                fi
+            else
+                log_error "codex CLI install declined (no terminal to ask, and AF_CODEX_INSTALL_CONSENT is not \"yes\") — subscription mode cannot run without the Codex CLI; nothing was installed" >&2
+                exit 1
+            fi
+            ;;
+        *)
+            log_error "invalid AF_CODEX_INSTALL_CONSENT value \"$consent\": must be unset or exactly \"yes\"" >&2
+            exit 1
+            ;;
+    esac
+
+    local codex_log="/tmp/af-codex-install.log"
+    : >"$codex_log"
+    log_info "Installing codex CLI (log: $codex_log)"
+    # Same probe -> sudo -n shape as install_playwright's npm-global-root writability check
+    # (intake DO-NOT-CHANGE: reuse its probe -> sudo -n shape); unlike playwright's optional
+    # tooling, the codex CLI is load-bearing for subscription mode, so every declined/infeasible
+    # path here is `exit 1`, never install_playwright's degrade-safe `return 0`.
+    local npm_root
+    npm_root="$(npm root -g 2>/dev/null || true)"
+    if [ -n "$npm_root" ] && [ -w "$npm_root" ]; then
+        npm install -g @openai/codex >>"$codex_log" 2>&1 || {
+            tail -20 "$codex_log"
+            log_error "codex CLI install failed (see $codex_log, last 20 lines above)"
+            exit 1
+        }
+    elif command_exists sudo && sudo -n true 2>/dev/null; then
+        sudo -n npm install -g @openai/codex >>"$codex_log" 2>&1 || {
+            tail -20 "$codex_log"
+            log_error "codex CLI install failed (see $codex_log, last 20 lines above)"
+            exit 1
+        }
+    else
+        log_error "cannot install the Codex CLI: the npm global prefix (/usr) is root-owned and passwordless sudo is unavailable in this container"
+        exit 1
+    fi
+    log_success "codex CLI installed: $(codex --version 2>/dev/null || echo codex-cli)"
+}
+
+_codex_session_valid() {
+    local status_output
+    if ! status_output="$(codex login status 2>&1)"; then
+        return 1
+    fi
+    # The CLI's status text is logged, never parsed (D7/Gap 10): a wording change upstream must not
+    # invalidate a genuinely authenticated session. Validity keys on the exit code (above) plus
+    # auth_mode + refresh-token read from auth.json directly, via jq.
+    local auth_file="${CODEX_HOME:-$HOME/.codex}/auth.json"
+    if [ ! -f "$auth_file" ]; then
+        return 1
+    fi
+    # An absent/null/empty auth_mode with tokens is ChatGPT, as import and the Go twin
+    # codexSessionValid read it. Only null is dropped (not `// empty`), so a non-string
+    # auth_mode such as false stays refused on both sides.
+    local auth_mode
+    auth_mode="$(jq -r '.auth_mode | select(. != null)' "$auth_file" 2>/dev/null)" || return 1
+    if [ -n "$auth_mode" ] && ! printf '%s' "$auth_mode" | grep -qiE "^(chatgpt|chatgptauthtokens)$"; then
+        return 1
+    fi
+    local refresh_token
+    refresh_token="$(jq -r '.tokens.refresh_token // empty' "$auth_file" 2>/dev/null)" || refresh_token=""
+    if [ -z "$refresh_token" ]; then
+        return 1
+    fi
+    return 0
+}
+
+# _run_with_timeout <secs> <command...>: coreutils timeout(1)'s contract (TERM the command at the
+# deadline, return 124) in plain bash, because vanilla macOS ships no `timeout`. The explicit <&0
+# keeps the command's stdin, which bash otherwise points at /dev/null for a background job. The
+# watchdog's output goes to /dev/null so its sleep never holds the caller's pipes open, and so do
+# the waits' stderr, where bash 3.2 announces every job a signal ended ("Terminated: 15").
+_run_with_timeout() {
+    local secs="$1" cmd_pid watchdog_pid rc=0 watchdog_rc=0
+    shift
+    "$@" <&0 &
+    cmd_pid=$!
+    (
+        sleep_pid=""
+        trap 'kill "$sleep_pid" 2>/dev/null; exit 0' TERM
+        sleep "$secs" &
+        sleep_pid=$!
+        wait "$sleep_pid"
+        # Past the deadline: the caller's TERM, racing the kill below, must not turn 124 into 0.
+        trap '' TERM
+        kill -TERM "$cmd_pid" 2>/dev/null && exit 124
+        exit 0
+    ) >/dev/null 2>&1 &
+    watchdog_pid=$!
+    wait "$cmd_pid" 2>/dev/null || rc=$?
+    kill -TERM "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || watchdog_rc=$?
+    if [ "$watchdog_rc" -eq 124 ]; then
+        return 124
+    fi
+    return "$rc"
+}
+
+_ensure_codex_session() {
+    if _codex_session_valid; then
+        log_success "Codex session verified (no login needed)"
+        return 0
+    fi
+    log_info "Authenticate to Codex: follow the URL and one-time code printed below (the code expires in 15 minutes)"
+    log_info "Waiting for the Codex login to complete…"
+    local _login_rc=0
+    _run_with_timeout "$CODEX_LOGIN_TIMEOUT" codex login --device-auth || _login_rc=$?
+    if [ "$_login_rc" -eq 124 ]; then
+        log_error "Codex login was not completed within 15 minutes; the gateway is not authenticated and agents are down until a bootstrap completes"
+        exit 1
+    fi
+    if [ "$_login_rc" -ne 0 ]; then
+        log_error "codex login --device-auth failed (exit $_login_rc); the gateway is not authenticated and agents are down until a bootstrap completes"
+        exit 1
+    fi
+    if ! _codex_session_valid; then
+        log_error "codex login --device-auth exited cleanly but did not establish a valid Codex session; the gateway is not authenticated and agents are down until a bootstrap completes"
+        exit 1
+    fi
+    log_success "Codex session verified"
 }
 
 install_playwright_plugin() {
@@ -679,11 +829,21 @@ Usage:
   ./quickstart.sh --check   Check prerequisites only
   ./quickstart.sh --litellm Full setup, then stand up the LiteLLM gateway for
                             OpenAI-model profiles (see USING_LITELLM.md)
+  ./quickstart.sh --litellm-auth=<api-key|codex-subscription>
+                            Choose the LiteLLM gateway's upstream auth mode
+                            (default: api-key). codex-subscription runs agents
+                            through a Codex/ChatGPT subscription instead of an
+                            OpenAI API key; requires --litellm.
   ./quickstart.sh --no-telemetry
                             Full setup, but SKIP the OpenObserve telemetry backend
                             (provisioned by default; installing it is not enabling it —
                             run 'af telemetry on' to start exporting)
   ./quickstart.sh --help    Show this help
+
+Environment:
+  AF_CODEX_INSTALL_CONSENT=yes
+                            Skip the interactive install-consent prompt when the codex
+                            CLI must be installed for --litellm-auth=codex-subscription.
 
 This script runs inside a container created by quickdocker.sh.
 It installs bd, af, and Claude Code, then configures the factory workspace.
@@ -705,6 +865,34 @@ parse_args() {
             --litellm)
                 WITH_LITELLM=true
                 shift
+                ;;
+            --litellm-auth=*)
+                # PR #688 Phase 3: --litellm-auth REQUIRES --litellm (checked once parse_args
+                # finishes, order-independent) — it does not imply it. See install.go's mirrored
+                # requires-refusal and decisions.md D10.
+                LITELLM_AUTH_MODE="${1#--litellm-auth=}"
+                case "$LITELLM_AUTH_MODE" in
+                    api-key|codex-subscription) ;;
+                    *)
+                        log_error "invalid --litellm-auth value '$LITELLM_AUTH_MODE': must be api-key or codex-subscription"
+                        exit 1
+                        ;;
+                esac
+                shift
+                ;;
+            --litellm-auth)
+                # Space form `--litellm-auth <mode>` (F25/PR #688): consume the value in $2 rather
+                # than falling through to the *) warn-and-ignore arm, which would silently leave the
+                # mode empty. Same enum validation as the =-form arm above.
+                LITELLM_AUTH_MODE="${2:-}"
+                case "$LITELLM_AUTH_MODE" in
+                    api-key|codex-subscription) ;;
+                    *)
+                        log_error "invalid --litellm-auth value '$LITELLM_AUTH_MODE': must be api-key or codex-subscription"
+                        exit 1
+                        ;;
+                esac
+                shift 2
                 ;;
             --no-telemetry)
                 # O-1: opt-out. A REAL case arm — without it the flag would fall through to
@@ -768,6 +956,207 @@ configure_login_init() {
     log_success "Installed webui login-shell restart guard (AF_ROOT pinned to $factory_root)"
 }
 
+# _litellm_auth_mode_read / _litellm_auth_mode_write (K2, issue #693 Phase 1): bash twins of
+# gatewayAuthMode's record accessor. Thin, non-migrating (decisions.md D6): read echoes the
+# record's content if present, empty if absent; write is a literal, unguarded printf.
+# setup_litellm is the only writer in the tree; wiring the write call into its ladder is K13, a
+# later phase — Phase 1 only lands the pair, unwired.
+_litellm_auth_mode_read() {
+    if [ -f ".agentfactory/litellm-auth-mode" ]; then
+        cat ".agentfactory/litellm-auth-mode"
+    fi
+}
+
+_litellm_auth_mode_write() {
+    printf '%s\n' "$1" > .agentfactory/litellm-auth-mode
+}
+
+# _ensure_mode_yaml <mode> (issue af-d0bff338, PR #694 Phase 3, K9): gate + legacy-migration
+# helper for the per-mode litellm config file. Returns 0 when the caller should (re)write the
+# mode's seed now — the target is absent, or (api-key only) an existing litellm.yaml carries
+# ONLY chatgpt/ lanes, a hand-switched pre-693 artifact (decisions.md D2: mirrors
+# gatewayAuthMode's tier-2 lane scan, gateway_auth.go:220-240, exactly — chatgpt-only triggers,
+# both-present or neither-present does not). Returns 1 when an existing, non-legacy file must be
+# left untouched (content and mtime unchanged). The legacy save-aside (never delete, ADR-017) +
+# log_warn naming the copy fire here as a side effect; the actual heredoc write stays in
+# setup_litellm() (decisions.md D5: heredocs stay byte-unchanged and physically inside
+# setup_litellm(); D1: UTC, colon-free timestamp).
+_ensure_mode_yaml() {
+    local mode="$1"
+    local target
+    if [ "$mode" = "api-key" ]; then
+        target=".agentfactory/litellm.yaml"
+    else
+        target=".agentfactory/litellm.codex-subscription.yaml"
+    fi
+
+    if [ ! -f "$target" ]; then
+        return 0
+    fi
+
+    if [ "$mode" = "api-key" ]; then
+        local saw_openai=false saw_chatgpt=false lane
+        while IFS= read -r lane; do
+            case "$lane" in
+                openai/*) saw_openai=true ;;
+                chatgpt/*) saw_chatgpt=true ;;
+            esac
+        done < <(grep -E '^[[:space:]]+model:[[:space:]]*[^[:space:]#]+' "$target" | sed -E 's/^[[:space:]]+model:[[:space:]]*([^[:space:]#]+).*/\1/')
+
+        if $saw_chatgpt && ! $saw_openai; then
+            local saved="${target}.$(date -u +%Y%m%dT%H%M%SZ).saved"
+            cp "$target" "$saved"
+            log_warn "Legacy $target carries only chatgpt/ lanes under api-key mode; saved aside to $saved and reseeding"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# _write_codex_compat_module <factory_root>: writes the af-owned LiteLLM proxy hook that the
+# subscription yaml names in litellm_settings.callbacks. LiteLLM resolves that module relative to
+# the CONFIG FILE's directory (proxy/types_utils/utils.py get_instance_fn), so the file lives next
+# to the yaml. Rewritten on every bootstrap — it is af's, never the operator's — and a changed body
+# stops the running gateway so _reconcile_gateway relaunches it with the new hook loaded: the
+# launch identity hashes only the yaml, and a gateway serving a stale hook is the stale-proxy class
+# issue #693 removed. Why it exists: the ChatGPT/Codex backend rejects system-role input items
+# ("System messages are not allowed"); LiteLLM folds a STRING system prompt into Responses
+# `instructions` but forwards the block-array system prompt Claude Code sends on every turn as a
+# system-role item (BerriAI/litellm#21420, closed not-planned). Flattening the array to a string
+# before translation is the whole fix. Retire it when `af config models check <profile> --first`
+# passes with the callbacks line removed.
+_write_codex_compat_module() {
+    local dir="$1/.agentfactory" target tmp
+    target="$dir/af_codex_compat.py"
+    tmp="$(mktemp "$dir/.af_codex_compat.XXXXXX")"
+    cat > "$tmp" << 'PYEOF'
+"""af-owned LiteLLM proxy hook for the ChatGPT-subscription (Codex) route.
+
+Written by quickstart.sh on every bootstrap; edits here are overwritten. The Codex backend
+rejects system-role input items ("System messages are not allowed"). LiteLLM folds a string
+system prompt into Responses `instructions` but forwards a block-array system prompt — what
+Claude Code sends on every turn — as a system-role item. This hook flattens the array into a
+string before LiteLLM translates the request (upstream: BerriAI/litellm#21420).
+"""
+from typing import Any, Optional, Union
+
+from litellm.integrations.custom_logger import CustomLogger
+
+
+def flatten_system(system: Any) -> Any:
+    """Return a block-array system prompt as one string; anything else unchanged."""
+    if not isinstance(system, list):
+        return system
+    texts = [
+        block["text"]
+        for block in system
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+        and block["text"]
+    ]
+    return "\n\n".join(texts) if texts else None
+
+
+class AfCodexCompat(CustomLogger):
+    async def async_pre_call_hook(
+        self, user_api_key_dict, cache, data: dict, call_type
+    ) -> Optional[Union[Exception, str, dict]]:
+        if call_type == "anthropic_messages" and isinstance(data.get("system"), list):
+            flattened = flatten_system(data["system"])
+            if flattened is None:
+                data.pop("system", None)
+            else:
+                data["system"] = flattened
+        return data
+
+
+proxy_handler_instance = AfCodexCompat()
+PYEOF
+    chmod 0644 "$tmp"
+    if [ -f "$target" ] && [ "$(sha256sum "$tmp" | cut -d' ' -f1)" = "$(sha256sum "$target" | cut -d' ' -f1)" ]; then
+        rm -f "$tmp"
+        return 0
+    fi
+    mv "$tmp" "$target"
+    log_info "Wrote $target (af-owned LiteLLM hook, rewritten by every bootstrap)"
+    if tmux has-session -t =litellm 2>/dev/null; then
+        log_info "The gateway hook changed; stopping the gateway so it relaunches with the new hook"
+        _gateway_stop
+    fi
+}
+
+# _ensure_codex_compat_wiring <yaml>: makes an existing subscription yaml name the hook above in
+# litellm_settings.callbacks. The seed carries the line; a yaml seeded before the hook existed does
+# not, and the operator owns that file (never overwritten), so the one line is inserted in place —
+# after a bare `litellm_settings:` header, or as a new block when there is none — with the
+# previous copy saved aside (ADR-017: never delete). Idempotent: an already-wired file is not
+# touched. A yaml that declares its own callbacks is operator-managed beyond what a textual insert
+# can do safely, so that case ends loud with the exact line to add. Missing file: nothing to do.
+_ensure_codex_compat_wiring() {
+    local target="$1" saved
+    [ -f "$target" ] || return 0
+    if grep -qE '^[[:space:]]+callbacks:[[:space:]]*af_codex_compat\.proxy_handler_instance([[:space:]]|$)' "$target"; then
+        return 0
+    fi
+    if grep -qE '^[[:space:]]*callbacks:' "$target"; then
+        log_error "$target declares litellm_settings.callbacks without af_codex_compat.proxy_handler_instance; the Codex backend rejects Claude Code's system prompt without that hook — add af_codex_compat.proxy_handler_instance to that callbacks entry"
+        return 1
+    fi
+    # Appending a second top-level litellm_settings would silently replace the operator's block (YAML
+    # keeps the last key), so any header form sed cannot extend is refused instead.
+    local header_re='^litellm_settings:[[:space:]]*(#.*)?$' other_header
+    if ! grep -qE "$header_re" "$target"; then
+        other_header="$(grep -m1 -E "^[\"']?litellm_settings[\"']?[[:space:]]*:" "$target")" || other_header=""
+        if [ -n "$other_header" ]; then
+            log_error "$target declares litellm_settings as '$other_header', which af cannot safely edit; the Codex backend rejects Claude Code's system prompt without the hook — add 'callbacks: af_codex_compat.proxy_handler_instance' under litellm_settings"
+            return 1
+        fi
+    fi
+    saved="${target}.$(date -u +%Y%m%dT%H%M%SZ).saved"
+    cp "$target" "$saved"
+    if grep -qE "$header_re" "$target"; then
+        # Attached -i suffix and an escaped literal newline: the only forms GNU and BSD sed share.
+        sed -i.bak -E 's/^(litellm_settings:[[:space:]]*(#.*)?)$/\1\
+  callbacks: af_codex_compat.proxy_handler_instance/' "$target" || return 1
+        rm -f "$target.bak"
+    else
+        printf '\nlitellm_settings:\n  callbacks: af_codex_compat.proxy_handler_instance\n' >> "$target"
+    fi
+    log_warn "Wired af_codex_compat into $target (previous copy saved to $saved): the Codex backend rejects Claude Code's system prompt without it"
+    return 0
+}
+
+# _port_in_use / _port_owner_pid (K11, issue #693 Phase 1): hoisted to top level so both
+# setup_litellm and setup_telemetry can reach them (decisions.md D7: hoist is location-only, the
+# body below is byte-identical to the one previously nested inside setup_telemetry). No `ss`/`lsof`
+# in the image, so both probe /proc directly.
+_port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&-; return 0; } || return 1; }
+
+# _port_owner_pid: resolves the pid owning a listening port from /proc/net/tcp, matched against
+# /proc/<pid>/fd of the current process tree. Returns the owning pid or empty — no third
+# error-return path (decisions.md D5); a permission-denied fd on one candidate pid is skipped, not
+# fatal to the whole scan.
+_port_owner_pid() {
+    local port="$1" hexport inode pid fd_target
+    hexport="$(printf '%04X' "$port")"
+    inode="$(awk -v p=":$hexport" '$2 ~ p"$" {split($10,a,":"); print a[1]; exit}' /proc/net/tcp 2>/dev/null)"
+    [ -z "$inode" ] && { echo ""; return; }
+    for pid in /proc/[0-9]*; do
+        pid="${pid#/proc/}"
+        for fd in "/proc/$pid/fd/"*; do
+            [ -e "$fd" ] || continue
+            fd_target="$(readlink "$fd" 2>/dev/null)" || continue
+            if [ "$fd_target" = "socket:[$inode]" ]; then
+                echo "$pid"
+                return
+            fi
+        done
+    done
+    echo ""
+}
+
 # setup_litellm (--litellm): automates USING_LITELLM.md's manual steps. Runs LAST,
 # after the normal bootstrap has fully completed — the factory never depends on it.
 # Because the flag is an explicit opt-in, failures here are loud (exit 1), not the
@@ -790,41 +1179,157 @@ setup_litellm() {
         exit 1
     fi
 
-    if ! command_exists litellm; then
+    # _gateway_stop / _reconcile_gateway (K12, issue #693 Phase 4): the ONLY kill site for the
+    # litellm tmux session. Nested here (decisions.md D1) so their text lands inside
+    # setup_litellm's own extracted body for the shape-test harness, and defined before the pip
+    # build pre-check below so that call site can reach them (nested function defs become
+    # callable only once the defining line executes).
+    _gateway_stop() {
+        mkdir -p .runtime/gateway
+        printf '{"pid":%s,"since":%s}' "$$" "$(date +%s)" > .runtime/gateway/reconciling
+        tmux kill-session -t =litellm 2>/dev/null || true
+        rm -f .runtime/gateway/launch.json
+        local waited=0
+        while _port_in_use "$LITELLM_PORT" && [ "$waited" -lt 10 ]; do
+            sleep 1
+            waited=$((waited + 1))
+        done
+    }
+
+    # _reconcile_gateway <relaunch_script>: desired identity (from the script's own --identity
+    # mode) vs. recorded identity (launch.json minus launched_at/pane_pid) decide whether the
+    # running session is kept, restarted, or a fresh one launched. A foreign listener on the
+    # port with no session refuses rather than launching into a collision.
+    _reconcile_gateway() {
+        local relaunch_script="$1"
+        local desired recorded desired_canon
+        desired="$("$relaunch_script" --identity 2>/dev/null)"
+        if tmux has-session -t =litellm 2>/dev/null; then
+            if [ -f .runtime/gateway/launch.json ]; then
+                recorded="$(jq -S -c 'del(.launched_at, .pane_pid)' .runtime/gateway/launch.json 2>/dev/null)" || recorded=""
+            else
+                recorded=""
+            fi
+            desired_canon="$(printf '%s' "$desired" | jq -S -c 'del(.launched_at, .pane_pid)' 2>/dev/null)"
+            if [ -z "$(printf '%s' "$desired" | jq -r '.credential_ref // empty' 2>/dev/null)" ]; then
+                log_info "Gateway credential reference is unknown (no API key mtime or import record); restarting"
+            elif [ -n "$recorded" ] && [ "$desired_canon" = "$recorded" ]; then
+                log_success "Gateway identity matches the running gateway; no restart"
+                return 0
+            else
+                log_info "Gateway identity changed since the last launch; restarting"
+            fi
+            log_warn "restarting the gateway causes a brief blip for any live agent session"
+            _gateway_stop
+        else
+            if _port_in_use "$LITELLM_PORT"; then
+                log_error "port $LITELLM_PORT is occupied by a process outside the 'litellm' tmux session; af does not stop processes it did not start"
+                exit 1
+            fi
+        fi
+        "$relaunch_script"
+        if tmux has-session -t =litellm 2>/dev/null; then
+            log_info "Launched LiteLLM in tmux session 'litellm'"
+        else
+            log_warn "gateway-relaunch.sh did not start the LiteLLM session (missing subscription handle or api key?); see USING_LITELLM.md"
+        fi
+    }
+
+    if ! command_exists litellm || [[ "$(litellm --version 2>/dev/null | grep -m1 .)" != *"$LITELLM_VERSION"* ]]; then
+        if tmux has-session -t =litellm 2>/dev/null; then
+            log_warn "a running litellm session's version differs from the pinned $LITELLM_VERSION; stopping it before reinstalling (a mismatched live process is worse than a stopped one)"
+            _gateway_stop
+        fi
         log_info "Installing litellm[proxy]==$LITELLM_VERSION"
         pip3 install --break-system-packages "litellm[proxy]==$LITELLM_VERSION" || {
             log_error "litellm install failed"
             exit 1
         }
     fi
-    log_success "litellm present: $(litellm --version 2>/dev/null | head -1 || echo 'version unknown')"
+    log_success "litellm present: $(litellm --version 2>/dev/null | grep -m1 . || echo 'version unknown')"
+    if ! python3 -c 'import litellm.proxy' 2>/dev/null; then
+        log_error "litellm.proxy failed to import after install — the build appears corrupt"
+        exit 1
+    fi
 
     mkdir -p "$secrets_dir"
     chmod 700 "$secrets_dir"
 
-    # OpenAI key: existing secret file > environment > interactive prompt.
-    # printf '%s' is load-bearing: the launch-line deref "$(cat …)" tolerates but
-    # must not rely on trailing-newline trimming.
-    if [ -s "$openai_key_file" ]; then
-        log_info "Using existing OpenAI key at $openai_key_file"
-    elif [ -n "${OPENAI_API_KEY:-}" ]; then
-        printf '%s' "$OPENAI_API_KEY" > "$openai_key_file"
-        log_info "Persisted OPENAI_API_KEY from environment to $openai_key_file"
-    elif [ -t 0 ]; then
-        local _openai_key=""
-        read -rsp "OpenAI API key (stored at $openai_key_file): " _openai_key
-        echo ""
-        if [ -z "$_openai_key" ]; then
-            log_error "No OpenAI API key provided"
+    # Mode ladder (BODY-1/decisions.md D17): parity with install.go's resolveLitellmAuthMode
+    # (install.go:944-962) — an explicit --litellm-auth flag (parse_args already enum-validated it,
+    # left in LITELLM_AUTH_MODE) wins, else the AF_LITELLM_AUTH env override, else the recorded mode
+    # (_litellm_auth_mode_read), else handle-presence migration. install.go (D2) always forwards a
+    # fully-resolved mode, so the lower tiers do handle-detection work only on a direct
+    # ./quickstart.sh invocation. The both-handles refusal (E9) guards-and-surfaces ONLY on the
+    # migration leg: once a flag, env, or record resolves the mode, coexisting handles are
+    # unambiguous and must not refuse.
+    local chatgpt_auth_file=".agentfactory/secrets/chatgpt/auth.json"
+    if [ -z "$LITELLM_AUTH_MODE" ] && [ -n "${AF_LITELLM_AUTH:-}" ]; then
+        case "$AF_LITELLM_AUTH" in
+            api-key|codex-subscription) LITELLM_AUTH_MODE="$AF_LITELLM_AUTH" ;;
+            *) log_error "invalid AF_LITELLM_AUTH value '$AF_LITELLM_AUTH': must be api-key or codex-subscription"; exit 1 ;;
+        esac
+    fi
+    if [ -z "$LITELLM_AUTH_MODE" ]; then
+        LITELLM_AUTH_MODE="$(_litellm_auth_mode_read)"
+    fi
+    if [ -z "$LITELLM_AUTH_MODE" ]; then
+        local has_key=false has_sub=false
+        [ -s "$openai_key_file" ] && has_key=true
+        [ -s "$chatgpt_auth_file" ] && has_sub=true
+        if $has_key && $has_sub; then
+            log_error "both an OpenAI API key ($openai_key_file) and a ChatGPT-subscription handle ($chatgpt_auth_file) exist; pass --litellm-auth=<api-key|codex-subscription> to choose one"
+            exit 1
+        elif $has_sub; then
+            LITELLM_AUTH_MODE="codex-subscription"
+        else
+            LITELLM_AUTH_MODE="api-key"
+        fi
+    fi
+    log_info "LiteLLM upstream auth mode: $LITELLM_AUTH_MODE"
+
+    if [ "$LITELLM_AUTH_MODE" = "api-key" ]; then
+        # OpenAI key: existing secret file > environment > interactive prompt.
+        # printf '%s' is load-bearing: the launch-line deref "$(cat …)" tolerates but
+        # must not rely on trailing-newline trimming.
+        if [ -s "$openai_key_file" ]; then
+            log_info "Using existing OpenAI key at $openai_key_file"
+        elif [ -n "${OPENAI_API_KEY:-}" ]; then
+            printf '%s' "$OPENAI_API_KEY" > "$openai_key_file"
+            log_info "Persisted OPENAI_API_KEY from environment to $openai_key_file"
+        elif [ -t 0 ]; then
+            local _openai_key=""
+            read -rsp "OpenAI API key (stored at $openai_key_file): " _openai_key
+            echo ""
+            if [ -z "$_openai_key" ]; then
+                log_error "No OpenAI API key provided"
+                exit 1
+            fi
+            printf '%s' "$_openai_key" > "$openai_key_file"
+            unset _openai_key
+        else
+            log_error "--litellm needs an OpenAI API key: set OPENAI_API_KEY or create $openai_key_file"
             exit 1
         fi
-        printf '%s' "$_openai_key" > "$openai_key_file"
-        unset _openai_key
+        chmod 600 "$openai_key_file"
     else
-        log_error "--litellm needs an OpenAI API key: set OPENAI_API_KEY or create $openai_key_file"
-        exit 1
+        # Subscription mode: the ChatGPT-subscription handle comes from `af gateway auth import`
+        # (E2), never an OpenAI key — the frame-lift invariant keeps this branch and the api-key
+        # branch above fully disjoint; neither ever falls back to the other.
+        _ensure_codex_cli
+        _ensure_codex_session
+        if ! af gateway auth import; then
+            exit 1
+        fi
     fi
-    chmod 600 "$openai_key_file"
+
+    # Stamp the mode record only AFTER the mode's prerequisites have succeeded (T15/decisions.md D13):
+    # api-key has its key, subscription has a CLI + a valid session + an imported handle. Writing it
+    # up in the ladder (the PR's original K13 position) left a lying `codex-subscription` record when
+    # consent/login was declined and the branch exited 1, bricking later flagless redeploys
+    # (AC-11/AC-12). The relaunch script regenerated below reads this record at runtime, so stamping
+    # it here does not starve it.
+    _litellm_auth_mode_write "$LITELLM_AUTH_MODE"
 
     # Master key: generated once, reused on every rerun (regenerating would orphan
     # any copy already handed out).
@@ -834,8 +1339,14 @@ setup_litellm() {
     fi
     chmod 600 "$master_key_file"
 
-    # Seed configs only when absent — operator edits are never overwritten.
-    if [ ! -f ".agentfactory/litellm.yaml" ]; then
+    # Seed configs only when absent — operator edits are never overwritten. Each mode seeds its
+    # own dedicated target file via _ensure_mode_yaml (K9, issue af-d0bff338 PR #694 Phase 3);
+    # the two targets are independent (decisions.md D4/D5) — a subscription run never touches
+    # litellm.yaml and vice versa. The prior phase's save-aside orphan fork is retired; a legacy
+    # chatgpt-only litellm.yaml under api-key mode is migrated by _ensure_mode_yaml itself
+    # (decisions.md D2/D3), not by this call site.
+    if [ "$LITELLM_AUTH_MODE" = "api-key" ]; then
+      if _ensure_mode_yaml "api-key"; then
         cat > ".agentfactory/litellm.yaml" << 'EOF'
 model_list:
   - model_name: gpt-4o                # substitute the OpenAI model id you want agents on
@@ -883,6 +1394,76 @@ general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
 EOF
         log_info "Seeded .agentfactory/litellm.yaml"
+      fi
+    else
+      # Subscription seed (F14/PR #688, K9/PR #694 Phase 3): the subscription litellm.yaml body has
+      # ONE source — this heredoc captured into a variable — seeded into its own dedicated target,
+      # .agentfactory/litellm.codex-subscription.yaml, only when absent (_ensure_mode_yaml); an
+      # api-key-mode litellm.yaml, if any, is never touched by this branch. No api_key entry (the
+      # upstream credential lives in gateway-relaunch.sh's CHATGPT_TOKEN_DIR export, never in this
+      # file) and no fallbacks block; drop_params is LiteLLM's own litellm_settings key, not a
+      # per-entry param. The SUBEOF delimiter stays distinct from heredoc #1's 'EOF' so the two seeds
+      # never corrupt each other's test extraction.
+      local subscription_yaml_body
+      subscription_yaml_body="$(cat << 'SUBEOF'
+model_list:
+  - model_name: gpt-5.6-sol            # substitute the Codex/ChatGPT model id you want agents on
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-sol
+  - model_name: gpt-5.6-terra          # mid lane: the codex profile's sonnet class
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-terra
+  - model_name: gpt-5.6-luna           # small model for Claude Code's background calls
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-luna
+
+  # Aliases for the model ids the host asks for BY NAME — same rationale as the api-key seed
+  # above, routed through the chatgpt/responses backend instead of openai/.
+  - model_name: claude-opus-5
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-sol
+  - model_name: claude-sonnet-5
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-sol
+  - model_name: claude-opus-4-8
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-sol
+  - model_name: claude-fable-5
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-sol
+  - model_name: claude-fable-5-1
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-sol
+  - model_name: claude-opus-5-5
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-sol
+  - model_name: claude-haiku-4-5       # haiku-class requests go to the small backend
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-luna
+
+litellm_settings:
+  # af_codex_compat.py sits next to this file and is rewritten by every bootstrap: it flattens
+  # Claude Code's block-array system prompt to a string before translation, because the Codex
+  # backend rejects system-role items ("System messages are not allowed", BerriAI/litellm#21420).
+  # Drop this line only when `af config models check <profile> --first` passes without it.
+  callbacks: af_codex_compat.proxy_handler_instance
+  drop_params: true
+
+router_settings:
+  num_retries: 2
+  timeout: 3000               # agentic turns can run long; don't use 30s
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+SUBEOF
+)"
+      if _ensure_mode_yaml "codex-subscription"; then
+        printf '%s\n' "$subscription_yaml_body" > ".agentfactory/litellm.codex-subscription.yaml"
+        log_info "Seeded .agentfactory/litellm.codex-subscription.yaml"
+      fi
+      # The hook the yaml names, and the one-line wiring for a yaml seeded before the hook existed.
+      _ensure_codex_compat_wiring ".agentfactory/litellm.codex-subscription.yaml" || exit 1
+      _write_codex_compat_module "$factory_root"
     fi
 
     # Context window: deliberately NOT seeded. CLAUDE_CODE_MAX_CONTEXT_TOKENS
@@ -892,7 +1473,8 @@ EOF
     # actually serves, and a guessed value would be the unnegotiated constant
     # issue #602 exists to remove. Operators set both per profile; the
     # runbook for choosing values is USING_LITELLM.md.
-    if ! jq -e '.models.codex' .agentfactory/models.json >/dev/null 2>&1; then
+    if [ "$LITELLM_AUTH_MODE" = "api-key" ]; then
+      if ! jq -e '.models.codex' .agentfactory/models.json >/dev/null 2>&1; then
         jq --arg url "http://localhost:$LITELLM_PORT" '.models.codex = {
             "ANTHROPIC_BASE_URL": $url,
             "ANTHROPIC_AUTH_TOKEN": "file:.agentfactory/secrets/litellm.key",
@@ -902,15 +1484,156 @@ EOF
         }' .agentfactory/models.json > .agentfactory/models.json.tmp \
             && mv .agentfactory/models.json.tmp .agentfactory/models.json
         log_info "Seeded codex profile in .agentfactory/models.json"
+      fi
+    else
+      # NEW jq block, sibling to .models.codex above — NEVER a mutation of that block (the
+      # frame-lift invariant: upstream-auth mode is never a key inside a profile map).
+      if ! jq -e '.models["codex-subscription"]' .agentfactory/models.json >/dev/null 2>&1; then
+        jq --arg url "http://localhost:$LITELLM_PORT" '.models["codex-subscription"] = {
+            "ANTHROPIC_BASE_URL": $url,
+            "ANTHROPIC_AUTH_TOKEN": "file:.agentfactory/secrets/litellm.key",
+            "ANTHROPIC_MODEL": "gpt-5.6-sol",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.6-luna",
+            "ANTHROPIC_API_KEY": "",
+            "AF_DISABLE_PARALLEL_SUBAGENTS": "1"
+        }' .agentfactory/models.json > .agentfactory/models.json.tmp \
+            && mv .agentfactory/models.json.tmp .agentfactory/models.json
+        log_info "Seeded codex-subscription profile in .agentfactory/models.json"
+      fi
     fi
 
-    # Detached tmux session. The $(cat …) forms stay single-quoted so the secrets
-    # resolve INSIDE the pane shell — never on this script's command line.
-    if ! tmux has-session -t litellm 2>/dev/null; then
-        tmux new-session -d -s litellm -c "$factory_root" \
-            'OPENAI_API_KEY="$(cat .agentfactory/secrets/openai.key)" LITELLM_MASTER_KEY="$(cat .agentfactory/secrets/litellm.key)" litellm --config .agentfactory/litellm.yaml --port '"$LITELLM_PORT"
-        log_info "Launched LiteLLM in tmux session 'litellm'"
+    # NEW .agentfactory/gateway-relaunch.sh — a STANDALONE script (not merely inlined),
+    # modeled on the telemetry relaunch.sh writer (:1136-1166 era). Called from BOTH the tmux
+    # first-bring-up below and the login-shell relaunch guard, so the launch line has exactly
+    # one home — no inline `litellm --config …` line remains anywhere in this function. Mode
+    # 0700 (not telemetry's 0755): this script's body exports secret-derived launch env
+    # (OPENAI_API_KEY, or the ChatGPT-subscription handle), unlike telemetry's inert body.
+    #
+    # Two heredocs: the first (unquoted) bakes in the write-time-known factory_root/port/mode as
+    # literal values (safe — no $(...) substitutions here); the second (QUOTED, 'EOF') is copied
+    # byte-for-byte so the $(cat …) secret derefs stay literal in BOTH quickstart.sh's own source
+    # and the written file, deferred to the pane shell that actually evaluates them.
+    local relaunch_script="$factory_root/.agentfactory/gateway-relaunch.sh"
+    cat > "$relaunch_script" << EOF
+#!/bin/bash
+# Written by quickstart.sh's setup_litellm() (PR #688 Phase 3, issue #686). Relaunches the
+# LiteLLM gateway when its tmux session is absent. Best-effort and idempotent.
+umask 077
+FACTORY_ROOT="$factory_root"
+LITELLM_PORT="$LITELLM_PORT"
+EOF
+    cat >> "$relaunch_script" << 'EOF'
+# Auth mode comes from the record .agentfactory/litellm-auth-mode at RUN time (K10/BODY-4), never a
+# write-time baked value: three homes for one fact drift. Missing/invalid ⇒ warn + exit 0 (never
+# launch under an unknown mode). setup_litellm stamps the record before writing this script.
+LITELLM_AUTH_MODE="$(cat "$FACTORY_ROOT/.agentfactory/litellm-auth-mode" 2>/dev/null)" || LITELLM_AUTH_MODE=""
+# credential_ref marks the credential's version, never its bytes, their hash, or its path, so a
+# rotation changes the identity and the next reconcile restarts the gateway. Subscription uses the
+# state record's imported_at, which only `af gateway auth import` writes: LiteLLM rewrites the
+# handle itself on every token refresh, and that must not restart it. Unreadable ⇒ empty ⇒ unknown.
+case "$LITELLM_AUTH_MODE" in
+    api-key)
+        _gw_config_file="$FACTORY_ROOT/.agentfactory/litellm.yaml"
+        _gw_credential_ref="$(date -r "$FACTORY_ROOT/.agentfactory/secrets/openai.key" +%s 2>/dev/null)"
+        ;;
+    codex-subscription)
+        _gw_config_file="$FACTORY_ROOT/.agentfactory/litellm.codex-subscription.yaml"
+        _gw_credential_ref="$(jq -r '.imported_at // empty' "$FACTORY_ROOT/.runtime/gateway_auth/codex-subscription.json" 2>/dev/null)"
+        ;;
+    "")
+        echo "warning: no .agentfactory/litellm-auth-mode record; refusing to relaunch the gateway (factory unaffected)" >&2
+        exit 0
+        ;;
+    *)
+        echo "error: .agentfactory/litellm-auth-mode names an unknown mode '$LITELLM_AUTH_MODE'; refusing to relaunch" >&2
+        exit 0
+        ;;
+esac
+# One identity computation feeds --identity, launch.json, AND (by mode) the launch line, so the
+# config file is named and hashed identically at every site (BODY-5); a single source makes the
+# name/hash-drift class of bug structurally impossible. sha256sum is a coreutil the image
+# guarantees; openssl is not (BODY-6). grep -m1 . skips litellm --version's leading blank line (T3).
+_gw_litellm_version="$(litellm --version 2>/dev/null | grep -m1 .)"
+_gw_config_sha256="$(sha256sum "$_gw_config_file" 2>/dev/null)"
+_gw_config_sha256="${_gw_config_sha256%% *}"
+if [ "$1" = "--identity" ]; then
+    jq -n \
+        --arg mode "$LITELLM_AUTH_MODE" \
+        --arg config_sha256 "$_gw_config_sha256" \
+        --arg litellm_version "$_gw_litellm_version" \
+        --arg credential_ref "$_gw_credential_ref" \
+        --argjson port "$LITELLM_PORT" \
+        --arg factory_root "$FACTORY_ROOT" \
+        '{"v":1,"mode":$mode,"config_sha256":$config_sha256,"litellm_version":$litellm_version,"credential_ref":$credential_ref,"port":$port,"factory_root":$factory_root}'
+    exit 0
+fi
+if ! command -v litellm >/dev/null 2>&1 || [ ! -s "$FACTORY_ROOT/.agentfactory/secrets/litellm.key" ]; then
+    exit 0
+fi
+if tmux has-session -t =litellm 2>/dev/null; then
+    exit 0
+fi
+launched=0
+if [ "$LITELLM_AUTH_MODE" = "api-key" ]; then
+    if [ ! -s "$FACTORY_ROOT/.agentfactory/secrets/openai.key" ]; then
+        echo "warning: OpenAI API key handle missing — refusing to relaunch (factory unaffected)" >&2
+        exit 0
     fi
+    if tmux new-session -d -s litellm -c "$FACTORY_ROOT" \
+        'OPENAI_API_KEY="$(cat .agentfactory/secrets/openai.key)" LITELLM_MASTER_KEY="$(cat .agentfactory/secrets/litellm.key)" litellm --port '"$LITELLM_PORT"' --config .agentfactory/litellm.yaml'; then
+        launched=1
+    fi
+elif [ "$LITELLM_AUTH_MODE" = "codex-subscription" ]; then
+    if [ ! -s "$FACTORY_ROOT/.agentfactory/secrets/chatgpt/auth.json" ]; then
+        echo "warning: ChatGPT-subscription handle missing — refusing to relaunch into the device-code path (factory unaffected)" >&2
+        exit 0
+    fi
+    if tmux new-session -d -s litellm -c "$FACTORY_ROOT" \
+        'CHATGPT_TOKEN_DIR="'"$FACTORY_ROOT"'/.agentfactory/secrets/chatgpt" CHATGPT_DEFAULT_INSTRUCTIONS="You are a helpful coding assistant." LITELLM_MASTER_KEY="$(cat .agentfactory/secrets/litellm.key)" litellm --port '"$LITELLM_PORT"' --config .agentfactory/litellm.codex-subscription.yaml'; then
+        launched=1
+    fi
+fi
+if [ "$launched" = "1" ]; then
+    mkdir -p "$FACTORY_ROOT/.runtime/gateway"
+    pane_pid="$(tmux list-panes -t =litellm -F '#{pane_pid}' 2>/dev/null | head -1)"
+    (
+        umask 077
+        jq -n \
+            --arg mode "$LITELLM_AUTH_MODE" \
+            --arg config_sha256 "$_gw_config_sha256" \
+            --arg litellm_version "$_gw_litellm_version" \
+            --arg credential_ref "$_gw_credential_ref" \
+            --argjson port "$LITELLM_PORT" \
+            --arg factory_root "$FACTORY_ROOT" \
+            --argjson launched_at "$(date +%s)" \
+            --arg pane_pid "$pane_pid" \
+            '{"v":1,"mode":$mode,"config_sha256":$config_sha256,"litellm_version":$litellm_version,"credential_ref":$credential_ref,"port":$port,"factory_root":$factory_root,"launched_at":$launched_at,"pane_pid":$pane_pid}' \
+            > "$FACTORY_ROOT/.runtime/gateway/launch.json"
+    )
+fi
+tmux set-environment -g -u OPENAI_API_KEY
+tmux set-environment -g -u CHATGPT_TOKEN_DIR
+tmux set-environment -g -u CHATGPT_AUTH_FILE
+tmux set-environment -g -u CHATGPT_API_BASE
+tmux set-environment -g -u CODEX_HOME
+EOF
+    chmod 0700 "$relaunch_script"
+
+    # Login-shell relaunch guard, same idiom as the webui guard: the tmux session dies with the
+    # container, so bring the gateway back on the next login shell. Written here (K15), before
+    # verification, so a run that dies in readiness/smoke never leaves a stale-mode guard. The
+    # guard body only ever calls the relaunch script — it already no-ops via its own internal
+    # has-session check when a session is present.
+    local bash_profile_path="$HOME/.bash_profile"
+    touch "$bash_profile_path"
+    sed -i '/BEGIN agentfactory litellm login guard/,/END agentfactory litellm login guard/d' "$bash_profile_path" 2>/dev/null || true
+    cat >> "$bash_profile_path" << EOF
+# BEGIN agentfactory litellm login guard
+"$relaunch_script"
+# END agentfactory litellm login guard
+EOF
+
+    _reconcile_gateway "$relaunch_script"
 
     # Readiness: poll the authenticated model list (free) before the paid smoke.
     local master_key ready="" attempts=0
@@ -928,45 +1651,106 @@ EOF
         exit 1
     fi
 
-    # Minimal smoke through the FULL translation path (/v1/messages -> OpenAI):
-    # proves Anthropic-format translation AND that the OpenAI key is valid.
-    # max_tokens is 16, not 1: models routed via OpenAI's Responses API (gpt-5.x)
-    # enforce max_output_tokens >= 16 and 400 on anything lower.
-    local smoke_model smoke
-    smoke_model="$(jq -r '.models.codex.ANTHROPIC_MODEL' .agentfactory/models.json)"
-    smoke="$(curl -sS "http://localhost:$LITELLM_PORT/v1/messages" \
-        -H "Authorization: Bearer $master_key" \
-        -H "anthropic-version: 2023-06-01" -H "content-type: application/json" \
-        -d "{\"model\":\"$smoke_model\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\".\"}]}" || true)"
-    if ! echo "$smoke" | jq -e '.type == "message"' >/dev/null 2>&1; then
-        log_error "Gateway smoke test failed: $smoke"
+    # Ownership proof (T7/K12, decisions.md D9): readiness answering on the port proves only that
+    # *something* serves — not that it is THIS run's gateway. Now that the port is bound (so the
+    # owner pid is resolvable), confirm the listener is the 'litellm' pane's process or a descendant
+    # of it, walking /proc/<pid>/stat's PPID chain. A foreign listener that happened to hold the port
+    # fails loudly here rather than being certified as the gateway.
+    local _pane_pid _owner_pid _walk _ppid
+    _pane_pid="$(tmux list-panes -t =litellm -F '#{pane_pid}' 2>/dev/null | head -1)"
+    _owner_pid="$(_port_owner_pid "$LITELLM_PORT")"
+    if [ -z "$_owner_pid" ] || [ -z "$_pane_pid" ]; then
+        log_error "could not confirm which process owns port $LITELLM_PORT for the 'litellm' session; refusing to certify a gateway af cannot prove it started"
         exit 1
     fi
-    log_success "Gateway smoke test passed (model $smoke_model)"
-
-    # The same transport gate agents rely on (secret file modes, endpoint, model id).
-    if ! af config models check codex; then
-        log_error "af config models check codex failed"
+    _walk="$_owner_pid"
+    while [ -n "$_walk" ] && [ "$_walk" != "0" ] && [ "$_walk" != "1" ] && [ "$_walk" != "$_pane_pid" ]; do
+        # /proc/<pid>/stat is `pid (comm) state ppid …`; comm can contain spaces or `)`, so strip
+        # through the last `") "` before reading the PPID (field 2 of the remainder).
+        _ppid="$(cat "/proc/$_walk/stat" 2>/dev/null)" || _ppid=""
+        _walk="$(printf '%s' "${_ppid##*) }" | awk '{print $2}')"
+    done
+    if [ "$_walk" != "$_pane_pid" ]; then
+        log_error "port $LITELLM_PORT is served by pid $_owner_pid, which is not the 'litellm' pane ($_pane_pid) or a descendant; a foreign process owns the gateway port — af does not adopt processes it did not start"
         exit 1
     fi
 
-    # Login-shell relaunch guard, same idiom as the webui guard: the tmux session
-    # dies with the container, so bring the gateway back on the next login shell.
-    # No-ops when litellm or its secrets are absent (e.g. a recreated container
-    # before --litellm has been rerun).
-    local profile="$HOME/.bash_profile"
-    local lbegin="# BEGIN agentfactory litellm login guard"
-    local lend="# END agentfactory litellm login guard"
-    touch "$profile"
-    sed -i "/$lbegin/,/$lend/d" "$profile" 2>/dev/null || true
-    cat >> "$profile" << EOF
-$lbegin
-if command -v litellm >/dev/null 2>&1 && [ -s "$factory_root/.agentfactory/secrets/litellm.key" ]; then
-    tmux has-session -t litellm 2>/dev/null || tmux new-session -d -s litellm -c "$factory_root" \\
-        'OPENAI_API_KEY="\$(cat .agentfactory/secrets/openai.key)" LITELLM_MASTER_KEY="\$(cat .agentfactory/secrets/litellm.key)" litellm --config .agentfactory/litellm.yaml --port $LITELLM_PORT'
-fi
-$lend
-EOF
+    # Smoke test: af config models check --live round-trips a real request through the
+    # profile matching this run's resolved auth mode, proving translation AND upstream
+    # credential validity in one call (replaces the old hand-rolled curl smoke).
+    local profile="codex"
+    if [ "$LITELLM_AUTH_MODE" = "codex-subscription" ]; then
+        profile="codex-subscription"
+    fi
+
+    # _first_probe_bootstrap <profile> <relaunch_script> (issue #693 K14): one classified
+    # /v1/messages request, far cheaper than --live's per-class sweep, run ahead of it so a
+    # stale ChatGPT-subscription session gets one chance at a forced re-login before the fuller
+    # --live smoke runs. Nested here, same idiom as _gateway_stop/_reconcile_gateway above, so
+    # it can be extracted via extractShellFunction and stub-harness-tested in isolation instead
+    # of needing a stub for setup_litellm()'s entire ~500-line body. `_relogin_attempted` scopes
+    # the ladder to at most once per invocation (D6) — "no further login on a second failure."
+    _first_probe_bootstrap() {
+        local profile="$1" relaunch_script="$2"
+        local _relogin_attempted=0 _first_out
+        if ! _first_out="$(af config models check "$profile" --first 2>&1)"; then
+            if [ "$LITELLM_AUTH_MODE" = "codex-subscription" ] && [ "$_relogin_attempted" -eq 0 ] \
+                && printf '%s' "$_first_out" | grep -qE -- '--first → (AUTH|TIMEOUT)'; then
+                _relogin_attempted=1
+                log_info "af config models check $profile --first reported an auth verdict; polling for a device-code re-login window"
+                local device_code_requested="" _poll_attempts=0
+                while [ "$_poll_attempts" -lt 10 ]; do
+                    if af gateway auth status --json 2>/dev/null | jq -e '.device_code_requested == true' >/dev/null 2>&1; then
+                        device_code_requested=1
+                        break
+                    fi
+                    _poll_attempts=$((_poll_attempts + 1))
+                    sleep 2
+                done
+                if [ -z "$device_code_requested" ]; then
+                    log_error "af gateway auth status --json never reported device_code_requested after 20s (10 attempts x 2s) — gateway is not authenticated; bootstrap failed"
+                    exit 1
+                fi
+                _ensure_codex_session
+                if ! af gateway auth import; then
+                    exit 1
+                fi
+                _reconcile_gateway "$relaunch_script"
+                if ! _first_out="$(af config models check "$profile" --first 2>&1)"; then
+                    log_error "af config models check $profile --first still failed after the forced re-login: $_first_out"
+                    log_error "the line above carries the gateway's own error text; the gateway pane has the rest: tmux capture-pane -t litellm -p -S -200"
+                    exit 1
+                fi
+            else
+                log_error "af config models check $profile --first failed: $_first_out"
+                log_error "the line above carries the gateway's own error text; the gateway pane has the rest: tmux capture-pane -t litellm -p -S -200"
+                exit 1
+            fi
+        fi
+    }
+    _first_probe_bootstrap "$profile" "$relaunch_script"
+
+    if ! af config models check "$profile" --live; then
+        log_error "af config models check $profile --live failed"
+        exit 1
+    fi
+
+    # Other-gateway-profile non-live check with an agent-mapping warning (D5): the resolved
+    # profile's sibling gets a cheap structural check only — never --first/--live, which would
+    # spend quota against a profile this run is not using. The warning fires only when the
+    # sibling's own check hard-fails AND an agent is mapped to it — never on a healthy but
+    # unused profile.
+    local other_profile="codex-subscription"
+    if [ "$profile" = "codex-subscription" ]; then
+        other_profile="codex"
+    fi
+    if ! af config models check "$other_profile" >/dev/null 2>&1; then
+        local mapped_agents
+        mapped_agents="$(jq -r --arg p "$other_profile" '.agents // {} | to_entries[] | select(.value == $p) | .key' .agentfactory/models.json 2>/dev/null | paste -sd, -)"
+        if [ -n "$mapped_agents" ]; then
+            log_warn "profile \"$other_profile\" failed its non-live check and is mapped to agent(s): $mapped_agents"
+        fi
+    fi
 
     log_success "LiteLLM gateway ready at http://localhost:$LITELLM_PORT (tmux session: litellm)"
 }
@@ -1113,9 +1897,9 @@ setup_telemetry() {
     local oo_bin="$bin_dir/openobserve"
     local oo_data="$factory_root/.agentfactory/telemetry/openobserve"
 
-    # Port-occupancy probe transplanted verbatim from quickdocker.sh:92 — pure-bash /dev/tcp, with
-    # no external port-scan tools (none is a repo dependency). Returns 0 (in use) / 1 (free).
-    _port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&-; return 0; } || return 1; }
+    # Port-occupancy probe: _port_in_use is now a top-level function (K11, issue #693 Phase 1,
+    # hoisted above setup_litellm so setup_litellm can reach it too); this function's body no
+    # longer defines it locally.
 
     # Relaunch script + login-guard append, written BEFORE every early return below
     # (fable-implement Step 2, issue #584, E-6/R5a interlock): an install whose
@@ -1412,8 +2196,8 @@ EOF
     # earlier in this function now, not here — fable-implement Step 2 (issue #584,
     # E-6/R5a interlock) moved the relaunch.sh write and this guard's ~/.bash_profile
     # append ahead of all eight early returns above, so an install that fails on
-    # first start still receives the recovery mechanism. See the writes immediately
-    # after _port_in_use()'s definition, near the top of this function.
+    # first start still receives the recovery mechanism. See the writes near the
+    # top of this function, immediately after the local variable declarations.
 
     # Two-lever summary (plain statement, never a prompt — ADR-014): the backend is INSTALLED, not
     # ENABLED. Runtime export stays off until the operator flips the gate.
@@ -1423,6 +2207,11 @@ EOF
 
 main() {
     parse_args "$@"
+
+    if [ -n "$LITELLM_AUTH_MODE" ] && [ "$WITH_LITELLM" != true ]; then
+        log_error "--litellm-auth requires --litellm"
+        exit 1
+    fi
 
     echo ""
     echo "=========================================="
@@ -1532,7 +2321,15 @@ main() {
     fi
     # <<< phase5 webui launch guard <<<
 
-    # Done!
+    # Opt-in LiteLLM gateway — LAST, after the normal bootstrap is fully done, so
+    # it behaves exactly like running USING_LITELLM.md's steps by hand post-setup.
+    if [ "$WITH_LITELLM" = true ]; then
+        setup_litellm
+    fi
+
+    # Done! Printed here (K15/D25, issue #693 Phase 4), after setup_litellm and before
+    # setup_telemetry — a run that dies inside setup_litellm's login/verification steps must
+    # never announce completion first.
     echo ""
     echo "=========================================="
     echo "  Setup Complete!"
@@ -1546,12 +2343,6 @@ main() {
     echo "  af up       # Start agent sessions"
     echo "  af down     # Stop agent sessions"
     echo ""
-
-    # Opt-in LiteLLM gateway — LAST, after the normal bootstrap is fully done, so
-    # it behaves exactly like running USING_LITELLM.md's steps by hand post-setup.
-    if [ "$WITH_LITELLM" = true ]; then
-        setup_litellm
-    fi
 
     # Telemetry backend — the NEW last statement. Default-on (O-1 opt-out via --no-telemetry);
     # runs after everything else so a hiccup here never touches the already-complete factory.

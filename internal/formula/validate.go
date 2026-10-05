@@ -11,7 +11,9 @@ import (
 	"github.com/stempeck/agentfactory/internal/config"
 )
 
-var validSkillName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+// A skill name is local (`skill`) or plugin-namespaced (`ns:skill`); a namespaced skill resolves at
+// integration admission, not against the local skills directory.
+var validSkillName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*(:[a-zA-Z][a-zA-Z0-9_-]*)?$`)
 
 // Validate checks that the formula has all required fields and valid structure.
 func (f *Formula) Validate() error {
@@ -34,6 +36,10 @@ func (f *Formula) Validate() error {
 	}
 
 	if err := f.validateSkillNames(); err != nil {
+		return err
+	}
+
+	if err := f.validateIntegrationNames(); err != nil {
 		return err
 	}
 
@@ -295,6 +301,33 @@ func (f *Formula) validateSkillNames() error {
 	return nil
 }
 
+func (f *Formula) validateIntegrationNames() error {
+	var problems []string
+	listed := make(map[string]string)
+	for _, list := range []struct {
+		key   string
+		names []string
+	}{{"integrations", f.Integrations}, {"integrations_optional", f.IntegrationsOptional}} {
+		for _, name := range list.names {
+			if err := config.ValidateAgentName(name); err != nil {
+				problems = append(problems, fmt.Sprintf("%s: invalid integration name %q (%v)", list.key, name, err))
+				continue
+			}
+			switch prev, seen := listed[name]; {
+			case seen && prev == list.key:
+				problems = append(problems, fmt.Sprintf("%s: duplicate integration %q", list.key, name))
+			case seen:
+				problems = append(problems, fmt.Sprintf("integration %q is listed in both integrations and integrations_optional", name))
+			}
+			listed[name] = list.key
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("formula %q %s", f.Name, strings.Join(problems, "; "))
+	}
+	return nil
+}
+
 // ValidateAgents rejects the formula if any declared agent (formula-level
 // or per-unit) is not a key in registry.Agents. An empty declared agent
 // is skipped (AC-4 documented default). A nil registry is rejected —
@@ -345,6 +378,9 @@ func (f *Formula) ValidateSkills(skillsDir string) error {
 	}
 	var missing []string
 	for _, name := range f.Skills {
+		if IsNamespacedSkill(name) {
+			continue
+		}
 		path := filepath.Join(skillsDir, name, "SKILL.md")
 		if _, err := os.Stat(path); err != nil {
 			missing = append(missing, fmt.Sprintf("%s: %s not found (no SKILL.md)", name, path))
@@ -355,6 +391,11 @@ func (f *Formula) ValidateSkills(skillsDir string) error {
 			len(missing), f.Name, strings.Join(missing, "\n  - "), describeAvailableSkills(skillsDir))
 	}
 	return nil
+}
+
+// IsNamespacedSkill reports whether a skill name is plugin-namespaced (`ns:skill`).
+func IsNamespacedSkill(name string) bool {
+	return strings.Contains(name, ":")
 }
 
 func describeAvailableSkills(skillsDir string) string {
@@ -380,7 +421,7 @@ func describeAvailableSkills(skillsDir string) string {
 
 var (
 	reSkillCall    = regexp.MustCompile(`Skill\(skill:\s*"([^"]+)"`)
-	reClaudePSkill = regexp.MustCompile(`claude\s+-p\s+["']/([a-zA-Z][a-zA-Z0-9_-]*)`)
+	reClaudePSkill = regexp.MustCompile(`claude\s+-p\s+["']/([a-zA-Z][a-zA-Z0-9_-]*(?::[a-zA-Z][a-zA-Z0-9_-]*)?)`)
 )
 
 // DetectSkillInvocations scans step descriptions for structured skill

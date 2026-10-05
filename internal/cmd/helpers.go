@@ -43,7 +43,7 @@ func telemetryLaunchEnv(root, agentDir, agentName, cliModel string, warn io.Writ
 // loadModelsConfigForCrossCheck loads models.json for a NON-selecting cross-check
 // caller (`af dispatch`, `af config dispatch set`). Neither path launches from a
 // profile, so a models.json validation error must NOT be fatal — mirroring the launch
-// path's non-selecting tolerance (resolveLaunchModelEnv's fall-through): it warns and
+// path's non-selecting tolerance (resolveModelEnvForSession's fall-through): it warns and
 // returns nil, which ValidateDispatchConfig treats as "skip the per-mapping model
 // cross-check". The profile-WRITING path (`af config models set` / SaveModelsConfig)
 // stays strict — this tolerance is only for the read/cross-check callers.
@@ -59,6 +59,7 @@ func loadModelsConfigForCrossCheck(root string, warn io.Writer) *config.ModelsCo
 type respawnTmux interface {
 	ClearHistory(pane string) error
 	RespawnPane(pane, command string) error
+	UnsetEnvironment(target string, keys ...string) error
 }
 
 // cmdTmux is the full union of *tmux.Tmux methods the cmd layer drives across
@@ -73,6 +74,7 @@ type cmdTmux interface {
 	IsAvailable() bool
 	HasSession(name string) (bool, error)
 	NewSession(name, workDir string) error
+	NewSessionWithCommand(name, workDir, command string) error
 	KillSession(name string) error //af:teardown:decl
 	SendKeys(session, keys string) error
 	SendKeysDelayed(session, keys string, delayMs int) error
@@ -148,53 +150,43 @@ type RespawnOptions struct {
 	// step_boundary_handoff is the exception among the agent-initiated classes: it decided on an
 	// occupancy reading, so it populates this rather than logging as an occupancy-less recycle.
 	TriggerDetail recycleDetail
+	// DroppedIntegrations is filled by the respawn itself from the composer, so the recovery log names every
+	// integration a recycle could not re-bind.
+	DroppedIntegrations []string
 }
 
 func respawnSession(opts RespawnOptions) error {
+	// Every recycle route (handoff, compact handoff, done, watchdog, recovery) funnels here,
+	// so one K14 guard covers them all. It runs before any identity or tmux effect, and the
+	// refusal is still recorded like any failed respawn.
+	if err := refusePluginAgentWithoutTemplate(opts.FactoryRoot, opts.AgentName); err != nil {
+		recordRecycle(opts, err)
+		return err
+	}
+	ensureFactoryIntegrationServices(context.Background(), nil, opts.FactoryRoot, os.Stderr)
 	mgr := session.NewManager(opts.FactoryRoot, opts.AgentName, opts.AgentEntry)
 	mgr.SetInitialPrompt("af prime")
 	if opts.WorktreePath != "" {
 		_ = mgr.SetWorktree(opts.WorktreePath, opts.WorktreeID)
 	}
-	// Carry the git identity fallback + centralized trailer across respawns
-	// (handoff/compact-handoff/watchdog) — without this, respawned agents would
-	// commit without them (issue #371 G-B sibling-entrypoint).
-	wireGitIdentity(mgr, opts.FactoryRoot, opts.WorktreePath)
-
-	// Re-resolve the FULL model precedence chain on every respawn (issue #480):
-	// BOTH a --model override (captured by the .runtime/model_override marker) AND a
-	// durable models.json.agents default must survive handoff/compact/watchdog —
-	// reading only the marker would silently revert a durable-default agent to the
-	// global model on the first handoff. A respawn carries no explicit flag (cliModel
-	// ""), so a broken models.json warns + falls through to the global default
-	// rather than failing. Emission is structural: BuildStartupCommand() re-emits the
-	// set, so no second emission path is added here (handoff_test transitivity guard).
-	if _, env, _ := resolveRespawnModelEnv(opts.FactoryRoot, opts.AgentName, respawnAgentDir(opts), opts.AgentEntry.Model, os.Stderr); len(env) > 0 {
-		// #678 K5: context.Background() because a respawn is not a request. This function takes no
-		// ctx — every one of its four callers reaches it from a recycle decision rather than from a
-		// cobra invocation — and adding one would change a signature four call sites share for a
-		// cancellation nothing here can honour: the pane is replaced by the last statement below.
-		agentDir := respawnAgentDir(opts)
-		nextStep, formula := nextReadyStep(context.Background(), opts.FactoryRoot, agentDir)
-		mgr.SetModelEnv(withEffortLevel(opts.FactoryRoot, agentDir, env, nextStep, formula))
+	// #678 K5: context.Background() because a respawn is not a request. This function takes no
+	// ctx — every one of its callers reaches it from a recycle decision rather than from a cobra
+	// invocation — and adding one would change a signature they all share for a cancellation
+	// nothing here can honour: the pane is replaced by the last statement below.
+	c, reports, err := launchContributions(context.Background(), opts.FactoryRoot, opts.AgentName, respawnAgentDir(opts), opts.AgentEntry, "", false, false, os.Stderr)
+	opts.DroppedIntegrations = reports.DroppedIntegrations
+	if err != nil {
+		recordRecycle(opts, err)
+		return err
+	}
+	mgr.SetLaunchContributions(&c)
+	line, err := mgr.BuildStartupCommand()
+	if err != nil {
+		recordRecycle(opts, err)
+		return err
 	}
 
-	// Profile-key universe across respawns (issue #602), wired UNCONDITIONALLY — NOT inside
-	// the guard above. A respawn is the path that reuses the tmux session, so it is where a
-	// key a prior profile set survives; gating this on a resolved profile would leave the
-	// switch-to-no-profile case carrying the stale value forever. BuildStartupCommand below is
-	// the only emitter a respawn reaches, so this is the only clear it will ever get.
-	mgr.SetModelKeyUniverse(launchModelKeyUniverse(opts.FactoryRoot))
-
-	// Telemetry env across respawns (issue #329): watchdog / handoff / compact-handoff all
-	// route through here and NEVER call Start(), so this is the only place they gain the OTel
-	// family — and, when the gate is off, the inline KEY='' hygiene the rebuilt command emits
-	// is the only clear a telemetry-off relaunch gets. Gate off ⇒ nil ⇒ inject nothing.
-	if env := telemetryLaunchEnv(opts.FactoryRoot, respawnAgentDir(opts), opts.AgentName, opts.AgentEntry.Model, os.Stderr); env != nil {
-		mgr.SetTelemetryEnv(env)
-	}
-
-	respawnCmd := opts.CmdPrefix + mgr.BuildStartupCommand()
+	respawnCmd := opts.CmdPrefix + line
 	tx := opts.Tx
 	if tx == nil {
 		tx = tmux.NewTmux()
@@ -211,12 +203,21 @@ func respawnSession(opts RespawnOptions) error {
 	// numbers, so moving code within this file or adding an import to it is free.
 	provisionRecycleSettings(opts)
 	provisionIdentity(opts)
+	// The respawned process inherits this session's tmux env, where an older af left copies of
+	// every launch family. A failed scrub only leaves those copies in place, so it is surfaced
+	// rather than allowed to block the respawn.
+	if err := tx.UnsetEnvironment(opts.PaneID, mgr.StaleTmuxEnvKeys()...); err != nil {
+		fmt.Fprintf(os.Stderr, "recovery: %s: stale tmux env scrub failed: %v\n", opts.AgentName, err)
+	}
 	_ = tx.ClearHistory(opts.PaneID)
 	// The respawn error is captured, recorded, then returned UNCHANGED. Letting the log write
 	// decide the return value would both mask a real respawn failure and break this function's
 	// existing error contract.
-	err := tx.RespawnPane(opts.PaneID, respawnCmd)
+	err = tx.RespawnPane(opts.PaneID, respawnCmd)
 	recordRecycle(opts, err)
+	if err == nil {
+		reports.mailIntegrations(opts.FactoryRoot, os.Stderr)
+	}
 	return err
 }
 
@@ -253,19 +254,16 @@ func gitConfigGet(dir, key string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// wireGitIdentity configures a session Manager's git identity fallback and the
-// centralized Co-authored-by trailer (issue #371). The default identity is drawn
-// from factory.json (default-filled to the C-3 constants); the author fallback is
-// applied ONLY when no ambient identity resolves (C-4 presence-gate), while the
-// trailer channel is always activated (centralized, AC-4/AC-5). Shared by every
-// Start-capable launch path so no entrypoint is missed (G-B).
+// wireGitIdentity resolves the git identity fallback and the centralized Co-authored-by
+// trailer (issue #371). The default identity is drawn from factory.json (default-filled to the
+// C-3 constants); name/email come back empty unless no ambient identity resolves (C-4
+// presence-gate), while the trailer values are always returned (centralized, AC-4/AC-5).
 //
-// The presence-gate is checked at workDir — the directory where the agent will
-// actually commit (its worktree) — NOT the factory root: GIT_AUTHOR_* overrides
-// even a repo-local user.name unconditionally, so checking the wrong directory
-// could silently re-author a commit whose repo already has an identity (C-4). An
-// empty workDir falls back to the factory root.
-func wireGitIdentity(mgr *session.Manager, factoryRoot, workDir string) {
+// The presence-gate is checked at workDir — the directory where the agent will actually commit —
+// NOT the factory root: GIT_AUTHOR_* overrides even a repo-local user.name unconditionally, so
+// checking the wrong directory could silently re-author a commit whose repo already has an
+// identity (C-4). An empty workDir falls back to the factory root.
+func wireGitIdentity(factoryRoot, workDir string) (name, email, hooksDir, coName, coEmail string) {
 	def := config.DefaultGitIdentity()
 	if cfg, err := config.LoadFactoryConfig(config.FactoryConfigPath(factoryRoot)); err == nil && cfg.GitIdentity != nil {
 		def = cfg.GitIdentity
@@ -274,10 +272,10 @@ func wireGitIdentity(mgr *session.Manager, factoryRoot, workDir string) {
 		workDir = factoryRoot
 	}
 	ambientName, ambientEmail := detectGitIdentity(workDir)
-	if name, email, apply := config.ResolveIdentity(def, ambientName, ambientEmail); apply {
-		mgr.SetGitIdentity(name, email)
+	if n, e, apply := config.ResolveIdentity(def, ambientName, ambientEmail); apply {
+		name, email = n, e
 	}
-	mgr.SetGitTrailer(config.GitHooksDir(factoryRoot), def.Name, def.Email)
+	return name, email, config.GitHooksDir(factoryRoot), def.Name, def.Email
 }
 
 func captureCheckpointWithFormula(ctx context.Context, cwd, notes string, mutate func(*checkpoint.Checkpoint)) error {

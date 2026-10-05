@@ -172,32 +172,6 @@ func TestSetEnvironment(t *testing.T) {
 	}
 }
 
-// TestUnsetEnvironment mirrors TestSetEnvironment for the #508 W2 wrapper: it drives the
-// real set-environment -u form against a live af-test-* session. Guard-gated like its
-// twin, so it runs only under `make test-integration`.
-func TestUnsetEnvironment(t *testing.T) {
-	if !hasTmux() {
-		t.Skip("tmux not available")
-	}
-
-	tx := NewTmux()
-	name := "af-test-unsetenv"
-
-	_ = tx.KillSession(name)
-
-	if err := tx.NewSession(name, "/tmp"); err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	defer tx.KillSession(name)
-
-	if err := tx.SetEnvironment(name, "TEST_VAR", "hello"); err != nil {
-		t.Fatalf("SetEnvironment: %v", err)
-	}
-	if err := tx.UnsetEnvironment(name, "TEST_VAR"); err != nil {
-		t.Fatalf("UnsetEnvironment: %v", err)
-	}
-}
-
 // TestSetOption_ReadBack is the T-3 read-back for Issue #412 Fix A (AC #6): a
 // real af-test-* session reports both applied options. NewSession raises the
 // GLOBAL history-limit to 50000 (best-effort) before creating its window;
@@ -485,5 +459,30 @@ func TestSendNotificationBanner_Integration(t *testing.T) {
 		if strings.TrimSpace(line) == "INJECTED" {
 			t.Fatalf("injection payload was executed: INJECTED appears on its own line:\n%s", content)
 		}
+	}
+}
+
+func TestGetPanePID_ExactMatchOnly(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not available")
+	}
+
+	tx := NewTmux()
+	longer := "af-test-panepid-longer"
+	missing := "af-test-panepid"
+	_ = tx.KillSession(longer)
+	_ = tx.KillSession(missing)
+
+	if err := tx.NewSession(longer, "/tmp"); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer tx.KillSession(longer)
+
+	pid, err := tx.GetPanePID(longer)
+	if err != nil || pid <= 0 {
+		t.Fatalf("control: GetPanePID(%q) = %d, %v; want the pane pid", longer, pid, err)
+	}
+	if pid, err := tx.GetPanePID(missing); err == nil {
+		t.Errorf("GetPanePID(%q) = %d with only %q running; a missing session must be an error, not a prefix match", missing, pid, longer)
 	}
 }

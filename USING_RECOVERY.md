@@ -256,8 +256,9 @@ gets externalized before the threshold is what survives after it.
 
 Every factory-initiated recycle appends one line to the factory-root
 `.runtime/recovery_log.jsonl`, with fields `at`, `agent`, `trigger`, `observed_pct`,
-`threshold_pct`, `session_id`, `instance_id`, `resumed_step`, `attempt` and `outcome` — when it
-happened, what triggered it, and what was resumed.
+`threshold_pct`, `session_id`, `instance_id`, `resumed_step`, `attempt`, `outcome` and, when the
+respawn could not bind a pinned integration, `dropped_integrations` — when it happened, what
+triggered it, and what was resumed.
 
 Live state is on the two machine-readable surfaces:
 

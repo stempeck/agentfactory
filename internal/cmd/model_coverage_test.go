@@ -410,25 +410,6 @@ func TestModelCoverage_UnservedClassesAreDedupedByName(t *testing.T) {
 	}
 }
 
-// TestModelCoverage_ServedHashIgnoresOrder pins what the field is for: it fingerprints WHICH ids a
-// gateway advertised, not the order it happened to list them in. A gateway that merely reorders its
-// model_list must not read as a changed inventory.
-func TestModelCoverage_ServedHashIgnoresOrder(t *testing.T) {
-	forward := servedListHash([]string{"gpt-5.6-terra", "gpt-5.6-luna", "claude-fable-5"})
-	shuffled := servedListHash([]string{"claude-fable-5", "gpt-5.6-terra", "gpt-5.6-luna"})
-	if forward != shuffled {
-		t.Errorf("reordering the served list must not change the hash;\n %s\n %s", forward, shuffled)
-	}
-	if forward == servedListHash([]string{"gpt-5.6-terra", "gpt-5.6-luna"}) {
-		t.Error("dropping an advertised id MUST change the hash, or the field records nothing")
-	}
-	// The hash is written to a file an operator can read; it must be a digest of the ids, not the
-	// ids themselves.
-	if strings.Contains(forward, "gpt-5.6-terra") {
-		t.Errorf("the hash must not carry the ids verbatim; got %q", forward)
-	}
-}
-
 // TestConfigModelsCheck_ModelCoverage_NoMainModel_ReportsUncovered is full issue #598: an endpoint
 // profile that declares no ANTHROPIC_MODEL derives nothing, so every class launches empty.
 func TestConfigModelsCheck_ModelCoverage_NoMainModel_ReportsUncovered(t *testing.T) {
@@ -579,11 +560,10 @@ func TestConfigModelsCheck_ModelCoverage_RecordWritten(t *testing.T) {
 		t.Fatalf("check must leave a coverage record behind: %v", err)
 	}
 	var rec struct {
-		V          int    `json:"v"`
-		Profile    string `json:"profile"`
-		CheckedAt  string `json:"checked_at"`
-		ServedHash string `json:"served_hash"`
-		Classes    []struct {
+		V         int    `json:"v"`
+		Profile   string `json:"profile"`
+		CheckedAt string `json:"checked_at"`
+		Classes   []struct {
 			Class  string `json:"class"`
 			Model  string `json:"model"`
 			Served bool   `json:"served"`
@@ -598,8 +578,8 @@ func TestConfigModelsCheck_ModelCoverage_RecordWritten(t *testing.T) {
 	if rec.Profile != "codex" {
 		t.Errorf("the record must name its profile (the fail-closed reader keys on it); got %q", rec.Profile)
 	}
-	if rec.CheckedAt == "" || rec.ServedHash == "" {
-		t.Errorf("the record must carry the probe timestamp and the served-list hash; got %+v", rec)
+	if rec.CheckedAt == "" {
+		t.Errorf("the record must carry the probe timestamp; got %+v", rec)
 	}
 	if len(rec.Classes) < len(config.DerivedEndpointClassKeys()) {
 		t.Errorf("the record must carry one verdict per derivable class plus the alias rows; got %d", len(rec.Classes))
@@ -662,6 +642,22 @@ func TestConfigModelsCheck_ModelCoverage_RecordReadFailsClosed(t *testing.T) {
 	})
 }
 
+// TestReadModelCoverageRecord_LegacyServedHashFieldStillReads pins design-doc.md L469's third
+// bullet: a coverage record written with the old served_hash field must still read after D23
+// deletes servedListHash/the ServedHash struct field — an unrecognised JSON key is silently
+// dropped by encoding/json, never a read failure.
+func TestReadModelCoverageRecord_LegacyServedHashFieldStillReads(t *testing.T) {
+	root := t.TempDir()
+	writeCoverageFixture(t, root, "codex", coverageRecordJSON("codex", map[string]bool{"opus": true}))
+	rec, ok := readModelCoverageRecord(root, "codex")
+	if !ok {
+		t.Fatal("a record written with the old served_hash field must still read after D23's field deletion")
+	}
+	if rec.V != modelCoverageVersion {
+		t.Errorf("the schema version must stay unchanged by the field deletion; got v=%d", rec.V)
+	}
+}
+
 // --- C5: --live ---------------------------------------------------------------------------------
 
 func TestConfigModelsCheck_ModelCoverage_LiveFlagRegistered(t *testing.T) {
@@ -693,12 +689,17 @@ func enableLiveSmoke(t *testing.T, respond func(model string) (*http.Response, e
 		var payload struct {
 			Model     string `json:"model"`
 			MaxTokens int    `json:"max_tokens"`
+			Stream    bool   `json:"stream"`
+			System    []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"system"`
 		}
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Errorf("the smoke body must be JSON: %v (%q)", err, body)
 		}
-		asked = append(asked, fmt.Sprintf("%s %s max_tokens=%d version=%s auth=%t",
-			req.URL.String(), payload.Model, payload.MaxTokens,
+		asked = append(asked, fmt.Sprintf("%s %s max_tokens=%d stream=%t system_blocks=%d version=%s auth=%t",
+			req.URL.String(), payload.Model, payload.MaxTokens, payload.Stream, len(payload.System),
 			req.Header.Get("anthropic-version"), req.Header.Get("Authorization") != ""))
 		return respond(payload.Model)
 	}
@@ -713,6 +714,27 @@ func liveAnswer(status int, body string) (*http.Response, error) {
 		Body:       io.NopCloser(strings.NewReader(body)),
 	}, nil
 }
+
+// streamedMessageBody is the smallest completed streamed Anthropic message: what a gateway that
+// serves a class answers a session-shaped probe with.
+const streamedMessageBody = "event: message_start\n" +
+	"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n" +
+	"event: content_block_start\n" +
+	"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+	"event: content_block_delta\n" +
+	"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"pong\"}}\n\n" +
+	"event: content_block_stop\n" +
+	"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+	"event: message_delta\n" +
+	"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n" +
+	"event: message_stop\n" +
+	"data: {\"type\":\"message_stop\"}\n\n"
+
+// streamedErrorBody is a gateway that opened the stream and then failed mid-turn.
+const streamedErrorBody = "event: message_start\n" +
+	"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n" +
+	"event: error\n" +
+	"data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n"
 
 func liveFixture(t *testing.T) string {
 	t.Helper()
@@ -733,7 +755,7 @@ func TestConfigModelsCheck_ModelCoverage_LiveSmokesEveryServedClass(t *testing.T
 	root := liveFixture(t)
 	stubModelsProbe(t, gatewayServedIDs(), nil)
 	asked := enableLiveSmoke(t, func(string) (*http.Response, error) {
-		return liveAnswer(200, `{"type":"message","content":[]}`)
+		return liveAnswer(200, streamedMessageBody)
 	})
 
 	out, err := runModelsCmd(t, runConfigModelsCheck, "codex")
@@ -746,8 +768,12 @@ func TestConfigModelsCheck_ModelCoverage_LiveSmokesEveryServedClass(t *testing.T
 	for _, req := range *asked {
 		// max_tokens is the floor a Responses-API-backed model accepts; a smaller ceiling is
 		// rejected outright and would read as an unserved class rather than as a bad request.
+		// The turn streams and carries a block-array system prompt because that is what a session
+		// sends: a gateway that answers a bare "ping" and refuses that shape must fail here.
 		if !strings.Contains(req, "http://localhost:4000/v1/messages") ||
 			!strings.Contains(req, "max_tokens=16") ||
+			!strings.Contains(req, "stream=true") ||
+			!strings.Contains(req, "system_blocks=1") ||
 			!strings.Contains(req, "version=2023-06-01") ||
 			!strings.Contains(req, "auth=true") {
 			t.Errorf("unexpected smoke request shape: %s", req)
@@ -773,9 +799,9 @@ func TestConfigModelsCheck_ModelCoverage_LiveRefusalFailsAndIsRecorded(t *testin
 	stubModelsProbe(t, gatewayServedIDs(), nil)
 	enableLiveSmoke(t, func(model string) (*http.Response, error) {
 		if model == "gpt-5.6-luna" {
-			return liveAnswer(400, `{"type":"error"}`)
+			return liveAnswer(400, `{"error":{"message":"litellm.BadRequestError: ChatgptException - {\"detail\":\"System messages are not allowed\"}","type":null,"code":"400"}}`)
 		}
-		return liveAnswer(200, `{"type":"message"}`)
+		return liveAnswer(200, streamedMessageBody)
 	})
 
 	out, err := runModelsCmd(t, runConfigModelsCheck, "codex")
@@ -784,6 +810,11 @@ func TestConfigModelsCheck_ModelCoverage_LiveRefusalFailsAndIsRecorded(t *testin
 	}
 	if !strings.Contains(out, `--live haiku → "gpt-5.6-luna": NOT SERVED`) {
 		t.Errorf("the refusing class must be named; out=%s", out)
+	}
+	// The gateway's own words travel into the verdict: that text is the searchable key to the
+	// upstream defect, and the status line alone never was.
+	if !strings.Contains(out, "System messages are not allowed") {
+		t.Errorf("the refusal must carry the gateway's error text verbatim; out=%s", out)
 	}
 	rec, ok := readModelCoverageRecord(root, "codex")
 	if !ok {
@@ -805,7 +836,7 @@ func TestConfigModelsCheck_ModelCoverage_LiveSkipsUnsmokeableRows(t *testing.T) 
 	root := liveFixture(t)
 	stubModelsProbe(t, []string{"gpt-5.6-terra", "claude-fable-5"}, nil) // gpt-5.6-luna absent
 	asked := enableLiveSmoke(t, func(string) (*http.Response, error) {
-		return liveAnswer(200, `{"type":"message"}`)
+		return liveAnswer(200, streamedMessageBody)
 	})
 
 	out, err := runModelsCmd(t, runConfigModelsCheck, "codex")
@@ -860,8 +891,45 @@ func TestConfigModelsCheck_ModelCoverage_LiveRejectsANonMessageAnswer(t *testing
 	if err == nil {
 		t.Fatalf("a 200 that is not a message must not count as served; out=%q", out)
 	}
-	if !strings.Contains(out, "want a message") {
-		t.Errorf("the verdict must say what was expected; out=%s", out)
+	if !strings.Contains(out, "want a streamed message") || !strings.Contains(out, "no such model") {
+		t.Errorf("the verdict must say what was expected and quote the gateway; out=%s", out)
+	}
+}
+
+// TestConfigModelsCheck_ModelCoverage_LiveRejectsAnUnstreamedMessage: a session asks the gateway to
+// stream. A gateway that answers a complete JSON message instead would not serve that session, so a
+// non-streamed message is not proof of service either.
+func TestConfigModelsCheck_ModelCoverage_LiveRejectsAnUnstreamedMessage(t *testing.T) {
+	liveFixture(t)
+	stubModelsProbe(t, gatewayServedIDs(), nil)
+	enableLiveSmoke(t, func(string) (*http.Response, error) {
+		return liveAnswer(200, `{"type":"message","content":[{"type":"text","text":"pong"}]}`)
+	})
+
+	out, err := runModelsCmd(t, runConfigModelsCheck, "codex")
+	if err == nil {
+		t.Fatalf("a 200 that did not stream must not count as served; out=%q", out)
+	}
+	if !strings.Contains(out, "want a streamed message") {
+		t.Errorf("the verdict must say the stream was missing; out=%s", out)
+	}
+}
+
+// TestConfigModelsCheck_ModelCoverage_LiveRejectsAStreamedErrorEvent: a stream that opens and then
+// fails is the shape a mid-turn upstream refusal takes; the event's message is the verdict.
+func TestConfigModelsCheck_ModelCoverage_LiveRejectsAStreamedErrorEvent(t *testing.T) {
+	liveFixture(t)
+	stubModelsProbe(t, gatewayServedIDs(), nil)
+	enableLiveSmoke(t, func(string) (*http.Response, error) {
+		return liveAnswer(200, streamedErrorBody)
+	})
+
+	out, err := runModelsCmd(t, runConfigModelsCheck, "codex")
+	if err == nil {
+		t.Fatalf("a stream that ended in an error event must not count as served; out=%q", out)
+	}
+	if !strings.Contains(out, "NOT SERVED") || !strings.Contains(out, "Overloaded") {
+		t.Errorf("the error event's message must be the verdict; out=%s", out)
 	}
 }
 

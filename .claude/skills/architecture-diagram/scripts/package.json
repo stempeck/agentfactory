@@ -1,0 +1,13 @@
+{
+  "name": "architecture-diagram-validator",
+  "private": true,
+  "type": "module",
+  "description": "Pinned Mermaid parser and DOM shim used only by the architecture-diagram skill's validator",
+  "dependencies": {
+    "jsdom": "29.1.1",
+    "mermaid": "12.1.0"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

@@ -12,10 +12,10 @@ import (
 // half), shell-quoted, before the `&&` (so the Claude Bash tool inherits them).
 func TestBuildStartupCommand_GitIdentityWhenSet(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-	mgr.SetGitIdentity("agentfactory-cli", "293373236+agentfactory-cli@users.noreply.github.com")
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
+	mgr.c.GitAuthorName, mgr.c.GitAuthorEmail = "agentfactory-cli", "293373236+agentfactory-cli@users.noreply.github.com"
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	for _, want := range []string{
 		"GIT_AUTHOR_NAME='agentfactory-cli'",
@@ -38,9 +38,9 @@ func TestBuildStartupCommand_GitIdentityWhenSet(t *testing.T) {
 // git env vars cannot clobber an ambient identity.
 func TestBuildStartupCommand_GitIdentityOmittedWhenUnset(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	for _, banned := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"} {
 		if strings.Contains(cmd, banned) {
@@ -55,10 +55,10 @@ func TestBuildStartupCommand_GitIdentityOmittedWhenUnset(t *testing.T) {
 // hard-coded in the shell hook).
 func TestBuildStartupCommand_GitTrailerWhenSet(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-	mgr.SetGitTrailer("/tmp/factory/.agentfactory/githooks", "agentfactory-cli", "293373236+agentfactory-cli@users.noreply.github.com")
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
+	mgr.c.GitHooksDir, mgr.c.CoauthorName, mgr.c.CoauthorEmail = "/tmp/factory/.agentfactory/githooks", "agentfactory-cli", "293373236+agentfactory-cli@users.noreply.github.com"
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	for _, want := range []string{
 		"GIT_CONFIG_COUNT=",
@@ -81,9 +81,9 @@ func TestBuildStartupCommand_GitTrailerWhenSet(t *testing.T) {
 // is opt-in at the Manager level, so unit-level startup commands stay clean.
 func TestBuildStartupCommand_GitTrailerOmittedWhenUnset(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	for _, banned := range []string{"GIT_CONFIG_COUNT", "core.hooksPath", "AF_COAUTHOR_NAME", "AF_COAUTHOR_EMAIL"} {
 		if strings.Contains(cmd, banned) {
@@ -96,10 +96,10 @@ func TestBuildStartupCommand_GitTrailerOmittedWhenUnset(t *testing.T) {
 // POSIX-quoted (injection-safe), mirroring the ANTHROPIC_* quoting discipline.
 func TestBuildStartupCommand_GitIdentityShellQuoted(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testagent", entry)
-	mgr.SetGitIdentity("O'Brien; rm -rf /", "evil@example.com")
+	mgr := newTestManager("/tmp/factory", "testagent", entry)
+	mgr.c.GitAuthorName, mgr.c.GitAuthorEmail = "O'Brien; rm -rf /", "evil@example.com"
 
-	cmd := mgr.BuildStartupCommand()
+	cmd := startupLine(t, mgr)
 
 	quoted := shellQuote("O'Brien; rm -rf /")
 	if !strings.Contains(cmd, "GIT_AUTHOR_NAME="+quoted) {

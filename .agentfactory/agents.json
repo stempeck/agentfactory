@@ -84,6 +84,12 @@
       "directive": "Run af prime to load formula context.",
       "formula": "investigate"
     },
+    "lineage": {
+      "type": "autonomous",
+      "description": "## Overview\n\n**Lineage** is a succession discipline, not a task agent.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "lineage"
+    },
     "manager": {
       "type": "interactive",
       "description": "Interactive agent for human-supervised work",
@@ -124,6 +130,12 @@
       "description": "## Overview\nLean, adaptive incremental workflow that addresses the UNRESOLVED review comments on a pull request, scaling process rigor to the size of the change.",
       "directive": "Run af prime to load formula context.",
       "formula": "rapid-increment"
+    },
+    "rapid-soldesign": {
+      "type": "autonomous",
+      "description": "## Overview\nAutonomous multi-agent rapid design refinement from a GitHub issue URI, delivered as a design PR.",
+      "directive": "Run af prime to load formula context.",
+      "formula": "rapid-soldesign"
     },
     "rapid-soldesign-plan": {
       "type": "autonomous",
