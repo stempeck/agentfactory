@@ -194,3 +194,41 @@ locally). Ran from the worktree root (inside the boundary):
 Working tree clean apart from the excluded CLAUDE.md regeneration line.
 
 STEP-15 VERDICT: PASS (tests pass, build clean).
+
+## SELF-VERIFY (Jidoka — outputs vs. runbook contract)
+
+Contract re-read from the approved runbook (`approach.md`); no design doc for this cycle.
+Point by point, each with evidence:
+
+**Tier A — every STALE audit claim fixed; no unverified claim entered.**
+- S1 (STALE, README 24→26 formulas + lineage/rapid-soldesign rows) — FIXED: README diff shows
+  "Twenty-four"→"Twenty-six", `rapid-soldesign` added to Design, `lineage` added to Utility.
+- S2 (STALE, README 12→13 skills + architecture-diagram row) — FIXED: "Twelve"→"Thirteen",
+  `/architecture-diagram` row added.
+- S3 (ABSENT, `af plugin` family) — FIXED: new "Plugins & the model gateway" block
+  (`af plugin list/install/verify/check/remove`).
+- S4 (ABSENT, `af gateway auth` + ChatGPT-subscription billing) — FIXED: `af gateway auth
+  import/status` in the block; quickstart gains `--litellm --litellm-auth=codex-subscription`.
+- S5 (MISSING, CHANGELOG #117 section) — FIXED: `## Unreleased` section for #117.
+- S6 (RELEASE GAP) — by design an OPERATOR decision at deliver-tier-a. Carried to step 17;
+  #117 sits under `## Unreleased` with no premature version tag. Documented deviation, not a
+  defect. No unverified claim entered (GATE-3 VERDICT: PASS — every command/count/link sourced).
+
+**Tier B — every draft operator-resolved; none self-approved.**
+- medium.md + linkedin.md both carry `Decision: READY — operator stempeck, verified #120`.
+  Verified via `gh issue view 120` (author=stempeck, keyword=READY). No self-approval.
+
+**Tier law — zero external posts by the agent.**
+- All agent actions were GitHub (operator-owned Tier A) or agent-comms: review PR #119,
+  notify issue #120 (closed), one PR comment. ZERO Medium/LinkedIn/external posts. Tier B
+  publishing remains the operator's; drafts are paste-ready only.
+
+**Voice law — EDITED enumeration.**
+- N/A: both drafts READY (approved as written); no EDITED reconciliation, so nothing to
+  enumerate. paste.html already matches the approved copy.
+
+**Privacy mode — diff matches declared mode.**
+- Runbook declares `Privacy-Decision: COMMITTED` (approach.md:236). Diff includes the
+  `.marketing/` cycle artifacts alongside README/CHANGELOG — matches committed mode.
+
+SELF-VERIFY VERDICT: PASS
