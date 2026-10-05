@@ -144,6 +144,12 @@ commits + orphan improve-agent commit 41616766, NOT in main — see memory note)
 orphaning 41616766 I pushed this cycle's clean history (origin/main + 6 cycle commits +
 drafts) to `af/marketing-cycle-af-91fe0795` and opened the PR from there.
 
-GATE-4 STATUS: HOLDING — drafts delivered on PR; awaiting operator READY/EDITED/SKIP.
-`af done --phase-complete --gate af-829d0f7e` will NOT run until the operator's decision
-keyword is recorded (per fidelity PRINCIPLE 2 — do not close a HOLD gate bead early).
+Delivered 2026-10-05:
+- **Review PR #119** (base `main`, head `af/marketing-cycle-af-91fe0795`) — both drafts
+  inline; three figure raw-URLs verified HTTP 200; paste vehicle in Files tab.
+- **Notify issue #120** — the ping, points to #119. Close when both drafts resolve.
+
+GATE-4 STATUS: HOLDING — drafts delivered on PR #119; awaiting operator READY/EDITED/SKIP
+per draft. `af done --phase-complete --gate af-829d0f7e` will NOT run until the operator's
+decision keyword is recorded on #119 (per fidelity PRINCIPLE 2 — do not close a HOLD gate
+bead early; learned this cycle at GATE 2).
