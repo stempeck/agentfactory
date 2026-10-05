@@ -155,3 +155,30 @@ approve-as-written for BOTH drafts (Medium + LinkedIn); no edits, so no voice re
 and no paste.html re-render needed. Keyword transcribed into both draft Decision forms. Open
 calls resolve to defaults (primary title, keep figure 3); release-tag question carried to
 step 17. Issue #120 closed. Proceeding: `af done --phase-complete --gate af-829d0f7e`.
+
+## SELF-REVIEW
+
+Reviewed `git diff origin/main...HEAD` (9 commits) before tests.
+
+Findings and fixes:
+1. **Privacy mode / diff shape — OK.** Committed mode: `.marketing/` cycle artifacts
+   (audit, story, log, medium, linkedin, paste.html, 3 screenshots) appear alongside the
+   README/CHANGELOG changes, as expected. No source code, no debug files, no stray binaries.
+2. **CLAUDE.md regeneration noise — EXCLUDED (fix).** `af prime` rewrote the agent CLAUDE.md
+   working-directory path to the worktree path; that machine-generated 1-line change was kept
+   OUT of every commit (it is not cycle content).
+3. **Stale claims reintroduced — NONE.** The two stale counts the audit caught are the only
+   count edits: "Twenty-four formulas"→"Twenty-six", "Twelve skills"→"Thirteen" — both match
+   the GATE-3 source recount (`install_formulas/*.toml`=26, `.claude/skills/`=13).
+4. **Broken relative links — NONE.** Verified present on HEAD: USING_PLUGINS/LITELLM/MODELS/
+   TOKENOMICS/AGENTFACTORY/RECOVERY/TELEMETRY.md, docs/formulas.md; ADR-024/ADR-025 files
+   exist under docs/architecture/adrs/.
+5. **Host-markdown rendering — OK.** README tables well-formed (3 columns intact after the
+   longer Design/Utility rows); CHANGELOG uses standard `##`/`###`/list/inline-code — renders
+   on GitHub. No literal-markdown hazards in the committed Tier A text.
+6. **Cruft (TODO/FIXME/placeholder/TBD) — NONE** in the README/CHANGELOG diff. The 3 PNGs are
+   intended figure artifacts, not cruft.
+7. **Tier B drafts — resolved READY** (operator-verified #120); Decision forms transcribed.
+   No EDITED reconciliation outstanding, so paste.html matches the approved copy.
+
+SELF-REVIEW VERDICT: PASS
