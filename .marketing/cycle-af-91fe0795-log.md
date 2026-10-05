@@ -110,3 +110,40 @@ Checklist over `git diff origin/main...HEAD` (public product claims = README.md 
    already merged to main (via #117) but not yet in a tagged release — accurate, not a promise.
 
 GATE-3 VERDICT: PASS
+
+## Phase 4 — Tier B drafts (voice-calibrated)
+
+Voice recalibrated against the approved finals: `cycle-af-d7166cc1-medium.md` (approved as
+written on PR #114) and the operator-edited `cycle-af-d7166cc1-linkedin.md` / cycle-2 short
+form. Rules held: lead with the switches an operator types + the outcome; spaced hyphens
+" - "; CAPS for emphasis; no self-congratulatory emotion; honest limitations stated.
+
+Artifacts produced (all under `.marketing/`, committed per runbook — not privacy mode):
+- **cycle-af-91fe0795-medium.md** — long-form flagship. Title "Three things my agent factory
+  couldn't do last month." claims a number (three); body lands exactly three numbered items.
+  Subtitle carries the Positioning search phrases. Hook → what shipped → honest limits →
+  repo link. Three `[FIGURE:]` marks.
+- **cycle-af-91fe0795-linkedin.md** — short-form, ~150 words, question hook, PLAIN TEXT
+  (CAPS not asterisks — LinkedIn renders no markdown), closing question invites replies.
+- **cycle-af-91fe0795-screen-plugin-verify.png / -gateway-auth.png / -models-check.png** —
+  the three marked figures, real CLI captures (valid PNGs, visually verified).
+- **cycle-af-91fe0795-paste.html** — rich-text paste vehicle; renders the full long-form
+  draft with all three figures embedded via relative `<img src>`; no not-yet-live URL.
+
+Each draft carries an HTML-comment DRAFT header and an Operator Decision form.
+
+## GATE-4 — HOLD for operator draft approval (review surface = GitHub PR)
+
+Runbook routing (lines 16-22, failure-mode 187): the operator reviews ALL on GitHub and
+will NOT read a worktree file path. So drafts are delivered INLINE on the review PR; the
+operator records READY / EDITED / SKIP per draft as a PR reply or push. A notify issue is
+the ping.
+
+Branch note: `af/marketing-cycle-cd14d3` is reused; its origin ref is stale (prior-cycle
+commits + orphan improve-agent commit 41616766, NOT in main — see memory note). To avoid
+orphaning 41616766 I pushed this cycle's clean history (origin/main + 6 cycle commits +
+drafts) to `af/marketing-cycle-af-91fe0795` and opened the PR from there.
+
+GATE-4 STATUS: HOLDING — drafts delivered on PR; awaiting operator READY/EDITED/SKIP.
+`af done --phase-complete --gate af-829d0f7e` will NOT run until the operator's decision
+keyword is recorded (per fidelity PRINCIPLE 2 — do not close a HOLD gate bead early).
