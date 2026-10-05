@@ -182,3 +182,15 @@ Findings and fixes:
    No EDITED reconciliation outstanding, so paste.html matches the approved copy.
 
 SELF-REVIEW VERDICT: PASS
+
+## Step 15 — Tests + build
+
+Runbook Claim Verification Map test command = `make test` (never `make test-integration`
+locally). Ran from the worktree root (inside the boundary):
+- **`make test`** — all packages `ok`, no FAIL. `internal/cmd` (doc-consistency tests:
+  formula/skill counts, doc links) green in 51.2s.
+- **`make build`** — exit 0; "Formulas in sync", "Skills in sync"; `./af` built (gitignored).
+
+Working tree clean apart from the excluded CLAUDE.md regeneration line.
+
+STEP-15 VERDICT: PASS (tests pass, build clean).
