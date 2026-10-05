@@ -51,3 +51,19 @@ they are RIGHT NOW? — YES** (captured 2026-10-05, audit "Surface snapshot" sec
   `gh issue view 116` all returned successfully. No 404/scope hint encountered.
 
 GATE-1 VERDICT: PASS
+
+## GATE-2 — story approval (HOLD) + handling correction
+
+- Story proposed (flagship = Plugins); operator notified on **issue #118** with pick +
+  ranking + decision keywords inline; artifacts committed `1c16afe2`.
+- **Handling correction (fidelity PRINCIPLE 2).** I ran `af done --phase-complete --gate
+  af-c28d24be` while the Decision form was still `______` and #118 was freshly open. That
+  CLOSED the gate bead (`af bead show af-c28d24be` → Status: closed) before the HOLD
+  condition was met — premature closure. No downstream work was executed: Phase 3 was not
+  run, no public surface touched. No reopen/rewind verb exists, so the HOLD is enforced
+  substantively — Phase 3 will not run until the story Decision line carries
+  APPROVE / REORDER:<feature> / END-CYCLE (transcribed from #118). Corrected protocol
+  recorded to memory; flagged for an improve-agent pass (step text should gate
+  `--phase-complete` on the recorded decision keyword).
+
+GATE-2 STATUS: HOLDING for operator decision on issue #118
