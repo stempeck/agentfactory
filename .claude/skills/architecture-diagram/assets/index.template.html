@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+  :root { --bg:#F6F7F9; --panel:#FFFFFF; --text:#1A1A1A; --muted:#555555; --line:#D0D4DA; --accent:#4477AA; --warn-bg:#FFF4E5; --warn:#8A4B00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111317; --panel:#1B1E24; --text:#EDEDED; --muted:#A8ADB5; --line:#2E333B; --accent:#7AA6D6; --warn-bg:#3A2A12; --warn:#F2C27A; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { margin:0; font-size:19px; }
+  header p { margin:2px 0 0; color:var(--muted); font-size:13px; }
+  #banners .banner { margin:10px 20px 0; padding:10px 14px; border-radius:6px; background:var(--warn-bg); color:var(--warn); white-space:pre-wrap; }
+  .layout { display:grid; grid-template-columns: 270px 1fr; gap:16px; padding:16px 20px; }
+  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+  nav { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; align-self:start; }
+  nav h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:4px 0 8px; }
+  nav ol { margin:0; padding-left:20px; }
+  nav li { margin:4px 0; }
+  nav a { color:var(--text); text-decoration:none; }
+  nav a[aria-current="true"] { color:var(--accent); font-weight:600; }
+  nav details { margin-top:14px; font-size:13px; color:var(--muted); }
+  nav details li { margin:6px 0; }
+  main { min-width:0; }
+  figure { margin:0; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; }
+  figure h2 { margin:0 0 4px; font-size:17px; }
+  .crumbs { font-size:13px; color:var(--muted); margin-bottom:6px; }
+  .crumbs a { color:var(--accent); }
+  figcaption { margin:0 0 10px; }
+  figcaption .assertion { font-weight:600; }
+  figcaption .meta { color:var(--muted); font-size:13px; }
+  .stage { background:#FFFFFF; border-radius:6px; padding:10px; overflow:auto; }
+  .stage svg { max-width:100%; height:auto; }
+  .row { display:grid; grid-template-columns: 1fr 340px; gap:16px; margin-top:16px; }
+  @media (max-width: 1100px) { .row { grid-template-columns: 1fr; } }
+  section.card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  section.card h3 { margin:0 0 8px; font-size:14px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th, td { text-align:left; vertical-align:top; padding:4px 6px; border-bottom:1px solid var(--line); }
+  .muted { color:var(--muted); }
+  blockquote { margin:4px 0; padding:4px 8px; border-left:3px solid var(--line); color:var(--muted); font-size:13px; }
+  button { font:inherit; font-size:13px; padding:5px 10px; border:1px solid var(--line); border-radius:5px; background:var(--panel); color:var(--text); cursor:pointer; margin:0 6px 6px 0; }
+  button:hover { border-color:var(--accent); }
+  details > summary { cursor:pointer; }
+</style>
+<script src="{{MERMAID_URL}}" integrity="{{MERMAID_SRI}}" crossorigin="anonymous" onerror="window.__mermaidLoadError = true"></script>
+</head>
+<body>
+<header>
+  <h1>{{SYSTEM}}: architecture diagrams</h1>
+  <p>Proposed design as stated in {{SOURCE}}; not verified against code. Generated {{GENERATED}} by architecture-diagram {{SKILL_VERSION}} with Mermaid {{MERMAID_VERSION}}.</p>
+  <p id="changes"></p>
+</header>
+<div id="banners" role="status"></div>
+<div class="layout">
+  <nav aria-label="Views">
+    <h2>Views</h2>
+    <ol id="nav"></ol>
+    <details id="openitems"><summary></summary><ul id="open-list"></ul></details>
+    <details id="notdrawn"><summary></summary><ul id="notdrawn-list"></ul></details>
+  </nav>
+  <main>
+    <figure id="figure">
+      <div class="crumbs" id="crumbs"></div>
+      <h2 id="title"></h2>
+      <figcaption id="caption"></figcaption>
+      <div class="stage" id="stage"></div>
+    </figure>
+    <div class="row">
+      <section class="card" id="describe"></section>
+      <section class="card" id="details"><h3>Details</h3><p class="muted">Select an element in the diagram or in the tables.</p></section>
+    </div>
+    <section class="card" id="drawer" style="margin-top:16px">
+      <h3>Export</h3>
+      <button id="copy-mermaid">Copy Mermaid</button>
+      <button id="copy-miro">Copy for Miro</button>
+      <button id="dl-svg">Download SVG</button>
+      <button id="dl-png">Download PNG</button>
+      <details><summary>Put this view on a Miro board</summary>
+        <ol>
+          <li>Click <b>Copy for Miro</b>.</li>
+          <li>Open any Miro board (any plan, including Free) and paste on the canvas with Cmd/Ctrl+V. Miro builds a diagram from native shapes. Alternatively: Creation bar, Formats, Diagram, <b>Build with code</b>, then paste into the code panel.</li>
+          <li>Edit in focus mode. Do not choose "Switch to free-form" if the code and shapes should stay in sync.</li>
+          <li>Paste once per view. Flowchart views become editable shapes; dynamic (sequence) views become native shapes that are not yet visually editable.</li>
+          <li>Fallback: <b>Download PNG</b> and drag the file onto the board.</li>
+        </ol>
+        <p class="muted">These steps come from Miro's help article "Create Mermaid diagrams" and were not tested on a board.</p>
+      </details>
+    </section>
+  </main>
+</div>
+<script type="application/json" id="architecture-model">{{MODEL_JSON}}</script>
+<script type="application/json" id="architecture-views">{{VIEWS_JSON}}</script>
+{{SOURCES}}
+<script>
+(function () {
+  const MODEL = JSON.parse(document.getElementById('architecture-model').textContent);
+  const VIEWS = JSON.parse(document.getElementById('architecture-views').textContent);
+  const SRC = {};
+  document.querySelectorAll('script[data-view]').forEach(s => { (SRC[s.dataset.view] ||= {})[s.dataset.variant] = s.textContent.replace(/^\n/, ''); });
+  const EL = new Map(MODEL.elements.map(e => [e.id, e]));
+  const REL = new Map(MODEL.relationships.map(r => [r.id, r]));
+  const BASE = { startOnLoad: false, securityLevel: 'strict', theme: 'base', look: 'classic', layout: 'elk', htmlLabels: false, flowchart: { htmlLabels: false, wrappingWidth: 600 } };
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const lines = (cites) => (cites || []).map(c => c.lines[0] === c.lines[1] ? `line ${c.lines[0]}` : `lines ${c.lines[0]}–${c.lines[1]}`).join(', ');
+  let renderSeq = 0;
+
+  function banner(text) {
+    const d = document.createElement('div'); d.className = 'banner'; d.textContent = text; $('banners').appendChild(d);
+  }
+
+  function nav() {
+    $('nav').innerHTML = VIEWS.map(v => `<li><a href="#view=${v.id}" data-view="${v.id}">${esc(v.title.replace(/ \(proposed design\)$/, ''))}</a></li>`).join('');
+    const skipped = MODEL.view_decisions.filter(d => d.decision !== 'produced');
+    const items = [
+      ...skipped.map(d => `<li><b>${esc(d.type)}</b> — ${esc(d.decision)}: ${esc(d.reason)}${d.evidence && d.evidence.length ? ` <span class="muted">(${lines(d.evidence)})</span>` : ''}</li>`),
+      ...MODEL.exclusions.map(x => `<li>${esc(x.what)} — ${esc(x.reason)} <span class="muted">(${lines(x.src)})</span></li>`),
+    ];
+    document.querySelector('#notdrawn summary').textContent = `Not drawn (${items.length})`;
+    $('notdrawn-list').innerHTML = items.join('');
+    const open = MODEL.open || [];
+    document.querySelector('#openitems summary').textContent = `Open in the design doc (${open.length})`;
+    $('open-list').innerHTML = open.map(o => `<li>${esc(o.text)} <span class="muted">(${lines(o.src)})</span>${(o.element_ids || []).map(id => ` · ${esc((EL.get(id) || {}).name || id)}`).join('')}</li>`).join('');
+    const count = (d) => MODEL.elements.filter(e => !e.cluster_of && e.delta === d).length;
+    $('changes').textContent = `Change markers stated by the design doc: ${count('new')} new, ${count('changed')} changed, ${count('removed')} removed, ${count('existing')} existing; ${count('unstated')} of ${MODEL.elements.filter(e => !e.cluster_of).length} elements carry no marker because the doc does not say.`;
+  }
+
+  function params() {
+    const p = new URLSearchParams(location.hash.replace(/^#/, ''));
+    return { view: p.get('view'), el: p.get('el') };
+  }
+
+  async function show() {
+    const { view, el } = params();
+    const v = VIEWS.find(x => x.id === view) || VIEWS[0];
+    if (!v) { banner('No view was produced for this design doc. See "Not drawn" for the reasons.'); return; }
+    document.querySelectorAll('#nav a').forEach(a => a.setAttribute('aria-current', String(a.dataset.view === v.id)));
+    const chain = []; let p = v.parent_view;
+    while (p) { const pv = VIEWS.find(x => x.id === p); if (!pv) break; chain.unshift(pv); p = pv.parent_view; }
+    $('crumbs').innerHTML = chain.map(c => `<a href="#view=${c.id}">${esc(c.title.replace(/ \(proposed design\)$/, ''))}</a> › `).join('');
+    $('title').textContent = v.title;
+    const assertion = v.assertion ? `<div class="assertion">${esc(v.assertion)} <span class="muted">(design doc ${v.assertion_lines.map(l => l[0] === l[1] ? 'line ' + l[0] : 'lines ' + l[0] + '–' + l[1]).join(', ')})</span></div>` : '';
+    $('caption').innerHTML = `${assertion}<div class="meta">Question this view answers: ${esc(v.question)}</div>`;
+    if ($('stage').dataset.view !== v.id) {
+      $('stage').dataset.view = v.id;
+      $('stage').innerHTML = '';
+      if (window.mermaid) {
+        try {
+          const { svg } = await mermaid.render(`d${renderSeq++}`, SRC[v.id].canonical);
+          $('stage').innerHTML = svg;
+        } catch (err) { banner(`View ${v.id} failed to render: ${err.message || err}`); }
+      }
+      describe(v);
+    }
+    details(v, el);
+  }
+
+  function elementCell(v, id) {
+    const e = EL.get(id);
+    return e ? `<a href="#view=${v.id}&el=${id}">${esc(e.name)}</a>` : esc(id);
+  }
+
+  function describe(v) {
+    const rows = [];
+    rows.push(`<h3>What this view contains</h3>`);
+    const els = [...new Set(v.nodes.map(n => n.element))].map(id => EL.get(id));
+    rows.push('<table><thead><tr><th>Element</th><th>Kind</th><th>Technology</th><th>Change</th><th>Design doc</th></tr></thead><tbody>' +
+      els.map(e => `<tr><td>${elementCell(v, e.id)}</td><td>${esc(e.kind.replace('_', ' '))}</td><td>${esc(e.technology || 'not stated')}</td><td>${esc(e.delta)}</td><td class="muted">${lines(e.src)}</td></tr>`).join('') + '</tbody></table>');
+    if (v.steps) {
+      rows.push('<h3 style="margin-top:12px">Steps</h3><table><thead><tr><th>#</th><th>From</th><th>Message</th><th>To</th></tr></thead><tbody>' +
+        v.steps.map((s, i) => `<tr><td>${i + 1}</td><td>${elementCell(v, s.from)}</td><td>${esc(s.message)} <span class="muted">(${esc(s.interaction)})</span></td><td>${elementCell(v, s.to)}</td></tr>`).join('') + '</tbody></table>');
+    } else {
+      const header = v.type === 'security' ? '<tr><th>From</th><th>Data</th><th>To</th><th>Trust boundary crossed</th><th>Design doc</th></tr>' : '<tr><th>From</th><th>Relationship</th><th>To</th><th>Data</th><th>Technology</th><th>Design doc</th></tr>';
+      rows.push('<h3 style="margin-top:12px">Relationships</h3><table><thead>' + header + '</thead><tbody>' +
+        v.edges.flatMap(edge => edge.relationships.map(rid => {
+          const r = REL.get(rid);
+          const from = v.nodes.find(n => n.id === edge.from), to = v.nodes.find(n => n.id === edge.to);
+          const f = from ? elementCell(v, from.element) : esc(edge.from), t = to ? elementCell(v, to.element) : esc(edge.to);
+          return v.type === 'security'
+            ? `<tr><td>${f}</td><td>${esc(r.data || r.verb)}</td><td>${t}</td><td>${esc((edge.crossed || []).join(', ') || 'none')}</td><td class="muted">${lines(r.src)}</td></tr>`
+            : `<tr><td>${f}</td><td>${esc(r.verb)}</td><td>${t}</td><td>${esc(r.data || '')}</td><td>${esc(r.technology || 'not stated')}</td><td class="muted">${lines(r.src)}</td></tr>`;
+        })).join('') + '</tbody></table>');
+    }
+    $('describe').innerHTML = rows.join('');
+  }
+
+  function details(v, id) {
+    const e = id && EL.get(id);
+    if (!e) { $('details').innerHTML = '<h3>Details</h3><p class="muted">Select an element in the diagram or in the tables.</p>'; return; }
+    const incident = MODEL.relationships.filter(r => r.from === id || r.to === id);
+    const open = (MODEL.open || []).filter(o => (o.element_ids || []).includes(id));
+    const drill = v.drill_down && v.drill_down[id];
+    const members = (e.cluster_of || []).map(m => EL.get(m)).filter(Boolean);
+    $('details').innerHTML = `<h3>${esc(e.name)}</h3>
+      <p class="muted">${esc(e.kind.replace('_', ' '))} · technology: ${esc(e.technology || 'not stated')} · change: ${esc(e.delta)}${e.doc_ids && e.doc_ids.length ? ' · design-doc ids: ' + esc(e.doc_ids.join(', ')) : ''}</p>
+      ${drill ? `<p><a href="#view=${drill}">Open detailed view</a></p>` : ''}
+      ${e.summary ? `<p>${esc(e.summary)}</p>` : ''}
+      ${(e.src || []).map(c => `<blockquote>${esc(c.quote)}<br>— design doc ${lines([c])}</blockquote>`).join('')}
+      ${e.delta_src ? (e.delta_src || []).map(c => `<blockquote>Change: ${esc(c.quote)}<br>— ${lines([c])}</blockquote>`).join('') : ''}
+      ${members.length ? `<p><b>Clustered elements:</b> ${members.map(m => esc(m.name)).join(', ')}</p>` : ''}
+      ${open.length ? `<p><b>Open:</b></p>${open.map(o => `<blockquote>${esc(o.text)}<br>— ${lines(o.src)}</blockquote>`).join('')}` : ''}
+      ${incident.length ? `<p><b>Relationships</b></p><ul>${incident.map(r => `<li>${elementCell(v, r.from)} ${esc(r.verb)} ${elementCell(v, r.to)} <span class="muted">(${lines(r.src)})</span></li>`).join('')}</ul>` : ''}`;
+  }
+
+  async function exportSvg() {
+    const id = $('stage').dataset.view;
+    const host = document.createElement('div');
+    host.style.cssText = 'position:absolute;left:-99999px;top:0;';
+    document.body.appendChild(host);
+    try {
+      const { svg } = await mermaid.render(`x${renderSeq++}`, SRC[id].canonical);
+      host.innerHTML = svg;
+      const el = host.querySelector('svg');
+      const vb = el.viewBox.baseVal;
+      el.removeAttribute('style');
+      el.setAttribute('width', String(Math.ceil(vb.width)));
+      el.setAttribute('height', String(Math.ceil(vb.height)));
+      return { id, text: new XMLSerializer().serializeToString(el), w: Math.ceil(vb.width), h: Math.ceil(vb.height) };
+    } finally {
+      host.remove();
+    }
+  }
+
+  function download(name, blob) {
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  async function copy(text, button) {
+    try { await navigator.clipboard.writeText(text); }
+    catch { const t = document.createElement('textarea'); t.value = text; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); }
+    const label = button.textContent; button.textContent = 'Copied'; setTimeout(() => { button.textContent = label; }, 1500);
+  }
+
+  $('copy-mermaid').onclick = (ev) => copy(SRC[$('stage').dataset.view].canonical, ev.currentTarget);
+  $('copy-miro').onclick = (ev) => copy(SRC[$('stage').dataset.view].miro, ev.currentTarget);
+  $('dl-svg').onclick = async () => { if (!window.mermaid) return; const s = await exportSvg(); download(`${s.id}.svg`, new Blob([s.text], { type: 'image/svg+xml' })); };
+  $('dl-png').onclick = async () => {
+    if (!window.mermaid) return;
+    const s = await exportSvg();
+    // Miro's image upload limit is 8192x4096 px and 32 MP.
+    const scale = Math.min(2, 8192 / s.w, 4096 / s.h, Math.sqrt(32e6 / (s.w * s.h)));
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = Math.floor(s.w * scale); c.height = Math.floor(s.h * scale);
+      const g = c.getContext('2d'); g.fillStyle = '#FFFFFF'; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, c.width, c.height);
+      c.toBlob(b => download(`${s.id}.png`, b), 'image/png');
+    };
+    img.onerror = () => banner('PNG export failed: the browser could not load the exported SVG.');
+    img.src = URL.createObjectURL(new Blob([s.text], { type: 'image/svg+xml' }));
+  };
+
+  async function start() {
+    nav();
+    if (!window.mermaid || window.__mermaidLoadError) {
+      banner('Mermaid failed to load (network, integrity check, or a browser older than Safari 17.4 or a 2024 Chromium/Firefox). Diagrams cannot render here; the tables still describe every view.');
+    } else {
+      mermaid.initialize(BASE);
+      for (const v of VIEWS) {
+        try { await mermaid.parse(SRC[v.id].canonical); }
+        catch (err) { banner(`View ${v.id} does not parse: ${err.message || err}`); }
+      }
+    }
+    window.addEventListener('hashchange', show);
+    await show();
+  }
+  start();
+})();
+</script>
+</body>
+</html>
