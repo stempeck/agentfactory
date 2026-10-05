@@ -87,3 +87,26 @@ Flagship APPROVED = Plugins. Changes (all commands verified against source befor
 - Issues filed: NONE — audit found doc staleness (fixed) + the release gap (operator
   decision), no product bugs; main is green. No manufactured activity.
 - Doc tests green (`go test ./internal/cmd -run 'PR724|IntegrationDocs|Doc'`).
+
+## GATE-3 — every public claim verified against source
+
+Checklist over `git diff origin/main...HEAD` (public product claims = README.md + CHANGELOG.md):
+
+1. **Unproven commands/flags/subcommands? — NONE.** Every command in the diff was proved
+   this session: `af plugin list/install/verify/check/remove` (plugin.go + live `af plugin
+   --help`), `af gateway auth import [--from]/status [--json]` (gateway_auth.go:392/409/419/420
+   + live help), `af config models check --live/--first` (config_models.go:143/144), `af
+   fidelity status` columns (fidelity.go:292), `af dispatch status` `refused (<class>, Nx)`
+   (dispatch.go:2604), `af up` already-running (up.go:277-279), `quickstart.sh --litellm
+   --litellm-auth=codex-subscription` (quickstart.sh:832/865-869), `af install --agents
+   --litellm --litellm-auth` (install.go:88/92/102 + live help).
+2. **Uncounted counts? — NONE.** "Twenty-six formulas" = `internal/cmd/install_formulas/*.toml`
+   recount (26, store/formulas matches); "Thirteen skills" = `.claude/skills/` recount (13).
+3. **Unverified URLs/links? — NONE.** No external http URL added to README/CHANGELOG. All
+   relative doc links referenced exist (verified present): USING_PLUGINS/LITELLM/MODELS/
+   TOKENOMICS/AGENTFACTORY/RECOVERY/TELEMETRY.md, docs/formulas.md, ADR-024, ADR-025.
+4. **Unshipped promises outside Roadmap? — NONE.** grep of added lines for
+   coming-soon/will/planned = empty. The CHANGELOG `## Unreleased` section describes features
+   already merged to main (via #117) but not yet in a tagged release — accurate, not a promise.
+
+GATE-3 VERDICT: PASS
