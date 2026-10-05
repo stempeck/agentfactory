@@ -122,6 +122,10 @@ type dispatchEntry struct {
 	PhaseInstanceID   string    `json:"phase_instance_id,omitempty"`
 	PhaseDispatchedAt time.Time `json:"phase_dispatched_at,omitempty"`
 	Attempts          int       `json:"attempts,omitempty"`
+
+	RefusalClass        string    `json:"refusal_class,omitempty"`
+	RefusedAt           time.Time `json:"refused_at,omitzero"`
+	ConsecutiveRefusals int       `json:"consecutive_refusals,omitempty"`
 }
 
 // cronState tracks when each operator-defined schedule last fired (issue #610), keyed by the
@@ -292,69 +296,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 				stats.skipped++
 				continue
 			}
-			itemKey := fmt.Sprintf("%s#%d", repo, item.Number)
-
-			sessionID := session.SessionName(agent)
-			agentRunning, _ := t.HasSession(sessionID)
-			targetState := dispatchTargetState(root, agent, agentRunning)
-
-			if entry, ok := state.Dispatched[itemKey]; ok {
-				if agentRunning {
-					if targetState == targetStateHalted {
-						stallHaltedTarget(cmd, stats, itemKey, agent)
-						continue
-					}
-					fmt.Fprintf(cmd.OutOrStdout(), "skip %s: agent %s is busy%s\n", itemKey, agent, busySuffix(targetState))
-					stats.skipped++
-					continue
-				}
-				retryAfter := time.Duration(dispatchCfg.RetryAfterSecs) * time.Second
-				if time.Since(entry.DispatchedAt) < retryAfter {
-					stats.skipped++
-					continue
-				}
-				delete(state.Dispatched, itemKey)
-				fmt.Fprintf(cmd.OutOrStdout(), "retry %s: agent %s idle, previous dispatch expired\n", itemKey, agent)
-			}
-
-			if agentRunning {
-				if targetState == targetStateHalted {
-					stallHaltedTarget(cmd, stats, itemKey, agent)
-					continue
-				}
-				fmt.Fprintf(cmd.OutOrStdout(), "skip %s: agent %s is busy%s\n", itemKey, agent, busySuffix(targetState))
-				stats.skipped++
-				continue
-			}
-
-			if dispatchDryRun {
-				fmt.Fprintf(cmd.OutOrStdout(), "would dispatch %s to %s\n", itemKey, agent)
-				stats.dispatched++
-				continue
-			}
-
-			// Phase 2 adds no workflow branch here; the captured sling stdout is
-			// the Phase-3 fallback source for instance-ID capture and is discarded
-			// on the non-workflow path (C-10: observable behavior unchanged).
-			if _, err := dispatchItem(root, agent, item.URL, dispatchCfg.NotifyOnComplete, model); err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "dispatch %s failed: %v\n", itemKey, err)
-				stats.errors++
-				continue
-			}
-
-			state.Dispatched[itemKey] = dispatchEntry{
-				Agent:        agent,
-				DispatchedAt: time.Now().UTC(),
-				ItemURL:      item.URL,
-				Source:       itemSources[i],
-			}
-			if dispatchCfg.RemoveTriggerAfterDispatch {
-				if err := removeTriggerLabel(repo, item.Number, dispatchCfg.TriggerLabel, itemSources[i]); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to remove trigger label from %s: %v\n", itemKey, err)
-				}
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "dispatched %s to %s\n", itemKey, agent)
-			stats.dispatched++
+			dispatchNonWorkflowItem(cmd, root, t, &state, stats, dispatchCfg, repo, item, itemSources[i], agent, model)
 		}
 	}
 
@@ -364,6 +306,132 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("saving dispatch state: %w", err)
 	}
 	return nil
+}
+
+// dispatchNonWorkflowItem is the item loop's body for an item routed to agent by a plain mapping. It is
+// extracted from runDispatch, whose gh shell-outs have no seam, so the refusal path can be driven from a test.
+func dispatchNonWorkflowItem(cmd *cobra.Command, root string, t cmdTmux, state *dispatchState, stats *dispatchCycleStats, dispatchCfg *config.DispatchConfig, repo string, item ghItem, source, agent, model string) {
+	itemKey := fmt.Sprintf("%s#%d", repo, item.Number)
+
+	sessionID := session.SessionName(agent)
+	agentRunning, _ := t.HasSession(sessionID)
+	targetState := dispatchTargetState(root, agent, agentRunning)
+
+	if entry, ok := state.Dispatched[itemKey]; ok {
+		if agentRunning {
+			if targetState == targetStateHalted {
+				stallHaltedTarget(cmd, stats, itemKey, agent)
+				return
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "skip %s: agent %s is busy%s\n", itemKey, agent, busySuffix(targetState))
+			stats.skipped++
+			return
+		}
+		if entry.RefusalClass != "" {
+			if refusalBackoffPending(entry, dispatchCfg.IntervalSecs) {
+				stats.skipped++
+				return
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "retry %s: previous dispatch refused (%s), backoff elapsed\n", itemKey, entry.RefusalClass)
+		} else {
+			retryAfter := time.Duration(dispatchCfg.RetryAfterSecs) * time.Second
+			if time.Since(entry.DispatchedAt) < retryAfter {
+				stats.skipped++
+				return
+			}
+			delete(state.Dispatched, itemKey)
+			fmt.Fprintf(cmd.OutOrStdout(), "retry %s: agent %s idle, previous dispatch expired\n", itemKey, agent)
+		}
+	}
+
+	if agentRunning {
+		if targetState == targetStateHalted {
+			stallHaltedTarget(cmd, stats, itemKey, agent)
+			return
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "skip %s: agent %s is busy%s\n", itemKey, agent, busySuffix(targetState))
+		stats.skipped++
+		return
+	}
+
+	if dispatchDryRun {
+		fmt.Fprintf(cmd.OutOrStdout(), "would dispatch %s to %s\n", itemKey, agent)
+		stats.dispatched++
+		return
+	}
+
+	// The captured sling stdout carries the refusal marker; on success it is discarded on the non-workflow
+	// path (C-10: observable behavior unchanged).
+	stdout, err := dispatchItem(root, agent, item.URL, dispatchCfg.NotifyOnComplete, model)
+	if err != nil {
+		if class := parseSlingRefusal(stdout); class != "" {
+			prev := state.Dispatched[itemKey]
+			if prev.RefusalClass == "" {
+				prev = dispatchEntry{Agent: agent, ItemURL: item.URL, Source: source}
+			}
+			state.Dispatched[itemKey] = prev.refused(class, time.Now().UTC())
+			fmt.Fprintf(cmd.ErrOrStderr(), "dispatch %s refused (%s): %v\n", itemKey, class, err)
+			stats.errors++
+			return
+		}
+		delete(state.Dispatched, itemKey)
+		fmt.Fprintf(cmd.ErrOrStderr(), "dispatch %s failed: %v\n", itemKey, err)
+		stats.errors++
+		return
+	}
+
+	state.Dispatched[itemKey] = dispatchEntry{
+		Agent:        agent,
+		DispatchedAt: time.Now().UTC(),
+		ItemURL:      item.URL,
+		Source:       source,
+	}
+	if dispatchCfg.RemoveTriggerAfterDispatch {
+		if err := removeTriggerLabel(repo, item.Number, dispatchCfg.TriggerLabel, source); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to remove trigger label from %s: %v\n", itemKey, err)
+		}
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "dispatched %s to %s\n", itemKey, agent)
+	stats.dispatched++
+}
+
+// parseSlingRefusal returns the class on the last refusal marker line of sling's stdout, or "".
+func parseSlingRefusal(stdout string) string {
+	class := ""
+	for _, line := range strings.Split(stdout, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), slingRefusedMarker+" ")
+		if !ok {
+			continue
+		}
+		for _, field := range strings.Fields(rest) {
+			if v, ok := strings.CutPrefix(field, "class="); ok {
+				class = v
+			}
+		}
+	}
+	return class
+}
+
+// refused records one more refusal of class at now. A refusal is not a dispatch, so every reader branches
+// on RefusalClass first; DispatchedAt keeps the first refusal's time only so the row never shows the zero
+// time (D26).
+func (e dispatchEntry) refused(class string, now time.Time) dispatchEntry {
+	if e.RefusalClass == "" {
+		e.ConsecutiveRefusals = 0
+	}
+	if e.DispatchedAt.IsZero() {
+		e.DispatchedAt = now
+	}
+	e.RefusalClass = class
+	e.RefusedAt = now
+	e.ConsecutiveRefusals++
+	return e
+}
+
+// refusalBackoffPending holds a refused item back with the cron failure backoff rather than the retry
+// window: nothing is running for a refusal, so the only question is how soon a re-sling could succeed.
+func refusalBackoffPending(e dispatchEntry, intervalSecs int) bool {
+	return time.Since(e.RefusedAt) < cronRetryBackoff(intervalSecs, e.ConsecutiveRefusals, 0)
 }
 
 // checkGHAuth verifies the GitHub CLI is authenticated.
@@ -1045,6 +1113,9 @@ const (
 // only when THIS dispatch produced a genuinely-complete instance (the RC#1 fix),
 // otherwise ⇒ phaseIncomplete (re-sling the current phase — the lost-record self-heal).
 func evaluatePhase(ctx context.Context, store issuestore.Store, repo string, item ghItem, itemSource string, entry dispatchEntry, mappings []config.DispatchMapping, wf *config.Workflow, phase string) (phaseOutcome, string) {
+	if entry.RefusalClass != "" {
+		return phaseIncomplete, "" // the last sling was refused, so no instance of it ran; resling backs off
+	}
 	if entry.Phase != phase {
 		// Staleness guard (#413 CRIT-1): the recorded entry must belong to the phase the
 		// live GitHub cursor names. After a crash between advance()'s label swap and the
@@ -1579,8 +1650,7 @@ func (w *workflowCtx) bootstrap() {
 		return
 	}
 	if err := w.slingPhase(first, m.Agent, 0); err != nil {
-		fmt.Fprintf(w.cmd.ErrOrStderr(), "dispatch %s failed: %v\n", w.itemKey, err)
-		w.stats.errors++
+		w.slingFailed(err, dispatchEntry{Agent: m.Agent, ItemURL: w.item.URL, Source: w.source, Workflow: w.wf.Label, Phase: first})
 		return
 	}
 	fmt.Fprintf(w.cmd.OutOrStdout(), "bootstrap %s: workflow %q phase %q slung to %s\n", w.itemKey, w.wf.Label, first, m.Agent)
@@ -1631,8 +1701,7 @@ func (w *workflowCtx) advance(phase string) {
 			w.stall("workflow %q %q→%q %v", w.wf.Label, phase, next, err)
 			return
 		}
-		fmt.Fprintf(w.cmd.ErrOrStderr(), "dispatch %s failed: %v\n", w.itemKey, err)
-		w.stats.errors++
+		w.slingFailed(err, dispatchEntry{Agent: m.Agent, ItemURL: w.item.URL, Source: w.source, Workflow: w.wf.Label, Phase: next})
 		return
 	}
 	fmt.Fprintf(w.cmd.OutOrStdout(), "advance %s: workflow %q %q→%q slung to %s\n", w.itemKey, w.wf.Label, phase, next, m.Agent)
@@ -1697,8 +1766,13 @@ func (w *workflowCtx) resling(phase, agent string, entry dispatchEntry) {
 		return
 	}
 	// Time-gate like the non-workflow retry window, measured from this phase's
-	// dispatch.
-	if entry.PhaseInstanceID != "" {
+	// dispatch; a refused sling backs off like the non-workflow refusal instead.
+	if entry.RefusalClass != "" {
+		if refusalBackoffPending(entry, w.dispatchCfg.IntervalSecs) {
+			w.stats.skipped++
+			return
+		}
+	} else if entry.PhaseInstanceID != "" {
 		retryAfter := time.Duration(w.dispatchCfg.RetryAfterSecs) * time.Second
 		if time.Since(entry.PhaseDispatchedAt) < retryAfter {
 			w.stats.skipped++
@@ -1728,6 +1802,17 @@ func (w *workflowCtx) resling(phase, agent string, entry dispatchEntry) {
 			// race is not a real attempt, so it must NOT be restored and counted toward
 			// the ceiling (ROUND-2 P-3). The record stays deleted, mirroring advance().
 			w.stall("workflow %q phase %q %v", w.wf.Label, phase, err)
+			return
+		}
+		var refused *slingRefusedError
+		if errors.As(err, &refused) {
+			// A refused sling ran nothing, so it is not an attempt toward the ceiling (D42); the prior
+			// record comes back carrying the refusal so the backoff above holds it. A lost or stale record
+			// names no run of this phase, so the refusal is recorded against a fresh one.
+			if entry.Phase != phase {
+				entry = dispatchEntry{Agent: agent, ItemURL: w.item.URL, Source: w.source, Workflow: w.wf.Label, Phase: phase}
+			}
+			w.slingFailed(err, entry)
 			return
 		}
 		// Restore the correlation record with this attempt COUNTED. slingPhase only writes
@@ -1788,6 +1873,9 @@ func (w *workflowCtx) slingPhase(phase, agent string, attempts int) error {
 	// the non-workflow dispatch path); pass "" so the phase agent stays on its default.
 	stdout, err := dispatchItem(w.root, agent, inputURL, w.dispatchCfg.NotifyOnComplete, "")
 	if err != nil {
+		if class := parseSlingRefusal(stdout); class != "" {
+			return &slingRefusedError{Class: class, Err: err}
+		}
 		return err
 	}
 	id := captureInstanceID(w.ctx, w.store, config.AgentDir(w.root, agent), stdout, dispatchedAt)
@@ -1803,6 +1891,26 @@ func (w *workflowCtx) slingPhase(phase, agent string, attempts int) error {
 		Attempts:          attempts,
 	}
 	return nil
+}
+
+// slingRefusedError is a slingPhase failure whose sling printed the admission refusal marker.
+type slingRefusedError struct {
+	Class string
+	Err   error
+}
+
+func (e *slingRefusedError) Error() string { return fmt.Sprintf("refused (%s): %v", e.Class, e.Err) }
+func (e *slingRefusedError) Unwrap() error { return e.Err }
+
+// slingFailed counts a failed phase sling. A refusal is recorded on base, because slingPhase writes a
+// record only on success and without one the next cycle would re-sling at tick speed.
+func (w *workflowCtx) slingFailed(err error, base dispatchEntry) {
+	var refused *slingRefusedError
+	if errors.As(err, &refused) {
+		w.state.Dispatched[w.itemKey] = base.refused(refused.Class, time.Now().UTC())
+	}
+	fmt.Fprintf(w.cmd.ErrOrStderr(), "dispatch %s failed: %v\n", w.itemKey, err)
+	w.stats.errors++
 }
 
 // loadDispatchState reads .runtime/dispatch-state.json.
@@ -1856,7 +1964,12 @@ func pruneDispatchState(state *dispatchState) {
 		if entry.Workflow != "" {
 			continue // active pipeline: label-as-cursor is the backstop, never prune mid-flight
 		}
-		if entry.DispatchedAt.Before(cutoff) {
+		// A refusal ages on its latest refusal, or prune would end its backoff while it is still refused.
+		last := entry.DispatchedAt
+		if entry.RefusalClass != "" {
+			last = entry.RefusedAt
+		}
+		if last.Before(cutoff) {
 			delete(state.Dispatched, key)
 		}
 	}
@@ -2154,7 +2267,7 @@ func computePhaseCompletion(ctx context.Context, root string, entries map[string
 		return phaseComplete
 	}
 	for key, entry := range entries {
-		if entry.PhaseInstanceID == "" {
+		if entry.PhaseInstanceID == "" || entry.RefusalClass != "" {
 			continue
 		}
 		iss, err := store.Get(ctx, entry.PhaseInstanceID)
@@ -2177,7 +2290,7 @@ func computePhaseCompletion(ctx context.Context, root string, entries map[string
 func computeAgentRecovery(root string, entries map[string]dispatchEntry) map[string]string {
 	byAgent := make(map[string]string)
 	for _, entry := range entries {
-		if _, seen := byAgent[entry.Agent]; seen {
+		if _, seen := byAgent[entry.Agent]; seen || entry.RefusalClass != "" {
 			continue
 		}
 		status := recoveryStatus(loadRecoveryState(root, entry.Agent))
@@ -2301,6 +2414,10 @@ type dispatchStatusEntry struct {
 	// recovery field is always present and says "none", because a row missing the key
 	// there would read as "nothing to worry about".)
 	Recovery string `json:"recovery,omitempty"`
+
+	RefusalClass        string    `json:"refusal_class,omitempty"`
+	RefusedAt           time.Time `json:"refused_at,omitzero"`
+	ConsecutiveRefusals int       `json:"consecutive_refusals,omitempty"`
 }
 
 // dispatchStatusJSON is the top-level success shape of
@@ -2365,6 +2482,10 @@ func emitDispatchStatusJSON(cmd *cobra.Command, running bool, entries map[string
 			// Empty for an agent with nothing to report, so omitempty keeps the 6-key
 			// non-workflow contract intact.
 			Recovery: agentRecovery[e.Agent],
+
+			RefusalClass:        e.RefusalClass,
+			RefusedAt:           e.RefusedAt,
+			ConsecutiveRefusals: e.ConsecutiveRefusals,
 		})
 	}
 
@@ -2479,6 +2600,8 @@ func formatDispatchStatus(running bool, entries map[string]dispatchEntry, agentS
 		// genuinely completed, surface the drift — the dispatcher will re-sling it.
 		status := avail
 		switch {
+		case entry.RefusalClass != "":
+			status = fmt.Sprintf("refused (%s, %dx)", entry.RefusalClass, entry.ConsecutiveRefusals)
 		case phaseComplete[key]:
 			status = "completed"
 		case entry.Workflow != "" && entry.PhaseInstanceID == "" && !agentState[entry.Agent]:

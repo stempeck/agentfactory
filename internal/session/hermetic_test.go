@@ -77,11 +77,6 @@ func (f *fakeTmux) SetEnvironment(sess, key, value string) error {
 	return nil
 }
 
-func (f *fakeTmux) UnsetEnvironment(sess, key string) error {
-	f.record(fmt.Sprintf("UnsetEnvironment %s %s", sess, key))
-	return nil
-}
-
 // --- tmuxClient-only methods ---
 
 func (f *fakeTmux) SetOption(sess, name, value string) error {
@@ -190,11 +185,53 @@ func TestInstallHermeticForTest(t *testing.T) {
 	}
 
 	// NewManager must use the redirected newManagerTmux (i.e. the hermetic fake).
-	m := NewManager("/root", "manager", config.AgentEntry{})
+	m := newTestManager("/root", "manager", config.AgentEntry{})
 	if _, ok := m.tmux.(*fakeTmux); !ok {
 		t.Fatalf("NewManager did not use the hermetic fake; got %T", m.tmux)
 	}
 	if m.tmux.(*fakeTmux) != fake {
 		t.Fatal("NewManager used a different fake instance than the one installed")
 	}
+}
+
+// newTestManager is NewManager plus empty contributions, so a test that is not about the composer
+// can Start and build a line without the nil refusal standing in its way.
+func newTestManager(factoryRoot, agentName string, entry config.AgentEntry) *Manager {
+	m := NewManager(factoryRoot, agentName, entry)
+	m.SetLaunchContributions(&LaunchContributions{})
+	return m
+}
+
+func startupLine(t *testing.T, m *Manager) string {
+	t.Helper()
+	line, err := m.BuildStartupCommand()
+	if err != nil {
+		t.Fatalf("BuildStartupCommand: %v", err)
+	}
+	return line
+}
+
+// assertNoTmuxEnvKey fails if Start wrote key into the session's tmux environment. tmux carries only
+// the identity quintet, so a config-derived value there would be a second emitter the launch line
+// can disagree with.
+func assertNoTmuxEnvKey(t *testing.T, ops []string, sess, key string) {
+	t.Helper()
+	for _, op := range ops {
+		if strings.HasPrefix(op, "SetEnvironment "+sess+" "+key+"=") {
+			t.Errorf("Start wrote %s into the tmux env (%q); it belongs on the launch line only", key, op)
+		}
+	}
+}
+
+// sentLine returns the launch line Start typed into sess's pane.
+func sentLine(t *testing.T, ops []string, sess string) string {
+	t.Helper()
+	prefix := "SendKeysDelayed " + sess + " "
+	for _, op := range ops {
+		if rest, ok := strings.CutPrefix(op, prefix); ok {
+			return rest[:strings.LastIndex(rest, " ")]
+		}
+	}
+	t.Fatalf("Start typed no launch line into %s; ops=%v", sess, ops)
+	return ""
 }

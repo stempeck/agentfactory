@@ -43,6 +43,18 @@ The orchestrator never busy-waits. When an action says "wait for signal X":
    re-run the check. Unprocessed completion mails accumulate in the inbox, so on each
    wake you can tell exactly which signals have arrived.
 
+**NEVER probe dispatch/liveness with a mutating command.** Verifying "is the sub-agent
+already dispatched / still alive" during an await — including when a STEP_FIDELITY verdict
+claims the dispatch step was skipped — uses READ-ONLY checks ONLY: `tmux has-session`,
+`tmux capture-pane`, `af mail inbox`. `af sling` is ALWAYS a real dispatch: it has no
+preview or dry-run mode, and an unknown flag is silently ignored rather than erroring, so
+tacking an invented preview flag onto a `--reset` re-dispatch does NOT preview — it
+re-dispatches the named agent with `--reset`, closing its in-progress beads and wiping a
+live agent's accumulated work (observed: ~11 min of Phase-7 work destroyed on a
+dispatch-impl await). If a
+post-dispatch STEP_FIDELITY claims a prior-session dispatch was skipped, reply-with-artifact
+using those read-only checks — never re-run `af sling` to "confirm" state.
+
 ## Working Directory Discipline (applies to EVERY step that runs `cd`)
 `af done`, `af prime`, and `af mail` resolve formula state from the CURRENT WORKING
 DIRECTORY. Several actions below `cd "${AF_WORKTREE:-$AF_ROOT}"` to run git/gh commands.
@@ -131,6 +143,10 @@ already push, and pushing on every progress edit races the sub-agents pushing to
 branch. `git -C` keeps the working directory from moving (see Working Directory
 Discipline), the staged-diff guard makes the commit a no-op when nothing changed, and the
 `.agentfactory/` reset keeps agent workspace files out of the design PR.
+
+A commit survives a sub-agent's working-tree cleanup but NOT a `git reset --hard
+origin/<branch>`, which {{impl_name}}'s branch setup runs. So dispatch-impl commits AND
+pushes its dispatch rows BEFORE `af sling` — the one intermediate site that pushes.
 
 ## !IMPORTANT - MANDATORY Exact Step Execution
 Execute each formula step EXACTLY as written, in order, with no modifications.
@@ -251,8 +267,8 @@ description = """
 
 2. **Fetch GitHub issue content (handles one OR several issues):**
    `issue_uri` usually names one issue, but it MAY name several related issues joined
-   by " AND ", whitespace, or commas (observed: three issue URLs — #626/#323/#515 —
-   passed as one agent-memory design problem). A bare `gh issue view "{{issue_uri}}"`
+   by " AND ", whitespace, or commas (observed: three issue URLs passed as one
+   agent-memory design problem). A bare `gh issue view "{{issue_uri}}"`
    FAILS on a multi-URL string, so normalize first: fetch every issue named and combine
    them into one problem input. A single URL/number falls through the loop unchanged, so
    the common case is untouched.
@@ -304,13 +320,14 @@ description = """
    VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
    mkdir -p "$(dirname "$VARS")"
    grep -q '^problem_summary=' "$VARS" 2>/dev/null || \\
-     printf 'problem_summary="%s"\\n' "$PROBLEM_SUMMARY" >> "$VARS"
+     printf 'problem_summary=%q\\n' "$PROBLEM_SUMMARY" >> "$VARS"
    # Persist the id/dir/title too. Downstream steps (commit-and-pr, finalize) otherwise
    # re-derive the title with `gh issue view "{{issue_uri}}"`, which returns EMPTY when
    # issue_uri names several issues — reading it back from the ledger is multi-issue-safe.
-   grep -q '^issue_id=' "$VARS" 2>/dev/null || printf 'issue_id="%s"\\n' "$ISSUE_NUMBER" >> "$VARS"
-   grep -q '^design_dir=' "$VARS" 2>/dev/null || printf 'design_dir="%s"\\n' "$DESIGN_DIR" >> "$VARS"
-   grep -q '^issue_title=' "$VARS" 2>/dev/null || printf 'issue_title="%s"\\n' "$ISSUE_TITLE" >> "$VARS"
+   # %q because the title is whatever the issue author typed, and the ledger is sourced.
+   grep -q '^issue_id=' "$VARS" 2>/dev/null || printf 'issue_id=%q\\n' "$ISSUE_NUMBER" >> "$VARS"
+   grep -q '^design_dir=' "$VARS" 2>/dev/null || printf 'design_dir=%q\\n' "$DESIGN_DIR" >> "$VARS"
+   grep -q '^issue_title=' "$VARS" 2>/dev/null || printf 'issue_title=%q\\n' "$ISSUE_TITLE" >> "$VARS"
    [ -s "$PROBLEM_SUMMARY" ] || { echo "VERIFICATION FAILED: problem summary is empty or missing at $PROBLEM_SUMMARY"; exit 1; }
    ```
 
@@ -376,10 +393,14 @@ description = """
    with no path gives it no referent, so it searches or regenerates its own problem
    context instead of reading yours. Read the absolute path from the ledger that
    parse-issue wrote, and re-derive it if the ledger is missing (sessions reset mid-run).
-   Note `--description="..."` is DOUBLE-QUOTED, so `$PROBLEM_SUMMARY` and `$AF_ACTOR`
-   expand HERE, in the orchestrator's shell, and are baked into the bead as literals —
-   which is what you want. `$AF_ACTOR` must NOT survive into the bead unexpanded: the
-   sub-agent evaluating it would resolve its OWN name and mail itself instead of you.
+   Note `--description="..."` is DOUBLE-QUOTED, so `$PROBLEM_SUMMARY`, `$ISSUE_ID` and
+   `$AF_ACTOR` expand HERE, in the orchestrator's shell, and are baked into the bead as
+   literals — which is what you want. `$AF_ACTOR` must NOT survive into the bead
+   unexpanded: the sub-agent evaluating it would resolve its OWN name and mail itself
+   instead of you. Run actions 0-5 in ONE shell: every later action reads the variables
+   an earlier one set, and the bead blocks stop rather than dispatch without them.
+   The same double quotes are why the bead text is plain: a backtick, code fence or inner
+   double quote in it would be executed or would end the argument, never stored.
    ```bash
    ISSUE_ID=$(basename "{{issue_uri}}")
    DESIGN_DIR=".designs/$ISSUE_ID/"
@@ -399,7 +420,8 @@ description = """
 1. **Create analyst bead with embedded instructions:**
    ```bash
    cd "${AF_WORKTREE:-$AF_ROOT}"
-   ANALYST_BEAD=$(af bead create --title "Analyst: rootcause-all for {{issue_title}}" \\
+   [ -s "$PROBLEM_SUMMARY" ] || { echo "CRITICAL: PROBLEM_SUMMARY is not set in this shell. Run action 0 first, in the same shell."; exit 1; }
+   ANALYST_BEAD=$(af bead create --title "Analyst: rootcause-all for ${issue_title:-#$ISSUE_ID}" \\
      --type task \\
      --description="## Instructions
 
@@ -410,20 +432,19 @@ description = """
    GitHub issue: {{issue_uri}}
 
    ### Phase 1: Run rootcause-all
-   Run `/rootcause-all` on that problem summary file, following YOUR OWN formula's
-   conventions for where the analysis is written. Do not relocate it on this
-   orchestrator's account.
+   Use the load skill tool to load and run /rootcause-all on that problem summary
+   file, following YOUR OWN formula's conventions for where the analysis is written.
+   Do not relocate it on this orchestrator's account.
 
-   When rootcause-all is complete, send a completion signal:
-   ```bash
-   af mail send $AF_ACTOR -s 'RAPIDSOL: ANALYSIS COMPLETE [{{issue_id}}]' -m "Analysis complete. Results at <absolute path to your rootcause_analysis.md>"
-   ```
+   When rootcause-all is complete, send this completion signal:
+
+       af mail send $AF_ACTOR -s 'RAPIDSOL: ANALYSIS COMPLETE [$ISSUE_ID]' -m 'Analysis complete. Results at <absolute path to your rootcause_analysis.md>'
+
    Report the real path you wrote to — the orchestrator reads it from this mail
    rather than assuming a location.
-   ```
 
    ### Phase 2: One Cross-Review Round
-   Complete your own formula normally, including `af done` — this orchestrator does
+   Complete your own formula normally, including af done — this orchestrator does
    NOT countermand your formula's contract. Your session remains alive after your
    formula completes because you were dispatched --persistent.
 
@@ -436,7 +457,8 @@ description = """
 
 2. **Create designer bead with embedded instructions:**
    ```bash
-   DESIGNER_BEAD=$(af bead create --title "Designer: design-v7 for {{issue_title}}" \\
+   [ -s "$PROBLEM_SUMMARY" ] || { echo "CRITICAL: PROBLEM_SUMMARY is not set in this shell. Run action 0 first, in the same shell."; exit 1; }
+   DESIGNER_BEAD=$(af bead create --title "Designer: design-v7 for ${issue_title:-#$ISSUE_ID}" \\
      --type task \\
      --description="## Instructions
 
@@ -447,13 +469,13 @@ description = """
    GitHub issue: {{issue_uri}}
 
    ### Phase 1: Run design-v7
-   Run `/design-v7` on that problem summary file. Produce a complete design
-   document at `.designs/{{issue_id}}/design-doc.md` with all dimension analyses.
+   Use the load skill tool to load and run /design-v7 on that problem summary file.
+   Produce a complete design document at .designs/$ISSUE_ID/design-doc.md with all
+   dimension analyses.
 
-   When design-v7 is complete, send a completion signal:
-   ```bash
-   af mail send $AF_ACTOR -s 'RAPIDSOL: DESIGN COMPLETE [{{issue_id}}]' -m 'Design complete. Results at .designs/{{issue_id}}/design-doc.md'
-   ```
+   When design-v7 is complete, send this completion signal:
+
+       af mail send $AF_ACTOR -s 'RAPIDSOL: DESIGN COMPLETE [$ISSUE_ID]' -m 'Design complete. Results at .designs/$ISSUE_ID/design-doc.md'
 
    ### Phase 2: ONE Cross-Review Round, Commit, Release
    After design-v7 completes, remain in your session. The orchestrator ($AF_ACTOR)
@@ -474,7 +496,7 @@ description = """
    VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
    mkdir -p "$(dirname "$VARS")"
    grep -q '^gate_bead=' "$VARS" 2>/dev/null || \\
-     printf 'analyst_bead="%s"\\ndesigner_bead="%s"\\ngate_bead="%s"\\n' \\
+     printf 'analyst_bead=%q\\ndesigner_bead=%q\\ngate_bead=%q\\n' \\
        "$ANALYST_BEAD" "$DESIGNER_BEAD" "$GATE_BEAD" >> "$VARS"
    echo "recorded beads: analyst=$ANALYST_BEAD designer=$DESIGNER_BEAD gate=$GATE_BEAD"
    ```
@@ -483,6 +505,7 @@ description = """
    The gate bead blocks the analyst bead from closing. If the analyst calls
    `af done` prematurely, the bead stays open (detectable by this orchestrator).
    ```bash
+   [ -n "$ANALYST_BEAD" ] && [ -n "$GATE_BEAD" ] || { echo "CRITICAL: ANALYST_BEAD or GATE_BEAD is not set in this shell. Run actions 0-3 first, in the same shell."; exit 1; }
    af bead dep "$ANALYST_BEAD" "$GATE_BEAD" || {
      echo "CRITICAL: af bead dep failed. Premature-af-done detection is non-functional."
      af mail send {{orchestrator}} -s "ABORT: Gate bead dependency failed for rapid-soldesign-plan" \\
@@ -493,8 +516,9 @@ description = """
 
 5. **Dispatch both agents with their bead instructions:**
    ```bash
-   af sling --agent {{analyst_name}} --persistent --var issue={{issue_id}} --reset "$(af bead show "$ANALYST_BEAD" --json | jq -r '.description')"
-   af sling --agent {{designer_name}} --persistent --var issue={{issue_id}} --reset "$(af bead show "$DESIGNER_BEAD" --json | jq -r '.description')"
+   [ -n "$ISSUE_ID" ] && [ -n "$ANALYST_BEAD" ] && [ -n "$DESIGNER_BEAD" ] || { echo "CRITICAL: ISSUE_ID, ANALYST_BEAD or DESIGNER_BEAD is not set in this shell. Run actions 0-4 first, in the same shell."; exit 1; }
+   af sling --agent {{analyst_name}} --persistent --var issue="$ISSUE_ID" --reset "$(af bead show "$ANALYST_BEAD" --json | jq -r '.description')"
+   af sling --agent {{designer_name}} --persistent --var issue="$ISSUE_ID" --reset "$(af bead show "$DESIGNER_BEAD" --json | jq -r '.description')"
    ```
 
 5a. **Verify both agent sessions started (one-time check, not a poll):**
@@ -655,7 +679,7 @@ poll, sleep, nudge, or keepalive.
      # Persist it NOW. Action 2 archives the analyst's mail immediately after this
      # verification, so the mail-based branch in cross-review-round-1 is dead by
      # construction — that step re-derives from a mail that no longer exists.
-     grep -q '^analysis_path=' "$VARS" 2>/dev/null || printf 'analysis_path="%s"\n' "$ANALYSIS_PATH" >> "$VARS"
+     grep -q '^analysis_path=' "$VARS" 2>/dev/null || printf 'analysis_path=%q\\n' "$ANALYSIS_PATH" >> "$VARS"
    fi
    ```
 
@@ -940,7 +964,7 @@ Event-driven throughout. Do NOT poll, sleep, nudge, or keepalive.
    # steps otherwise fall back to re-deriving it from the branch.
    VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
    mkdir -p "$(dirname "$VARS")"
-   grep -q '^pr_url=' "$VARS" 2>/dev/null || printf 'pr_url="%s"\\n' "$PR_URL" >> "$VARS"
+   grep -q '^pr_url=' "$VARS" 2>/dev/null || printf 'pr_url=%q\\n' "$PR_URL" >> "$VARS"
    # Durability: pr-body.md is written in THIS action — AFTER action 4's `git add
    # "$DESIGN_DIR"` commit — and NO later action stages it (action 8 commits only the
    # progress file). Left uncommitted it dies at the next sub-agent's cleanup step, the
@@ -1051,15 +1075,35 @@ this session.
    echo "Dispatching {{impl_name}} with PR_URL=$PR_URL"
    ```
 
-2. **Dispatch {{impl_name}} with the PR link — nothing else (only if not already dispatched):**
-   The agent is designed to take a PR link and run: it reads the PR, does its job, and
-   pushes its results back to the PR. Do NOT add task instructions, skill invocations,
-   or checkout steps — that is the agent's job, not the formula's.
+2. **Record the dispatch rows, commit AND PUSH them — BEFORE `af sling`:**
+   {{impl_name}}'s branch setup runs `git reset --hard origin/<branch>` in this shared
+   worktree, destroying any local-only commit (observed twice). Pushing now races nothing:
+   analyst and designer are released and {{impl_name}} is not running yet. No other
+   progress edit until action 5.
+   ```bash
+   ROOT="${AF_WORKTREE:-$AF_ROOT}"
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   PROGRESS="$ROOT/${DESIGN_DIR}design-refinement-progress.md"
+   BRANCH=$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)
+   TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   sed -i "s@^| Impl | Pending | Not dispatched | - | - |@| Impl | {{impl_name}} | Dispatched | $TS | - |@" "$PROGRESS"
+   sed -i "s@^| implementation-plan agent dispatched | Pending | - |@| implementation-plan agent dispatched | Dispatched | $TS |@" "$PROGRESS"
+   grep -q '^| implementation-plan agent dispatched | Dispatched' "$PROGRESS" || { echo "ROW NOT UPDATED: set both rows to Dispatched by hand, re-run"; exit 1; }
+   git -C "$ROOT" add "${DESIGN_DIR}design-refinement-progress.md"
+   git -C "$ROOT" reset -q HEAD -- .agentfactory/ 2>/dev/null || true
+   git -C "$ROOT" diff --cached --quiet || git -C "$ROOT" commit -q -m "chore($ISSUE_ID): progress — implementation-plan agent dispatched"
+   git -C "$ROOT" show "origin/$BRANCH:${DESIGN_DIR}design-refinement-progress.md" 2>/dev/null | grep -q '^| implementation-plan agent dispatched | Dispatched' || git -C "$ROOT" push -q origin HEAD || { echo "PUSH FAILED: fix it and re-run this block BEFORE af sling"; exit 1; }
+   ```
+
+3. **Dispatch {{impl_name}} with the PR link — nothing else (only if not already dispatched):**
+   Do NOT add task instructions, skill invocations, or checkout steps — that is the
+   agent's job, not the formula's.
    ```bash
    af sling --agent {{impl_name}} --reset "$PR_URL"
    ```
 
-3. **Verify the {{impl_name}} session started (one-time check):**
+4. **Verify the {{impl_name}} session started (one-time check):**
    ```bash
    sleep 5
    if ! tmux has-session -t "af-{{impl_name}}" 2>/dev/null; then
@@ -1072,10 +1116,8 @@ this session.
    ```
    Then STOP and end your turn — the agent's WORK_DONE mail will wake you.
 
-4. **On wake, check for the WORK_DONE mail from {{impl_name}}:**
-   When {{impl_name}} finishes its formula, its final `af done` mails
-   `WORK_DONE: <instance>` to this orchestrator (the dispatch caller). That is the
-   completion signal — no custom signal is injected into the agent.
+5. **On wake, check for the WORK_DONE mail from {{impl_name}}:**
+   Its final `af done` mails `WORK_DONE: <instance>` here — no custom signal is injected.
    ```bash
    DONE=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.from == "{{impl_name}}") | select(.subject | test("WORK_DONE")) | .id' | head -1)
    ```
@@ -1086,10 +1128,9 @@ this session.
      ALREADY written its own outcome section into this same file, so re-read it before
      editing rather than overwriting), **commit it**, and `af done` to advance.
 
-     Re-reading is NOT sufficient on its own, and this is where the loss was observed:
-     the earlier "Dispatched" edit made in action 3 was never committed, {{impl_name}}'s
-     own cleanup step discarded it, and the row had to be re-derived by hand at finalize.
-     Re-read to avoid clobbering the agent's section, then commit so YOUR rows survive.
+     The dispatch rows are already on origin (action 2) — fill only the completion rows
+     (`implementation_plan_outline.md created`, the Impl row's `Completed`). {{impl_name}}
+     has finished, so nothing resets the branch now; a local commit holds until finalize pushes.
      ```bash
      ROOT="${AF_WORKTREE:-$AF_ROOT}"
      ISSUE_ID=$(basename "{{issue_uri}}")
@@ -1101,10 +1142,11 @@ this session.
      ```
 
 **Exit criteria:**
+- Dispatch rows committed **and pushed** BEFORE `af sling` (present on origin/<branch>)
 - {{impl_name}} dispatched via `af sling --agent {{impl_name}} --reset "$PR_URL"` (no instruction text)
 - {{impl_name}} session verified alive
 - WORK_DONE mail from {{impl_name}} received and archived
-- Progress file updated **and committed** (the observed loss site)
+- Completion rows updated **and committed**
 """
 
 [[steps]]

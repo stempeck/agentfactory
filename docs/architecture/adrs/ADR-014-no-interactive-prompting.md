@@ -184,9 +184,16 @@ Applies to:
 Does not apply to:
 - **One-time bootstrap / installation scripts** invoked manually by a
   human operator at setup time: `quickdocker.sh:112,145,163`,
-  `quickdockerbase.sh:98,134`. The operator persona is real at the
-  bootstrap moment. These scripts are exempt but should be minimized
-  over time and not proliferated.
+  `quickdockerbase.sh:98,134`, `quickstart.sh`'s `setup_litellm`. The
+  operator persona is real at the bootstrap moment. These scripts are
+  exempt but should be minimized over time and not proliferated.
+- **Operator-gated `install.go` prompts that run only on a real
+  terminal.** `promptOpenAIKey` (`install.go:1058`) and
+  `promptCodexInstallConsent` (`install.go:1087`) are reachable only
+  past `requireOperatorTeardown` (`install.go:772`) — an interactive
+  operator at a terminal, same persona as the bootstrap scripts above.
+  Both refuse immediately when stdin is not a terminal, per the
+  "Permitted uses" defensive shape.
 - **Contents of a tmux session after `af attach`.** Operator ↔ agent
   interaction inside an attached tmux session is outside
   agent-runtime scope.
@@ -211,9 +218,11 @@ Convention plus review plus mechanical grep. Specifically:
       -- 'internal/**' 'cmd/**' 'py/**'
   ```
   should return either empty, or lines in `internal/cmd/prime.go`
-  (the permitted defensive shape) only. Any other hit is a violation.
-  Installing this as a pre-commit hook or CI step is a candidate
-  future enforcement.
+  (the permitted defensive shape), or lines in `install.go`'s
+  `promptOpenAIKey`/`promptCodexInstallConsent` (the operator-gated
+  seams named in the exemption list above) only. Any other hit is a
+  violation. Installing this as a pre-commit hook or CI step is a
+  candidate future enforcement.
 
 ## Corpus links
 

@@ -127,6 +127,82 @@ func TestFormulaSyncBehavior(t *testing.T) {
 		}
 	})
 
+	t.Run("preserves_plugin_formula_recorded_in_manifest", func(t *testing.T) {
+		// K10 (issue #538 Phase 4): the SOURCE-repo orphan pass must preserve a plugin
+		// formula recorded in .agentfactory/plugins.json instead of deleting it as an
+		// orphan. This is the only test proving the exemption actually FIRES (rather than
+		// being merely inert — that byte-identical-without-manifest path is covered by
+		// removes_orphan + preserves_customer_formula). projectDir == repoRoot == AF_SRC ⇒
+		// is_source_repo=true, the branch that deletes. The script derives the manifest path
+		// from FORMULA_DIR (== config.PluginsConfigPath under tmpDir), so the fixture is
+		// test-controllable even though source detection forces PROJECT == repoRoot.
+		tmpDir := t.TempDir()
+		formulaDir := config.FormulasDir(tmpDir)
+		if err := os.MkdirAll(formulaDir, 0755); err != nil {
+			t.Fatalf("creating formula dir: %v", err)
+		}
+
+		// A plugin-staged formula with no install_formulas counterpart — without the
+		// manifest the source-repo orphan pass would delete it (like removes_orphan).
+		pluginPath := filepath.Join(formulaDir, "acme-agent.formula.toml")
+		if err := os.WriteFile(pluginPath, []byte("# plugin formula"), 0644); err != nil {
+			t.Fatalf("writing plugin formula: %v", err)
+		}
+		// A genuine orphan NOT recorded in the manifest — must still be deleted, proving the
+		// exemption is selective, not a blanket skip of the orphan pass.
+		orphanPath := filepath.Join(formulaDir, "not-a-plugin.formula.toml")
+		if err := os.WriteFile(orphanPath, []byte("# orphan"), 0644); err != nil {
+			t.Fatalf("writing orphan formula: %v", err)
+		}
+
+		// Record the plugin formula keyed by BARE STEM, mirroring plugin.go:568.
+		manifest := &config.PluginsConfig{Plugins: map[string]config.PluginEntry{
+			"acme": {Formulas: map[string]config.PluginFormula{"acme-agent": {SHA256: "deadbeef"}}},
+		}}
+		if err := config.SavePluginsConfig(config.PluginsConfigPath(tmpDir), manifest); err != nil {
+			t.Fatalf("writing plugins manifest: %v", err)
+		}
+
+		runSyncScript(t, syncScript, repoRoot, formulaDir, repoRoot)
+
+		if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
+			t.Error("plugin formula recorded in plugins.json was deleted by the source-repo orphan pass — K10 exemption did not fire")
+		}
+		if _, err := os.Stat(orphanPath); !os.IsNotExist(err) {
+			t.Error("a formula NOT recorded in plugins.json survived — the K10 exemption must be selective, not a blanket skip")
+		}
+	})
+
+	t.Run("customer_branch_inert_to_manifest", func(t *testing.T) {
+		// XR-7 closes the customer (non-source) branch, which make check-regen never
+		// exercises. K10's exemption lives ONLY in the source passes, so a plugins.json must
+		// be completely inert here — the customer branch preserves everything regardless.
+		// This proves the shared plugins_manifest/plugin_owner_of_stem setup neither misfires
+		// nor aborts the customer branch under `set -euo pipefail` even with a manifest present.
+		tmpDir := t.TempDir()
+		formulaDir := config.FormulasDir(tmpDir)
+		if err := os.MkdirAll(formulaDir, 0755); err != nil {
+			t.Fatalf("creating formula dir: %v", err)
+		}
+		customerPath := filepath.Join(formulaDir, "my-custom-workflow.formula.toml")
+		if err := os.WriteFile(customerPath, []byte("# customer formula"), 0644); err != nil {
+			t.Fatalf("writing customer formula: %v", err)
+		}
+		manifest := &config.PluginsConfig{Plugins: map[string]config.PluginEntry{
+			"acme": {Formulas: map[string]config.PluginFormula{"acme-agent": {SHA256: "x"}}},
+		}}
+		if err := config.SavePluginsConfig(config.PluginsConfigPath(tmpDir), manifest); err != nil {
+			t.Fatalf("writing plugins manifest: %v", err)
+		}
+
+		// projectDir=tmpDir != AF_SRC ⇒ is_source_repo=false ⇒ customer branch (no template pass).
+		runSyncScript(t, syncScript, repoRoot, formulaDir, tmpDir)
+
+		if _, err := os.Stat(customerPath); os.IsNotExist(err) {
+			t.Error("customer formula was deleted in the customer branch with a manifest present — the source-only K10 exemption must not affect the customer branch")
+		}
+	})
+
 	t.Run("copies_all_source_formulas", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		formulaDir := config.FormulasDir(tmpDir)

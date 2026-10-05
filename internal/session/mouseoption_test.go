@@ -36,7 +36,7 @@ func startMouseAgent(t *testing.T, configure func(*fakeTmux)) (*Manager, *fakeTm
 	}
 
 	entry := config.AgentEntry{Type: "interactive", Description: "test"}
-	mgr := NewManager(tmpDir, "mouseagent", entry)
+	mgr := newTestManager(tmpDir, "mouseagent", entry)
 	if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
 		t.Fatalf("SetWorktree: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestStart_AppliesMouseOption(t *testing.T) {
 	}
 
 	entry := config.AgentEntry{Type: "interactive", Description: "test"}
-	mgr := NewManager(tmpDir, "mouseagent", entry)
+	mgr := newTestManager(tmpDir, "mouseagent", entry)
 	if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
 		t.Fatalf("SetWorktree: %v", err)
 	}

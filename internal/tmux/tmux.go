@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -205,6 +206,22 @@ func (t *Tmux) IsAvailable() bool {
 	}
 	cmd := exec.Command("tmux", "-V")
 	return cmd.Run() == nil
+}
+
+// NewSessionWithCommand creates a detached session whose only pane runs command, so the session
+// ends when command exits. It is the integration-service launcher (#695 K10): unlike NewSession it
+// applies no server-wide or global option, because a service session is not an operator-attached
+// pane (H5-8). An existing session surfaces as ErrSessionExists.
+func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
+	if t.guardOp("new-session", name) {
+		return nil
+	}
+	args := []string{"new-session", "-d", "-s", name}
+	if workDir != "" {
+		args = append(args, "-c", workDir)
+	}
+	_, err := t.run(append(args, command)...)
+	return err
 }
 
 // NewSession creates a new detached tmux session.
@@ -458,6 +475,22 @@ func (t *Tmux) GetPaneCommand(session string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+// GetPanePID returns the pid of the process running in a session's pane.
+func (t *Tmux) GetPanePID(session string) (int, error) {
+	if t.guard {
+		return 0, nil // read-only probe: benign zero-value, no real exec
+	}
+	// list-panes -t is a WINDOW target: a bare "=name" is an exact window name, and when no window
+	// matches tmux retries it as a session WITHOUT the exact flag, prefix-matching another session.
+	// The trailing ":" makes "=name" the session part, so the exact match applies to the session.
+	out, err := t.run("list-panes", "-t", "="+session+":", "-F", "#{pane_pid}")
+	if err != nil {
+		return 0, err
+	}
+	first, _, _ := strings.Cut(strings.TrimSpace(out), "\n")
+	return strconv.Atoi(first)
+}
+
 // IsAgentRunning checks if an agent appears to be running in the session.
 // If expectedPaneCommands is non-empty, the pane command must match one of them.
 // If empty, any non-shell command counts as "agent running".
@@ -554,14 +587,24 @@ func (t *Tmux) SetEnvironment(session, key, value string) error {
 	return err
 }
 
-// UnsetEnvironment removes an environment variable from the session (the -u form of
-// set-environment). Guarded identically to SetEnvironment: -u is still a set-environment
-// op, so the ADR-018 guard classification stays correct.
-func (t *Tmux) UnsetEnvironment(session, key string) error {
-	if t.guardOp("set-environment", session) {
+// UnsetEnvironment removes session-scoped environment variables (set-environment -u). The keys
+// travel as ';'-chained commands in one argv so a long list costs a single tmux exec; unsetting an
+// absent key succeeds, so a caller need not know which keys are present.
+func (t *Tmux) UnsetEnvironment(target string, keys ...string) error {
+	if t.guardOp("set-environment", target) {
 		return nil
 	}
-	_, err := t.run("set-environment", "-t", session, "-u", key)
+	if len(keys) == 0 {
+		return nil
+	}
+	var args []string
+	for i, key := range keys {
+		if i > 0 {
+			args = append(args, ";")
+		}
+		args = append(args, "set-environment", "-t", target, "-u", key)
+	}
+	_, err := t.run(args...)
 	return err
 }
 

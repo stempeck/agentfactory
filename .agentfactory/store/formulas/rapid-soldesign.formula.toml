@@ -1,0 +1,1155 @@
+description = """
+## Overview
+Autonomous multi-agent rapid design refinement from a GitHub issue URI, delivered as a design PR.
+
+This formula automates a streamlined multi-agent workflow: dispatch an analyst
+(rootcause-all) and a designer (design-v7) in parallel, then orchestrate a single
+cross-review round between them. Both agents stay alive with full context
+throughout the cross-review, preserving the unique knowledge each agent builds
+during its initial investigation. After the cross-review, artifacts are committed
+to a PR and both agents are released. The run ends at the design PR; it produces
+no implementation plan.
+
+## Workflow
+1. Parse GitHub issue, validate gh auth, create problem summary
+2. Dispatch analyst + designer agents in parallel, create gate bead
+3. Await completion mail from both agents (event-driven — woken by their mail)
+4. Cross-review round 1: analyst reviews design, designer incorporates
+5. Commit artifacts, open PR, record PR link; both agents af done
+6. Finalize: verify output, send completion mail
+
+## Key Design Decisions
+- Two persistent agents retain accumulated context for richer cross-pollination
+- The analyst stays alive through the single cross-review round (no early af done),
+  so its investigation context is available when the designer incorporates findings
+- One cross-review round, then commit + PR — the pipeline stays lean
+- The design PR is the deliverable, so a design can be iterated on without producing
+  an implementation plan on every run; planning from the PR is a separate dispatch
+- Event-driven coordination: the orchestrator is woken by each sub-agent's completion
+  mail (the `af mail check --inject` hook delivers it on wake). The orchestrator therefore does
+  NOT poll, sleep, nudge, or send keepalives — sub-agents simply mail when done, and
+  the orchestrator advances on wake. Agent liveness is the factory watchdog's job.
+
+## User Touchpoints
+- Fully autonomous after dispatch — no human approval gate
+- Completion notification via mail when the design PR is ready
+
+## Event-Driven Wait Protocol (applies to every "await" action below)
+The orchestrator never busy-waits. When an action says "wait for signal X":
+1. Check your inbox once: `af mail inbox --json`.
+2. If the awaited signal(s) are present, archive them (`af mail delete`) and continue.
+3. If not present, STOP and end your turn. Do NOT sleep, loop, nudge, or keepalive.
+   When the sub-agent mails you, the `af mail check --inject` hook wakes this session and you
+   re-run the check. Unprocessed completion mails accumulate in the inbox, so on each
+   wake you can tell exactly which signals have arrived.
+
+**NEVER probe dispatch/liveness with a mutating command.** Verifying "is the sub-agent
+already dispatched / still alive" during an await — including when a STEP_FIDELITY verdict
+claims the dispatch step was skipped — uses READ-ONLY checks ONLY: `tmux has-session`,
+`tmux capture-pane`, `af mail inbox`. `af sling` is ALWAYS a real dispatch: it has no
+preview or dry-run mode, and an unknown flag is silently ignored rather than erroring, so
+tacking an invented preview flag onto a `--reset` re-dispatch does NOT preview — it
+re-dispatches the named agent with `--reset`, closing its in-progress beads and wiping a
+live agent's accumulated work (observed: ~11 min of Phase-7 work destroyed). If a
+post-dispatch STEP_FIDELITY claims a prior-session dispatch was skipped, reply-with-artifact
+using those read-only checks — never re-run `af sling` to "confirm" state.
+
+## Working Directory Discipline (applies to EVERY step that runs `cd`)
+`af done`, `af prime`, and `af mail` resolve formula state from the CURRENT WORKING
+DIRECTORY. Several actions below `cd "${AF_WORKTREE:-$AF_ROOT}"` to run git/gh commands.
+Run `af done` from there and it fails with:
+
+    Error: no active formula (missing .runtime/hooked_formula)
+
+even though the file exists — the two root-resolution paths disagree inside a worktree.
+Observed previously at the commit-and-pr step. Therefore: **after any action that
+`cd`s to the worktree root, return to your agent directory before running `af done`:**
+
+```bash
+cd "${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}"
+```
+
+Prefer `git -C "${AF_WORKTREE:-$AF_ROOT}" …` over `cd` where practical, so the working
+directory never moves in the first place.
+
+## Deferred Variable Substitution (applies to EVERY step whose bash uses {{design_dir}} etc.)
+CLI inputs render at prime time; **deferred vars do NOT**. `{{issue_uri}}`,
+`{{analyst_name}}`, and `{{designer_name}}` arrive substituted.
+`{{design_dir}}`, `{{issue_id}}`, `{{issue_title}}`, `{{pr_url}}`, and `{{gate_bead}}`
+arrive as those exact literal characters — there is no `af` command that sets a deferred
+var, so nothing ever fills them in. Observed on every prime of a full run.
+
+Running such bash verbatim does not fail loudly; it fails MISLEADINGLY:
+
+    [ ! -f ".../{{design_dir}}design-doc.md" ]   → false VERIFICATION FAILED → exit 1,
+                                                   aborting the formula while the file
+                                                   is present on disk
+    git add {{design_dir}}                       → stages nothing, silently
+
+Therefore, **before running any bash in a step that mentions a deferred var, derive the
+shell equivalents first and use the shell variables in the commands:**
+
+```bash
+ISSUE_ID=$(basename "{{issue_uri}}")     # {{issue_uri}} DOES render; basename → 568
+DESIGN_DIR=".designs/$ISSUE_ID/"
+ANALYSIS_DIR=".analysis/$ISSUE_ID/"
+```
+
+Derivation is deterministic, idempotent, and safe to repeat in every step — re-derive
+rather than assuming a prior step's shell state survived (it does not; each step runs in
+a fresh shell, and sessions reset mid-run).
+
+For deferred values that CANNOT be derived from an input — `{{pr_url}}`, `{{gate_bead}}`,
+and the bead IDs — record them when first created and read them back later:
+
+```bash
+VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+mkdir -p "$(dirname "$VARS")"
+grep -q "^gate_bead=" "$VARS" 2>/dev/null || printf 'gate_bead="%s"\n' "$GATE_BEAD" >> "$VARS"
+[ -f "$VARS" ] && . "$VARS"
+```
+
+`.work/` sits inside the agent workspace, which is excluded from the design PR, so this
+ledger never pollutes the commit.
+
+## Progress File Durability (applies to EVERY step that edits design-refinement-progress.md)
+`{{design_dir}}design-refinement-progress.md` lives in the SHARED worktree that every
+sub-agent also works in. Sub-agents run their own formulas with their own
+cleanup/checkout steps, and those steps discard uncommitted working-tree changes
+indiscriminately — including yours.
+
+An edit you do not commit is therefore not durable. Observed on a full run: a progress
+row recorded in the working tree was discarded when a sub-agent later ran its cleanup
+step, and by finalize the row had silently reverted to `Pending | -` and had to be
+re-derived by hand. Nothing failed loudly; the file simply went backwards.
+
+**Therefore: every action that edits the progress file commits it in the same action.**
+
+```bash
+ROOT="${AF_WORKTREE:-$AF_ROOT}"
+ISSUE_ID=$(basename "{{issue_uri}}")
+DESIGN_DIR=".designs/$ISSUE_ID/"
+git -C "$ROOT" add "${DESIGN_DIR}design-refinement-progress.md"
+git -C "$ROOT" reset HEAD -- .agentfactory/ 2>/dev/null || true
+git -C "$ROOT" diff --cached --quiet || \
+  git -C "$ROOT" commit -q -m "chore($ISSUE_ID): progress — <stage>"
+```
+
+Commit LOCALLY only at these intermediate sites; do not push. commit-and-pr and finalize
+already push, and pushing on every progress edit races the sub-agents pushing to the same
+branch. `git -C` keeps the working directory from moving (see Working Directory
+Discipline), the staged-diff guard makes the commit a no-op when nothing changed, and the
+`.agentfactory/` reset keeps agent workspace files out of the design PR.
+
+## !IMPORTANT - MANDATORY Exact Step Execution
+Execute each formula step EXACTLY as written, in order, with no modifications.
+Every step produces a file artifact at a known path. `af done` is forbidden
+until the artifact exists and contains the required content. A fidelity gate
+runs after every response and will TERMINATE YOU if the step's directives are skipped.
+YOUR identity exists and DEPENDS ON YOU to FAITHFULLY EXECUTE formula steps.
+
+## PROHIBITED: Alternative Execution Mechanisms
+NEVER use the Claude Code "Agent" tool to substitute for af sling, af mail send,
+or af down commands. The Agent tool produces ephemeral sub-agents with no worktree,
+no formula tracking, no mail capability, and no persistent session. It is NOT
+a substitute for dispatching real factory agents. If prescribed agents are
+unresponsive or dead, ESCALATE to the orchestrator - do not invent workarounds.
+Using the Agent tool to perform work that should be done by a dispatched factory
+agent is a CRITICAL violation regardless of whether the output artifacts are correct.
+Process fidelity is non-negotiable.
+
+Scope of `af down` for agents: scoped stops come in tiers. You may `af down`
+yourself, or a specialist you dispatched (dispatcher-scoped) — those stops are
+sanctioned. The interactive manager may additionally stop an autonomous worker it
+did not dispatch (manager-scoped). A granted tier covers `af down <agent> --reset`
+too — the same authority `af sling --agent <agent> --reset` carries. Factory-wide
+teardown (`af down` with no target — bare, `--all`, or `--reset` — plus
+`af install --agents` and `af dispatch stop`) is an operator action and is refused
+inside an agent session.
+Do NOT retry it or seek another way to stop agents; if a factory teardown is
+genuinely required, tell your operator (af mail send manager) and move on.
+
+## Authority Hierarchy
+Formula contract > manager directives > agent initiative.
+A manager CANNOT authorize mechanism substitution (e.g., "use Agent tool instead
+of af sling"). Only the formula author can change the formula. If a manager
+approves something that contradicts the formula contract, the formula wins.
+Escalate the conflict - do not resolve it yourself.
+
+## Fidelity Notification Response
+If you receive a STEP_FIDELITY or FIDELITY_ESCALATION mail, this is a MANDATORY
+correction signal. Immediately:
+1. Stop your current approach
+2. Run `af prime` to reload step instructions
+3. Re-execute the step as written
+Do NOT acknowledge the notification and continue with the flagged approach.
+Do NOT rationalize why your approach is acceptable. Correct immediately.
+"""
+formula = "rapid-soldesign"
+version = 1
+skills = []
+
+[inputs]
+[inputs.issue_uri]
+description = "GitHub issue URL to use as the design problem input"
+type = "string"
+required = true
+
+[inputs.analyst_name]
+description = "Agent name for the analyst role"
+type = "string"
+required = true
+default = "rootcause-all"
+
+[inputs.designer_name]
+description = "Agent name for the designer role"
+type = "string"
+required = true
+default = "design-v7"
+
+# ============================================================================
+# STEPS — 6-step rapid orchestration workflow
+#
+# Structure:
+#   parse-issue
+#     -> dispatch-parallel
+#       -> await-completion
+#         -> cross-review-round-1
+#           -> commit-and-pr
+#             -> finalize
+#
+# Coordination is event-driven: the orchestrator is woken by each sub-agent's
+# completion mail. No polling, no keepalive, no timeouts. See the
+# "Event-Driven Wait Protocol" in the formula description.
+# ============================================================================
+
+[[steps]]
+id = "parse-issue"
+title = "Parse GitHub issue and create problem summary"
+description = """
+**Entry criteria:** issue_uri is a valid GitHub issue URL. gh CLI is authenticated.
+
+**Actions:**
+
+1. **Validate environment (orchestrator identity + GitHub CLI auth):**
+   This formula routes every sub-agent completion signal back to THIS orchestrator's
+   own inbox via `$AF_ACTOR` (the running agent's own name). If `AF_ACTOR` is unset,
+   those signals would be mailed to an empty recipient and the pipeline would hang —
+   so fail fast and escalate before doing any work.
+   ```bash
+   if [ -z "${AF_ACTOR:-}" ]; then
+     echo "CRITICAL: AF_ACTOR is unset — cannot route sub-agent completion signals."
+     af mail send {{orchestrator}} -s "ABORT: AF_ACTOR unset for rapid-soldesign" \
+       -m "AF_ACTOR is empty in this session; sub-agent signals cannot be routed. Aborting formula."
+     exit 1
+   fi
+   echo "Orchestrator identity (AF_ACTOR): $AF_ACTOR"
+
+   gh auth status || {
+     echo "ERROR: gh CLI not authenticated. Run 'gh auth login' first."
+     exit 1
+   }
+   ```
+
+2. **Fetch GitHub issue content (handles one OR several issues):**
+   `issue_uri` usually names one issue, but it MAY name several related issues joined
+   by " AND ", whitespace, or commas (observed: three issue URLs passed as one
+   agent-memory design problem). A bare `gh issue view "{{issue_uri}}"`
+   FAILS on a multi-URL string, so normalize first: fetch every issue named and combine
+   them into one problem input. A single URL/number falls through the loop unchanged, so
+   the common case is untouched.
+   ```bash
+   ISSUE_URIS=$(printf '%s' "{{issue_uri}}" | grep -oE 'https?://[^ ,]+/issues/[0-9]+')
+   [ -n "$ISSUE_URIS" ] || ISSUE_URIS="{{issue_uri}}"   # bare number / single value
+   ISSUE_NUMBER=$(basename "{{issue_uri}}")             # deterministic id — every step derives it identically
+   ISSUE_TITLE=""; ISSUE_BODY=""; N_ISSUES=0
+   for u in $ISSUE_URIS; do
+     J=$(gh issue view "$u" --json number,title,body 2>/dev/null)
+     [ -n "$J" ] || { echo "ERROR: could not fetch GitHub issue at $u"; exit 1; }
+     N=$(echo "$J" | jq -r '.number'); T=$(echo "$J" | jq -r '.title'); B=$(echo "$J" | jq -r '.body')
+     N_ISSUES=$((N_ISSUES + 1))
+     ISSUE_TITLE="${ISSUE_TITLE:+$ISSUE_TITLE; }#$N $T"
+     ISSUE_BODY="${ISSUE_BODY}$(printf '\\n\\n## Issue #%s — %s (%s)\\n\\n%s' "$N" "$T" "$u" "$B")"
+   done
+   [ "$N_ISSUES" -gt 1 ] && ISSUE_TITLE="Combined design: $ISSUE_TITLE"
+   ```
+
+3. **Truncate issue body to 50000 characters to prevent context exhaustion:**
+   ```bash
+   ISSUE_BODY_TRUNCATED=$(echo "$ISSUE_BODY" | head -c 50000)
+   if [ ${#ISSUE_BODY} -gt 50000 ]; then
+     ISSUE_BODY_TRUNCATED="${ISSUE_BODY_TRUNCATED}\\n\\n[TRUNCATED — full issue at {{issue_uri}}]"
+   fi
+   ```
+
+4. **Create problem summary file at `{{design_dir}}problem-summary-<issue-number>.md`:**
+   Write it at that exact path — inside {{design_dir}}, NOT in your agent directory and
+   NOT in the bare working directory. This action previously named no directory at all,
+   so the location was chosen ad hoc on every run. Two failure modes follow from that:
+   anything written under `.agentfactory/` is excluded from the design PR (the same trap
+   documented for the progress file in action 5), and the two sub-agent beads below
+   reference "the problem summary file" — with no fixed path there is no referent to give
+   them, so they search for it or regenerate their own problem context instead of reading
+   yours (observed: the analyst committed its own `.designs/<id>/` problem context rather
+   than consuming the orchestrator's).
+   ```bash
+   ISSUE_ID=$(basename "{{issue_uri}}")     # {{design_dir}} does NOT render — derive it
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   mkdir -p "${AF_WORKTREE:-$AF_ROOT}/$DESIGN_DIR"
+   PROBLEM_SUMMARY="${AF_WORKTREE:-$AF_ROOT}/${DESIGN_DIR}problem-summary-${ISSUE_ID}.md"
+   ```
+   Write the extracted issue content (title, URL, labels, truncated body) to
+   `$PROBLEM_SUMMARY`. This file is what the analyst and designer agents receive as
+   their problem input, so record its ABSOLUTE path in the ledger — dispatch-parallel
+   embeds it verbatim into both bead descriptions:
+   ```bash
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   mkdir -p "$(dirname "$VARS")"
+   grep -q '^problem_summary=' "$VARS" 2>/dev/null || \\
+     printf 'problem_summary=%q\\n' "$PROBLEM_SUMMARY" >> "$VARS"
+   # Persist the id/dir/title too. Downstream steps (commit-and-pr, finalize) otherwise
+   # re-derive the title with `gh issue view "{{issue_uri}}"`, which returns EMPTY when
+   # issue_uri names several issues — reading it back from the ledger is multi-issue-safe.
+   # %q because the title is whatever the issue author typed, and the ledger is sourced.
+   grep -q '^issue_id=' "$VARS" 2>/dev/null || printf 'issue_id=%q\\n' "$ISSUE_NUMBER" >> "$VARS"
+   grep -q '^design_dir=' "$VARS" 2>/dev/null || printf 'design_dir=%q\\n' "$DESIGN_DIR" >> "$VARS"
+   grep -q '^issue_title=' "$VARS" 2>/dev/null || printf 'issue_title=%q\\n' "$ISSUE_TITLE" >> "$VARS"
+   [ -s "$PROBLEM_SUMMARY" ] || { echo "VERIFICATION FAILED: problem summary is empty or missing at $PROBLEM_SUMMARY"; exit 1; }
+   ```
+
+5. **Generate `{{design_dir}}design-refinement-progress.md`:**
+   Write it at that exact path — inside {{design_dir}}, NOT in your agent directory.
+   Step commit-and-pr `git add`s `{{design_dir}}design-refinement-progress.md`, and
+   anything under `.agentfactory/` is explicitly excluded from the design PR, so a
+   progress file written to your agent workspace cannot be committed and the git add
+   silently adds nothing (observed previously, where it had to be copied by hand on
+   every update). Create {{design_dir}} first if it does not exist.
+   ```markdown
+   # Rapid Design Refinement Progress: <ISSUE_TITLE>
+
+   **Status**: In Progress
+   **Issue**: {{issue_uri}}
+   **Started**: <timestamp>
+
+   ## Agents
+   | Role | Agent | Status | Started | Completed |
+   |------|---------|--------|---------|-----------|
+   | Analyst | Pending | Not dispatched | - | - |
+   | Designer | Pending | Not dispatched | - | - |
+
+   ## Cross-Review Progress
+   | Round | Exchange | Status | Timestamp |
+   |-------|----------|--------|-----------|
+   | 1 | Analyst reviews design-doc | Pending | - |
+   | 1 | Designer incorporates HIGH/CRIT | Pending | - |
+
+   ## Design PR
+   | Stage | Status | Timestamp |
+   |-------|--------|-----------|
+   | PR opened | Pending | - |
+   ```
+
+6. **Store variables for subsequent steps:**
+   Record `{{issue_id}}` = ISSUE_NUMBER, `{{issue_title}}` = ISSUE_TITLE,
+   `{{design_dir}}` = `.designs/<issue-id>/`.
+
+**Exit criteria:**
+- AF_ACTOR confirmed set; gh auth status passed
+- Issue fetched successfully with title and body
+- Problem summary file created at `{{design_dir}}problem-summary-<issue-id>.md`, verified
+  non-empty, and its absolute path recorded to the `.work/formula-vars.env` ledger
+- design-refinement-progress.md generated
+- Variables issue_id, issue_title, design_dir recorded
+"""
+
+[[steps]]
+id = "dispatch-parallel"
+title = "Dispatch analyst and designer agents in parallel"
+needs = ["parse-issue"]
+description = """
+**Entry criteria:** parse-issue complete; problem summary and progress file created.
+
+**Actions:**
+
+0. **Resolve the problem summary path FIRST — both beads below embed it:**
+   A bead description is the sub-agent's ENTIRE task text. "The problem summary file"
+   with no path gives it no referent, so it searches or regenerates its own problem
+   context instead of reading yours. Read the absolute path from the ledger that
+   parse-issue wrote, and re-derive it if the ledger is missing (sessions reset mid-run).
+   Note `--description="..."` is DOUBLE-QUOTED, so `$PROBLEM_SUMMARY`, `$ISSUE_ID` and
+   `$AF_ACTOR` expand HERE, in the orchestrator's shell, and are baked into the bead as
+   literals — which is what you want. `$AF_ACTOR` must NOT survive into the bead
+   unexpanded: the sub-agent evaluating it would resolve its OWN name and mail itself
+   instead of you. Run actions 0-5 in ONE shell: every later action reads the variables
+   an earlier one set, and the bead blocks stop rather than dispatch without them.
+   The same double quotes are why the bead text is plain: a backtick, code fence or inner
+   double quote in it would be executed or would end the argument, never stored.
+   ```bash
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   [ -f "$VARS" ] && . "$VARS"
+   PROBLEM_SUMMARY="${problem_summary:-}"
+   [ -s "$PROBLEM_SUMMARY" ] || PROBLEM_SUMMARY="${AF_WORKTREE:-$AF_ROOT}/${DESIGN_DIR}problem-summary-${ISSUE_ID}.md"
+   if [ ! -s "$PROBLEM_SUMMARY" ]; then
+     echo "CRITICAL: no problem summary at $PROBLEM_SUMMARY — sub-agents would be dispatched without their problem input."
+     af mail send {{orchestrator}} -s "ABORT: problem summary missing for rapid-soldesign" \\
+       -m "parse-issue did not leave a readable problem summary; cannot dispatch analyst/designer. Aborting formula."
+     exit 1
+   fi
+   echo "Problem summary resolved: $PROBLEM_SUMMARY"
+   ```
+
+1. **Create analyst bead with embedded instructions:**
+   ```bash
+   cd "${AF_WORKTREE:-$AF_ROOT}"
+   [ -s "$PROBLEM_SUMMARY" ] || { echo "CRITICAL: PROBLEM_SUMMARY is not set in this shell. Run action 0 first, in the same shell."; exit 1; }
+   ANALYST_BEAD=$(af bead create --title "Analyst: rootcause-all for ${issue_title:-#$ISSUE_ID}" \\
+     --type task \\
+     --description="## Instructions
+
+   You are the ANALYST agent for the rapid-soldesign formula.
+
+   Problem summary file (your problem input — read THIS, do not regenerate your own):
+     $PROBLEM_SUMMARY
+   GitHub issue: {{issue_uri}}
+
+   ### Phase 1: Run rootcause-all
+   Use the load skill tool to load and run /rootcause-all on that problem summary
+   file, following YOUR OWN formula's conventions for where the analysis is written.
+   Do not relocate it on this orchestrator's account.
+
+   When rootcause-all is complete, send this completion signal:
+
+       af mail send $AF_ACTOR -s 'RAPIDSOL: ANALYSIS COMPLETE [$ISSUE_ID]' -m 'Analysis complete. Results at <absolute path to your rootcause_analysis.md>'
+
+   Report the real path you wrote to — the orchestrator reads it from this mail
+   rather than assuming a location.
+
+   ### Phase 2: One Cross-Review Round
+   Complete your own formula normally, including af done — this orchestrator does
+   NOT countermand your formula's contract. Your session remains alive after your
+   formula completes because you were dispatched --persistent.
+
+   The orchestrator ($AF_ACTOR) will then mail you a cross-review task, which wakes
+   you even from an idle post-formula state. Act on it and reply. Your accumulated
+   investigation context is what makes the cross-review valuable, so do not clear
+   or hand off the session before that exchange.
+   " --json | jq -r '.id')
+   ```
+
+2. **Create designer bead with embedded instructions:**
+   ```bash
+   [ -s "$PROBLEM_SUMMARY" ] || { echo "CRITICAL: PROBLEM_SUMMARY is not set in this shell. Run action 0 first, in the same shell."; exit 1; }
+   DESIGNER_BEAD=$(af bead create --title "Designer: design-v7 for ${issue_title:-#$ISSUE_ID}" \\
+     --type task \\
+     --description="## Instructions
+
+   You are the DESIGNER agent for the rapid-soldesign formula.
+
+   Problem summary file (your problem input — read THIS, do not regenerate your own):
+     $PROBLEM_SUMMARY
+   GitHub issue: {{issue_uri}}
+
+   ### Phase 1: Run design-v7
+   Use the load skill tool to load and run /design-v7 on that problem summary file.
+   Produce a complete design document at .designs/$ISSUE_ID/design-doc.md with all
+   dimension analyses.
+
+   When design-v7 is complete, send this completion signal:
+
+       af mail send $AF_ACTOR -s 'RAPIDSOL: DESIGN COMPLETE [$ISSUE_ID]' -m 'Design complete. Results at .designs/$ISSUE_ID/design-doc.md'
+
+   ### Phase 2: ONE Cross-Review Round, Commit, Release
+   After design-v7 completes, remain in your session. The orchestrator ($AF_ACTOR)
+   will mail you a cross-review task; that mail wakes you. Incorporate the analyst's
+   findings into your design-doc.md, then commit and run af done when instructed.
+   Your worktree is the orchestrator's shared tree — committed work carries forward
+   to the PR. Act when mailed; otherwise wait.
+   " --json | jq -r '.id')
+   ```
+
+3. **Create orchestrator-held gate bead (premature-af-done detection):**
+   ```bash
+   GATE_BEAD=$(af bead create --title "rapid-soldesign-consultation-lock" \\
+     --type gate --json | jq -r '.id')
+   # Persist it: {{gate_bead}} never renders, and commit-and-pr must close THIS bead by
+   # id several steps and possibly several sessions later. Without the ledger the close
+   # runs against a literal placeholder and the gate is left open forever.
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   mkdir -p "$(dirname "$VARS")"
+   grep -q '^gate_bead=' "$VARS" 2>/dev/null || \\
+     printf 'analyst_bead=%q\\ndesigner_bead=%q\\ngate_bead=%q\\n' \\
+       "$ANALYST_BEAD" "$DESIGNER_BEAD" "$GATE_BEAD" >> "$VARS"
+   echo "recorded beads: analyst=$ANALYST_BEAD designer=$DESIGNER_BEAD gate=$GATE_BEAD"
+   ```
+
+4. **Add gate bead as dependency on analyst bead:**
+   The gate bead blocks the analyst bead from closing. If the analyst calls
+   `af done` prematurely, the bead stays open (detectable by this orchestrator).
+   ```bash
+   [ -n "$ANALYST_BEAD" ] && [ -n "$GATE_BEAD" ] || { echo "CRITICAL: ANALYST_BEAD or GATE_BEAD is not set in this shell. Run actions 0-3 first, in the same shell."; exit 1; }
+   af bead dep "$ANALYST_BEAD" "$GATE_BEAD" || {
+     echo "CRITICAL: af bead dep failed. Premature-af-done detection is non-functional."
+     af mail send {{orchestrator}} -s "ABORT: Gate bead dependency failed for rapid-soldesign" \\
+       -m "af bead dep failed. Cannot proceed without the detection lock. Aborting formula."
+     exit 1
+   }
+   ```
+
+5. **Dispatch both agents with their bead instructions:**
+   ```bash
+   [ -n "$ISSUE_ID" ] && [ -n "$ANALYST_BEAD" ] && [ -n "$DESIGNER_BEAD" ] || { echo "CRITICAL: ISSUE_ID, ANALYST_BEAD or DESIGNER_BEAD is not set in this shell. Run actions 0-4 first, in the same shell."; exit 1; }
+   af sling --agent {{analyst_name}} --persistent --var issue="$ISSUE_ID" --reset "$(af bead show "$ANALYST_BEAD" --json | jq -r '.description')"
+   af sling --agent {{designer_name}} --persistent --var issue="$ISSUE_ID" --reset "$(af bead show "$DESIGNER_BEAD" --json | jq -r '.description')"
+   ```
+
+5a. **Verify both agent sessions started (one-time check, not a poll):**
+  ```bash
+  sleep 5
+  if ! tmux has-session -t "af-{{analyst_name}}" 2>/dev/null; then
+    echo "CRITICAL: af sling failed - analyst session not found"
+    af mail send {{orchestrator}} -s "ESCALATE: af sling failed for {{analyst_name}}" \
+      -m "Agent dispatch failed. tmux session af-{{analyst_name}} does not exist."
+    exit 1
+  fi
+  if ! tmux has-session -t "af-{{designer_name}}" 2>/dev/null; then
+    echo "CRITICAL: af sling failed - designer session not found"
+    af mail send {{orchestrator}} -s "ESCALATE: af sling failed for {{designer_name}}" \
+      -m "Agent dispatch failed. tmux session af-{{designer_name}} does not exist."
+    exit 1
+  fi
+  echo "Both agent sessions verified alive."
+  ```
+
+6. **Update progress file:**
+   Update `{{design_dir}}design-refinement-progress.md` — the SAME file parse-issue
+   created, edited in place. Never write a fresh copy from your current working
+   directory: an unanchored update lands in the agent workspace, which is excluded from
+   the design PR, and the real file silently stops advancing (observed previously, where
+   it had to be copied by hand on every update). Derive the path, do not trust cwd:
+   ```bash
+   PROGRESS="${AF_WORKTREE:-$AF_ROOT}/.designs/$(basename "{{issue_uri}}")/design-refinement-progress.md"
+   ```
+   Record agent names and "Dispatched" status.
+
+   Then COMMIT the edit before ending the action — see "Progress File Durability" in the
+   behavioral preamble. An uncommitted progress edit is routinely destroyed.
+   ```bash
+   ROOT="${AF_WORKTREE:-$AF_ROOT}"
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   git -C "$ROOT" add "${DESIGN_DIR}design-refinement-progress.md"
+   git -C "$ROOT" reset HEAD -- .agentfactory/ 2>/dev/null || true
+   git -C "$ROOT" diff --cached --quiet || \
+     git -C "$ROOT" commit -q -m "chore($ISSUE_ID): progress — agents dispatched"
+   ```
+
+**Exit criteria:**
+- Problem summary resolved to a non-empty absolute path BEFORE either bead was created
+  (formula aborted if absent — sub-agents must never be dispatched without their input)
+- Analyst bead created with rootcause-all + stay-alive instructions, and the resolved
+  problem-summary path embedded in its description
+- Designer bead created with design-v7 + single-round + commit instructions, and the
+  resolved problem-summary path embedded in its description
+- Gate bead created and added as dependency on analyst bead
+- Both agents dispatched via af sling --persistent and sessions verified
+- Progress file updated **and committed** (an uncommitted edit does not survive)
+- If af bead dep fails, formula aborted (hard stop)
+"""
+
+[[steps]]
+id = "await-completion"
+title = "Await initial-analysis completion mail from both agents"
+needs = ["dispatch-parallel"]
+description = """
+**Entry criteria:** Both agents dispatched and working.
+
+This is event-driven (see the Event-Driven Wait Protocol). Both agents mail the
+orchestrator when their initial work is done; each mail wakes this session. Do NOT
+poll, sleep, nudge, or keepalive.
+
+**Actions:**
+
+1. **On wake, check the inbox for BOTH completion signals:**
+   A sub-agent's OWN formula-completion mail (`WORK_DONE`) is an EQUIVALENT completion
+   signal and MUST be accepted as one. Each sub-agent runs its own multi-step formula;
+   that formula's final `af done` mails `WORK_DONE` to this orchestrator (the dispatch
+   caller) and leaves the agent idle. The bead-prescribed `RAPIDSOL:` signal competes
+   with that lifecycle and may never be sent at all — observed previously, where the
+   analyst finished all 14 of its own steps, mailed `WORK_DONE`, and went idle without
+   ever sending `RAPIDSOL: ANALYSIS COMPLETE`. Waiting only for the prescribed subject
+   hangs this formula forever. Signals confirm; artifacts (action 3) verify.
+
+   **Run this exact block on EVERY wake — including a re-wake where you already hold one
+   signal.** Do NOT narrow it to check only the still-missing signal, and do NOT reword the
+   `ANALYSIS=… DESIGN=…` output line. The per-turn fidelity gate sees only the CURRENT
+   turn's tool calls, so a truncated or reformatted check reads as "the prescribed check
+   was not run as written" and trips a STEP_FIDELITY flag (observed: a one-signal re-wake
+   ran `DESIGN=<none>` alone and was flagged). Re-running the full two-signal block is
+   idempotent and cheap; the narrowed variant is never worth the flag.
+   ```bash
+   ANALYSIS=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: ANALYSIS COMPLETE")) | .id' | head -1)
+   if [ -z "$ANALYSIS" ]; then
+     ANALYSIS=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.from == "{{analyst_name}}") | select(.subject | test("WORK_DONE")) | .id' | head -1)
+   fi
+   DESIGN=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: DESIGN COMPLETE")) | .id' | head -1)
+   if [ -z "$DESIGN" ]; then
+     DESIGN=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.from == "{{designer_name}}") | select(.subject | test("WORK_DONE")) | .id' | head -1)
+   fi
+   echo "ANALYSIS=${ANALYSIS:-<none>} DESIGN=${DESIGN:-<none>}"
+   ```
+
+2. **Decision:**
+   - **If BOTH `$ANALYSIS` and `$DESIGN` are non-empty:** proceed to action 3 FIRST and
+     archive only after the artifacts verify. Action 3 resolves the analyst's output path
+     out of its mail, so deleting the mail before verifying destroys that input.
+     ```bash
+     echo "Both initial outputs signalled — verifying artifacts before archiving."
+     ```
+     Then, once action 3 has verified both artifacts:
+     ```bash
+     af mail delete "$ANALYSIS"; af mail delete "$DESIGN"
+     echo "Both initial outputs complete."
+     ```
+   - **If either is empty:** STOP and end your turn. Leave any received signal in the
+     inbox (do not delete a lone signal — it must still be present on the next wake).
+     You will be re-woken when the remaining agent mails you.
+   - **Hang guard — if you are woken again and one agent is STILL silent in both forms,**
+     check whether that agent's session is gone (`tmux has-session -t "af-<agent>"`) while
+     its artifact exists on disk. A dead-or-idle agent will never mail again: treat it as
+     complete, mail {{orchestrator}} a WARNING naming the agent and the missing signal, and
+     proceed. Do NOT nudge, sleep, or poll — this is a one-shot check on an existing wake.
+
+3. **Verify both initial artifacts exist on the shared worktree:**
+   Analyst and designer share this orchestrator's worktree, so their files are
+   readable on disk without committing. Cross-review reads them directly.
+   ```bash
+   # Deferred vars do not render (see "Deferred Variable Substitution"). Derive first —
+   # running the check against a literal {{design_dir}} reports the file missing while it
+   # sits on disk, and the exit 1 below then aborts the formula on a false negative.
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   mkdir -p "$(dirname "$VARS")"
+
+   if [ ! -f "${AF_WORKTREE:-.}/${DESIGN_DIR}design-doc.md" ]; then
+     echo "VERIFICATION FAILED: ${DESIGN_DIR}design-doc.md missing despite DESIGN COMPLETE signal"
+     af mail send {{orchestrator}} -s "ESCALATE: Designer signalled complete but design-doc.md is missing" \
+       -m "{{designer_name}} sent DESIGN COMPLETE but ${DESIGN_DIR}design-doc.md is absent on the shared worktree. Aborting step 3."
+     exit 1
+   fi
+   # Resolve the analyst's output path instead of assuming it. The analyst follows
+   # its OWN formula's conventions, which this orchestrator does not control.
+   # The mail branch below is best-effort ONLY: the analyst's own formula completion
+   # mails a generic WORK_DONE with no path in the body (observed — it never sent the
+   # prescribed RAPIDSOL subject at all), so this regex normally yields nothing and the
+   # filesystem fallback is what actually resolves. Keep both; trust neither alone.
+   ANALYSIS_PATH=$(af mail inbox --json 2>/dev/null \
+     | jq -r '.[] | select(.from == "{{analyst_name}}") | (.body // .message // "")' 2>/dev/null \
+     | grep -oE '(/|\\.)[^ ]*rootcause_analysis\\.md' | head -1)
+   if [ -z "$ANALYSIS_PATH" ] || [ ! -f "$ANALYSIS_PATH" ]; then
+     ANALYSIS_PATH=$(ls -1 "${AF_WORKTREE:-.}"/.analysis/$ISSUE_ID/rootcause_analysis.md \
+                            "${AF_WORKTREE:-.}"/todos/rootcause_analysis.md 2>/dev/null | head -1)
+   fi
+   echo "ANALYSIS_PATH=$ANALYSIS_PATH"
+   if [ -z "$ANALYSIS_PATH" ]; then
+     echo "WARNING: rootcause_analysis.md not found despite ANALYSIS COMPLETE signal"
+     af mail send {{orchestrator}} -s "WARNING: Analyst signalled complete but rootcause_analysis.md is missing" \
+       -m "{{analyst_name}} signalled ANALYSIS COMPLETE but no rootcause_analysis.md could be resolved from its mail or under .analysis/$ISSUE_ID/ or todos/. Cross-review may proceed without it; manual review recommended."
+   else
+     echo "Verified: analyst output resolved at $ANALYSIS_PATH"
+     # Persist it NOW. Action 2 archives the analyst's mail immediately after this
+     # verification, so the mail-based branch in cross-review-round-1 is dead by
+     # construction — that step re-derives from a mail that no longer exists.
+     grep -q '^analysis_path=' "$VARS" 2>/dev/null || printf 'analysis_path=%q\\n' "$ANALYSIS_PATH" >> "$VARS"
+   fi
+   ```
+
+4. **Update progress file** at `${AF_WORKTREE:-$AF_ROOT}/.designs/$ISSUE_ID/design-refinement-progress.md`
+   (edit in place — never a fresh copy from cwd) with "Analysis Complete" and
+   "Design Complete" status, **commit it**, then `af done` to advance.
+   ```bash
+   ROOT="${AF_WORKTREE:-$AF_ROOT}"
+   git -C "$ROOT" add "${DESIGN_DIR}design-refinement-progress.md"
+   git -C "$ROOT" reset HEAD -- .agentfactory/ 2>/dev/null || true
+   git -C "$ROOT" diff --cached --quiet || \
+     git -C "$ROOT" commit -q -m "chore($ISSUE_ID): progress — initial analyses complete"
+   ```
+
+**Exit criteria:**
+- Analyst completion observed and archived — EITHER `RAPIDSOL: ANALYSIS COMPLETE` OR a
+  `WORK_DONE` mail from {{analyst_name}} (both are valid completion signals)
+- Designer completion observed and archived — EITHER `RAPIDSOL: DESIGN COMPLETE` OR a
+  `WORK_DONE` mail from {{designer_name}}
+- design-doc.md present on the shared worktree (verified)
+- Analyst output path resolved and verified BEFORE its mail was archived
+- Progress file updated at {{design_dir}}design-refinement-progress.md **and committed**
+"""
+
+[[steps]]
+id = "cross-review-round-1"
+title = "Cross-review round 1: analyst reviews design, designer incorporates"
+needs = ["await-completion"]
+description = """
+**Entry criteria:** Both initial analyses complete.
+
+Event-driven throughout (see the Event-Driven Wait Protocol). The orchestrator mails
+a task, then waits to be woken by the reply mail. Do NOT poll, sleep, nudge, or keepalive.
+
+**Actions:**
+
+1. **Analyst liveness check before assigning review (one-time check):**
+   ```bash
+   if ! tmux has-session -t "af-{{analyst_name}}" 2>/dev/null; then
+     af mail send {{orchestrator}} -s "CRITICAL: Analyst session died before cross-review" \
+       -m "Analyst called af done or session crashed. Context LOST. Options: A) skip cross-review, B) re-dispatch (degraded), C) abort."
+     exit 1
+   fi
+   ```
+
+2. **Assign the analyst's review (only if not already assigned this round):**
+   If `{{design_dir}}cross-review/analyst-review-design.md` does NOT yet exist and you
+   have not already mailed the round-1 review task, mail it now:
+   Derive the paths and send them ABSOLUTE. Two distinct failures otherwise, both silent:
+   `{{design_dir}}` and `{{issue_id}}` are deferred, so the recipient literally receives
+   "at {{design_dir}}design-doc.md"; and even once derived, `.designs/<id>/` is relative to
+   the WORKTREE ROOT while the recipient's cwd is its own `.agentfactory/agents/<name>/`
+   workspace, where that path does not exist. Either way the sub-agent cannot resolve the
+   file and improvises its own — the same "no referent, so it regenerates" failure
+   dispatch-parallel action 0 documents for bead descriptions.
+   ```bash
+   ROOT="${AF_WORKTREE:-$AF_ROOT}"
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   mkdir -p "${ROOT}/${DESIGN_DIR}cross-review"
+   af mail send {{analyst_name}} -s "RAPIDSOL" -m "CROSS-REVIEW ROUND 1: Read the designer's design-doc.md at ${ROOT}/${DESIGN_DIR}design-doc.md — Write your review to ${ROOT}/${DESIGN_DIR}cross-review/analyst-review-design.md using the structured review format (CRITICAL/HIGH/LOW sections). When done, send: af mail send $AF_ACTOR -s 'RAPIDSOL: REVIEW WRITTEN [${ISSUE_ID}] [round 1]'"
+   ```
+   Then STOP and end your turn — the analyst's reply mail will wake you.
+
+3. **On wake, check for the analyst review signal:**
+   ```bash
+   REVIEW=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: REVIEW WRITTEN.*round 1")) | .id' | head -1)
+   ```
+   - If empty: STOP and end your turn (you were woken by other mail; keep waiting).
+   - If non-empty: `af mail delete "$REVIEW"` and continue to action 4.
+
+4. **Assign the designer to incorporate findings:**
+   ```bash
+   # Resolve the analyst's output path instead of assuming it. The analyst follows
+   # its OWN formula's conventions, which this orchestrator does not control.
+   # Read the path recorded by await-completion FIRST. Do not lead with the mail regex:
+   # await-completion archives the analyst's mail as soon as it verifies the artifacts,
+   # so by the time this step runs there is no analyst mail left to parse — the regex
+   # branch cannot succeed here, only the ledger and the filesystem can.
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   [ -f "$VARS" ] && . "$VARS"
+   ANALYSIS_PATH="${analysis_path:-}"
+   if [ -z "$ANALYSIS_PATH" ] || [ ! -f "$ANALYSIS_PATH" ]; then
+     ANALYSIS_PATH=$(ls -1 "${AF_WORKTREE:-.}"/.analysis/$ISSUE_ID/rootcause_analysis.md \
+                            "${AF_WORKTREE:-.}"/todos/rootcause_analysis.md 2>/dev/null | head -1)
+   fi
+   echo "ANALYSIS_PATH=$ANALYSIS_PATH"
+   if [ -z "$ANALYSIS_PATH" ]; then
+     echo "WARNING: no rootcause_analysis.md resolved — the designer would receive an empty path."
+     af mail send {{orchestrator}} -s "WARNING: No analyst path for cross-review round 1" \
+       -m "Neither the recorded ledger nor .analysis/$ISSUE_ID/ nor todos/ yielded a rootcause_analysis.md. The designer is being asked to incorporate findings without the analysis document; manual review recommended."
+   fi
+   # Absolute, for the same reason as action 2: ${DESIGN_DIR} alone is relative to the
+   # worktree root, and the designer reads mail from its own agent workspace.
+   ROOT="${AF_WORKTREE:-$AF_ROOT}"
+   af mail send {{designer_name}} -s "RAPIDSOL" -m "CROSS-REVIEW ROUND 1: Read the analyst's rootcause_analysis.md at $ANALYSIS_PATH — Also read the analyst's review at ${ROOT}/${DESIGN_DIR}cross-review/analyst-review-design.md — Incorporate all CRITICAL and HIGH findings into your design-doc.md at ${ROOT}/${DESIGN_DIR}design-doc.md. Log changes to ${ROOT}/${DESIGN_DIR}cross-review/designer-update-log.md. When done, send: af mail send $AF_ACTOR -s 'RAPIDSOL: DESIGN UPDATED [$ISSUE_ID]'"
+   ```
+   Then STOP and end your turn — the designer's reply mail will wake you.
+
+5. **On wake, check for the designer update signal:**
+   ```bash
+   UPDATED=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: DESIGN UPDATED")) | .id' | head -1)
+   ```
+   - If empty: STOP and end your turn (keep waiting).
+   - If non-empty: `af mail delete "$UPDATED"`, update the progress file at
+     `${AF_WORKTREE:-$AF_ROOT}/${DESIGN_DIR}design-refinement-progress.md` (edit in
+     place — never a fresh copy from cwd) with round-1 completion, **commit it**, and
+     `af done` to advance.
+     ```bash
+     ROOT="${AF_WORKTREE:-$AF_ROOT}"
+     git -C "$ROOT" add "${DESIGN_DIR}design-refinement-progress.md"
+     git -C "$ROOT" reset HEAD -- .agentfactory/ 2>/dev/null || true
+     git -C "$ROOT" diff --cached --quiet || \
+       git -C "$ROOT" commit -q -m "chore($ISSUE_ID): progress — cross-review round 1 complete"
+     ```
+
+**Exit criteria:**
+- Analyst review written to cross-review/analyst-review-design.md
+- RAPIDSOL: REVIEW WRITTEN [round 1] signal received and archived
+- Designer incorporated HIGH/CRIT findings into design-doc.md
+- RAPIDSOL: DESIGN UPDATED signal received and archived
+- Progress file updated **and committed**
+- Cross-review tasks mailed with ABSOLUTE paths (no `{{design_dir}}` literal, no worktree-relative path)
+"""
+
+[[steps]]
+id = "commit-and-pr"
+title = "Commit artifacts, open PR, release both agents"
+needs = ["cross-review-round-1"]
+description = """
+**Entry criteria:** Cross-review round 1 complete. Designer has updated design-doc.md.
+
+Event-driven throughout. Do NOT poll, sleep, nudge, or keepalive.
+
+**Actions:**
+
+1. **Assign the designer to commit the cross-reviewed design (if not already done):**
+   If `HEAD:{{design_dir}}design-doc.md` is not yet committed and you have not already
+   mailed the commit task, mail it now:
+   ```bash
+   # Derive and send absolute: {{design_dir}}/{{issue_id}} are deferred literals here, and
+   # the designer runs git from its own agent workspace, so a relative pathspec stages
+   # nothing. `git -C` pins the repo regardless of the recipient's cwd.
+   ROOT="${AF_WORKTREE:-$AF_ROOT}"
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   af mail send {{designer_name}} -s "RAPIDSOL" -m "Cross-review complete. Commit your work now: git -C ${ROOT} add ${DESIGN_DIR}design-doc.md ${DESIGN_DIR}cross-review/ ${DESIGN_DIR}*.md && git -C ${ROOT} commit -m 'rapid-soldesign: cross-reviewed design for #${ISSUE_ID}' && git -C ${ROOT} push origin HEAD. When done, send: af mail send $AF_ACTOR -s 'RAPIDSOL: DESIGNER COMMITTED [${ISSUE_ID}]'"
+   ```
+   Then STOP and end your turn — the designer's reply mail will wake you.
+
+2. **On wake, check for the designer commit signal:**
+   ```bash
+   COMMITTED=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: DESIGNER COMMITTED")) | .id' | head -1)
+   ```
+   - If empty: STOP and end your turn (keep waiting).
+   - If non-empty: `af mail delete "$COMMITTED"` and continue.
+
+3. **Verify the design doc is committed on HEAD (shared worktree):**
+   ```bash
+   if ! git -C "${AF_WORKTREE:-$AF_ROOT}" cat-file -e "HEAD:{{design_dir}}design-doc.md" 2>/dev/null; then
+     echo "COMMIT VERIFICATION FAILED: {{design_dir}}design-doc.md not committed on HEAD"
+     af mail send {{orchestrator}} -s "ESCALATE: Commit verification failed — design-doc.md is not on HEAD" \
+       -m "{{design_dir}}design-doc.md is not committed on HEAD of the PR branch. Cannot open a design PR without it."
+     exit 1
+   fi
+   echo "Path verification: design-doc.md committed on HEAD at {{design_dir}}"
+   ```
+
+4. **Finalize the design commit and clean stray .agentfactory/ artifacts:**
+   IMPORTANT: Only commit files under {{design_dir}} and the progress file.
+   Do NOT commit anything under .agentfactory/ — agent CLAUDE.md files,
+   checkpoint files, runtime artifacts, and agent workspace files do not
+   belong in the design PR.
+   ```bash
+   # Derive first: `git add {{design_dir}}` stages NOTHING (no such pathspec) and the
+   # `git diff --cached --quiet ||` guard then skips the commit silently, so the design
+   # artifacts never reach the PR and the step still appears to succeed.
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   # Prefer the title parse-issue recorded in the ledger; `gh issue view "{{issue_uri}}"`
+   # returns EMPTY when issue_uri names several issues, blanking the commit subject.
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   [ -f "$VARS" ] && . "$VARS"
+   ISSUE_TITLE="${issue_title:-$(gh issue view "{{issue_uri}}" --json title --jq '.title' 2>/dev/null)}"
+
+   cd "${AF_WORKTREE:-$AF_ROOT}"
+   git add "$DESIGN_DIR"
+   git add "${DESIGN_DIR}design-refinement-progress.md"
+   git reset HEAD -- .agentfactory/ 2>/dev/null || true
+   # Confirm the exclusion actually held before committing — the design PR must never
+   # carry agent CLAUDE.md, checkpoint, or runtime files.
+   if git diff --cached --name-only | grep -q '^\\.agentfactory/'; then
+     echo "ABORT: .agentfactory/ paths are still staged after the reset:"
+     git diff --cached --name-only | grep '^\\.agentfactory/'
+     exit 1
+   fi
+   git diff --cached --name-only
+   git diff --cached --quiet || git commit -m "rapid-soldesign: design artifacts for #$ISSUE_ID ($ISSUE_TITLE)"
+   git push origin HEAD
+   ```
+
+5. **Write the PR description, then create (or reuse) the PR and record its URL:**
+   Write `{{design_dir}}cross-review/pr-body.md` summarizing this run from the committed
+   artifacts under `{{design_dir}}` and the GitHub issue (`gh issue view {{issue_uri}}`):
+   ```markdown
+   ## Issue
+   Design for #{{issue_id}} - {{issue_title}}
+   {{issue_uri}}
+
+   <problem statement>
+
+   ## Root cause
+   - <validated root cause, from design-doc.md>
+
+   ## Proposed solution
+   - <what the solution comprises, from design-doc.md>
+
+   ## Cross-review
+   - <findings, from cross-review/analyst-review-design.md and designer-update-log.md>
+
+   ## Artifacts
+   - {{design_dir}}design-doc.md
+   - {{design_dir}}cross-review/
+   ```
+   ```bash
+   # Derive BEFORE composing any path. `{{design_dir}}` is deferred and reaches this bash
+   # as those literal characters, so `cat ".../{{design_dir}}cross-review/pr-body.md"`
+   # reads nothing and `--body-file` below points at a nonexistent path: the PR is then
+   # created or edited with an EMPTY description and the step still reports success.
+   # Observed: the whole cross-review write-up silently absent from the PR.
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   # Prefer the ledger title (multi-issue-safe); fall back to gh for a single issue.
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   [ -f "$VARS" ] && . "$VARS"
+   ISSUE_TITLE="${issue_title:-$(gh issue view "{{issue_uri}}" --json title --jq '.title' 2>/dev/null)}"
+   cd "${AF_WORKTREE:-$AF_ROOT}"
+   BRANCH=$(git rev-parse --abbrev-ref HEAD)
+   PR_URL=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null)
+   if [ -z "$PR_URL" ]; then
+     PR_URL=$(gh pr create \
+       --title "design: $ISSUE_TITLE (#$ISSUE_ID)" \
+       --body "$(cat "${AF_WORKTREE:-$AF_ROOT}/${DESIGN_DIR}cross-review/pr-body.md")" 2>&1)
+   else
+     # A sub-agent commonly opens the PR during its own formula, BEFORE the cross-review
+     # runs. Reusing that PR unchanged ships a description that predates the review and
+     # never mentions its findings — observed previously, where the PR was opened 40
+     # minutes before cross-review and its body described only the initial design. Reuse
+     # the PR (never open a duplicate), but bring its body and title up to date. Preserve
+     # the existing body as a collapsed provenance appendix rather than discarding it.
+     PR_NUM=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null)
+     BODY_FILE="${AF_WORKTREE:-$AF_ROOT}/${DESIGN_DIR}cross-review/pr-body.md"
+     # Guard: append the appendix at most once. Without it a retry nests the previous
+     # body inside the new one recursively, growing the PR description each attempt.
+     if ! grep -q 'Provenance: original PR description' "$BODY_FILE" 2>/dev/null; then
+       {
+         printf '\\n\\n---\\n\\n<details>\\n<summary>Provenance: original PR description (pre-cross-review, retained)</summary>\\n\\n'
+         gh pr view "$PR_NUM" --json body --jq '.body'
+         printf '\\n\\n</details>\\n'
+       } >> "$BODY_FILE"
+     fi
+     # Render the title from shell vars — {{issue_title}}/{{issue_id}} are deferred and
+     # would ship as literal placeholders in the PR title on this reuse path (the create
+     # path above already uses $ISSUE_TITLE/$ISSUE_ID).
+     gh pr edit "$PR_NUM" \
+       --title "design: $ISSUE_TITLE (#$ISSUE_ID) — cross-reviewed" \
+       --body-file "$BODY_FILE"
+   fi
+   echo "PR_URL=$PR_URL"
+   ```
+   Record `{{pr_url}}` = PR_URL for downstream steps. If PR_URL is empty or not a
+   URL, escalate and abort:
+   ```bash
+   case "$PR_URL" in
+     https://*) echo "PR recorded: $PR_URL" ;;
+     *) af mail send {{orchestrator}} -s "ESCALATE: PR creation failed in rapid-soldesign" \
+          -m "gh pr create did not return a URL: $PR_URL"; exit 1 ;;
+   esac
+   # Persist for finalize — {{pr_url}} never renders, and finalize otherwise falls back
+   # to re-deriving it from the branch.
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   mkdir -p "$(dirname "$VARS")"
+   grep -q '^pr_url=' "$VARS" 2>/dev/null || printf 'pr_url=%q\\n' "$PR_URL" >> "$VARS"
+   # Durability: pr-body.md is written in THIS action — AFTER action 4's `git add
+   # "$DESIGN_DIR"` commit — and NO later action stages it (action 8 commits only the
+   # progress file). Left uncommitted it dies at the next sub-agent's cleanup step, the
+   # same working-tree-discard trap the "Progress File Durability" preamble documents:
+   # observed on a full run, where pr-body.md had to be committed by hand before the
+   # agents were released in action 7. Commit it LOCALLY now — action 8's push carries it.
+   # A committed file survives cleanup, and a persisted pr-body.md also stops the reused-PR
+   # `--body-file` branch from re-reading an empty body on a mid-step session resume.
+   ROOT="${AF_WORKTREE:-$AF_ROOT}"
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   git -C "$ROOT" add "${DESIGN_DIR}cross-review/pr-body.md" 2>/dev/null || true
+   git -C "$ROOT" reset HEAD -- .agentfactory/ 2>/dev/null || true
+   git -C "$ROOT" diff --cached --quiet || git -C "$ROOT" commit -q -m "rapid-soldesign: PR body for #$ISSUE_ID"
+   ```
+
+6. **Close orchestrator-held gate bead (allows analyst bead to close):**
+   Read the id back from the ledger written at dispatch-parallel — `{{gate_bead}}` is a
+   literal here, and `af bead close "{{gate_bead}}"` fails against a placeholder.
+   ```bash
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   [ -f "$VARS" ] && . "$VARS"
+   if [ -n "${gate_bead:-}" ]; then
+     af bead close "$gate_bead"
+   else
+     gate_bead=$(af bead list --json 2>/dev/null \\
+       | jq -r '.[] | select(.title == "rapid-soldesign-consultation-lock") | .id' | head -1)
+     [ -n "$gate_bead" ] && af bead close "$gate_bead" \\
+       || echo "WARNING: consultation-lock gate bead not found; nothing to close."
+   fi
+   ```
+
+7. **Release both agents — assign each to signal DONE and run af done (if not already):**
+   ```bash
+   af mail send {{analyst_name}} -s "RAPIDSOL" -m "ALL REVIEWS COMPLETE AND COMMITTED — Send: af mail send $AF_ACTOR -s 'RAPIDSOL: ANALYST DONE [{{issue_id}}]' then run af done. The cross-review round is finished. Thank you for staying alive through the process."
+   af mail send {{designer_name}} -s "RAPIDSOL" -m "ALL REVIEWS COMPLETE AND COMMITTED — Send: af mail send $AF_ACTOR -s 'RAPIDSOL: DESIGNER DONE [{{issue_id}}]' then run af done. The cross-review round is finished."
+   ```
+   Then STOP and end your turn — the agents' DONE mails will wake you.
+
+8. **On wake, check for BOTH DONE signals and af down whoever has reported:**
+   The sub-agents send these explicit signals to this orchestrator's own inbox
+   ($AF_ACTOR) — note that their WORK_DONE mails go to the supervisor, not here.
+   ```bash
+   ADONE=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: ANALYST DONE")) | .id' | head -1)
+   DDONE=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: DESIGNER DONE")) | .id' | head -1)
+   if [ -n "$ADONE" ]; then af mail delete "$ADONE"; af down {{analyst_name}} || true; fi
+   if [ -n "$DDONE" ]; then af mail delete "$DDONE"; af down {{designer_name}} || true; fi
+   ```
+   - If BOTH have now been received (across this and prior wakes — i.e. both sessions are
+     gone): update the progress file at `${AF_WORKTREE:-$AF_ROOT}/${DESIGN_DIR}design-refinement-progress.md`
+     (edit in place — never a fresh copy from cwd) with the PR link, then `git add` +
+     commit + push it as in action 4, and `af done` to advance.
+     ```bash
+     if ! tmux has-session -t "af-{{analyst_name}}" 2>/dev/null && ! tmux has-session -t "af-{{designer_name}}" 2>/dev/null; then
+       echo "Both agents released."
+     else
+       echo "Still awaiting a DONE signal — ending turn."
+       exit 0
+     fi
+     ```
+   - Otherwise: STOP and end your turn (keep waiting for the remaining DONE mail).
+
+**Exit criteria:**
+- Designer committed cross-reviewed design-doc.md on HEAD (verified)
+- Design artifacts committed and pushed (no .agentfactory/ files included)
+- PR created, OR existing PR reused with its title and body UPDATED to the composed
+  pr-body.md (a reused PR must not keep a pre-cross-review description); {{pr_url}}
+  recorded (non-empty URL)
+- pr-body.md committed locally in action 5 so it survives the sub-agent cleanup that
+  action 7 triggers (action 8's push carries the commit); an uncommitted pr-body.md is
+  discarded and a mid-step resume then reads an empty PR body
+- Gate bead closed (analyst bead can now close)
+- Both analyst and designer sent DONE signals, ran af done, and were af down'd
+- Progress file updated with PR link
+- Working directory returned to your agent directory before `af done`
+"""
+
+[[steps]]
+id = "finalize"
+title = "Finalize: verify output, send completion mail"
+needs = ["commit-and-pr"]
+description = """
+**Entry criteria:** PR opened and {{pr_url}} recorded. Analyst and designer released.
+
+**Actions:**
+
+1. **Verify design-doc.md is on the PR branch:**
+   ```bash
+   cd "${AF_WORKTREE:-$AF_ROOT}"
+   BRANCH=$(git rev-parse --abbrev-ref HEAD)
+   git fetch origin "$BRANCH" 2>/dev/null || true
+   # Derive DESIGN_DIR before checking. A literal '{{design_dir}}' path names no tree
+   # entry, so the verbatim form reports the design missing and mails a false WARNING
+   # while the design is committed and pushed.
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   if ! git cat-file -e "origin/$BRANCH:${DESIGN_DIR}design-doc.md" 2>/dev/null; then
+     echo "WARNING: ${DESIGN_DIR}design-doc.md not found on origin/$BRANCH."
+     af mail send {{orchestrator}} -s "WARNING: design-doc.md missing from the PR branch" \\
+       -m "${DESIGN_DIR}design-doc.md is not on origin/$BRANCH after commit-and-pr pushed. Manual review recommended."
+   else
+     echo "Verified: ${DESIGN_DIR}design-doc.md is on origin/$BRANCH."
+   fi
+   ```
+
+2. **Update progress file with completion, then commit and push it:**
+   Edit `${AF_WORKTREE:-$AF_ROOT}/${DESIGN_DIR}design-refinement-progress.md` in place —
+   never a fresh copy from cwd — setting the header to:
+   ```markdown
+   **Status**: COMPLETE
+   **Completed**: <timestamp>
+   **PR**: $PR_URL
+   ```
+   The final status is only visible on the PR if it is actually committed; commit-and-pr
+   ran several steps ago and cannot carry a change made now:
+   ```bash
+   cd "${AF_WORKTREE:-$AF_ROOT}"
+   git add "${DESIGN_DIR}design-refinement-progress.md"
+   git reset HEAD -- .agentfactory/ 2>/dev/null || true
+   git diff --cached --quiet || git commit -m "chore($ISSUE_ID): mark rapid-soldesign run COMPLETE"
+   git push origin HEAD
+   cd "${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}"
+   ```
+
+3. **Send completion mail to {{orchestrator}} with PR link:**
+   This mail is the formula's ONE human touchpoint, so it must RENDER — never ship
+   `{{...}}` literals. `{{issue_id}}`, `{{issue_title}}`, and `{{design_dir}}` are
+   deferred (they arrive as those exact characters — see "Deferred Variable Substitution"),
+   so DERIVE them here exactly as action 1 does before composing the body. This action
+   previously embedded the deferred vars raw and mailed the operator "complete for
+   {{issue_title}} … {{design_dir}}design-doc.md" — the literal placeholders, not values.
+   ```bash
+   cd "${AF_WORKTREE:-$AF_ROOT}"
+   BRANCH=$(git rev-parse --abbrev-ref HEAD)
+   ISSUE_ID=$(basename "{{issue_uri}}")                 # {{issue_id}} does NOT render — derive it
+   DESIGN_DIR=".designs/$ISSUE_ID/"                     # {{design_dir}} does NOT render — derive it
+   # {{issue_title}} does NOT render; prefer the ledger (gh issue view "{{issue_uri}}"
+   # returns EMPTY on a multi-issue URI), fall back to gh for a single issue.
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   [ -f "$VARS" ] && . "$VARS"
+   ISSUE_TITLE="${issue_title:-$(gh issue view "{{issue_uri}}" --json title --jq '.title' 2>/dev/null)}"
+   PR_URL="{{pr_url}}"
+   case "$PR_URL" in
+     https://*) : ;;
+     *) PR_URL=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null) ;;
+   esac
+   af mail send {{orchestrator}} -s "RAPIDSOL: COMPLETE [$ISSUE_ID]" -m "
+   Rapid design refinement complete for $ISSUE_TITLE.
+
+   ## PR
+   $PR_URL
+
+   ## Output
+   - Design document: ${DESIGN_DIR}design-doc.md
+   - Cross-review artifacts: ${DESIGN_DIR}cross-review/
+
+   ## Next Step
+   Review the design on the PR. No implementation plan was produced; hand the PR to
+   your implementation-planning workflow when you want one.
+   "
+   ```
+
+**Exit criteria:**
+- design-doc.md verified present on origin/<branch> (or warning escalated)
+- Progress file updated to COMPLETE **and committed + pushed** (an uncommitted final
+  status never reaches the PR)
+- RAPIDSOL: COMPLETE mail sent to {{orchestrator}} with the PR link, and the issue id and
+  title RENDERED (no `{{...}}` literals in subject or body)
+"""
+
+[vars]
+[vars.analyst_bead]
+description = "Bead ID for the analyst agent's work"
+default = ""
+source = "deferred"
+
+[vars.designer_bead]
+description = "Bead ID for the designer agent's work"
+default = ""
+source = "deferred"
+
+[vars.gate_bead]
+description = "Orchestrator-held gate bead ID (premature-af-done detection)"
+default = ""
+source = "deferred"
+
+[vars.issue_id]
+description = "GitHub issue number extracted from issue_uri"
+default = ""
+source = "deferred"
+
+[vars.issue_title]
+description = "GitHub issue title"
+default = ""
+source = "deferred"
+
+[vars.design_dir]
+description = "Design directory path (.designs/<issue-id>/)"
+default = ""
+source = "deferred"
+
+[vars.pr_url]
+description = "PR URL recorded after the design artifacts are pushed"
+default = ""
+source = "deferred"

@@ -31,12 +31,14 @@ anchored to file:line or commit SHA.
 | [014](ADR-014-no-interactive-prompting.md) | No interactive prompting in agent-runtime code paths | Accepted | Near-miss: `internal/cmd/sling.go:389-401` (#126 staged); permitted shape: `internal/cmd/prime.go:232-253` |
 | [015](ADR-015-formula-three-location-lifecycle.md) | Three-location formula lifecycle with ordered sync | Accepted | Extends ADR-008; `discover.go:18-42`, `install.go:22-23`, issue #139 |
 | [016](ADR-016-no-skill-provenance-in-formulas.md) | No skill provenance annotations in formulas | Accepted | `formula-create/skillmd-mode.md:79,137`; 60 annotations across 8 formulas |
-| [017](ADR-017-no-customer-repo-mutations.md) | af infrastructure commands must not delete customer data | Accepted | `internal/cmd/formula.go:102-108`; designs 170/173 incident history |
+| [017](ADR-017-no-customer-repo-mutations.md) | af infrastructure commands must not delete customer data; integration external writes are listed, never deleted | Accepted | `internal/cmd/formula.go:102-108`; designs 170/173 incident history |
 | [018](ADR-018-tests-never-disturb-running-factory.md) | Tests must never disturb a running factory | Accepted | `internal/session/names.go:7-12`; issues #309/#316/#317 |
 | [019](ADR-019-no-container-recreation.md) | af changes must never require recreating or destroying an existing factory container | Accepted | `quickdocker.sh:325-337,486-493`; `.designs/425` Rev-2; issue #428 |
-| [020](ADR-020-explicit-agent-installation.md) | Agent installation is explicit and customer-owned | Accepted | `internal/cmd/install.go:161`; `todos/stempeck_publish_oss.sh:208-213` |
+| [020](ADR-020-explicit-agent-installation.md) | Agent installation is explicit and customer-owned | Accepted | `internal/cmd/install.go:161`; `todos/stempeck_publish_oss.sh:237-242` |
 | [022](ADR-022-memory-vault-holds-durable-cross-task-learnings.md) | Memory vault holds durable cross-task learnings; ephemeral per-task/handoff state stays in mail and checkpoints | Accepted | `internal/memory/note.go:15-24`; `.designs/515/design-doc.md:16,19,66` |
 | [023](ADR-023-sessionstart-context-surface.md) | SessionStart context is three independent writers, one hook entry each; identity is delivered by every carrier except that hook | Accepted | `internal/claude/config/settings-autonomous.json:49-67`; `internal/cmd/prime.go:287`; `internal/cmd/identity_parity_test.go:49`; `.designs/675/design-doc.md:126,172` |
+| [024](ADR-024-gateway-shims-and-litellm-pin-gate.md) | Gateway protocol shims are af-owned LiteLLM callbacks; the LiteLLM pin moves only on a session-shaped probe | Proposed | `quickstart.sh:994,1062,1389`; `internal/cmd/config_models.go:937`; pre-decision state `4eb42139` |
+| [025](ADR-025-plugin-repositories-trust-boundary.md) | Plugin repositories are acquired inert outside the consumed store; plugins.json is a load-bearing provenance manifest whose readers fail closed | Proposed | `internal/config/plugins.go`; `internal/cmd/plugin.go`; `agent-gen-all.sh`; `.designs/538/design-doc.md`; PR #539 |
 
 ---
 

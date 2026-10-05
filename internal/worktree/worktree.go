@@ -1284,6 +1284,30 @@ func FindByAgent(factoryRoot, agentName string) (*Meta, error) {
 	return nil, nil
 }
 
+// ListMetas returns every worktree's Meta. Unlike the scans beside it, it fails closed on an unreadable meta.
+func ListMetas(factoryRoot string) ([]*Meta, error) {
+	entries, err := os.ReadDir(WorktreesDir(factoryRoot))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading worktrees dir: %w", err)
+	}
+	var metas []*Meta
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".meta.json") {
+			continue
+		}
+		wtID := strings.TrimSuffix(entry.Name(), ".meta.json")
+		meta, err := ReadMeta(factoryRoot, wtID)
+		if err != nil {
+			return nil, fmt.Errorf("worktree %s: %w", wtID, err)
+		}
+		metas = append(metas, meta)
+	}
+	return metas, nil
+}
+
 func countActiveWorktrees(factoryRoot string) (int, error) {
 	dir := WorktreesDir(factoryRoot)
 	entries, err := os.ReadDir(dir)

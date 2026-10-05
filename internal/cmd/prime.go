@@ -112,16 +112,10 @@ func runPrime(cmd *cobra.Command, args []string) error {
 		// rather than inside telemetryRecordFor because these belong to the records that OPEN
 		// something — a step_end carrying them would repeat one run-scoped fact per step.
 		ev.AFVersion, ev.AFCommit = Version, Commit
-		// #678 K5: the launch leg's own breadcrumb is preferred over the environment, and the
-		// environment stays the fallback. The two agree on the LEVEL by construction — the breadcrumb
-		// is written from the same value that was exported — but only the breadcrumb carries the
-		// objective, and a launch that chose no level writes none, which is where the env read still
-		// answers for a level a profile declared on its own.
-		crumb := readEffortBreadcrumb(cwd)
-		ev.EffortLevel = crumb.Level
-		if ev.EffortLevel == "" {
-			ev.EffortLevel = launchEffortLevel()
-		}
+		// #678 K5: the level the session is actually running at, whoever set it — a selecting launch
+		// or a profile that declared it on its own. Whether it was a treatment is the reduce_effort
+		// record's question below, not this one's.
+		ev.EffortLevel = launchEffortLevel()
 		appendTelemetryRecord(factoryRoot, ev)
 
 	}
@@ -165,9 +159,10 @@ func runPrime(cmd *cobra.Command, args []string) error {
 	// meant to be measured against. When there is no step, the step context is left EXPLICITLY empty and
 	// the formula is resolved from disk — surfaced, not silently omitted. Still gated on
 	// sessionChanged so the once-per-session firing is unchanged. StepID is retained (when present) for the
-	// `af turn evidence` [step X] display that reads it, not for the arm.
+	// [step X] suffix on `af tokenomics status`'s recent-interventions tail
+	// (readTokenomicsInterventionTail), not for the arm.
 	if sessionChanged && verbTelemetryFrom(ctx).enabled {
-		crumb := readEffortBreadcrumb(cwd)
+		crumb := readLaunchEffort()
 		if obj := recordObjective(crumb.Objective); crumb.Level != "" && obj != "" {
 			instanceID, formula := "", hookedFormulaName(cwd)
 			if primed != nil {
@@ -312,6 +307,12 @@ func primeAgent(ctx context.Context, out io.Writer, factoryRoot, role, workDir s
 
 		// Output startup directive
 		outputStartupDirective(out, agentEntry.Type)
+	}
+
+	// The hook surface stays byte-identical for integration sessions (D14); a plain prime is where the
+	// agent asks what it has.
+	if !primeHookMode {
+		outputIntegrationLines(out, factoryRoot, workDir)
 	}
 
 	// Inject formula workflow context if active (self-guarding -- no-op when no formula)

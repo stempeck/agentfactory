@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1519,6 +1520,21 @@ func TestInstallAgentsDispatchesToSeam(t *testing.T) {
 	})
 }
 
+// stubCodexReady neutralizes the K6 preflightCodexSubscription seam for tests whose
+// concern is downstream of it: it reports the codex CLI present with a valid session, so
+// the preflight returns before its install-consent/device-auth branches. Per D9 this must
+// be explicit — the real /usr/bin/codex is present in dev/CI containers, so leaving the
+// seam to ambient PATH makes the test pass in dev and fail in CI (no codex on PATH → the
+// install-consent prompt reads EOF). Tests that exercise the preflight itself override the
+// seams themselves instead of calling this.
+func stubCodexReady(t *testing.T) {
+	t.Helper()
+	origLookPath, origSession := lookPathCodex, codexSessionValid
+	lookPathCodex = func() (string, error) { return "/usr/bin/codex", nil }
+	codexSessionValid = func() bool { return true }
+	t.Cleanup(func() { lookPathCodex, codexSessionValid = origLookPath, origSession })
+}
+
 // TestInstallAgentsForwardsQuickstartFlags pins the mirror-flag contract:
 // --litellm/--no-telemetry forward verbatim to the quickstart seam ONLY (never
 // agent-gen, which has no such flags), a default run forwards nothing, and
@@ -1535,6 +1551,7 @@ func TestInstallAgentsForwardsQuickstartFlags(t *testing.T) {
 		installNoBuildFlag = false
 		installLitellmFlag = false
 		installNoTelemetryFlag = false
+		installLitellmAuthFlag = ""
 	}
 	resetFlags()
 	t.Cleanup(resetFlags)
@@ -1730,6 +1747,298 @@ func TestInstallAgentsForwardsQuickstartFlags(t *testing.T) {
 			t.Errorf("seam ran despite rejected flag: agentgen=%v quickstart=%v", agentGenCalled, quickstartCalled)
 		}
 	})
+
+	// F13: --litellm-auth without --agents hits the same guard (install.go:113 already
+	// routes it there), but the error must name the flag the operator actually passed —
+	// naming only --litellm/--no-telemetry misleads whoever ran `af install --litellm-auth=…`.
+	t.Run("litellm_auth_without_agents_names_the_flag", func(t *testing.T) {
+		resetSpies()
+		dir := setupFactoryDir(t)
+		_, err := runInstallInDir(t, dir, "--litellm-auth=codex-subscription")
+		if err == nil || !strings.Contains(err.Error(), "require --agents") {
+			t.Fatalf("expected 'require --agents' error, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "--litellm-auth") {
+			t.Fatalf("error must name --litellm-auth (the flag the operator passed), got: %v", err)
+		}
+		if agentGenCalled || quickstartCalled {
+			t.Errorf("seam ran despite rejected flag: agentgen=%v quickstart=%v", agentGenCalled, quickstartCalled)
+		}
+	})
+
+	// PR #688 Phase 3: --litellm-auth=<mode> must forward verbatim into quickstartArgs alongside
+	// --litellm/--no-telemetry. RED today — the flag does not exist yet, so cobra rejects it as
+	// unknown before any seam runs. --litellm-auth REQUIRES --litellm (decisions.md D10) — this
+	// subtest's own concern is the forwarding behavior, not the requires-relationship (pinned
+	// separately by TestInstallLitellmAuthRequiresLitellmFlag), so it passes --litellm explicitly.
+	t.Run("forwards_litellm_auth_flag", func(t *testing.T) {
+		resetSpies()
+		stubCodexReady(t)
+		dir := setupFactoryDir(t)
+		// E2 subscription preflight needs an importable session or an already-imported
+		// handle before it lets agent-gen-all.sh run.
+		secretsDir := filepath.Join(config.ConfigDir(dir), "secrets")
+		if err := os.MkdirAll(filepath.Join(secretsDir, "chatgpt"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(secretsDir, "chatgpt", "auth.json"), []byte(`{"tokens":{}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := runInstallInDir(t, dir, "--agents", "--litellm", "--litellm-auth=codex-subscription")
+		if err != nil {
+			t.Fatalf("install --agents --litellm --litellm-auth=codex-subscription failed: %v\noutput: %s", err, out)
+		}
+		if got := strings.Join(gotQuickstartArgs, " "); !strings.Contains(got, "--litellm-auth=codex-subscription") {
+			t.Errorf("quickstart args = %q, want to contain %q", got, "--litellm-auth=codex-subscription")
+		}
+	})
+
+	t.Run("refuses_when_quickstart_missing_litellm_auth_arm", func(t *testing.T) {
+		resetSpies()
+		stubCodexReady(t)
+		staleSrc := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"}, nil)
+		// Overwrite with a pre-Phase-3 quickstart.sh: no --litellm-auth arm at all.
+		if err := os.WriteFile(filepath.Join(staleSrc, "quickstart.sh"), []byte("#!/bin/bash\ntrue\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("AF_SOURCE_ROOT", staleSrc)
+		dir := setupFactoryDir(t)
+		// --litellm-auth REQUIRES --litellm (D10); this subtest's concern is the arm-presence
+		// assertion, so --litellm is passed explicitly to reach that code path.
+		_, err := runInstallInDir(t, dir, "--agents", "--litellm", "--litellm-auth=codex-subscription")
+		if err == nil {
+			t.Fatal("expected refusal when the resolved quickstart.sh has no --litellm-auth arm, got success")
+		}
+		if !strings.Contains(err.Error(), "litellm-auth") {
+			t.Errorf("error = %q, want it to name --litellm-auth", err.Error())
+		}
+		if agentGenCalled {
+			t.Error("agent-gen-all.sh ran despite the stale-script refusal")
+		}
+		if quickstartCalled {
+			t.Error("quickstart.sh ran despite the stale-script refusal")
+		}
+	})
+
+	// K3 (design-doc.md, cross-review "High" risk row): a stale on-disk quickstart.sh that
+	// already has --litellm-auth (from an earlier PR) but predates _reconcile_gateway/
+	// _ensure_codex_cli must refuse loudly rather than silently forward a mode into code
+	// that lacks the guarded behavior — blind review iteration 2's finding.
+	t.Run("refuses_when_quickstart_missing_reconcile_gateway_marker", func(t *testing.T) {
+		resetSpies()
+		stubCodexReady(t)
+		staleSrc := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"}, nil)
+		// Has --litellm-auth but no _reconcile_gateway function.
+		if err := os.WriteFile(filepath.Join(staleSrc, "quickstart.sh"), []byte("#!/bin/bash\n# --litellm-auth=<mode>\ntrue\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("AF_SOURCE_ROOT", staleSrc)
+		dir := setupFactoryDir(t)
+		secretsDir := filepath.Join(config.ConfigDir(dir), "secrets")
+		if err := os.MkdirAll(filepath.Join(secretsDir, "chatgpt"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(secretsDir, "chatgpt", "auth.json"), []byte(`{"tokens":{}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := runInstallInDir(t, dir, "--agents", "--litellm", "--litellm-auth=codex-subscription")
+		if err == nil {
+			t.Fatal("expected refusal when the resolved quickstart.sh has no _reconcile_gateway function, got success")
+		}
+		if !strings.Contains(err.Error(), "reconcile") {
+			t.Errorf("error = %q, want it to name the gateway reconcile path", err.Error())
+		}
+		if agentGenCalled || quickstartCalled {
+			t.Errorf("seam ran despite the stale-script refusal: agentgen=%v quickstart=%v", agentGenCalled, quickstartCalled)
+		}
+	})
+
+	t.Run("refuses_when_quickstart_missing_ensure_codex_cli_marker", func(t *testing.T) {
+		resetSpies()
+		staleSrc := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"}, nil)
+		// Has --litellm-auth and _reconcile_gateway but no _ensure_codex_cli function —
+		// exercises the codex-subscription-only third assertion.
+		if err := os.WriteFile(filepath.Join(staleSrc, "quickstart.sh"), []byte("#!/bin/bash\n# --litellm-auth=<mode>\n_reconcile_gateway() {\n    true\n}\ntrue\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("AF_SOURCE_ROOT", staleSrc)
+		dir := setupFactoryDir(t)
+		secretsDir := filepath.Join(config.ConfigDir(dir), "secrets")
+		if err := os.MkdirAll(filepath.Join(secretsDir, "chatgpt"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(secretsDir, "chatgpt", "auth.json"), []byte(`{"tokens":{}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := runInstallInDir(t, dir, "--agents", "--litellm", "--litellm-auth=codex-subscription")
+		if err == nil {
+			t.Fatal("expected refusal when the resolved quickstart.sh has no _ensure_codex_cli function, got success")
+		}
+		if !strings.Contains(err.Error(), "codex CLI install") {
+			t.Errorf("error = %q, want it to name the codex CLI install/consent flow", err.Error())
+		}
+		if agentGenCalled || quickstartCalled {
+			t.Errorf("seam ran despite the stale-script refusal: agentgen=%v quickstart=%v", agentGenCalled, quickstartCalled)
+		}
+	})
+
+	// setup_litellm reconciles the gateway in every mode, so a plain `--litellm` (implicit api-key:
+	// no flag, no env, no record) against a script that predates _reconcile_gateway must refuse too.
+	for _, stale := range []struct{ name, script string }{
+		{"refuses_implicit_api_key_when_quickstart_missing_reconcile_gateway_marker", "#!/bin/bash\n# --litellm-auth=<mode>\ntrue\n"},
+		{"refuses_implicit_api_key_when_quickstart_fully_stale", "#!/bin/bash\ntrue\n"},
+	} {
+		t.Run(stale.name, func(t *testing.T) {
+			resetSpies()
+			t.Setenv("AF_LITELLM_AUTH", "")
+			t.Setenv("OPENAI_API_KEY", "sk-test-env")
+			staleSrc := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"}, nil)
+			if err := os.WriteFile(filepath.Join(staleSrc, "quickstart.sh"), []byte(stale.script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("AF_SOURCE_ROOT", staleSrc)
+			dir := setupFactoryDir(t)
+			_, err := runInstallInDir(t, dir, "--agents", "--litellm")
+			if err == nil {
+				t.Fatal("expected refusal when an implicit api-key --litellm run resolves a quickstart.sh with no _reconcile_gateway function, got success")
+			}
+			if !strings.Contains(err.Error(), "reconcile") {
+				t.Errorf("error = %q, want it to name the gateway reconcile path", err.Error())
+			}
+			if agentGenCalled || quickstartCalled {
+				t.Errorf("seam ran despite the stale-script refusal: agentgen=%v quickstart=%v", agentGenCalled, quickstartCalled)
+			}
+		})
+	}
+
+	// The --litellm-auth marker and the codex CLI marker keep their narrower gates: an implicit
+	// api-key run never forwards the flag and never installs the codex CLI.
+	t.Run("implicit_api_key_requires_only_the_reconcile_marker", func(t *testing.T) {
+		resetSpies()
+		t.Setenv("AF_LITELLM_AUTH", "")
+		t.Setenv("OPENAI_API_KEY", "sk-test-env")
+		src := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"}, nil)
+		if err := os.WriteFile(filepath.Join(src, "quickstart.sh"), []byte("#!/bin/bash\n_reconcile_gateway() {\n    true\n}\ntrue\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("AF_SOURCE_ROOT", src)
+		dir := setupFactoryDir(t)
+		out, err := runInstallInDir(t, dir, "--agents", "--litellm")
+		if err != nil {
+			t.Fatalf("implicit api-key --litellm against a script with _reconcile_gateway but no --litellm-auth arm or _ensure_codex_cli failed: %v\noutput: %s", err, out)
+		}
+		if got := strings.Join(gotQuickstartArgs, " "); got != "--litellm" {
+			t.Errorf("quickstart args = %q, want exactly %q", got, "--litellm")
+		}
+	})
+
+	// Reconciled for issue #693 Phase 2a (concern_tests.md §1 reconciliation candidate): E2
+	// (install.go:814-836, the "codex login"-naming refusal) is deleted this phase and replaced by
+	// K6's preflightCodexSubscription, whose own refusal strings (design-doc.md:120, decisions.md
+	// D5) do NOT contain "codex login" — so this subtest is retargeted at K6's install-feasibility
+	// refusal instead of E2's session/handle refusal (that concern moves to
+	// TestInstallCodexPreflightRefusesWhenCannotInstall, which is the net-new K6 pinning test).
+	// Per D9, lookPathCodex/sudo/npm must be explicitly overridden — never left to ambient PATH
+	// state (the real codex binary is present in this container).
+	t.Run("subscription_codex_absent_and_uninstallable_refuses_before_any_seam", func(t *testing.T) {
+		resetSpies()
+		origLookPath, origSudo, origNpm := lookPathCodex, sudoNonInteractiveOK, npmGlobalRootWritable
+		lookPathCodex = func() (string, error) { return "", fmt.Errorf("codex not found") }
+		sudoNonInteractiveOK = func() bool { return false }
+		npmGlobalRootWritable = func() bool { return false }
+		t.Cleanup(func() {
+			lookPathCodex, sudoNonInteractiveOK, npmGlobalRootWritable = origLookPath, origSudo, origNpm
+		})
+		t.Setenv("CODEX_HOME", t.TempDir()) // no auth.json under this dir — never rely on ambient state (D9)
+		dir := setupFactoryDir(t)           // no .agentfactory/secrets/chatgpt/auth.json
+		// --litellm-auth REQUIRES --litellm (D10); this subtest's concern is the K6 preflight, so
+		// --litellm is passed explicitly to reach that code path.
+		_, err := runInstallInDir(t, dir, "--agents", "--litellm", "--litellm-auth=codex-subscription")
+		if err == nil {
+			t.Fatal("expected K6 refusal when codex is absent and neither sudo nor npm root is writable, got success")
+		}
+		if !strings.Contains(err.Error(), "npm global prefix is root-owned") {
+			t.Errorf("error = %q, want it to name the npm prefix refusal (design-doc.md:120)", err.Error())
+		}
+		if agentGenCalled {
+			t.Error("agent-gen-all.sh ran despite the K6 refusal — the preflight must precede it")
+		}
+		if quickstartCalled {
+			t.Error("quickstart.sh ran despite the K6 refusal")
+		}
+	})
+
+	// F17/D10 (blind-review iteration 1, pre-Phase-2a): the mode-resolution ladder's own handle
+	// predicate must treat a 0-byte handle as absent — gatewayHandleNonEmpty (shared by K1's
+	// gatewayAuthMode and this ladder) already guarantees this, so an empty subscription handle
+	// with no other signal resolves to the api-key default and forwards nothing (D18 case (a)).
+	// This is now a K5-level protective assertion, not a K6 preflight concern: the old E2 preflight
+	// this subtest used to pin is deleted this phase (concern_tests.md §1 reconciliation).
+	t.Run("subscription_empty_handle_treated_as_absent_resolves_to_default", func(t *testing.T) {
+		resetSpies()
+		t.Setenv("OPENAI_API_KEY", "sk-test-env") // empty handle ⇒ default mode is api-key, which needs a key
+		dir := setupFactoryDir(t)
+		secretsDir := filepath.Join(config.ConfigDir(dir), "secrets")
+		if err := os.MkdirAll(filepath.Join(secretsDir, "chatgpt"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(secretsDir, "chatgpt", "auth.json"), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := runInstallInDir(t, dir, "--agents", "--litellm")
+		if err != nil {
+			t.Fatalf("a 0-byte handle with no other signal must resolve to the api-key default, got: %v\noutput: %s", err, out)
+		}
+		if got := strings.Join(gotQuickstartArgs, " "); got != "--litellm" {
+			t.Errorf("quickstart args = %q, want %q (empty handle treated as absent, D18 case (a))", got, "--litellm")
+		}
+	})
+
+	t.Run("af_litellm_auth_env_forwarded_even_at_default_mode", func(t *testing.T) {
+		resetSpies()
+		// Disk alone would infer codex-subscription (the sole existing handle), but
+		// an explicit AF_LITELLM_AUTH=api-key must win AND be forwarded — even though
+		// "api-key" is also the ladder's silent default — or quickstart.sh's own
+		// disk-only ladder (no env-var tier) would independently re-derive
+		// codex-subscription and diverge from what install.go resolved.
+		t.Setenv("AF_LITELLM_AUTH", "api-key")
+		t.Setenv("OPENAI_API_KEY", "sk-test-env")
+		dir := setupFactoryDir(t)
+		secretsDir := filepath.Join(config.ConfigDir(dir), "secrets")
+		if err := os.MkdirAll(filepath.Join(secretsDir, "chatgpt"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(secretsDir, "chatgpt", "auth.json"), []byte(`{"tokens":{}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := runInstallInDir(t, dir, "--agents", "--litellm")
+		if err != nil {
+			t.Fatalf("install --agents --litellm with AF_LITELLM_AUTH=api-key failed: %v\noutput: %s", err, out)
+		}
+		if got := strings.Join(gotQuickstartArgs, " "); !strings.Contains(got, "--litellm-auth=api-key") {
+			t.Errorf("quickstart args = %q, want to contain %q (explicit env must be forwarded even at the default mode)",
+				got, "--litellm-auth=api-key")
+		}
+	})
+
+	// PR #688 Phase 3 (decisions.md D10, correction discovered during blind review iteration 2):
+	// --litellm-auth REQUIRES --litellm, matching IMPLREADME_PHASE3.md's Required-change bullet
+	// verbatim ("requires --litellm") — passing --litellm-auth alone must refuse before any seam
+	// runs, not silently imply the gateway is wanted.
+	t.Run("litellm_auth_without_litellm_refuses_before_any_seam", func(t *testing.T) {
+		resetSpies()
+		dir := setupFactoryDir(t)
+		_, err := runInstallInDir(t, dir, "--agents", "--litellm-auth=codex-subscription")
+		if err == nil {
+			t.Fatal("expected refusal when --litellm-auth is passed without --litellm, got success")
+		}
+		if !strings.Contains(err.Error(), "litellm-auth") || !strings.Contains(err.Error(), "requires") {
+			t.Errorf("error = %q, want it to name --litellm-auth and 'requires'", err.Error())
+		}
+		if agentGenCalled || quickstartCalled {
+			t.Errorf("seam ran despite the requires-refusal: agentgen=%v quickstart=%v", agentGenCalled, quickstartCalled)
+		}
+	})
 }
 
 // --- Phase 2 guard test helpers ------------------------------------------------
@@ -1750,7 +2059,25 @@ func newAFSourceDir(t *testing.T, scripts []string, formulas map[string]string) 
 		t.Fatal(err)
 	}
 	for _, s := range scripts {
-		if err := os.WriteFile(filepath.Join(src, s), []byte("#!/bin/bash\ntrue\n"), 0755); err != nil {
+		// quickstart.sh carries a --litellm-auth marker plus stub _ensure_codex_cli/
+		// _reconcile_gateway function definitions so all three assertQuickstartSupports
+		// checks pass against this fixture by default, matching the real shipped
+		// script; TestInstallAgentsForwardsQuickstartFlags's
+		// "refuses_when_quickstart_missing_*" subtests build stale fixtures lacking
+		// one marker at a time to exercise the negative cases.
+		content := "#!/bin/bash\ntrue\n"
+		if s == "quickstart.sh" {
+			content = "#!/bin/bash\n" +
+				"# --litellm-auth=<mode> arm present (fixture placeholder)\n" +
+				"_ensure_codex_cli() {\n" +
+				"    true\n" +
+				"}\n" +
+				"_reconcile_gateway() {\n" +
+				"    true\n" +
+				"}\n" +
+				"true\n"
+		}
+		if err := os.WriteFile(filepath.Join(src, s), []byte(content), 0755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2011,4 +2338,463 @@ func TestWarnIfEnclosingFactory_QuietWhenMarkerless(t *testing.T) {
 	if errBuf.String() != "" {
 		t.Errorf("marker-less dir must be quiet, got: %q", errBuf.String())
 	}
+}
+
+// --- PR #688 Phase 3 ("Bootstrap") --litellm-auth mode-resolution tests ------------------------
+//
+// The --litellm-auth flag itself exists (install.go:99-100, PR #688 Phase 3). The tests below in
+// this section pin issue #693 Phase 2a's K5 ladder replacement (decisions.md D1: install.go's
+// resolveLitellmAuthMode/its replacement must delegate to gatewayAuthMode for the record+migration
+// tiers) — RED today because resolveLitellmAuthMode (install.go:927-956) never reads the
+// litellm-auth-mode record at all. See todos/fable-implement/red_predictions.md.
+
+// TestInstallBothHandlesResolvesFromRecord replaces TestInstallRefusesWhenBothHandlesExistWithoutFlag
+// (intake.md "Test module" required change, decisions.md D1/D3). Per D1, K5 delegates to
+// gatewayAuthMode(root) for its record+migration tiers, so with BOTH handles present:
+//   - a record present ⇒ success, forwarding the recorded mode (net-new, RED today: today's
+//     resolveLitellmAuthMode has no record tier at all and refuses unconditionally whenever both
+//     handles exist, record or not).
+//   - no record ⇒ the refusal survives (intake.md: "the both-handles-without-a-flag refusal
+//     survives ... for the no-record case"), naming --litellm-auth (D3: this is
+//     gatewayAuthMode's OWN tier-4 error, gateway_auth.go:246, propagated verbatim once K5
+//     delegates — already asserted by TestGatewayAuthMode_Tier4BothHandlesNoRecordRefusesNamingFlag
+//     at the K1 level; this subtest is the install.go-level integration check).
+func TestInstallBothHandlesResolvesFromRecord(t *testing.T) {
+	installAgentsFlag = false
+	installLitellmFlag = false
+	installLitellmAuthFlag = ""
+	t.Cleanup(func() { installAgentsFlag = false; installLitellmFlag = false; installLitellmAuthFlag = "" })
+
+	origAgentGen := runAgentGenScript
+	origQuickstart := runQuickstartScript
+	t.Cleanup(func() { runAgentGenScript = origAgentGen; runQuickstartScript = origQuickstart })
+
+	afSrc := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"}, nil)
+	t.Setenv("AF_SOURCE_ROOT", afSrc)
+
+	seedBothHandles := func(t *testing.T, dir string) {
+		t.Helper()
+		secretsDir := filepath.Join(config.ConfigDir(dir), "secrets")
+		if err := os.MkdirAll(filepath.Join(secretsDir, "chatgpt"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(secretsDir, "openai.key"), []byte("sk-test-file"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(secretsDir, "chatgpt", "auth.json"), []byte(`{"tokens":{}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("record_present_forwards_recorded_mode", func(t *testing.T) {
+		stubCodexReady(t)
+		var agentGenCalled, quickstartCalled bool
+		var gotQuickstartArgs []string
+		runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error {
+			agentGenCalled = true
+			return nil
+		}
+		runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error {
+			quickstartCalled = true
+			gotQuickstartArgs = append([]string{}, extraArgs...)
+			return nil
+		}
+
+		dir := setupFactoryDir(t)
+		seedBothHandles(t, dir)
+		if err := os.WriteFile(authModeRecordPath(dir), []byte("codex-subscription\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		out, err := runInstallInDir(t, dir, "--agents", "--litellm")
+		if err != nil {
+			t.Fatalf("both handles + a present record must resolve from the record, got error: %v\noutput: %s", err, out)
+		}
+		if !agentGenCalled || !quickstartCalled {
+			t.Errorf("expected both seams to run: agentgen=%v quickstart=%v", agentGenCalled, quickstartCalled)
+		}
+		if got := strings.Join(gotQuickstartArgs, " "); !strings.Contains(got, "--litellm-auth=codex-subscription") {
+			t.Errorf("quickstart args = %q, want to contain %q (record-backed mode forwarded per D18 case (d))",
+				got, "--litellm-auth=codex-subscription")
+		}
+	})
+
+	t.Run("no_record_refuses_naming_flag", func(t *testing.T) {
+		var agentGenCalled, quickstartCalled bool
+		runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error {
+			agentGenCalled = true
+			return nil
+		}
+		runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error {
+			quickstartCalled = true
+			return nil
+		}
+
+		dir := setupFactoryDir(t)
+		seedBothHandles(t, dir)
+		// No record file written — the no-record-refusal case must survive (intake.md).
+
+		_, err := runInstallInDir(t, dir, "--agents", "--litellm")
+		if err == nil {
+			t.Fatal("expected a refusal when both auth handles exist and no record/flag/env disambiguates, got success")
+		}
+		if !strings.Contains(err.Error(), "--litellm-auth") {
+			t.Errorf("refusal %q does not name --litellm-auth (intake.md AC, decisions.md D3)", err)
+		}
+		if agentGenCalled || quickstartCalled {
+			t.Errorf("seam ran despite the both-handles-no-record refusal: agentgen=%v quickstart=%v", agentGenCalled, quickstartCalled)
+		}
+	})
+}
+
+// TestInstallRedeployWithoutFlagKeepsExistingMode pins the "single existing handle" ladder tier:
+// on redeploy, with exactly one handle present and no explicit --litellm-auth flag, the existing
+// mode is inferred and preserved — a subscription-only factory stays subscription, not silently
+// reset to the api-key default.
+func TestInstallRedeployWithoutFlagKeepsExistingMode(t *testing.T) {
+	stubCodexReady(t)
+	installAgentsFlag = false
+	installLitellmFlag = false
+	installLitellmAuthFlag = ""
+	t.Cleanup(func() { installAgentsFlag = false; installLitellmFlag = false; installLitellmAuthFlag = "" })
+
+	origAgentGen := runAgentGenScript
+	origQuickstart := runQuickstartScript
+	origPrompt := promptOpenAIKey
+	t.Cleanup(func() {
+		runAgentGenScript = origAgentGen
+		runQuickstartScript = origQuickstart
+		promptOpenAIKey = origPrompt
+	})
+	var gotQuickstartArgs []string
+	runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error { return nil }
+	runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error {
+		gotQuickstartArgs = append([]string{}, extraArgs...)
+		return nil
+	}
+	promptOpenAIKey = func(errW io.Writer, keyFile string) (string, error) {
+		return "", fmt.Errorf("stdin is not a terminal, cannot prompt")
+	}
+
+	afSrc := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"}, nil)
+	t.Setenv("AF_SOURCE_ROOT", afSrc)
+
+	dir := setupFactoryDir(t)
+	secretsDir := filepath.Join(config.ConfigDir(dir), "secrets")
+	if err := os.MkdirAll(filepath.Join(secretsDir, "chatgpt"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Subscription-only factory: no openai.key, only the ChatGPT handle.
+	if err := os.WriteFile(filepath.Join(secretsDir, "chatgpt", "auth.json"), []byte(`{"tokens":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENAI_API_KEY", "")
+
+	out, err := runInstallInDir(t, dir, "--agents", "--litellm")
+	if err != nil {
+		t.Fatalf("redeploy of a subscription-only factory with no flag must succeed by inferring "+
+			"subscription mode from the existing handle, got: %v\noutput: %s", err, out)
+	}
+	if got := strings.Join(gotQuickstartArgs, " "); !strings.Contains(got, "--litellm-auth=codex-subscription") {
+		t.Errorf("quickstart args = %q, want to contain %q (mode inferred from the sole existing handle)",
+			got, "--litellm-auth=codex-subscription")
+	}
+}
+
+// TestInstallSubscriptionModeNeverPersistsEnvOpenAIKey pins the DO-NOT-CHANGE analog: in
+// subscription mode, install.go's key block (unconditional os.Setenv("OPENAI_API_KEY", …)) must
+// be skipped entirely.
+func TestInstallSubscriptionModeNeverPersistsEnvOpenAIKey(t *testing.T) {
+	stubCodexReady(t)
+	installAgentsFlag = false
+	installLitellmFlag = false
+	installLitellmAuthFlag = ""
+	t.Cleanup(func() { installAgentsFlag = false; installLitellmFlag = false; installLitellmAuthFlag = "" })
+
+	origAgentGen := runAgentGenScript
+	origQuickstart := runQuickstartScript
+	t.Cleanup(func() { runAgentGenScript = origAgentGen; runQuickstartScript = origQuickstart })
+	runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error { return nil }
+	runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error { return nil }
+
+	afSrc := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"}, nil)
+	t.Setenv("AF_SOURCE_ROOT", afSrc)
+
+	dir := setupFactoryDir(t)
+	t.Setenv("OPENAI_API_KEY", "")
+
+	// E2 subscription preflight needs an importable session or an already-imported
+	// handle before it will let agent-gen-all.sh run; this test's own concern is the
+	// key block downstream of that preflight, not E2 itself (see
+	// TestInstallAgentsForwardsQuickstartFlags/subscription_without_codex_session_refuses_before_any_seam
+	// for the E2 refusal path).
+	secretsDir := filepath.Join(config.ConfigDir(dir), "secrets")
+	if err := os.MkdirAll(filepath.Join(secretsDir, "chatgpt"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secretsDir, "chatgpt", "auth.json"), []byte(`{"tokens":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// --litellm-auth REQUIRES --litellm (D10); this test's concern is the key-block skip, so
+	// --litellm is passed explicitly to reach that code path.
+	_, err := runInstallInDir(t, dir, "--agents", "--litellm", "--litellm-auth=codex-subscription")
+	if err != nil {
+		t.Fatalf("install --agents --litellm --litellm-auth=codex-subscription failed: %v", err)
+	}
+	if os.Getenv("OPENAI_API_KEY") != "" {
+		t.Error("subscription mode must never persist OPENAI_API_KEY into the process env")
+	}
+}
+
+// --- issue #693 Phase 2a: K6 preflight (preflightCodexSubscription/preflightGatewayPort) ---------
+//
+// preflightCodexSubscription/preflightGatewayPort do not exist yet (Phase 6 lands them in the slot
+// of the deleted E2 block, install.go:814-836). These tests exercise the target behavior only
+// through runInstallInDir and the pre-existing K4 seams (lookPathCodex, sudoNonInteractiveOK,
+// npmGlobalRootWritable, codexSessionValid, runCodexDeviceAuth) — never a not-yet-existing symbol,
+// so the package still compiles. RED today because nothing in runInstallAgents calls these seams;
+// the OLD E2 block (gatewayHandleNonEmpty-only) is what actually gates the codex-subscription path
+// until Phase 6 lands. See todos/fable-implement/red_predictions.md.
+
+// TestInstallCodexPreflightRefusesWhenCannotInstall pins design-doc.md:120 (K6 row): when the
+// codex CLI is absent and neither passwordless sudo nor a writable npm global root is available,
+// the refusal must name the npm prefix and sudo (D5's exact quoted string) and fire BEFORE
+// runAgentGenScript — install.go's own AC #1 (concern_tests.md §5 item 2).
+func TestInstallCodexPreflightRefusesWhenCannotInstall(t *testing.T) {
+	installAgentsFlag = false
+	installLitellmFlag = false
+	installLitellmAuthFlag = ""
+	t.Cleanup(func() { installAgentsFlag = false; installLitellmFlag = false; installLitellmAuthFlag = "" })
+
+	origAgentGen := runAgentGenScript
+	origQuickstart := runQuickstartScript
+	origLookPath := lookPathCodex
+	origSudo := sudoNonInteractiveOK
+	origNpm := npmGlobalRootWritable
+	t.Cleanup(func() {
+		runAgentGenScript = origAgentGen
+		runQuickstartScript = origQuickstart
+		lookPathCodex = origLookPath
+		sudoNonInteractiveOK = origSudo
+		npmGlobalRootWritable = origNpm
+	})
+
+	var agentGenCalled, quickstartCalled bool
+	runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error {
+		agentGenCalled = true
+		return nil
+	}
+	runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error {
+		quickstartCalled = true
+		return nil
+	}
+	// D9: never rely on ambient PATH absence — the real codex binary is present in this container.
+	lookPathCodex = func() (string, error) { return "", fmt.Errorf("exec: \"codex\": executable file not found in $PATH") }
+	sudoNonInteractiveOK = func() bool { return false }
+	npmGlobalRootWritable = func() bool { return false }
+	t.Setenv("CODEX_HOME", t.TempDir()) // no auth.json under this dir — never rely on ambient state (D9)
+
+	afSrc := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"}, nil)
+	t.Setenv("AF_SOURCE_ROOT", afSrc)
+
+	dir := setupFactoryDir(t)
+	// No imported gateway handle — mode resolves to codex-subscription only via the explicit flag.
+	_, err := runInstallInDir(t, dir, "--agents", "--litellm", "--litellm-auth=codex-subscription")
+	if err == nil {
+		t.Fatal("expected a refusal when the codex CLI is absent and neither sudo nor npm root is writable, got success")
+	}
+	if !strings.Contains(err.Error(), "npm global prefix is root-owned") || !strings.Contains(err.Error(), "passwordless sudo") {
+		t.Errorf("error = %q, want it to name the npm prefix and passwordless sudo (design-doc.md:120, decisions.md D5)", err.Error())
+	}
+	if agentGenCalled {
+		t.Error("agent-gen-all.sh ran despite the codex-install-infeasible refusal — K6 must precede it")
+	}
+	if quickstartCalled {
+		t.Error("quickstart.sh ran despite the codex-install-infeasible refusal")
+	}
+}
+
+// TestInstallCodexInstallConsent pins design-doc.md:120's consent gate (AC #2,
+// concern_tests.md §5 item 3, decisions.md D6: Go-side os.Setenv("AF_CODEX_INSTALL_CONSENT", "yes")
+// is this phase's scope; bash-side consumption is Phase 2b's).
+func TestInstallCodexInstallConsent(t *testing.T) {
+	installAgentsFlag = false
+	installLitellmFlag = false
+	installLitellmAuthFlag = ""
+	t.Cleanup(func() { installAgentsFlag = false; installLitellmFlag = false; installLitellmAuthFlag = "" })
+
+	origAgentGen := runAgentGenScript
+	origQuickstart := runQuickstartScript
+	origLookPath := lookPathCodex
+	origSudo := sudoNonInteractiveOK
+	origNpm := npmGlobalRootWritable
+	t.Cleanup(func() {
+		runAgentGenScript = origAgentGen
+		runQuickstartScript = origQuickstart
+		lookPathCodex = origLookPath
+		sudoNonInteractiveOK = origSudo
+		npmGlobalRootWritable = origNpm
+	})
+
+	// Codex CLI absent but install-feasible (sudo/npm both OK), isolating the consent gate from
+	// the install-feasibility refusal pinned above.
+	lookPathCodex = func() (string, error) { return "", fmt.Errorf("codex not found") }
+	sudoNonInteractiveOK = func() bool { return true }
+	npmGlobalRootWritable = func() bool { return true }
+	t.Setenv("CODEX_HOME", t.TempDir()) // no auth.json under this dir — never rely on ambient state (D9)
+
+	afSrc := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"}, nil)
+	t.Setenv("AF_SOURCE_ROOT", afSrc)
+
+	t.Run("consent_yes_env_forwards_and_reaches_quickstart_env", func(t *testing.T) {
+		t.Setenv("AF_CODEX_INSTALL_CONSENT", "yes")
+		var gotConsentEnvAtSeam string
+		var gotQuickstartArgs []string
+		runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error { return nil }
+		runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error {
+			gotConsentEnvAtSeam = os.Getenv("AF_CODEX_INSTALL_CONSENT")
+			gotQuickstartArgs = append([]string{}, extraArgs...)
+			return nil
+		}
+
+		dir := setupFactoryDir(t)
+		out, err := runInstallInDir(t, dir, "--agents", "--litellm", "--litellm-auth=codex-subscription")
+		if err != nil {
+			t.Fatalf("consent pre-granted via AF_CODEX_INSTALL_CONSENT=yes must let the bootstrap proceed, got: %v\noutput: %s", err, out)
+		}
+		if gotConsentEnvAtSeam != "yes" {
+			t.Errorf("AF_CODEX_INSTALL_CONSENT at quickstart seam = %q, want %q", gotConsentEnvAtSeam, "yes")
+		}
+		if got := strings.Join(gotQuickstartArgs, " "); !strings.Contains(got, "--litellm-auth=codex-subscription") {
+			t.Errorf("quickstart args = %q, want to contain %q", got, "--litellm-auth=codex-subscription")
+		}
+	})
+
+	t.Run("no_consent_non_tty_refuses_naming_env_var", func(t *testing.T) {
+		t.Setenv("AF_CODEX_INSTALL_CONSENT", "")
+		var agentGenCalled, quickstartCalled bool
+		runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error {
+			agentGenCalled = true
+			return nil
+		}
+		runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error {
+			quickstartCalled = true
+			return nil
+		}
+
+		dir := setupFactoryDir(t)
+		_, err := runInstallInDir(t, dir, "--agents", "--litellm", "--litellm-auth=codex-subscription")
+		if err == nil {
+			t.Fatal("expected a refusal when consent is unset and stdin is not a terminal, got success")
+		}
+		if !strings.Contains(err.Error(), "AF_CODEX_INSTALL_CONSENT") {
+			t.Errorf("error = %q, want it to name AF_CODEX_INSTALL_CONSENT (design-doc.md:120)", err.Error())
+		}
+		if agentGenCalled || quickstartCalled {
+			t.Errorf("seam ran despite the consent refusal: agentgen=%v quickstart=%v", agentGenCalled, quickstartCalled)
+		}
+	})
+}
+
+// TestInstallPreTeardownLoginPrecedesAgentGen pins design-doc.md:120's D24 cross-review fix
+// (concern_tests.md §3, AC #4): when the codex CLI is already present and the session is invalid,
+// runCodexDeviceAuth must run BEFORE runAgentGenScript (which takes agents down non-transactionally)
+// so the common redeploy case completes login with agents still up; when the session is valid,
+// runCodexDeviceAuth must never fire.
+func TestInstallPreTeardownLoginPrecedesAgentGen(t *testing.T) {
+	installAgentsFlag = false
+	installLitellmFlag = false
+	installLitellmAuthFlag = ""
+	t.Cleanup(func() { installAgentsFlag = false; installLitellmFlag = false; installLitellmAuthFlag = "" })
+
+	origAgentGen := runAgentGenScript
+	origQuickstart := runQuickstartScript
+	origLookPath := lookPathCodex
+	origSessionValid := codexSessionValid
+	origDeviceAuth := runCodexDeviceAuth
+	t.Cleanup(func() {
+		runAgentGenScript = origAgentGen
+		runQuickstartScript = origQuickstart
+		lookPathCodex = origLookPath
+		codexSessionValid = origSessionValid
+		runCodexDeviceAuth = origDeviceAuth
+	})
+
+	// CLI present (D24 only pre-teardown-logs-in when the CLI does not need installing).
+	lookPathCodex = func() (string, error) { return "/usr/bin/codex", nil }
+
+	afSrc := newAFSourceDir(t, []string{"agent-gen-all.sh", "quickstart.sh"}, nil)
+	t.Setenv("AF_SOURCE_ROOT", afSrc)
+
+	seedSubscriptionHandle := func(t *testing.T, dir string) {
+		t.Helper()
+		secretsDir := filepath.Join(config.ConfigDir(dir), "secrets", "chatgpt")
+		if err := os.MkdirAll(secretsDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(secretsDir, "auth.json"), []byte(`{"tokens":{}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("session_invalid_device_auth_precedes_agent_gen", func(t *testing.T) {
+		var events []string
+		codexSessionValid = func() bool { return false }
+		runCodexDeviceAuth = func(ctx context.Context, out, errW io.Writer) error {
+			events = append(events, "deviceauth")
+			return nil
+		}
+		runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error {
+			events = append(events, "agentgen")
+			return nil
+		}
+		runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error {
+			events = append(events, "quickstart")
+			return nil
+		}
+
+		dir := setupFactoryDir(t)
+		seedSubscriptionHandle(t, dir)
+		out, err := runInstallInDir(t, dir, "--agents", "--litellm", "--litellm-auth=codex-subscription")
+		if err != nil {
+			t.Fatalf("redeploy with an invalid session must complete pre-teardown login, got: %v\noutput: %s", err, out)
+		}
+		if len(events) == 0 || events[0] != "deviceauth" {
+			t.Fatalf("events = %v, want runCodexDeviceAuth to fire first (before agent-gen), D24", events)
+		}
+		agentGenIdx, deviceAuthIdx := -1, -1
+		for i, e := range events {
+			if e == "agentgen" {
+				agentGenIdx = i
+			}
+			if e == "deviceauth" {
+				deviceAuthIdx = i
+			}
+		}
+		if agentGenIdx == -1 || deviceAuthIdx == -1 || deviceAuthIdx > agentGenIdx {
+			t.Errorf("events = %v, want deviceauth strictly before agentgen", events)
+		}
+	})
+
+	t.Run("session_valid_device_auth_never_fires", func(t *testing.T) {
+		deviceAuthCalled := false
+		codexSessionValid = func() bool { return true }
+		runCodexDeviceAuth = func(ctx context.Context, out, errW io.Writer) error {
+			deviceAuthCalled = true
+			return nil
+		}
+		runAgentGenScript = func(cmd *cobra.Command, afSrc, projectDir string, noBuild bool) error { return nil }
+		runQuickstartScript = func(cmd *cobra.Command, afSrc, projectDir string, extraArgs []string) error { return nil }
+
+		dir := setupFactoryDir(t)
+		seedSubscriptionHandle(t, dir)
+		out, err := runInstallInDir(t, dir, "--agents", "--litellm", "--litellm-auth=codex-subscription")
+		if err != nil {
+			t.Fatalf("redeploy with a valid session must succeed without a login, got: %v\noutput: %s", err, out)
+		}
+		if deviceAuthCalled {
+			t.Error("runCodexDeviceAuth fired despite an already-valid session")
+		}
+	})
 }

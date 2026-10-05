@@ -339,6 +339,65 @@ func TestSettings_AllowlistsEqual(t *testing.T) {
 	}
 }
 
+// TestSettings_LitellmAuthModeRow pins PR #694 BODY-7: the gateway mode record
+// .agentfactory/litellm-auth-mode is an excluded, non-writable file. Unlike litellm.yaml, af does
+// read it (gatewayAuthMode, reported as selected_mode by `af gateway auth status --json`), so its
+// reason must say so rather than claim there is no af seam. af-core's paths.go declares no helper
+// for it, so it must ALSO be recorded in tierRowsWithoutPathHelper, which is exactly what keeps
+// TestSettings_DispositionComplete's containment arm green once the row exists.
+func TestSettings_LitellmAuthModeRow(t *testing.T) {
+	row, ok := rowFor("litellm-auth-mode")
+	if !ok {
+		t.Fatal("the tier table has no row for \"litellm-auth-mode\" — the gateway auth-mode record is " +
+			"unclassified; classify it as an excluded, non-writable row (BODY-7)")
+	}
+	if row.Tier != TierExcluded {
+		t.Errorf("litellm-auth-mode has tier %q, want %q — the console owns no seam for the gateway mode record", row.Tier, TierExcluded)
+	}
+	if row.Writable {
+		t.Error("litellm-auth-mode is writable — the console must not edit the gateway's mode record; it is excluded, not editable")
+	}
+	for _, stale := range []string{"no af seam", "not by af"} {
+		if strings.Contains(row.Reason, stale) {
+			t.Errorf("litellm-auth-mode reason %q claims %q, but af reads the record through gatewayAuthMode", row.Reason, stale)
+		}
+	}
+	for _, seam := range []string{"af gateway auth status", "selected_mode"} {
+		if !strings.Contains(row.Reason, seam) {
+			t.Errorf("litellm-auth-mode reason %q does not name af's read seam %q", row.Reason, seam)
+		}
+	}
+	if !contains(tierRowsWithoutPathHelper, "litellm-auth-mode") {
+		t.Error("litellm-auth-mode is not recorded in tierRowsWithoutPathHelper; af-core's paths.go declares " +
+			"no helper for it, so TestSettings_DispositionComplete's containment arm needs it listed there")
+	}
+}
+
+// TestSettings_PluginsRow pins PR #539 T4/BODY-7: plugins.json is excluded and non-writable. A raw
+// row would put plugin source URLs in the served payload and let a malformed manifest fail the whole
+// Settings view, while its only writers are `af plugin install` and `af plugin remove` (design 695
+// Phase 2, IMPLREADME_PHASE2 AC 11).
+func TestSettings_PluginsRow(t *testing.T) {
+	row, ok := rowFor("plugins")
+	if !ok {
+		t.Fatal("the tier table has no row for \"plugins\" — plugins.json is unclassified (T4)")
+	}
+	if row.Tier != TierExcluded {
+		t.Errorf("plugins has tier %q, want %q", row.Tier, TierExcluded)
+	}
+	if row.Writable {
+		t.Error("plugins is writable — only `af plugin install|remove` write plugins.json")
+	}
+	for _, want := range []string{"af plugin install", "af plugin install|remove", "af plugin list|verify"} {
+		if !strings.Contains(row.Reason, want) {
+			t.Errorf("plugins reason %q does not name %q", row.Reason, want)
+		}
+	}
+	if row.EffectiveWhen == "" || row.EffectiveWhen == "n/a" {
+		t.Errorf("plugins EffectiveWhen %q: a plugin re-install does change plugins.json, so name when it takes effect", row.EffectiveWhen)
+	}
+}
+
 func acceptedWord(ok bool) string {
 	if ok {
 		return "accepts"

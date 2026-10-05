@@ -170,6 +170,142 @@ gate non-conforming — it does not widen this exception:
 Reference: #668 (measured incident), #672 (rework acceptance criteria),
 PR #669 (acceptance-failed implementation under rework).
 
+## Amendment (2026-09-29): One enumerated exception — the af-owned session guard for integration-bound sessions
+
+**Status:** Proposed (awaiting operator ruling R1). Nothing below takes effect
+as an exception to this ADR until the operator records R1. Like the 2026-08-31
+amendment, it would grant ONE exemption, named below, and define no exempt class
+and no process for adding one.
+
+### Context
+
+Sometimes Claude Code stops in the middle of a task to ask the person at the
+terminal a question, and does nothing else until someone answers. There are two
+kinds of these prompts, and Claude Code tells hooks about each one as an event:
+
+- A **permission prompt** asks "may this tool run, yes or no?". Its hook event
+  is `PermissionRequest`.
+- An **input request** comes from an MCP server (an add-on tool server) that
+  asks the person to type an answer. Its hook event is `Elicitation`.
+
+Do these prompts block? Yes. Both stop the agent until someone answers.
+
+af starts Claude Code for every agent with `--dangerously-skip-permissions`
+(`internal/session/session.go:739`), a mode that turns off most permission
+prompts. This amendment works on the assumption that some prompts still appear
+in that mode: a hook of an installed plugin can still ask for permission, and an
+MCP server can still ask for input. That assumption has not yet been measured on
+a live session.
+
+Nobody watches an autonomous agent's terminal. A prompt there is never answered,
+so the agent stops working while it still looks "running". Mail cannot help: an
+agent that is waiting on a prompt reads no mail.
+
+The af session guard is af's own hook on these two events. The hook itself never
+blocks: it answers at once and always exits successfully
+(`internal/cmd/plugin_guard.go:44-78`). Once an agent's session is bound to any
+integration, the guard answers "no" to every permission prompt and every input
+request in that session, whoever raised it. A refusal that af cannot trace to an
+integration's plugin is reported under the name `unknown`.
+
+That answer is why an exception is needed. With nobody watching, the only way to
+keep the agent moving is for af to answer the prompt itself, and the only safe
+answer is "no". But "no" refuses the action that asked: for a permission prompt,
+af's answer is a deny decision (`internal/cmd/plugin_guard.go:149-150`), and the
+tool call that asked does not run. This ADR says af hooks never refuse anything;
+they let the agent carry on and report by mail. So af answering "no" is an
+exception, and this ADR grants exceptions only by naming them one at a time, as
+the 2026-08-31 amendment did. This amendment names this one.
+
+### Decision
+
+One exception is enumerated:
+
+**The af session guard** — the hidden command `af plugin guard-event
+<permission|elicitation>` (`internal/cmd/plugin_guard.go:15-21`), installed as
+the `PermissionRequest` and `Elicitation` hooks of every autonomous agent's
+settings (`internal/claude/config/settings-autonomous.json:38`, `:49`) — may
+deny a permission request (answer "no" to "may this tool run?") and decline an
+elicitation (refuse to give an MCP server the input it asked for).
+
+- **Purpose:** keep an unattended agent from waiting forever on a question
+  nobody will answer.
+- **Why these two events:** they are where Claude Code, about to wait for a
+  person, lets a hook give the answer instead. Hooking them is how af answers in
+  the absent person's place.
+- **Why "no" and not "yes":** "yes" would let a third-party plugin do something
+  no person approved, in a session nobody watches. "No" costs one refused
+  action. The agent is told the action was refused, with af's reason, and can
+  carry on. af mails the manager `INTEGRATION_GUARD_DENIED <integration>: ...`
+  once, so a person can run that operation from an interactive session or allow
+  it in the plugin's settings (`internal/cmd/plugin_guard.go:70-72`).
+
+The exception is valid only while ALL of the following hold; violating any of
+them makes the guard non-conforming, and it does not widen this exception:
+
+1. **No evaluator in the decision path.** The answer depends only on whether the
+   session's integration pin exists: the file `.runtime/integration_bindings`
+   that af writes into the agent's directory when it starts the agent with
+   integrations. No LLM call and no judgment service is involved
+   (`internal/cmd/plugin_guard.go:60-63`).
+2. **Does nothing without a pin.** In a session with no pin the guard does
+   nothing and lets Claude Code show the prompt as usual, so a factory with no
+   integrations behaves exactly as before (`internal/cmd/plugin_guard.go:60-63`).
+   af writes the pin only when it started the agent with at least one
+   integration, or skipped an optional one (`internal/cmd/integration_pin.go:139`),
+   so a pin that holds only skipped optional integrations also turns the guard
+   on, and its refusals are reported under `unknown`. A pin written when the
+   agent starts names every integration bound to it, factory-wide integrations
+   included (`internal/cmd/integration_pin.go:171`).
+3. **The hook process never fails.** Its answer is the JSON it prints. Every
+   path returns success, so the process exits 0, and a session af cannot match
+   to one of its agents gets no answer: Claude Code shows the prompt as usual
+   (`internal/cmd/plugin_guard.go:45-47`, `:56-59`).
+4. **Every refusal is reported.** af mails the manager
+   `INTEGRATION_GUARD_DENIED <integration>: <event> <tool>` once per integration
+   across the factory (`internal/cmd/plugin_guard.go:72`); writing a new pin lets
+   that mail go out again for the integrations the pin binds
+   (`internal/cmd/integration_pin.go:159-162`). Every refusal is still decided
+   and printed; only the mail is sent once. A refusal that no pinned plugin can
+   be traced to is reported under the one name `unknown`
+   (`internal/cmd/plugin_guard.go:109`).
+5. **Scope is these prompts, in autonomous sessions only.** The guard acts only
+   when Claude Code is about to stop and wait for a person in an autonomous
+   session. It never refuses a tool call that would have run without asking. The
+   interactive template, whose pane a human answers, carries no guard. That
+   exclusion is itself a provisional choice awaiting Supervisor confirmation,
+   like R1.
+
+### Consequences
+
+- The broad rule, and the 2026-08-31 exception, stand exactly as before.
+- This amendment is precedent for nothing. Conditions 1–5 bound this one
+  exemption; they are not a template for another deny hook.
+- Consented third-party hooks shipped inside an integration are the
+  integration's own. They are outside this ADR's af-hooks rule and gain nothing
+  from this amendment.
+- Residual: a stall the guard cannot see (a prompt path other than these two
+  events) is detected only by occupancy recovery.
+- Residual: a session that receives factory-scope integrations without a pin
+  (`af up` of an agent whose formula declares no integrations, or a respawn of an
+  instance pinned before this change) passes through, because the pin is written
+  only where a formula declares integrations (`internal/cmd/up.go:319`,
+  `:335`). Closing it means writing a pin outside instantiation or keying the
+  guard on something other than the pin, both of which depart from the
+  IMPLREADME's contract and are escalated to the Supervisor.
+- Residual: the pin lives in the agent's own dir, so a session that deletes
+  `.runtime/integration_bindings` switches its guard off. The guard stops an
+  unwatched pane from stalling; it is not a boundary against the agent itself.
+- Residual, outside the guard: the dispatch pre-check refuses only on a check
+  record it can read, so a first-ever failing `[check]` is refused by admission
+  after `--reset` has already stopped the agent (`internal/cmd/sling.go:247`).
+  Report markers are keyed per (integration, condition) factory-wide, as the
+  IMPLREADME specifies, so one agent's intact launch re-arms a condition another
+  agent still has. Both are escalated to the Supervisor.
+
+Reference: ruling R1; `internal/cmd/plugin_guard.go:15-153` (the command),
+`internal/claude/config/settings-autonomous.json:38-59` (its hook wiring).
+
 ## Corpus links
 
 - `subsystems/hooks.md` — full hooks shape

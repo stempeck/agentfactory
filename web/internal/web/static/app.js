@@ -844,9 +844,9 @@
   // UNMANAGED_FILES is an explicit ALLOW-list, and must stay one. The served files map carries a
   // `.agentfactory/secrets/` row (web/internal/config/tier.go:163-169), so a panel built from
   // `!writable` or from `tier === 'excluded'` would render the secrets directory — C-1 says the
-  // console never reads, lists or names it. Naming the four files that ARE listed is the only shape
+  // console never reads, lists or names it. Naming the five files that ARE listed is the only shape
   // in which that cannot happen by accident.
-  var UNMANAGED_FILES = ['models', 'telemetry', 'build-host', 'litellm.yaml'];
+  var UNMANAGED_FILES = ['models', 'telemetry', 'build-host', 'plugins', 'litellm.yaml'];
 
   // Who owns each unmanaged file instead. Each row's `reason` already says this in prose; these are
   // the commands, so the panel routes a secret-bearing workflow to the CLI rather than to a dead end.
@@ -854,6 +854,7 @@
     models: 'af config models set',
     telemetry: 'af telemetry on|off — which writes the .telemetry-gate file; telemetry.json itself has no CLI writer',
     'build-host': 'af config build-host',
+    plugins: 'af plugin install|remove write it; af plugin list|verify inspect it',
     'litellm.yaml': 'the gateway owns it — af has no seam for it'
   };
 

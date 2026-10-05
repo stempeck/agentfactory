@@ -86,6 +86,25 @@ func TestFormulasDir(t *testing.T) {
 	}
 }
 
+func TestPluginsDir(t *testing.T) {
+	got := PluginsDir("/tmp/myproject")
+	// MUST include the "store" segment — PluginsDir composes StoreDir like
+	// FormulasDir, so a helper that joined dotDir directly (.agentfactory/plugins)
+	// would fail this assertion.
+	want := filepath.Join("/tmp/myproject", ".agentfactory", "store", "plugins")
+	if got != want {
+		t.Errorf("PluginsDir: got %q, want %q", got, want)
+	}
+}
+
+func TestPluginsConfigPath(t *testing.T) {
+	got := PluginsConfigPath("/tmp/myproject")
+	want := filepath.Join("/tmp/myproject", ".agentfactory", "plugins.json")
+	if got != want {
+		t.Errorf("PluginsConfigPath: got %q, want %q", got, want)
+	}
+}
+
 func TestDetectAgentFromCwd_AtAgentRoot(t *testing.T) {
 	root := t.TempDir()
 	cwd := filepath.Join(root, ".agentfactory", "agents", "manager")

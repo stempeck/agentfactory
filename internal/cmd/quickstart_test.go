@@ -63,7 +63,7 @@ func TestQuickstartSupplyChainInvariants(t *testing.T) {
 	})
 
 	t.Run("has_sudo_npm_sub_fallback", func(t *testing.T) {
-		re := regexp.MustCompile(`sudo\s+npm\s+install\s+-g`)
+		re := regexp.MustCompile(`sudo\s+(-n\s+)?npm\s+install\s+-g`)
 		if !re.MatchString(installClaude) {
 			t.Error("install_claude() must have sudo npm as sub-fallback")
 		}

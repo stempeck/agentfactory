@@ -46,7 +46,7 @@ func plantIntervention(t *testing.T, root, agent, ts string, mechanism tokenomic
 func runTurnInterventions(t *testing.T, root, agent, since string) string {
 	t.Helper()
 	var out bytes.Buffer
-	if err := runTurnInterventionsCore(&out, root, agent, since); err != nil {
+	if err := runTurnInterventionsCore(&out, root, agent, since, launchEffort{}); err != nil {
 		t.Fatalf("af turn interventions returned an error; ADR-007 says every transcript-side "+
 			"outcome rides in the OUTPUT and still exits 0: %v", err)
 	}
@@ -241,6 +241,21 @@ func TestFidelityGateInterventionSection(t *testing.T) {
 		if !strings.Contains(head, "Assistant response:") {
 			t.Error("the intervention section precedes the assistant response; the grader reads the " +
 				"harness's action before it reads what the agent did with it")
+		}
+	})
+
+	// The standing reduction rides the session's own environment (#709): the gate's verb call must
+	// inherit it from the claude process, since only the grader itself runs under env -i.
+	t.Run("the session's standing effort reduction reaches the grader through its environment", func(t *testing.T) {
+		workDir := setupGateLockTestEnv(t)
+		plantLaunchEffort(t, "medium", "efficiency", "bd-k15-step-1", "hook-e2e")
+
+		judgeInput := runTurn(t, workDir)
+
+		const want = "- effort: reduce_effort — the harness started this session at reduced reasoning effort, " +
+			"which holds for every turn of the session (effort_level=medium)"
+		if !strings.Contains(judgeInput, want) {
+			t.Errorf("the judge input does not carry the standing effort line %q:\n%s", want, judgeInput)
 		}
 	})
 

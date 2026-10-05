@@ -63,6 +63,95 @@ af down --all 2>/dev/null || true
 
 echo "syncing formulas from source..."
 updated=0
+
+# K10 (issue #538): plugins.json records the formulas staged from installed plugin repos.
+# A staged plugin formula/template has no internal/cmd/install_formulas/ counterpart, so the
+# source-repo orphan passes below would delete it on the next redeploy. Derive the manifest
+# path from FORMULA_DIR (== <root>/.agentfactory/plugins.json, matching
+# config.PluginsConfigPath) so the same code is correct at runtime AND drivable by the
+# hermetic sync test, whose cwd is not the factory root.
+plugins_manifest="$(dirname "$(dirname "$FORMULA_DIR")")/plugins.json"
+
+# plugin_owner_of_stem <bare-stem> — if plugins.json records a formula whose bare stem
+# matches, set PLUGIN_OWNER to the owning plugin name and return 0; else return 1. Mirrors
+# config.PluginsConfig.OwnsAgent (internal/config/plugins.go), including its sorted-first
+# owner when several plugins record a stem: callers strip .formula.toml
+# off the query stem (XR-5) and the jq compare strips it off each stored key too, so a match
+# holds whether K7 recorded keys as "<stem>" or "<stem>.formula.toml".
+#
+# An absent manifest returns 1, so the orphan passes stay byte-identical to today with no
+# plugins.json (AC-6). A PRESENT manifest that LoadPluginsConfig would reject must never read
+# as "zero plugins": that would reap exactly the artifacts the manifest protects. Such a
+# manifest preserves every orphan candidate instead, with one WARNING per run (ADR-017: when
+# in doubt, don't delete). The jq shape check mirrors the Go decode
+# (TestPluginManifestShapeParity pins the two together), and plugins_schema_version mirrors
+# config.CurrentPluginsVersion so a newer schema, whose ownership fields this script cannot
+# know, is refused too. Each exit status is
+# captured with `|| rc=$?` and no pipeline is used, so neither `set -e` nor a SIGPIPE under
+# pipefail can turn a jq failure into a silent non-match. Without jq, a grep for either
+# key form preserves conservatively.
+plugins_manifest_state=""
+plugins_schema_version=2
+
+plugins_manifest_unreadable() {
+    if [ "$plugins_manifest_state" != unreadable ]; then
+        plugins_manifest_state=unreadable
+        echo "WARNING: $plugins_manifest is present but unreadable or invalid (exit $1; want the shape af accepts: a JSON object with an object-valued \"plugins\" and schema version 1..$plugins_schema_version) — preserving every orphan formula and template this run; fix or restore the file"
+    fi
+    PLUGIN_OWNER="(unknown: plugins.json unreadable)"
+}
+
+plugin_owner_of_stem() {
+    local stem="$1" owners="" rc=0
+    [ -e "$plugins_manifest" ] || return 1
+    if [ -z "$plugins_manifest_state" ]; then
+        if command -v jq >/dev/null 2>&1; then
+            jq -e --argjson max "$plugins_schema_version" '
+                def str_or_null: . == null or type == "string";
+                type == "object"
+                and (.version | . == null or (type == "number" and . == floor and . >= 1 and . <= $max))
+                and (.plugins | type == "object")
+                and all(.plugins[]; . == null or (type == "object"
+                    and all(.source, .commit, .installed_at; str_or_null)
+                    and (.formulas | . == null or type == "object")
+                    and (.integration | . == null or type == "object")
+                    and all((.formulas // {})[]; . == null or (type == "object" and (.sha256 | str_or_null)))))
+            ' "$plugins_manifest" >/dev/null || rc=$?
+            if [ "$rc" -eq 0 ]; then
+                plugins_manifest_state=valid
+            else
+                plugins_manifest_unreadable "$rc"
+            fi
+        else
+            plugins_manifest_state=no-jq
+        fi
+    fi
+    case "$plugins_manifest_state" in
+        unreadable)
+            PLUGIN_OWNER="(unknown: plugins.json unreadable)"
+            return 0
+            ;;
+        no-jq)
+            grep -qF -e "\"$stem\"" -e "\"$stem.formula.toml\"" "$plugins_manifest" || rc=$?
+            case "$rc" in
+                0) PLUGIN_OWNER="(unknown; jq unavailable)"; return 0 ;;
+                1) return 1 ;;
+                *) plugins_manifest_unreadable "$rc"; return 0 ;;
+            esac
+            ;;
+    esac
+    owners="$(jq -r --arg s "$stem" \
+        '.plugins | to_entries | sort_by(.key)[] | select([(.value.formulas // {}) | keys[] | rtrimstr(".formula.toml")] | index($s)) | .key' \
+        "$plugins_manifest")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        plugins_manifest_unreadable "$rc"
+        return 0
+    fi
+    [ -n "$owners" ] || return 1
+    PLUGIN_OWNER="${owners%%$'\n'*}"
+    return 0
+}
+
 is_source_repo=false
 # Only treat as source repo when PROJECT is literally the same directory as AF_SRC.
 # The go.mod heuristic was too broad — it matched any agentfactory fork/checkout,
@@ -87,6 +176,13 @@ if [ "$is_source_repo" = true ]; then
         [ -f "$f" ] || continue
         name=$(basename "$f")
         if [ ! -f "$AF_SRC/internal/cmd/install_formulas/$name" ]; then
+            # K10: preserve a plugin-owned formula recorded in plugins.json before treating
+            # it as a deletable orphan (XR-5: this pass keys on $name WITH .formula.toml, so
+            # strip it to the bare stem the manifest keys on).
+            if plugin_owner_of_stem "${name%.formula.toml}"; then
+                echo "preserving plugin formula: $name (installed by plugin $PLUGIN_OWNER)"
+                continue
+            fi
             echo "WARNING: removing local formula not in source tree: $name"
             echo "  (To preserve, promote it: cp $FORMULA_DIR/$name $AF_SRC/internal/cmd/install_formulas/)"
             rm "$f"
@@ -115,6 +211,12 @@ if [ "$is_source_repo" = true ]; then
         # Skip built-in templates
         case "$tmpl_name" in manager|supervisor) continue ;; esac
         if [ ! -f "$AF_SRC/internal/cmd/install_formulas/${tmpl_name}.formula.toml" ]; then
+            # K10: preserve a plugin-owned role template recorded in plugins.json before
+            # deleting it (XR-5: tmpl_name is already the bare stem the manifest keys on).
+            if plugin_owner_of_stem "$tmpl_name"; then
+                echo "preserving plugin template: $tmpl_name (installed by plugin $PLUGIN_OWNER)"
+                continue
+            fi
             echo "WARNING: removing orphan template: $tmpl_file (no matching formula)"
             rm "$tmpl_file"
         fi

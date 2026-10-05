@@ -52,6 +52,7 @@ state.json
 !.agentfactory/dispatch.json
 !.agentfactory/factory.json
 !.agentfactory/messaging.json
+!.agentfactory/plugins.json
 # Decision O-3 (issue #329 P5a): .agentfactory/telemetry.json and secrets/telemetry.auth are
 # DELIBERATELY left in the ignored tier (like models.json / litellm.yaml / secrets/litellm.key),
 # NOT allowlisted above. quickstart.sh's setup_telemetry() re-seeds telemetry.json (it can carry a
@@ -140,10 +141,14 @@ test_results.txt
 !.claude/skills/six-sigma-challenge/**
 
 # Scratch dirs tryExecCapableDir (internal/cmd/exec_capable_test.go) falls back to when /tmp is
-# noexec — the Stop-hook e2e harness, the live deny probe, the gate self-verify harness and the
-# per-role SessionStart proof, in the order listed below. Removed by t.Cleanup; ignored so a hard
-# kill cannot leave a 16 MB af binary, or a whole disposable factory, staged.
+# noexec — the Stop-hook e2e harness, the live deny probe, the gate self-verify harness, the
+# per-role SessionStart proof, the formula step-shell sandbox, the publish-script harness and the
+# integration install/check/service harness, in the order listed below. Removed by t.Cleanup;
+# ignored so a hard kill cannot leave a 16 MB af binary, or a whole disposable factory, staged.
 /internal/cmd/testdata/hooke2e*
 /internal/cmd/testdata/af-test-denyprobe*
 /internal/cmd/testdata/guardselfverify*
 /internal/cmd/testdata/af-test-sessionstart*
+/internal/cmd/testdata/af-test-stepshell*
+/internal/cmd/testdata/af-test-publish*
+/internal/cmd/testdata/af-test-integration*

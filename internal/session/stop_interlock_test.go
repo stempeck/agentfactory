@@ -34,7 +34,7 @@ func setAmbientCallerRole(t *testing.T, role string) {
 func TestStop_AgentContextInterlock(t *testing.T) {
 	t.Run("nonself_interactive_refused", func(t *testing.T) {
 		fake := installHermeticSession(t)
-		mgr := NewManager(t.TempDir(), "manager", config.AgentEntry{Type: "interactive"})
+		mgr := newTestManager(t.TempDir(), "manager", config.AgentEntry{Type: "interactive"})
 		fake.present[mgr.SessionID()] = true // MUST be running, else ErrNotRunning short-circuits before the interlock
 		setAmbientCallerRole(t, "witness")   // non-self agent context
 
@@ -49,7 +49,7 @@ func TestStop_AgentContextInterlock(t *testing.T) {
 
 	t.Run("self_allowed", func(t *testing.T) {
 		fake := installHermeticSession(t)
-		mgr := NewManager(t.TempDir(), "manager", config.AgentEntry{Type: "interactive"})
+		mgr := newTestManager(t.TempDir(), "manager", config.AgentEntry{Type: "interactive"})
 		fake.present[mgr.SessionID()] = true
 		setAmbientCallerRole(t, "manager") // self target
 
@@ -63,7 +63,7 @@ func TestStop_AgentContextInterlock(t *testing.T) {
 
 	t.Run("specialist_autonomous_allowed", func(t *testing.T) {
 		fake := installHermeticSession(t)
-		mgr := NewManager(t.TempDir(), "solver", config.AgentEntry{Type: "autonomous", Formula: "factoryworker"})
+		mgr := newTestManager(t.TempDir(), "solver", config.AgentEntry{Type: "autonomous", Formula: "factoryworker"})
 		fake.present[mgr.SessionID()] = true
 		setAmbientCallerRole(t, "witness") // non-self, but the target is autonomous (not interactive)
 

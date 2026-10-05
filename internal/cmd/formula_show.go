@@ -54,6 +54,9 @@ type formulaShowOutput struct {
 	Type        string         `json:"type"`
 	Inputs      []formulaField `json:"inputs"`
 	Vars        []formulaField `json:"vars"`
+
+	Integrations         []string `json:"integrations"`
+	IntegrationsOptional []string `json:"integrations_optional"`
 }
 
 // runFormulaShow is the RunE for `af formula show`. Always returns nil — a
@@ -93,6 +96,9 @@ func runFormulaShow(cmd *cobra.Command, args []string) error {
 		Type:        string(f.Type),
 		Inputs:      make([]formulaField, 0, len(f.Inputs)),
 		Vars:        make([]formulaField, 0, len(f.Vars)),
+
+		Integrations:         append([]string{}, f.Integrations...),
+		IntegrationsOptional: append([]string{}, f.IntegrationsOptional...),
 	}
 
 	// Maps have no defined order; sort by key for deterministic, snapshot-stable

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -26,21 +27,16 @@ func modelsRoot(t *testing.T) string {
 	return root
 }
 
-// #668 D16: the effort-reduction experiment arm.
+// #668 D16 asked for a per-profile reduced reasoning effort, recorded naming the value applied, so the
+// harness could measure whether a cheaper mode finishes the same steps. #678 K5 moved the decision to
+// the launch legs: the level is chosen from the step's learned generation baseline, where it can be
+// applied to a session that has not started yet rather than to one already running.
 //
-// It is an ARM, not a policy. design-doc.md's D16 row asks for a per-profile reduced reasoning
-// effort carried on the boundary-relaunch leg and recorded naming the value applied, so the harness
-// can measure whether a cheaper mode finishes the same steps. Without the record the experiment has
-// no readout: two runs at different effort levels would be indistinguishable in the data.
-//
-// #678 K5 re-homed the DECISION and left the arm. The level is no longer read off a profile at a
-// boundary relaunch — it is chosen from the step's learned generation baseline at the launch legs,
-// where it can be applied to a session that has not started yet rather than to one already running.
-// What this file still owns is the arm's edges, which are unchanged by that move: the write boundary's
-// vocabulary, the conjunction of gate and mechanism switch, and the rule that a control session must
-// never receive the treatment. The boundary's own readout is now asserted ABSENT below, because a
-// second effort record derived from a profile would double-count every relaunch the new actuator
-// already recorded at launch.
+// What this file still owns is the effort arm's edges: the write boundary's vocabulary, the
+// conjunction of gate and mechanism switch that governs the actuator's selection, and a declared
+// level passing through whichever way the arm is switched (#707). The boundary's own readout is
+// asserted ABSENT below, because a second effort record derived from a profile would double-count
+// every relaunch the actuator already recorded at launch.
 
 // effortProfile writes a models.json whose profile for this fixture's agent declares an effort
 // level, through the real saver so a value the write boundary would reject fails here.
@@ -193,30 +189,30 @@ func TestEffortExperiment(t *testing.T) {
 		}
 	})
 
-	// The arm switch has to govern the TREATMENT, not merely the bookkeeping. design-doc.md:330 says
-	// the relaunch env carries the reduced setting "only when the policy arm is enabled", and it says
-	// so because an experiment whose control group receives the treatment measures nothing: gating the
-	// record alone would run every relaunch reduced and record half of them.
-	t.Run("the arm switch governs the relaunch env, not just the record", func(t *testing.T) {
+	// The arm switch governs the actuator's SELECTION, never the operator's configuration (#707). Since
+	// #678 K5 the treatment is a level the actuator chooses; a level the profile declares is the
+	// operator's, and the records already tell the two apart — only a launch that selected exports the
+	// attestation af prime attests from, and every other launch exports it empty.
+	t.Run("a declared level passes through whichever way the arm is switched", func(t *testing.T) {
 		declared := []config.EnvVar{
 			{Key: "ANTHROPIC_MODEL", Value: "claude-opus-5"},
 			{Key: config.EnvEffortLevel, Value: "low"},
 		}
+		unattested := append(slices.Clone(declared),
+			config.EnvVar{Key: config.EnvEffortObjective},
+			config.EnvVar{Key: config.EnvEffortStepLabel},
+			config.EnvVar{Key: config.EnvEffortFormula})
 
-		t.Run("off drops the key", func(t *testing.T) {
+		t.Run("off keeps the declared level", func(t *testing.T) {
 			fx := newLifecycleFixture(t)
 			gateOn(t, fx.root)
 			armAdvisoryPolicy(t, fx.root, advisoryMarginPct, advisoryMinRuns, map[string]string{"effort": "off"})
 
 			got := withEffortLevel(fx.root, fx.workDir, declared, "", "")
-			for _, kv := range got {
-				if kv.Key == config.EnvEffortLevel {
-					t.Errorf("the relaunch still exports %s=%q with the arm off; every respawn runs the "+
-						"treatment and Phase 7 has no control group", kv.Key, kv.Value)
-				}
-			}
-			if len(got) != len(declared)-1 {
-				t.Errorf("kept %d of %d keys; only the effort key may be dropped", len(got), len(declared))
+			if !slices.Equal(got, unattested) {
+				t.Errorf("the arm is off and the launch env became %v, want the profile's %v unchanged "+
+					"beside an empty attestation; an operator who turned tokenomics off would lose the level "+
+					"they configured", got, unattested)
 			}
 		})
 
@@ -237,10 +233,9 @@ func TestEffortExperiment(t *testing.T) {
 			}
 		})
 
-		t.Run("the umbrella off is the arm off", func(t *testing.T) {
-			// The gate file and the mechanism switch are a conjunction, and a treatment that survived
-			// an operator turning the whole feature off would be the worst version of this bug: it
-			// would be invisible in a factory that never opted in at all.
+		t.Run("the umbrella off keeps the declared level", func(t *testing.T) {
+			// The umbrella off is the posture a fresh factory starts in (no .tokenomics file), so this
+			// is the case that decides whether a declared level works at all out of the box.
 			fx := newLifecycleFixture(t)
 			armAdvisoryPolicy(t, fx.root, advisoryMarginPct, advisoryMinRuns, map[string]string{"effort": "on"})
 			// armAdvisoryPolicy turns the gate on as part of arming, so the umbrella is closed here
@@ -250,10 +245,9 @@ func TestEffortExperiment(t *testing.T) {
 				t.Fatalf("close the tokenomics gate: %v", err)
 			}
 
-			for _, kv := range withEffortLevel(fx.root, fx.workDir, declared, "", "") {
-				if kv.Key == config.EnvEffortLevel {
-					t.Error("af tokenomics is off at the gate and the relaunch still carries the effort key")
-				}
+			if got := withEffortLevel(fx.root, fx.workDir, declared, "", ""); !slices.Equal(got, unattested) {
+				t.Errorf("af tokenomics is off at the gate and the launch env became %v, want the "+
+					"profile's %v unchanged beside an empty attestation", got, unattested)
 			}
 		})
 	})
@@ -261,38 +255,42 @@ func TestEffortExperiment(t *testing.T) {
 
 // TestEffortArmWiredAtEveryModelEnvSite pins the WIRING, which the subtests above cannot: they drive
 // withEffortLevel directly, so deleting the wrapper from a call site leaves them all green while
-// the control arm silently receives the treatment. That is the exact failure design-doc.md:330 rules
-// out, and it is invisible in a unit test of the helper.
+// that leg silently stops applying the actuator's selection. It is invisible in a unit test of the
+// helper.
 //
-// #678 K5 renamed the wrapper and widened what it does — it now SELECTS a level from the step's
-// learned baseline as well as filtering a declared one — which makes this interlock carry more weight
-// than it did, not less: a launch leg that misses the wrapper now loses the treatment entirely rather
-// than merely leaking a declared level. The literal below was updated with the rename and must never
-// be relaxed to a substring that both spellings satisfy.
+// #678 K5 renamed the wrapper and widened what it does — it SELECTS a level from the step's learned
+// baseline, capped at the declared one — and a launch leg that misses it loses the treatment entirely
+// while still launching sessions that look like steps which simply warranted no reduction. The
+// literal below was updated with the rename and must never be relaxed to a substring that both
+// spellings satisfy.
 //
 // A source read rather than a launch, because the claim is "no production site sets the model env
 // unfiltered" — a universal over call sites, which no single launch can witness. Same idiom, and same
 // reasoning, as TestSubagentScanStaysOffTheRenderPath.
 func TestEffortArmWiredAtEveryModelEnvSite(t *testing.T) {
-	all := grepPackage(t, ".", "mgr.SetModelEnv(")
+	all := grepPackage(t, ".", ".ModelEnv = ")
 	if len(all) == 0 {
-		t.Fatal("no production file in package cmd calls mgr.SetModelEnv; this interlock is scanning " +
+		t.Fatal("no production file in package cmd assigns a launch's ModelEnv; this interlock is scanning " +
 			"the wrong tree and would stay green with every launch exporting the effort key unfiltered")
 	}
-	armed := grepPackage(t, ".", "mgr.SetModelEnv(withEffortLevel(")
-	if len(armed) == len(all) {
-		return
-	}
 	armedAt := map[string]bool{}
-	for _, hit := range armed {
+	for _, hit := range grepPackage(t, ".", ".ModelEnv = withEffortLevel(") {
 		armedAt[hit] = true
 	}
 	for _, hit := range all {
 		if !armedAt[hit] {
-			t.Errorf("%s sets the model env without withEffortLevel; a profile declaring %s would "+
-				"then reach a session whose D16 arm is off, and the step's learned baseline would "+
-				"reach nothing at all. Wrap it, or if this site genuinely cannot carry an agent's "+
-				"profile, say why in the SAME change", hit, config.EnvEffortLevel)
+			t.Errorf("%s sets the model env without withEffortLevel; the step's learned baseline "+
+				"would never lower %s on that leg, and a relaunch through it would leave the previous "+
+				"session's attestation standing for af prime. Wrap it, or if this site genuinely cannot carry an "+
+				"agent's profile, say why in the SAME change", hit, config.EnvEffortLevel)
 		}
+		if filepath.Base(strings.Split(hit, ":")[0]) != "launch_contributions.go" {
+			t.Errorf("%s assigns a launch's ModelEnv outside the launch composer; every leg must reach "+
+				"the model env through launchContributions so no leg can skip the selection", hit)
+		}
+	}
+	// A keyed literal would set the field without an assignment this scan can see.
+	if hits := grepPackage(t, ".", "ModelEnv:"); len(hits) != 0 {
+		t.Errorf("%v set ModelEnv through a struct-literal key, which bypasses this interlock", hits)
 	}
 }

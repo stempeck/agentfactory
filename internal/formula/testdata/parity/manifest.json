@@ -12,6 +12,8 @@
     { "file": "bad-var-source.toml",        "verdict": "reject", "stage": "validate", "lamp": "parse",  "note": "var source not in allow-list" },
     { "file": "input-var-collision.toml",   "verdict": "reject", "stage": "validate", "lamp": "parse",  "note": "input and var share a name" },
     { "file": "bad-skill-name.toml",        "verdict": "reject", "stage": "validate", "lamp": "parse",  "note": "skill name fails syntax regex" },
+    { "file": "ns-skill-valid.toml",        "verdict": "accept", "note": "namespaced <ns>:<skill> name" },
+    { "file": "ns-skill-too-deep.toml",     "verdict": "reject", "stage": "validate", "lamp": "parse",  "note": "a skill name takes at most one namespace" },
     { "file": "missing-name.toml",          "verdict": "reject", "stage": "validate", "lamp": "parse",  "note": "formula name field absent" },
     { "file": "bad-type.toml",              "verdict": "reject", "stage": "validate", "lamp": "parse",  "note": "type not one of convoy/workflow/expansion/aspect" },
     { "file": "parse-bad-toml.toml",        "verdict": "reject", "stage": "parse",                     "note": "malformed TOML: rejected at decode (Go) / parse throw (JS)" }

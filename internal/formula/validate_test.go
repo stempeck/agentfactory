@@ -289,6 +289,16 @@ Do NOT read the SKILL.md.`},
 		}
 	})
 
+	t.Run("detects claude -p namespaced skill", func(t *testing.T) {
+		steps := []Step{
+			{Description: `claude -p "/acme:review the diff"`},
+		}
+		got := DetectSkillInvocations(steps)
+		if len(got) != 1 || got[0] != "acme:review" {
+			t.Errorf("got %v, want [acme:review]", got)
+		}
+	})
+
 	t.Run("deduplicates and sorts", func(t *testing.T) {
 		steps := []Step{
 			{Description: `Skill(skill: "zebra", args: "x") and Skill(skill: "alpha", args: "y")`},

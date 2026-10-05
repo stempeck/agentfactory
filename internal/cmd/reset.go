@@ -38,6 +38,8 @@ func resetAgentState(ctx context.Context, w io.Writer, factoryRoot, agentName, r
 
 	meta, err := worktree.FindByAgent(factoryRoot, agentName)
 	if err == nil && meta != nil {
+		// The worktree survives when a co-tenant keeps it, and so would this agent's pin inside it.
+		os.Remove(integrationPinPath(config.AgentDir(worktree.AbsWorktreePath(factoryRoot, meta), agentName)))
 		updated, empty, rmErr := worktree.RemoveAgent(factoryRoot, meta.ID, agentName)
 		if rmErr != nil {
 			fmt.Fprintf(os.Stderr, "%s: warning: worktree RemoveAgent: %v\n", agentName, rmErr)

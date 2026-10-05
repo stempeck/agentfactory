@@ -450,70 +450,54 @@ func capEffortLevel(planned, declared string) string {
 	return planned
 }
 
-// effortBreadcrumb is what a launch leg tells the session it is about to start about the level it was
+// launchEffort is what a launch leg tells the session it is about to start about the level it was
 // started at, and WHY (#678 K5).
 //
 // It exists because the two readers cannot see the launch. af prime records the session_start arm and
 // af done compares the next step's plan against the level in force, and both run in a process the
-// launcher replaced. The environment carries the level but not the objective, and the objective is
-// the whole point: a run at "medium" on a host whose default is medium is a control run, and a run at
-// "medium" because the efficiency actuator chose it is a treatment run (efficiency.go:3-7).
+// launcher replaced. The level alone does not say why it is in force, and the objective is the whole
+// point: a run at "medium" on a host whose default is medium is a control run, and a run at "medium"
+// because the efficiency actuator chose it is a treatment run (efficiency.go:3-7).
 //
-// StepLabel is the key the plan was resolved under, so af done can tell "the plan for the step I am
-// about to open changed" from "a different step's plan was in force".
-type effortBreadcrumb struct {
-	Level     string `json:"level"`
-	Objective string `json:"objective"`
-	StepLabel string `json:"step_label"`
-}
-
-func effortBreadcrumbPath(agentDir string) string {
-	return filepath.Join(agentDir, ".runtime", "effort_level")
-}
-
-// writeEffortBreadcrumb is best-effort past the write, for the reason every other .runtime/ writer on
-// a launch path is: a session may not fail to start because a note about it could not be filed
-// (ADR-007). The cost of losing it is one unlabelled session_start.
-func writeEffortBreadcrumb(agentDir string, b effortBreadcrumb) {
-	data, err := json.Marshal(b)
-	if err != nil {
-		return
-	}
-	runtimeDir := filepath.Join(agentDir, ".runtime")
-	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
-		return
-	}
-	_ = os.WriteFile(effortBreadcrumbPath(agentDir), append(data, '\n'), 0o644)
-}
-
-// clearEffortBreadcrumb is the other half of writing one, and it is not housekeeping.
+// It travels on the launch line itself (#709), exported beside the level by a launch that selected and
+// empty on every other launch, because the session's environment is the one place no lifecycle event
+// in the agent directory can reach: formula cleanup cannot delete it, and `af up` against a running
+// agent never gets past the liveness check to rewrite it.
 //
-// The breadcrumb is an ATTESTATION: af prime reads it and writes a reduce_effort record saying this
-// session ran reduced. A launch that selects nothing applies nothing, so a breadcrumb left over from
-// the previous launch would have the next session attest a treatment it never received — into an
-// append-only log, where it cannot be corrected, and where Phase 7 counts it as a firing and credits
-// the arm with a session that ran in the control (D-8/D-14).
-//
-// So every path out of withEffortLevel that does not select must come through here. The arm being off
-// is one of those paths: the control group must leave no trace that reads as treatment.
-func clearEffortBreadcrumb(agentDir string) {
-	_ = os.Remove(effortBreadcrumbPath(agentDir))
+// StepLabel and Formula are the keys the plan was resolved under, so a reader can tell "the plan for
+// the step I am about to open changed" from "a different step's plan was in force".
+type launchEffort struct{ Level, Objective, StepLabel, Formula string }
+
+// readLaunchEffort returns the zero value unless the launch attested an objective AND a level the host
+// honours. A zero Level is "no level in force", which is what an unlaunched arm honestly is; the level
+// alone is not an attestation, since a profile or the operator's shell rc exports it into sessions
+// nothing reduced.
+func readLaunchEffort() launchEffort {
+	objective := os.Getenv(config.EnvEffortObjective)
+	level := launchEffortLevel()
+	if objective == "" || level == "" {
+		return launchEffort{}
+	}
+	return launchEffort{
+		Level:     level,
+		Objective: objective,
+		StepLabel: os.Getenv(config.EnvEffortStepLabel),
+		Formula:   os.Getenv(config.EnvEffortFormula),
+	}
 }
 
-// readEffortBreadcrumb returns the zero value for every failure — absent, unreadable, undecodable —
-// and a zero Level is "no level in force", which is what an unlaunched arm honestly is. A level the
-// host itself would not honour is dropped for the same reason launchEffortLevel drops one: a record
-// naming it would attest an arm the session never ran in.
-func readEffortBreadcrumb(agentDir string) effortBreadcrumb {
-	data, err := os.ReadFile(effortBreadcrumbPath(agentDir))
-	if err != nil {
-		return effortBreadcrumb{}
+// withEffortAttestation exports the attestation on every path, empty when nothing was selected: a
+// relaunch reuses the pane's environment, so a launch that said nothing would leave the previous
+// session's attestation standing. A plain append is exact because no profile may declare these keys
+// (config.afIdentityKeys).
+func withEffortAttestation(env []config.EnvVar, level, objective, stepLabel, formula string) []config.EnvVar {
+	if level != "" {
+		env = withDeclaredEffortLevel(env, level)
 	}
-	var b effortBreadcrumb
-	if err := json.Unmarshal(data, &b); err != nil || !config.IsEffortLevel(b.Level) {
-		return effortBreadcrumb{}
-	}
-	return b
+	return append(env,
+		config.EnvVar{Key: config.EnvEffortObjective, Value: objective},
+		config.EnvVar{Key: config.EnvEffortStepLabel, Value: stepLabel},
+		config.EnvVar{Key: config.EnvEffortFormula, Value: formula})
 }
 
 // withEffortLevel is the #678 K5 effort actuator: it CHOOSES the reasoning-effort level a launching
@@ -526,58 +510,48 @@ func readEffortBreadcrumb(agentDir string) effortBreadcrumb {
 // which is AC-2. The band it replaces (`free < appetite`, deleted from advisory.go) could not: on a
 // roomy window `free` is enormous, so token efficiency was conditional on running out of room.
 //
-// With the arm off it keeps the drop-when-off rule verbatim, and that rule is about the TREATMENT
-// rather than the bookkeeping: design-doc.md:330 makes "the relaunch env carries the reduced-effort
-// setting only when the policy arm is enabled" the criterion, because an experiment whose control
-// group receives the treatment measures nothing. DROPPED rather than overwritten, because there is no
-// neutral level to write — models.go accepts an empty value as the operator's deferral to the host's
-// own default, which is what dropping already means, and the #602 universe clear that follows every
-// one of these call sites turns the drop into a real unset on a reused pane.
+// Selecting nothing — the arm off, a step whose history warrants nothing, or a selection equal to the
+// declared level (#679 F4) — leaves the declared CLAUDE_CODE_EFFORT_LEVEL untouched (absent when none
+// is declared) and exports the three AF_EFFORT_* attestation keys empty. The treatment is a level
+// this function SELECTS; a level the profile declares is the operator's configuration, in force until
+// a selection warrants less, whichever way the arm is switched (#707). Stripping it with the arm off
+// was #668 D16's rule from when the declared level WAS the treatment, and since K5 it only deleted
+// the operator's level on every leg of a tokenomics-off factory. What keeps a declared level from
+// reading as treatment is the attestation: only a launch that selects exports a non-empty one, and
+// every other path exports it empty.
 //
-// It wraps EVERY production SetModelEnv — the respawn leg, af sling and af up —
-// because a session launched under a profile that declared the key would otherwise carry the
-// treatment from its first turn and never be relaunched into the control.
-// TestEffortArmWiredAtEveryModelEnvSite pins the set.
-//
-// Selecting nothing returns the env UNCHANGED rather than dropping the declared key: with the arm on,
-// what a profile declares is in force until something warrants less, and a step with no learned
-// history warrants nothing.
+// It wraps the one model-env assignment, in the composer every leg calls (the respawn leg, af sling
+// and af up), because a leg that bypassed it would never be lowered, and would leave the previous
+// launch's attestation standing in a reused pane. TestEffortArmWiredAtEveryModelEnvSite pins the set.
 //
 // formula is the launch leg's answer to "which formula is this?", resolved from a source that knows
-// it on the FIRST session (nextReadyStep's instance-bead title). Empty falls back to hookedFormulaName
-// inside selectEffortLevel, which is all a direct caller with a last_closed_step needs (#679 F3).
+// it on the FIRST session (nextReadyStep's instance-bead title). Empty falls back to last_closed_step,
+// which is all a direct caller needs (#679 F3) — and only past the arm check, so an off launch reads
+// no file.
 func withEffortLevel(factoryRoot, agentDir string, env []config.EnvVar, nextStepLabel, formula string) []config.EnvVar {
-	declared, hasDeclared := declaredEffortLevel(env)
 	policy := launchPolicy(factoryRoot)
 	if !policy.On(tokenomics.MechanismEffort) {
-		clearEffortBreadcrumb(agentDir)
-		if !hasDeclared {
-			return env
-		}
-		return withoutEffortLevel(env)
+		return withEffortAttestation(env, "", "", "", "")
+	}
+	if formula == "" {
+		formula = hookedFormulaName(agentDir)
 	}
 
+	declared := modelEnvValue(env, config.EnvEffortLevel)
 	level, objective := selectEffortLevel(factoryRoot, agentDir, nextStepLabel, declared, formula, policy)
 	if level == "" {
-		clearEffortBreadcrumb(agentDir)
-		return env
+		return withEffortAttestation(env, "", "", "", "")
 	}
 	// #679 F4: a chosen level equal to what the profile already DECLARES reduced nothing — the
 	// operator's profile set it, not the actuator (capEffortLevel returns `declared` when the profile
 	// sits at or below the plan). Attesting an efficiency treatment there would file a control run
-	// into the reduced arm. Suppress the breadcrumb and leave the already-declared env untouched. A
-	// level over an UNDECLARED profile (declared == "") differs and is a real reduction that still
-	// attests — the PROTECT case.
+	// into the reduced arm. Attest nothing and leave the already-declared level untouched. A level over
+	// an UNDECLARED profile (declared == "") differs and is a real reduction that still attests — the
+	// PROTECT case.
 	if level == declared {
-		clearEffortBreadcrumb(agentDir)
-		return env
+		return withEffortAttestation(env, "", "", "", "")
 	}
-	writeEffortBreadcrumb(agentDir, effortBreadcrumb{
-		Level:     level,
-		Objective: string(objective),
-		StepLabel: nextStepLabel,
-	})
-	return withDeclaredEffortLevel(env, level)
+	return withEffortAttestation(env, level, string(objective), nextStepLabel, formula)
 }
 
 // selectEffortLevel answers what the next step's history warrants, and under which objective.
@@ -597,12 +571,6 @@ func selectEffortLevel(factoryRoot, agentDir, nextStepLabel, declared, formula s
 	// spelling the RECORD writer files under, and a second chain here would eventually resolve a
 	// profile the learned side never wrote (profileWindow's doc states the same rule for the window).
 	model, _ := resolveRecordModel(factoryRoot, agentDir, agentName, "")
-	// The leg resolves the formula name from the instance title so selection works on the first
-	// session; a direct caller (or a leg that could not read the store) passes "" and we fall back to
-	// last_closed_step, the only source there was before #679 F3.
-	if formula == "" {
-		formula = hookedFormulaName(agentDir)
-	}
 	learned := learnedFor(factoryRoot, formula, nextStepLabel, model)
 
 	if level := capEffortLevel(tokenomics.Efficiency(learned.aggregate, learned.found, policy).EffortLevel, declared); level != "" {
@@ -635,14 +603,14 @@ func capacityLastResort(factoryRoot, model string, learned learnedStep, policy t
 		Verdict == tokenomics.VerdictNoFit
 }
 
-// recordObjective maps a breadcrumb's objective onto the record vocabulary, and returns "" for
-// anything it does not recognise. The two vocabularies spell the same two words, and this is where the
-// import edge is honoured rather than assumed: internal/telemetry must never learn what a decision
-// looks like, so nothing but a value this switch names may reach a record.
+// recordObjective maps an attested objective onto the record vocabulary, and returns "" for anything
+// it does not recognise. The two vocabularies spell the same two words, and this is where the import
+// edge is honoured rather than assumed: internal/telemetry must never learn what a decision looks
+// like, so nothing but a value this switch names may reach a record.
 //
-// "" means "this breadcrumb names no objective I can attest", and its caller writes NO RECORD at all
+// "" means "this attestation names no objective I can attest", and its caller writes NO RECORD at all
 // rather than an unlabelled one. That is the conservative half: an unrecognised objective means the
-// breadcrumb was written by a binary whose vocabulary this one does not share, so what the session
+// launch was made by a binary whose vocabulary this one does not share, so what the session
 // actually ran in is unknown — and a record is a claim about the arm a session ran in, which is worse
 // wrong than missing.
 func recordObjective(objective string) string {
@@ -653,25 +621,6 @@ func recordObjective(objective string) string {
 		return telemetry.ObjectiveCapacity
 	}
 	return ""
-}
-
-func declaredEffortLevel(env []config.EnvVar) (string, bool) {
-	for _, kv := range env {
-		if kv.Key == config.EnvEffortLevel {
-			return kv.Value, true
-		}
-	}
-	return "", false
-}
-
-func withoutEffortLevel(env []config.EnvVar) []config.EnvVar {
-	kept := make([]config.EnvVar, 0, len(env))
-	for _, kv := range env {
-		if kv.Key != config.EnvEffortLevel {
-			kept = append(kept, kv)
-		}
-	}
-	return kept
 }
 
 // efficiencyRelaunchLedger bounds how many times ONE formula instance may be recycled for an
@@ -742,11 +691,11 @@ type efficiencyRelaunch struct {
 
 // boundaryEfficiencyRelaunch assembles that operand from the plan stepAdmission already resolved.
 //
-// The level comparison is against the breadcrumb the LAUNCH leg wrote rather than against this
-// process's own environment, because af done inherits the pane's env and would compare the plan to
-// itself on any path where the launcher exported nothing. A recycle that changes nothing is a respawn
-// spent for nothing — handoffHelps' argument, applied to the efficiency arm — and reducesEffort is
-// where that argument is actually made.
+// The level comparison is against the launch's attestation rather than the bare level in this
+// process's environment, because a profile or the operator's shell rc exports a level into sessions
+// nothing selected, and comparing the plan against that would warrant relaunches the actuator never
+// asked for. A recycle that changes nothing is a respawn spent for nothing — handoffHelps' argument,
+// applied to the efficiency arm — and reducesEffort is where that argument is actually made.
 //
 // The interview switch gates the clean start, which is the third of the three readers #678 K8 gives
 // that switch. Both legs are additionally downstream of Policy.EfficiencyOn, because a plan resolved
@@ -754,7 +703,7 @@ type efficiencyRelaunch struct {
 func boundaryEfficiencyRelaunch(workDir, instanceID string, adm admission) efficiencyRelaunch {
 	plan := adm.efficiency
 	levelChanges := adm.policy.On(tokenomics.MechanismEffort) &&
-		reducesEffort(readEffortBreadcrumb(workDir), plan.EffortLevel, adm.stepLabel)
+		reducesEffort(readLaunchEffort(), plan.EffortLevel, adm.stepLabel)
 	cleanStart := plan.CleanStart && adm.policy.On(tokenomics.MechanismInterview)
 	if !levelChanges && !cleanStart {
 		return efficiencyRelaunch{}
@@ -780,7 +729,7 @@ func boundaryEfficiencyRelaunch(workDir, instanceID string, adm admission) effic
 // six full re-primes per formula instance, spent by the mechanism that exists to save them.
 //
 //   - No planned level, or one with no rank. Nothing to move toward.
-//   - An ABSENT breadcrumb. The launch leg writes one whenever it selects, so no breadcrumb means no
+//   - An ABSENT attestation. The launch leg exports one whenever it selects, so none means no
 //     selection happened — the arm is off, or the step has no learned history, or the leg resolved an
 //     empty model env and was skipped. A leg that did not run cannot be made to run by recycling into
 //     it again, and treating absence as "the level differs" is exactly how that loop starts.
@@ -790,10 +739,10 @@ func boundaryEfficiencyRelaunch(workDir, instanceID string, adm admission) effic
 //     would warrant a relaunch forever for a difference no relaunch can close. Below the plan is also
 //     not a problem worth solving: the operator asked for less depth and got it.
 //
-// The step label is the fourth refusal and the reason the breadcrumb carries one. A breadcrumb
+// The step label is the fourth refusal and the reason the attestation carries one. An attestation
 // resolved for the step ABOUT TO OPEN belongs to a session that was launched targeting this very step,
 // so it is already running the level this plan asked for and there is nothing to correct.
-func reducesEffort(crumb effortBreadcrumb, planned, nextStepLabel string) bool {
+func reducesEffort(crumb launchEffort, planned, nextStepLabel string) bool {
 	if crumb.Level == "" || crumb.StepLabel == nextStepLabel {
 		return false
 	}

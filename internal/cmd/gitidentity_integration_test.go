@@ -56,10 +56,15 @@ func TestGitIdentityEndToEnd(t *testing.T) {
 	// The resolved state when no ambient identity is present: identity fallback +
 	// trailer both active (ResolveIdentity's IFF logic is unit-covered separately).
 	mgr := session.NewManager("/tmp/factory", "agent", config.AgentEntry{Type: "autonomous", Description: "test"})
-	mgr.SetGitIdentity(config.DefaultGitUserName, config.DefaultGitUserEmail)
-	mgr.SetGitTrailer(hooksDir, config.DefaultGitUserName, config.DefaultGitUserEmail)
+	mgr.SetLaunchContributions(&session.LaunchContributions{
+		GitAuthorName: config.DefaultGitUserName, GitAuthorEmail: config.DefaultGitUserEmail,
+		GitHooksDir: hooksDir, CoauthorName: config.DefaultGitUserName, CoauthorEmail: config.DefaultGitUserEmail,
+	})
 
-	startup := mgr.BuildStartupCommand()
+	startup, err := mgr.BuildStartupCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
 	exports := startup[:strings.Index(startup, "&& claude")]
 
 	script := exports + "\n" +

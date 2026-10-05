@@ -30,7 +30,7 @@ func startAgentWithEntry(t *testing.T, entry config.AgentEntry) *Manager {
 		t.Fatalf("creating agent dir: %v", err)
 	}
 
-	mgr := NewManager(tmpDir, "legacyagent", entry)
+	mgr := newTestManager(tmpDir, "legacyagent", entry)
 	if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
 		t.Fatalf("SetWorktree: %v", err)
 	}

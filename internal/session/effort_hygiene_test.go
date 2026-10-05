@@ -30,25 +30,21 @@ import (
 // the records say the mechanism was off.
 func TestEffortLevelClearsOnProfileSwitch(t *testing.T) {
 	mgr, fake := startMouseAgent(t, nil)
-	mgr.SetModelEnv([]config.EnvVar{{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"}})
+	mgr.c.ModelEnv = []config.EnvVar{{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"}}
 	// The universe as launchModelKeyUniverse builds it in a factory where one profile declares an
 	// effort level and the profile being launched does not.
-	mgr.SetModelKeyUniverse([]string{"ANTHROPIC_MODEL", config.EnvEffortLevel})
+	mgr.c.ModelKeyUniverse = []string{"ANTHROPIC_MODEL", config.EnvEffortLevel}
 
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: unexpected error: %v", err)
 	}
 
-	wantUnset := "UnsetEnvironment " + mgr.SessionID() + " " + config.EnvEffortLevel
-	if !hasOp(fake.ops, wantUnset) {
-		t.Errorf("a switch to a profile declaring no effort level must clear the previous one at the "+
-			"tmux twin; want %q, ops=%v", wantUnset, fake.ops)
-	}
-	inline := mgr.BuildStartupCommand()
+	assertNoTmuxEnvKey(t, fake.ops, mgr.SessionID(), config.EnvEffortLevel)
+	inline := startupLine(t, mgr)
 	if !hasUnsetToken(inline, config.EnvEffortLevel) {
-		t.Errorf("the inline twin must emit a true `unset %s` — it is the only clear a respawn ever "+
-			"emits, and the boundary relaunch this arm rides is a respawn; got: %s",
-			config.EnvEffortLevel, inline)
+		t.Errorf("a switch to a profile declaring no effort level must emit a true `unset %s` — the "+
+			"launch line is the only clear any launch emits, including the boundary relaunch this "+
+			"arm rides; got: %s", config.EnvEffortLevel, inline)
 	}
 }
 
@@ -57,8 +53,8 @@ func TestEffortLevelClearsOnProfileSwitch(t *testing.T) {
 // it does today, inheriting whatever the operator's shell exports.
 func TestEffortLevelUntouchedWhenNoProfileDeclaresIt(t *testing.T) {
 	mgr, fake := startMouseAgent(t, nil)
-	mgr.SetModelEnv([]config.EnvVar{{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"}})
-	mgr.SetModelKeyUniverse([]string{"ANTHROPIC_MODEL"})
+	mgr.c.ModelEnv = []config.EnvVar{{Key: "ANTHROPIC_MODEL", Value: "claude-opus-4"}}
+	mgr.c.ModelKeyUniverse = []string{"ANTHROPIC_MODEL"}
 
 	if err := mgr.Start(); err != nil {
 		t.Fatalf("Start: unexpected error: %v", err)
@@ -66,12 +62,12 @@ func TestEffortLevelUntouchedWhenNoProfileDeclaresIt(t *testing.T) {
 
 	for _, op := range fake.ops {
 		if strings.Contains(op, config.EnvEffortLevel) {
-			t.Errorf("a factory where no profile declares an effort level touched %s at the tmux twin "+
+			t.Errorf("a factory where no profile declares an effort level touched %s in the tmux env "+
 				"(%q); quickstart.sh:567 exports xhigh into every operator shell, so touching it here "+
 				"downshifts every agent in every existing factory", config.EnvEffortLevel, op)
 		}
 	}
-	inline := mgr.BuildStartupCommand()
+	inline := startupLine(t, mgr)
 	if strings.Contains(inline, config.EnvEffortLevel) {
 		t.Errorf("the launch line mentions %s in a factory that never configured it: %s",
 			config.EnvEffortLevel, inline)
@@ -93,6 +89,12 @@ func TestEffortLevelIsNotAFamilyMember(t *testing.T) {
 				"clears the value quickstart.sh:567 exports into every operator shell, on every "+
 				"launch, in every factory. The profile-key universe is where per-profile keys clear.",
 				config.EnvEffortLevel)
+		}
+	}
+	for _, key := range effortAttestationVars {
+		if key == config.EnvEffortLevel {
+			t.Errorf("%s is in effortAttestationVars, which a launch that selects nothing clears; that "+
+				"clears the level a profile declared (#707)", config.EnvEffortLevel)
 		}
 	}
 }

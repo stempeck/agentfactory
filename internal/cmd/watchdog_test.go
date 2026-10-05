@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -136,7 +138,7 @@ func TestWatchdog_EndpointCauseNamedInEscalationMail(t *testing.T) {
 	if !detected {
 		t.Fatal("expected 503 to be detected")
 	}
-	subject, body := watchdogFailureMail("worker_a", cause, mailOnly)
+	subject, body := watchdogFailureMail("worker_a", cause, mailOnly, false)
 	if !strings.Contains(subject, "worker_a") {
 		t.Errorf("escalation subject should name the agent, got %q", subject)
 	}
@@ -977,6 +979,8 @@ func TestWatchdog_TelemetryGuardFiresBesidePollAgents(t *testing.T) {
 	defer func() { watchdogNudgeFn = oldNudge }()
 
 	calls := stubTelemetryBackendGuard(t, nil)
+	stubGatewayBackendGuard(t, nil)
+	stubIntegrationServicesGuard(t, nil)
 	scope := buildWatchdogScope([]string{"worker"}, "")
 
 	watchdogTick(&cobra.Command{}, root, scope, map[string]*watchdogAgentState{}, map[string]int{}, 2)
@@ -1003,6 +1007,13 @@ func TestEnsureTelemetryBackend_WatchdogNeverOverlapsInFlightAttempts(t *testing
 	oldNudge := watchdogNudgeFn
 	watchdogNudgeFn = func(sessionID string) error { return nil }
 	defer func() { watchdogNudgeFn = oldNudge }()
+
+	// This test exercises the telemetry guard's concurrency behavior specifically;
+	// the gateway guard just needs to stay silent (concern_blast.md R1).
+	oldGateway := ensureGatewayBackendFn
+	ensureGatewayBackendFn = func(ctx context.Context, cmd *cobra.Command, root string) {}
+	defer func() { ensureGatewayBackendFn = oldGateway }()
+	stubIntegrationServicesGuard(t, nil)
 
 	release := make(chan struct{})
 	var wg sync.WaitGroup
@@ -1056,6 +1067,13 @@ func TestWatchdog_TelemetryGuardDoesNotBlockPollAgents(t *testing.T) {
 	watchdogNudgeFn = func(sessionID string) error { return nil }
 	defer func() { watchdogNudgeFn = oldNudge }()
 
+	// This test exercises the telemetry guard's blocking behavior specifically; the
+	// gateway guard just needs to stay silent (concern_blast.md R1).
+	oldGateway := ensureGatewayBackendFn
+	ensureGatewayBackendFn = func(ctx context.Context, cmd *cobra.Command, root string) {}
+	defer func() { ensureGatewayBackendFn = oldGateway }()
+	stubIntegrationServicesGuard(t, nil)
+
 	blocked := make(chan struct{})
 	done := make(chan struct{})
 	orig := ensureTelemetryBackendFn
@@ -1105,11 +1123,72 @@ func TestWatchdog_PollAgentsFunctionBodyNeverReferencesTelemetryGuard(t *testing
 		fnBody = rest[:next]
 	}
 
-	for _, needle := range []string{"ensureTelemetryBackend", "triggerTelemetryBackendGuard"} {
+	for _, needle := range []string{"ensureTelemetryBackend", "triggerTelemetryBackendGuard",
+		"ensureIntegrationServices", "triggerIntegrationServicesGuard"} {
 		if strings.Contains(fnBody, needle) {
 			t.Errorf("pollAgents's function body references %q — the telemetry-backend guard must sit "+
 				"BESIDE pollAgents in watchdogTick, never inside it (it would otherwise fire once per "+
 				"agent in the fleet instead of once per tick)", needle)
 		}
+	}
+}
+
+// TestWatchdog_StaleAnchorCommentsCiteLiveLines (spec L840-843, concern_tests §5.12): the
+// telemetry single-flight's scope comment cited up.go:398 / :423 and quickstart.sh:1105-1107,
+// anchors that predate Phase 1. Every up.go:<N> watchdog.go cites must name a line that holds
+// the call it describes (the telemetry cold-start guard and launchWatchdog must both be cited,
+// as they stand after the integration ensure is inserted), and relaunch.sh's check-then-act is
+// cited at quickstart.sh:1930.
+func TestWatchdog_StaleAnchorCommentsCiteLiveLines(t *testing.T) {
+	read := func(name string) string {
+		t.Helper()
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return string(b)
+	}
+	wd := read("watchdog.go")
+	upLines := strings.Split(read("up.go"), "\n")
+	qsLines := strings.Split(read(filepath.Join("..", "..", "quickstart.sh")), "\n")
+
+	for _, stale := range []string{"up.go:398", "up.go:423", "launchWatchdog at :423", "quickstart.sh:1105"} {
+		if strings.Contains(wd, stale) {
+			t.Errorf("watchdog.go still cites the stale anchor %q (spec L840-843)", stale)
+		}
+	}
+
+	callees := []string{"ensureTelemetryBackendFn(", "launchWatchdog(", "ensureGatewayBackendFn(", "ensureIntegrationServicesFn("}
+	cited := map[string]bool{}
+	for _, m := range regexp.MustCompile(`up\.go:(\d+)`).FindAllStringSubmatch(wd, -1) {
+		n, _ := strconv.Atoi(m[1])
+		line := ""
+		if n >= 1 && n <= len(upLines) {
+			line = upLines[n-1]
+		}
+		hit := ""
+		for _, c := range callees {
+			if strings.Contains(line, c) && !strings.Contains(line, "func "+c) {
+				hit = c
+				break
+			}
+		}
+		if hit == "" {
+			t.Errorf("watchdog.go cites up.go:%d, which holds %q, not a guard call or the launchWatchdog( call", n, strings.TrimSpace(line))
+			continue
+		}
+		cited[hit] = true
+	}
+	for _, want := range []string{"ensureTelemetryBackendFn(", "launchWatchdog("} {
+		if !cited[want] {
+			t.Errorf("watchdog.go must cite the up.go:<N> line of the %s call as it stands in the final commit (spec L840-842)", want)
+		}
+	}
+
+	if !strings.Contains(wd, "quickstart.sh:1930") {
+		t.Errorf("watchdog.go must cite relaunch.sh's check-then-act at quickstart.sh:1930 (spec L843)")
+	}
+	if len(qsLines) < 1930 || !strings.Contains(qsLines[1929], "has-session -t telemetry") {
+		t.Errorf("the spec's anchor quickstart.sh:1930 no longer holds the telemetry has-session check; re-anchor the citation")
 	}
 }

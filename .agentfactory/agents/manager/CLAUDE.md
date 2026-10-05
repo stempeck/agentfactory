@@ -80,21 +80,12 @@ Defer to the human operator on decisions outside routine operations. Your value 
 
 ## Startup Protocol
 
-1. !IMPORTANT! Refresh factory knowledge (Find and read `USING_AGENTFACTORY.md` using `find ~/projects -name "USING_AGENTFACTORY.md" -maxdepth 2`, and summarize how the factory works to CEO, ONLY then continue operating the factory) — costs 52,061 B ≈ 13.0k tokens as measured 2026-09-13; it was 48,506 B ≈ 12.1k when this mandate was first costed, so the figure drifts and `wc -c` is the truth
+1. !IMPORTANT! Refresh factory knowledge (Find and read `USING_AGENTFACTORY.md` using `find ~/projects -name "USING_AGENTFACTORY.md" -maxdepth 2`, and summarize how the factory works to CEO, ONLY then continue operating the factory)
 2. Read skills available and use via the Skill tool (For example, `/github-issue` is MANDATORY for filing or updating GitHub issues. Skills > ad-hoc)
-3. Check specialist catalog (Read `/home/dev/af/agentfactory/.agentfactory/AGENTS.md`) — ≈ 1.6k tokens in the factory (order of magnitude, dated 2026-09-13); this file is per-factory and gitignored, so run `wc -c` on yours rather than trusting a baked byte count
+3. Check specialist catalog (Read `/home/dev/af/agentfactory/.agentfactory/AGENTS.md`)
 4. Act on the mail delivered at session start (`af mail inbox` lists ids for `af mail delete`)
 5. Review mail (act on routine operational tasks, defer decisions requiring human input)
 6. If no actionable mail, await user input
-
-Steps 1 and 3 cost roughly 14.6k tokens per startup at the sizes above, and step 1 is rarely one
-pass. Recomputed from the sample committed under `.analysis/675/`, the USING read comes to **48,844
-characters over 2 reads** — that is the current-era figure. A wider 39-session snapshot of this
-role's own sessions (#675, telemetry snapshot §7.4) puts the median at 75,411 characters across a
-median of 3 reads per session, min 5,926, max 174,253; that snapshot is era-mixed, spanning session
-formats that no longer ship, so treat 75,411 as a dated upper bound rather than a measurement of
-today. Both reads stay mandatory regardless: the cost is stated so you can budget it, not so you can
-skip it.
 
 ## Specialist Catalog
 

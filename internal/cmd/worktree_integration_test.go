@@ -1209,12 +1209,15 @@ func TestWorktreeBuildHostResolution(t *testing.T) {
 	entry := agentsCfg.Agents["solver"]
 
 	mgr := session.NewManager(workspace, "solver", entry)
-	mgr.SetBuildHost(loadedCfg)
+	mgr.SetLaunchContributions(&session.LaunchContributions{BuildHost: loadedCfg})
 	if err := mgr.SetWorktree(wtPath, meta.ID); err != nil {
 		t.Fatalf("SetWorktree: %v", err)
 	}
 
-	cmd := mgr.BuildStartupCommand()
+	cmd, err := mgr.BuildStartupCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, want := range []string{
 		"AF_BUILD_MODE='ssh'",
@@ -1254,11 +1257,15 @@ func TestWorktreeBuildHostResolution_NoConfig(t *testing.T) {
 	entry := agentsCfg.Agents["solver"]
 
 	mgr := session.NewManager(workspace, "solver", entry)
+	mgr.SetLaunchContributions(&session.LaunchContributions{})
 	if err := mgr.SetWorktree(wtPath, meta.ID); err != nil {
 		t.Fatalf("SetWorktree: %v", err)
 	}
 
-	cmd := mgr.BuildStartupCommand()
+	cmd, err := mgr.BuildStartupCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if strings.Contains(cmd, "AF_BUILD_") {
 		t.Errorf("startup command without build-host.json should NOT contain AF_BUILD_, got: %s", cmd)

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,8 @@ var (
 	ErrNotRunning     = errors.New("agent session not running")
 	ErrNotProvisioned = errors.New("agent workspace not provisioned (run af install <role>)")
 	ErrWorktreeNotSet = errors.New("session: Start called before SetWorktree with a non-empty path")
+
+	ErrLaunchContributionsMissing = errors.New("session: Start/BuildStartupCommand called before SetLaunchContributions")
 )
 
 const (
@@ -60,47 +63,23 @@ const (
 
 	// envOTelHeaders is the telemetry channel's secret-bearing key (issue #329). Its
 	// value is a header list (Name=value,…) whose value may be a file: ref, so it takes
-	// the same inline-deref twin asymmetry ANTHROPIC_AUTH_TOKEN uses — the deref lives
-	// ONLY in the inline startup command, never in the tmux twin.
+	// the same inline deref ANTHROPIC_AUTH_TOKEN uses.
 	envOTelHeaders = "OTEL_EXPORTER_OTLP_HEADERS"
 )
 
 // redirectFamilyVars enumerates the endpoint/model redirect env the launch chokepoint
-// owns. Start()'s session-env hygiene pass (issue #508) unsets any of these NOT in
+// owns. The launch line's hygiene pass (issue #508) clears any of these NOT in
 // the effective set so a profile switch on a reused session leaves no stale redirect
-// var. envBaseURL/envAuthToken use the consts (TestEndpointConstants_NoDuplicateStrings
-// forbids their string literals outside the const block).
-//
-// ANTHROPIC_API_KEY is deliberately EXCLUDED: security.md I2 decides it is never
-// auto-cleared — default-profile agents may legitimately authenticate via an ambient
-// Anthropic key. Leaving it out of the hygiene family keeps API_KEY handling
-// byte-identical to today's behavior (the zero-regression choice on this fleet-wide
-// chokepoint). A profile that wants it cleared declares ANTHROPIC_API_KEY:"" explicitly,
-// which lands in the effective set and emits the inline clear — so it is untouched here
-// regardless.
-var redirectFamilyVars = []string{
-	envBaseURL,
-	envAuthToken,
-	"ANTHROPIC_MODEL",
-	"ANTHROPIC_SMALL_FAST_MODEL",
-	"ANTHROPIC_DEFAULT_OPUS_MODEL",
-	"ANTHROPIC_DEFAULT_SONNET_MODEL",
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL",
-	// Cleared by no hygiene pass before issue #598: it is in neither family list, so a value
-	// exported from an operator's shell rc would silently redirect fable-class requests on every
-	// profile, including the direct Anthropic ones. Clearing it costs nothing for a profile that
-	// does not declare it. Deliberately NOT a config.EndpointClassKeys member — the inventory
-	// waits on a live observation of the deployed CLI, while clearing an inherited value is right
-	// either way.
-	"ANTHROPIC_DEFAULT_FABLE_MODEL",
-	"CLAUDE_CODE_SUBAGENT_MODEL",
-}
+// var. The names and their order are owned by config.RedirectFamilyEnvVars (#695 Lift B,
+// which also records why ANTHROPIC_API_KEY is excluded); this is a private copy so nothing
+// here can reorder config's list.
+var redirectFamilyVars = slices.Clone(config.RedirectFamilyEnvVars)
 
 // telemetryFamilyVars enumerates the exact seven OTel launch-env vars this chokepoint owns
 // (issue #329) — the fixed set telemetry.LaunchEnv builds. Like redirectFamilyVars they are
-// iterated by EXCLUSION in both hygiene passes (Start()'s unset loop and the inline KEY=''
-// loop): any of these NOT emitted by this launch is cleared, so a telemetry-off relaunch of a
-// reused/respawned session leaves no stale OTel var behind. This family is kept SEPARATE from
+// iterated by EXCLUSION in the launch line's KEY='' hygiene loop: any of these NOT emitted by
+// this launch is cleared, so a telemetry-off relaunch of a reused/respawned session leaves no
+// stale OTel var behind. This family is kept SEPARATE from
 // redirectFamilyVars and from the model-env `effective` bookkeeping so the two orthogonal
 // channels never clear each other's vars. There is deliberately no content-capture gate here:
 // the five content-capture log switches are never in this set and must never be added (the
@@ -113,6 +92,21 @@ var telemetryFamilyVars = []string{
 	"OTEL_EXPORTER_OTLP_ENDPOINT",
 	envOTelHeaders,
 	"OTEL_RESOURCE_ATTRIBUTES",
+}
+
+// afGatewayUpstreamAuthVars are the five gateway upstream-auth env names (issue #686 K2) —
+// reserved for the factory-managed `.agentfactory/secrets/chatgpt/auth.json` handle, never a
+// profile key (config.afGatewayUpstreamKeys denylists them at the config boundary; this list
+// must stay byte-identical to that one). Cleared unconditionally on every launch line, exactly
+// like redirectFamilyVars/telemetryFamilyVars, but kept in a separate, fourth family: unlike
+// those two this family has no corresponding "carry" path — nothing in `effective` ever sets
+// one of these keys, so this family is pure hygiene (clear-only), never export.
+var afGatewayUpstreamAuthVars = []string{
+	"OPENAI_API_KEY",
+	"CHATGPT_TOKEN_DIR",
+	"CHATGPT_AUTH_FILE",
+	"CHATGPT_API_BASE",
+	"CODEX_HOME",
 }
 
 // managerOwnedVars enumerates the env this Manager exports on its own authority — git
@@ -139,12 +133,19 @@ var managerOwnedVars = []string{
 	"AF_HOST_MOUNT",
 }
 
+// effortAttestationVars carry a selected effort level's attestation (#709). A reused session keeps
+// the environment of the launch before it, so every launch that does not carry them clears them —
+// otherwise a relaunch that selected nothing would go on attesting the previous session's reduction.
+var effortAttestationVars = []string{config.EnvEffortObjective, config.EnvEffortStepLabel, config.EnvEffortFormula}
+
 // universeCarveOutVars are the keys the profile-key-universe hygiene (issue #602) must never
-// clear, even on a launch that does not carry them. Three groups, three reasons:
+// clear, even on a launch that does not carry them. Four groups, three reasons:
 //
-//   - redirectFamilyVars and telemetryFamilyVars already own their keys and clear them with
-//     the proven KEY='' idiom. Two idioms for two classes is deliberate; letting the universe
-//     true-unset these would silently change the behavior #508 and #329 each pinned.
+//   - redirectFamilyVars, telemetryFamilyVars and effortAttestationVars already own their keys
+//     and clear them with the proven KEY='' idiom. Two idioms for two classes is deliberate;
+//     letting the universe true-unset these would silently change the behavior #508, #329 and
+//     #709 each pinned. (The attestation names are also denylisted from every profile, so they
+//     never reach the universe; the carve-out is insurance, not the guard.)
 //   - envAPIKey is a legal profile key so it lands in the union, but security.md I2 decides it
 //     is never auto-cleared: a default-profile agent may authenticate via an ambient key.
 //   - managerOwnedVars would otherwise be exported and immediately unset in one command.
@@ -153,7 +154,7 @@ var managerOwnedVars = []string{
 // protect — rather than in the cmd layer that computes the raw union (ADR-004).
 var universeCarveOutVars = func() map[string]bool {
 	out := map[string]bool{envAPIKey: true}
-	for _, family := range [][]string{redirectFamilyVars, telemetryFamilyVars, managerOwnedVars} {
+	for _, family := range [][]string{redirectFamilyVars, telemetryFamilyVars, effortAttestationVars, managerOwnedVars} {
 		for _, key := range family {
 			out[key] = true
 		}
@@ -171,15 +172,13 @@ var universeCarveOutVars = func() map[string]bool {
 // (recoverable) rather than emit a launch-breaking `unset`. This is a cleanup-side guard only: the
 // write boundary does NOT reject these names (they are valid identifiers), so a dormant one never
 // fails a registry load.
-var shellCriticalVars = map[string]bool{
-	"PATH":            true,
-	"HOME":            true,
-	"SHELL":           true,
-	"IFS":             true,
-	"LD_LIBRARY_PATH": true,
-	"LD_PRELOAD":      true,
-	"LD_AUDIT":        true,
-}
+var shellCriticalVars = func() map[string]bool {
+	out := map[string]bool{}
+	for _, key := range config.ShellCriticalEnvVars {
+		out[key] = true
+	}
+	return out
+}()
 
 var checkAvailableMemoryFunc = checkAvailableMemory
 
@@ -257,7 +256,7 @@ func readDarwinMemAvailableMB() (uint64, error) {
 	return (freePages + inactivePages) * pageSize / (1024 * 1024), nil
 }
 
-// tmuxClient is the exact union of the 14 *tmux.Tmux methods that Manager.Start()
+// tmuxClient is the exact union of the 13 *tmux.Tmux methods that Manager.Start()
 // and Manager.Stop() call. Typing Manager.tmux to this interface is the seam that
 // lets tests inject a fake; the compile assertion below guarantees the real
 // client still satisfies it.
@@ -267,7 +266,6 @@ type tmuxClient interface {
 	KillSession(name string) error //af:teardown:decl
 	NewSession(name, workDir string) error
 	SetEnvironment(session, key, value string) error
-	UnsetEnvironment(session, key string) error
 	SetOption(session, name, value string) error
 	ShowOption(session, name string) (string, error)
 	WaitForShellReady(session string, timeout time.Duration) error
@@ -307,65 +305,42 @@ type Manager struct {
 	initialPrompt string
 	worktreePath  string
 	worktreeID    string
-	buildHost     *config.BuildHostConfig
-
-	// Resolved per-agent model-env export set (issue #480). When non-empty it is
-	// emitted at the launch chokepoint in place of the legacy Model/BaseURL/
-	// AuthToken fields (presence-gate); empty values are kept so a profile can
-	// clear an ambient var (e.g. ANTHROPIC_API_KEY=''). Set via SetModelEnv.
-	modelEnv []config.EnvVar
-
-	// Telemetry OTel launch-env set (issue #329). A SEPARATE channel from modelEnv —
-	// emitted independent of the model-env presence gate because telemetry on/off is
-	// orthogonal to whether an agent has a model profile. It must NEVER be merged into
-	// modelEnv: `len(modelEnv) > 0` elides the legacy Model/BaseURL/AuthToken emission,
-	// so a telemetry-only modelEnv would silently drop a no-profile agent's endpoint.
-	// Empty ⇒ nothing emitted; the hygiene passes still clear the telemetry family so a
-	// telemetry-off relaunch leaves no stale OTel var. Set via SetTelemetryEnv.
-	telemetryEnv []config.EnvVar
-
-	// Every env key any models.json profile defines — the profile-key universe (issue #602).
-	// A THIRD channel, orthogonal to modelEnv and telemetryEnv: it emits nothing, it only
-	// bounds what the hygiene passes may clear. The two family lists are hardcoded in Go while
-	// a profile is a generic string map, so an operator-added key was emitted by modelEnv and
-	// cleared by neither family; deriving the clear scope from the same config the emit scope
-	// comes from closes that class for every key STILL DECLARED IN SOME PROFILE. A key deleted
-	// from EVERY profile leaves the universe, so a value already written into a live session's
-	// env is no longer cleared until `af down && af up` — the accepted residual (design 602 Risk
-	// Registry; documented in USING_*.md). Applied OUTSIDE the modelEnv presence gate at both
-	// twins, so a switch to no profile at all still clears. Order is preserved as handed in (the
-	// cmd layer sorts) so the launch line is deterministic. Set via SetModelKeyUniverse.
-	modelKeyUniverse []string
-
-	// Git identity to export when no ambient identity resolves (issue #371 AC-2).
-	// Empty ⇒ not exported (presence-gate / C-4); set via SetGitIdentity.
-	gitAuthorName  string
-	gitAuthorEmail string
-
-	// Trailer activation (issue #371 AC-4/AC-5): when gitHooksDir is non-empty the
-	// session sets core.hooksPath to it and passes the co-author value to the hook.
-	gitHooksDir   string
-	coauthorName  string
-	coauthorEmail string
+	c             *LaunchContributions
 }
 
-// SetGitIdentity configures the default git author/committer identity exported
-// into the agent session (issue #371 AC-2). The caller (cmd layer) presence-gates
-// this: it is invoked only when no ambient identity resolves, so the exports
-// never override a real identity (C-4). Empty values leave the exports off.
-func (m *Manager) SetGitIdentity(name, email string) {
-	m.gitAuthorName = name
-	m.gitAuthorEmail = email
+// LaunchContributions is every config-derived value a launch line carries. The cmd layer composes
+// it once per launch, so every launch path hands the emitter the same values.
+type LaunchContributions struct {
+	// ModelEnv is the resolved per-agent model-env export set (issue #480). Non-empty, it
+	// supersedes the legacy entry Model/BaseURL/AuthToken emission (presence gate); empty values
+	// are kept so a profile can clear an ambient var (e.g. ANTHROPIC_API_KEY='').
+	ModelEnv []config.EnvVar
+	// ModelKeyUniverse is every env key any models.json profile defines (issue #602). It emits
+	// nothing; it only bounds what the hygiene pass may clear, outside ModelEnv's presence gate,
+	// so a switch to no profile at all still clears. Order is kept as handed in (the cmd layer
+	// sorts) so the launch line is deterministic.
+	ModelKeyUniverse []string
+	// TelemetryEnv is the OTel launch-env set (issue #329), nil when the gate is off. It must
+	// never be merged into ModelEnv: a non-empty ModelEnv elides the legacy endpoint, so a
+	// telemetry-only ModelEnv would silently drop a no-profile agent's endpoint.
+	TelemetryEnv []config.EnvVar
+	// GitAuthorName/GitAuthorEmail are empty unless no ambient identity resolves (issue #371
+	// C-4), so the export never overrides a real identity. A non-empty GitHooksDir becomes
+	// core.hooksPath and activates the co-author trailer (AC-4/AC-5).
+	GitAuthorName, GitAuthorEmail            string
+	GitHooksDir, CoauthorName, CoauthorEmail string
+	BuildHost                                *config.BuildHostConfig // nil ⇒ no AF_BUILD_*
+
+	PluginDirs             []string
+	IntegrationEnv         []config.EnvVar
+	IntegrationKeyUniverse []string
+	HookFailModes          string
 }
 
-// SetGitTrailer activates the centralized Co-authored-by trailer for this session
-// (issue #371 AC-4/AC-5): hooksDir becomes core.hooksPath (via GIT_CONFIG_*), and
-// the co-author name/email are handed to the prepare-commit-msg hook via env. An
-// empty hooksDir leaves the trailer channel off.
-func (m *Manager) SetGitTrailer(hooksDir, coauthorName, coauthorEmail string) {
-	m.gitHooksDir = hooksDir
-	m.coauthorName = coauthorName
-	m.coauthorEmail = coauthorEmail
+// SetLaunchContributions hands the Manager its composed contributions. Without it Start and
+// BuildStartupCommand refuse, so a launch path that skips the composer launches nothing.
+func (m *Manager) SetLaunchContributions(c *LaunchContributions) {
+	m.c = c
 }
 
 // NewManager creates a Manager for the given agent.
@@ -397,43 +372,6 @@ func (m *Manager) SetWorktree(path, id string) error {
 	return nil
 }
 
-// SetBuildHost configures optional build-host settings. When set, AF_BUILD_*
-// environment variables are exported into the tmux session.
-func (m *Manager) SetBuildHost(cfg *config.BuildHostConfig) {
-	m.buildHost = cfg
-}
-
-// SetModelEnv configures the resolved per-agent model-env export set (issue #480).
-// The cmd layer (Phase 3) resolves it via config.ResolveModelEnv and hands it in
-// after NewManager. A nil/empty set leaves the legacy Model/BaseURL/AuthToken
-// emission path unchanged (presence-gate); a non-empty set is emitted at both
-// launch sites and supersedes the legacy fields.
-func (m *Manager) SetModelEnv(env []config.EnvVar) {
-	m.modelEnv = env
-}
-
-// SetModelKeyUniverse configures the profile-key universe: every env key any models.json
-// profile defines (issue #602). The cmd layer computes the sorted union after loading the
-// registry and hands it in after NewManager. Unlike SetModelEnv this is wired
-// UNCONDITIONALLY at every launch site — a launch that resolves NO profile is exactly the
-// case that must still clear a previous profile's keys, so gating the call on a non-empty
-// model-env set would leave the headline stale-on-switch case unfixed. A nil/empty universe
-// clears nothing and leaves the launch line byte-identical to a factory that never defined
-// such a key.
-func (m *Manager) SetModelKeyUniverse(keys []string) {
-	m.modelKeyUniverse = keys
-}
-
-// SetTelemetryEnv configures the telemetry OTel launch-env set (issue #329). The cmd
-// layer builds it via telemetry.LaunchEnv only when the factory telemetry gate is on and
-// hands it in after NewManager; a nil/empty set (gate off) emits no OTel var, while the
-// hygiene passes still clear the telemetry family so a reused/respawned session carries
-// none of a prior telemetry-on run's vars. It is a channel wholly separate from
-// SetModelEnv and never shares modelEnv's presence gate (see the telemetryEnv field).
-func (m *Manager) SetTelemetryEnv(env []config.EnvVar) {
-	m.telemetryEnv = env
-}
-
 // modelFromModelEnv returns the ANTHROPIC_MODEL value carried in the resolved set,
 // or "" if the set does not define one (e.g. a base_url-only profile). The CLI
 // --model flag and the ANTHROPIC_MODEL env are sourced from this single value so
@@ -449,7 +387,7 @@ func modelFromModelEnv(env []config.EnvVar) string {
 }
 
 // modelEnvHasKey reports whether the resolved set already carries the given key. Used
-// by both emission twins to decide whether a legacy endpoint must still be emitted: a
+// by the emitter to decide whether a legacy endpoint must still be emitted: a
 // model-only passthrough set (PR #482) carries no ANTHROPIC_BASE_URL, so the legacy
 // endpoint must travel with it rather than be suppressed.
 func modelEnvHasKey(env []config.EnvVar, key string) bool {
@@ -463,18 +401,19 @@ func modelEnvHasKey(env []config.EnvVar, key string) bool {
 
 // staleUniverseKeys returns the profile-key-universe keys this launch does NOT carry and is
 // allowed to clear: everything in the universe minus what effective records as emitted, minus
-// the carve-outs. One filter feeds both twins, so the tmux env and the inline command can
-// never disagree about what was cleared. Order follows the universe as handed in (sorted by
+// the carve-outs. Order follows the universe as handed in (sorted by
 // the cmd layer), which is what keeps the emitted unset segment deterministic across runs.
 func (m *Manager) staleUniverseKeys(effective map[string]bool) []string {
 	var stale []string
-	for _, key := range m.modelKeyUniverse {
-		if effective[key] || universeCarveOutVars[key] {
+	seen := map[string]bool{}
+	for _, key := range slices.Concat(m.c.ModelKeyUniverse, m.c.IntegrationKeyUniverse) {
+		if effective[key] || universeCarveOutVars[key] || seen[key] {
 			continue
 		}
+		seen[key] = true
 		// A profile key rides into `unset K1 K2 …` unquoted (issue #602 P1/F1), so a name that is
 		// not a safe shell identifier (a space or shell metacharacter) or a shell/loader-critical
-		// name (PATH …) must never reach the emitted segment on either twin. IsValidEnvKeyName is
+		// name (PATH …) must never reach the emitted segment. IsValidEnvKeyName is
 		// the same predicate the write boundary rejects by, so the two cannot disagree.
 		if shellCriticalVars[key] || !config.IsValidEnvKeyName(key) {
 			continue
@@ -482,6 +421,26 @@ func (m *Manager) staleUniverseKeys(effective map[string]bool) []string {
 		stale = append(stale, key)
 	}
 	return stale
+}
+
+// StaleTmuxEnvKeys returns every key an older af wrote into the tmux SESSION env, which a respawn
+// reuses and so still inherits: the families this package owns, the effort level and the
+// profile-key universe. The launch line's own exports override anything inherited, so the set
+// ignores what this launch carries. envAPIKey is never auto-cleared (security.md I2), and
+// shell-critical or non-identifier universe names are dropped as in staleUniverseKeys. Integration
+// keys are absent because no af ever wrote one to tmux.
+func (m *Manager) StaleTmuxEnvKeys() []string {
+	var keys []string
+	seen := map[string]bool{}
+	families := slices.Concat(redirectFamilyVars, telemetryFamilyVars, afGatewayUpstreamAuthVars, effortAttestationVars, managerOwnedVars, []string{config.EnvEffortLevel})
+	for _, key := range slices.Concat(families, m.c.ModelKeyUniverse) {
+		if seen[key] || key == envAPIKey || shellCriticalVars[key] || !config.IsValidEnvKeyName(key) {
+			continue
+		}
+		seen[key] = true
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 // SessionID returns the tmux session name for this agent.
@@ -510,13 +469,15 @@ func (m *Manager) Start() error {
 	if m.worktreePath == "" {
 		return ErrWorktreeNotSet
 	}
+	if m.c == nil {
+		return ErrLaunchContributionsMissing
+	}
 
-	// Zombie detection: if session exists, check health
-	running, _ := m.tmux.HasSession(sessionID)
-	if running {
-		if m.tmux.IsClaudeRunning(sessionID) {
-			return ErrAlreadyRunning
-		}
+	present, live := m.probe()
+	if live {
+		return ErrAlreadyRunning
+	}
+	if present {
 		// Zombie — tmux alive but Claude dead. Kill and recreate.
 		if err := m.tmux.KillSession(sessionID); err != nil { //af:teardown:restorative
 			return fmt.Errorf("killing zombie session: %w", err)
@@ -566,146 +527,6 @@ func (m *Manager) Start() error {
 	if m.worktreePath != "" {
 		_ = m.tmux.SetEnvironment(sessionID, "AF_WORKTREE", m.worktreePath)
 		_ = m.tmux.SetEnvironment(sessionID, "AF_WORKTREE_ID", m.worktreeID)
-	}
-	// effective records the redirect-family keys this launch actually emits, so the
-	// hygiene pass below can unset the rest (issue #508). It is populated in lockstep
-	// with the SetEnvironment calls to guarantee it never diverges from what was emitted.
-	effective := map[string]bool{}
-	if len(m.modelEnv) > 0 {
-		// Resolved model-env set supersedes the legacy fields (issue #480): emit the
-		// whole set (empty values clear) and skip the legacy trio below so the
-		// tmux env and the inline command never disagree.
-		//
-		// Deliberate twin asymmetry (issue #508): the tmux env carries a file:<path>
-		// ANTHROPIC_AUTH_TOKEN as the raw placeholder VERBATIM — NOT the $(cat …) deref
-		// buildStartupCommand emits inline, and NOT the resolved secret. tmux
-		// set-environment does no shell evaluation, so a "$(cat …)" string would be
-		// stored literally, and a resolved secret would be readable via
-		// `tmux show-environment`. The file:→$(cat …) transform lives ONLY in
-		// buildStartupCommand's inline loop.
-		for _, ev := range m.modelEnv {
-			_ = m.tmux.SetEnvironment(sessionID, ev.Key, ev.Value)
-			effective[ev.Key] = true
-		}
-		// A model-only resolved set (a legacy agent whose Model is not a defined
-		// profile, or no models.json at all) carries no endpoint. Keep the legacy
-		// BaseURL/AuthToken travelling with it so a mixed-provider agent still reaches
-		// its endpoint (PR #482: regression of #262).
-		if !modelEnvHasKey(m.modelEnv, envBaseURL) {
-			if m.agentEntry.BaseURL != "" {
-				if err := m.tmux.SetEnvironment(sessionID, envBaseURL, m.agentEntry.BaseURL); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: failed to set %s for %s: %v\n", envBaseURL, sessionID, err)
-				}
-				effective[envBaseURL] = true
-			}
-			if m.agentEntry.AuthToken != "" {
-				if err := m.tmux.SetEnvironment(sessionID, envAuthToken, m.agentEntry.AuthToken); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: failed to set %s for %s: %v\n", envAuthToken, sessionID, err)
-				}
-				effective[envAuthToken] = true
-			}
-			// No endpoint travels at all after the legacy carry: blank any stale redirect
-			// endpoint on the reused session, mirroring the inline KEY='' clear (issue
-			// #508). Computed AFTER the carry so a legacy endpoint is never clobbered (PR
-			// #482 regression class). The auth-token clear is further gated on an empty
-			// auth_token: an auth_token-only config (base_url empty, token set just above)
-			// must keep its token rather than lose it to a last-write-wins clear.
-			if m.agentEntry.BaseURL == "" {
-				_ = m.tmux.SetEnvironment(sessionID, envBaseURL, "")
-				effective[envBaseURL] = true
-				if m.agentEntry.AuthToken == "" {
-					_ = m.tmux.SetEnvironment(sessionID, envAuthToken, "")
-					effective[envAuthToken] = true
-				}
-			}
-		}
-	} else {
-		if m.agentEntry.Model != "" {
-			_ = m.tmux.SetEnvironment(sessionID, "ANTHROPIC_MODEL", m.agentEntry.Model)
-			effective["ANTHROPIC_MODEL"] = true
-		}
-		if m.agentEntry.BaseURL != "" {
-			if err := m.tmux.SetEnvironment(sessionID, envBaseURL, m.agentEntry.BaseURL); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to set %s for %s: %v\n", envBaseURL, sessionID, err)
-			}
-			effective[envBaseURL] = true
-		}
-		if m.agentEntry.AuthToken != "" {
-			if err := m.tmux.SetEnvironment(sessionID, envAuthToken, m.agentEntry.AuthToken); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to set %s for %s: %v\n", envAuthToken, sessionID, err)
-			}
-			effective[envAuthToken] = true
-		}
-	}
-	// Session-env hygiene (issue #508): a respawn / profile switch reuses the
-	// tmux session, so a redirect var set by a prior profile survives in the session env
-	// (respawn-pane inherits it) unless we actively remove it. Unset every
-	// redirect-family var NOT in the effective set emitted above, leaving a switched-away
-	// endpoint with no stale value. No-op when nothing is stale.
-	for _, key := range redirectFamilyVars {
-		if !effective[key] {
-			_ = m.tmux.UnsetEnvironment(sessionID, key)
-		}
-	}
-	// Telemetry env (issue #329): a SEPARATE channel from the model-env block above,
-	// emitted whether or not a model profile resolved. When the gate is off the cmd layer
-	// calls neither LaunchEnv nor SetTelemetryEnv, so this loop is a no-op and the hygiene
-	// pass below clears any telemetry var a prior telemetry-on launch left on the reused
-	// session. telemEffective is keyed ONLY on the telemetry family so it never interferes
-	// with the model-env `effective` map. Deliberate twin asymmetry: a file: header ref is
-	// carried VERBATIM here (tmux set-environment does no shell evaluation, and a resolved
-	// secret would be readable via `tmux show-environment`) — the $(cat …) deref lives ONLY
-	// in buildStartupCommand's inline loop.
-	telemEffective := map[string]bool{}
-	for _, ev := range m.telemetryEnv {
-		_ = m.tmux.SetEnvironment(sessionID, ev.Key, ev.Value)
-		telemEffective[ev.Key] = true
-	}
-	for _, key := range telemetryFamilyVars {
-		if !telemEffective[key] {
-			_ = m.tmux.UnsetEnvironment(sessionID, key)
-		}
-	}
-	// Profile-key-universe hygiene (issue #602), the third channel. The two loops above clear
-	// by hardcoded family lists, but a models.json profile is a generic string map: an
-	// operator-defined key outside both families — CLAUDE_CODE_AUTO_COMPACT_WINDOW is the
-	// first — was emitted by the model-env block and cleared by nothing, so it survived a
-	// profile switch on a reused session. Clearing by the config-derived universe closes that
-	// for every key still declared in some profile without a per-key Go edit (a key deleted from
-	// EVERY profile leaves the universe — the accepted residual). OUTSIDE the modelEnv gate
-	// (closed above) so a switch to NO profile clears too. UnsetEnvironment on an absent key
-	// is a silent no-op, so the loop needs no presence check.
-	for _, key := range m.staleUniverseKeys(effective) {
-		_ = m.tmux.UnsetEnvironment(sessionID, key)
-	}
-	// Git identity fallback (best-effort; presence-gated — issue #371 AC-2/C-4).
-	if m.gitAuthorName != "" && m.gitAuthorEmail != "" {
-		_ = m.tmux.SetEnvironment(sessionID, envGitAuthorName, m.gitAuthorName)
-		_ = m.tmux.SetEnvironment(sessionID, envGitAuthorEmail, m.gitAuthorEmail)
-		_ = m.tmux.SetEnvironment(sessionID, envGitCommitterName, m.gitAuthorName)
-		_ = m.tmux.SetEnvironment(sessionID, envGitCommitterEmail, m.gitAuthorEmail)
-	}
-	// Trailer activation (best-effort — issue #371 AC-4/AC-5).
-	if m.gitHooksDir != "" {
-		_ = m.tmux.SetEnvironment(sessionID, envGitConfigCount, "1")
-		_ = m.tmux.SetEnvironment(sessionID, envGitConfigKey0, "core.hooksPath")
-		_ = m.tmux.SetEnvironment(sessionID, envGitConfigValue0, m.gitHooksDir)
-		if m.coauthorName != "" && m.coauthorEmail != "" {
-			_ = m.tmux.SetEnvironment(sessionID, envCoauthorName, m.coauthorName)
-			_ = m.tmux.SetEnvironment(sessionID, envCoauthorEmail, m.coauthorEmail)
-		}
-	}
-	if m.buildHost != nil {
-		_ = m.tmux.SetEnvironment(sessionID, "AF_BUILD_MODE", m.buildHost.Mode)
-		if m.buildHost.Host != "" {
-			_ = m.tmux.SetEnvironment(sessionID, "AF_BUILD_HOST", m.buildHost.Host)
-		}
-		if m.buildHost.User != "" {
-			_ = m.tmux.SetEnvironment(sessionID, "AF_BUILD_USER", m.buildHost.User)
-		}
-		if m.buildHost.MountPath != "" {
-			_ = m.tmux.SetEnvironment(sessionID, "AF_HOST_MOUNT", m.buildHost.MountPath)
-		}
 	}
 
 	// Enable mouse so the wheel scrolls Claude's conversation viewport instead of
@@ -768,16 +589,15 @@ func (m *Manager) buildStartupCommand() string {
 		exports += fmt.Sprintf(" AF_WORKTREE=%s AF_WORKTREE_ID=%s",
 			shellQuote(m.worktreePath), shellQuote(m.worktreeID))
 	}
-	// effective records the keys this launch actually emits inline, so the hygiene passes can
-	// clear the rest — the inline twin of Start()'s bookkeeping. Function-scoped, like its
-	// twin: the universe pass below runs OUTSIDE the model-env gate, on the no-profile path
-	// where that gate never opens, and must still see what was emitted.
+	// effective records the keys this launch actually emits, so the hygiene passes can clear the
+	// rest. Function-scoped because the universe pass below runs OUTSIDE the model-env gate, on
+	// the no-profile path where that gate never opens, and must still see what was emitted.
 	effective := map[string]bool{}
-	if len(m.modelEnv) > 0 {
+	if len(m.c.ModelEnv) > 0 {
 		// Resolved model-env set supersedes the legacy fields (issue #480), in the
 		// same slot the legacy exports occupied. Every value is single-quoted via
 		// shellQuote (shell-injection inert); an empty value emits KEY='' to clear it.
-		for _, ev := range m.modelEnv {
+		for _, ev := range m.c.ModelEnv {
 			// A file:<path> ANTHROPIC_AUTH_TOKEN is dereferenced to "$(cat '<abs>')" so
 			// the pane shell reads the secret at exec time — the value never lands on
 			// the launch line or in scrollback (issue #508). Only the path passes
@@ -793,9 +613,8 @@ func (m *Manager) buildStartupCommand() string {
 			effective[ev.Key] = true
 		}
 		// A model-only resolved set carries no endpoint; keep the legacy BaseURL/
-		// AuthToken travelling with it (PR #482: regression of #262). Mirrors
-		// the Start() tmux-env twin above.
-		if !modelEnvHasKey(m.modelEnv, envBaseURL) {
+		// AuthToken travelling with it (PR #482: regression of #262).
+		if !modelEnvHasKey(m.c.ModelEnv, envBaseURL) {
 			if m.agentEntry.BaseURL != "" {
 				exports += fmt.Sprintf(" %s=%s", envBaseURL, shellQuote(m.agentEntry.BaseURL))
 				effective[envBaseURL] = true
@@ -805,12 +624,11 @@ func (m *Manager) buildStartupCommand() string {
 				effective[envAuthToken] = true
 			}
 		}
-		// Redirect-var hygiene at parity with Start(): emit an explicit KEY='' for every
-		// redirect-family var this launch does NOT carry, so a value a prior profile left
-		// on a reused session survives no switch. This is the ONLY clear the respawn paths
-		// (handoff / compact-handoff / watchdog recoverAgent all rebuild through here) ever
-		// emit, so it must cover the whole family — not just base_url/auth_token (issue
-		// #508). Computed on the EFFECTIVE env AFTER the legacy carry so a carried endpoint
+		// Redirect-var hygiene: emit an explicit KEY='' for every redirect-family var this
+		// launch does NOT carry, so a value a prior profile left on a reused session survives
+		// no switch. This is the ONLY clear any launch emits, so it must cover the whole family —
+		// not just base_url/auth_token (issue #508). Computed on the EFFECTIVE env AFTER the
+		// legacy carry so a carried endpoint
 		// is never clobbered (PR #482 regression class); an auth_token-only config keeps
 		// its token because envAuthToken is in the effective set; ANTHROPIC_API_KEY is not
 		// in this family, so it is never auto-cleared.
@@ -827,15 +645,14 @@ func (m *Manager) buildStartupCommand() string {
 			exports += fmt.Sprintf(" %s=%s", envAuthToken, shellQuote(m.agentEntry.AuthToken))
 		}
 	}
-	// Telemetry env inline twin (issue #329), independent of the model-env gate above.
-	// A file: ref inside OTEL_EXPORTER_OTLP_HEADERS (shape Name=file:<path>) is dereferenced
-	// to `Name='"$(cat '<abs>')"` so the pane shell reads the secret at exec time — the raw
-	// ref stays in the tmux twin (Start), never the resolved secret. telemEffective is keyed
-	// only on the telemetry family. The KEY='' hygiene loop below is the ONLY clear a respawn
-	// emits (respawn never calls Start), so it must cover the whole telemetry family — that is
-	// what makes a telemetry-off relaunch drop a prior run's OTel vars.
+	// Telemetry env (issue #329), independent of the model-env gate above. A file: ref inside
+	// OTEL_EXPORTER_OTLP_HEADERS (shape Name=file:<path>) is dereferenced to
+	// `Name='"$(cat '<abs>')"` so the pane shell reads the secret at exec time. telemEffective is
+	// keyed only on the telemetry family. The KEY='' hygiene loop below is the ONLY clear any
+	// launch emits, so it must cover the whole telemetry family — that is what makes a
+	// telemetry-off relaunch drop a prior run's OTel vars.
 	telemEffective := map[string]bool{}
-	for _, ev := range m.telemetryEnv {
+	for _, ev := range m.c.TelemetryEnv {
 		if ev.Key == envOTelHeaders {
 			if i := strings.Index(ev.Value, secretRefPrefix); i >= 0 {
 				exports += " " + m.derefFileRefInline(ev.Key, ev.Value[:i], ev.Value[i+len(secretRefPrefix):])
@@ -851,58 +668,95 @@ func (m *Manager) buildStartupCommand() string {
 			exports += fmt.Sprintf(" %s=''", key)
 		}
 	}
+	// Gateway upstream-auth hygiene (issue #686 K2), independent of the model-env gate above.
+	// Unconditional because this
+	// family has no legitimate carry path, so the clear must not depend on `effective` being
+	// correct.
+	for _, key := range afGatewayUpstreamAuthVars {
+		exports += fmt.Sprintf(" %s=''", key)
+	}
+	for _, key := range effortAttestationVars {
+		if !effective[key] {
+			exports += fmt.Sprintf(" %s=''", key)
+		}
+	}
 	// Git identity fallback (presence-gated — only when no ambient identity resolved).
-	if m.gitAuthorName != "" && m.gitAuthorEmail != "" {
+	if m.c.GitAuthorName != "" && m.c.GitAuthorEmail != "" {
 		exports += fmt.Sprintf(" %s=%s %s=%s %s=%s %s=%s",
-			envGitAuthorName, shellQuote(m.gitAuthorName),
-			envGitAuthorEmail, shellQuote(m.gitAuthorEmail),
-			envGitCommitterName, shellQuote(m.gitAuthorName),
-			envGitCommitterEmail, shellQuote(m.gitAuthorEmail))
+			envGitAuthorName, shellQuote(m.c.GitAuthorName),
+			envGitAuthorEmail, shellQuote(m.c.GitAuthorEmail),
+			envGitCommitterName, shellQuote(m.c.GitAuthorName),
+			envGitCommitterEmail, shellQuote(m.c.GitAuthorEmail))
 	}
 	// Trailer activation: redirect git hook lookup to the af-managed githooks dir
 	// (via core.hooksPath, ADR-017-clean) and hand the hook the co-author value.
-	if m.gitHooksDir != "" {
+	if m.c.GitHooksDir != "" {
 		exports += fmt.Sprintf(" %s=1 %s=%s %s=%s",
 			envGitConfigCount,
 			envGitConfigKey0, shellQuote("core.hooksPath"),
-			envGitConfigValue0, shellQuote(m.gitHooksDir))
-		if m.coauthorName != "" && m.coauthorEmail != "" {
+			envGitConfigValue0, shellQuote(m.c.GitHooksDir))
+		if m.c.CoauthorName != "" && m.c.CoauthorEmail != "" {
 			exports += fmt.Sprintf(" %s=%s %s=%s",
-				envCoauthorName, shellQuote(m.coauthorName),
-				envCoauthorEmail, shellQuote(m.coauthorEmail))
+				envCoauthorName, shellQuote(m.c.CoauthorName),
+				envCoauthorEmail, shellQuote(m.c.CoauthorEmail))
 		}
 	}
-	if m.buildHost != nil {
-		exports += fmt.Sprintf(" AF_BUILD_MODE=%s", shellQuote(m.buildHost.Mode))
-		if m.buildHost.Host != "" {
-			exports += fmt.Sprintf(" AF_BUILD_HOST=%s", shellQuote(m.buildHost.Host))
+	if m.c.BuildHost != nil {
+		exports += fmt.Sprintf(" AF_BUILD_MODE=%s", shellQuote(m.c.BuildHost.Mode))
+		if m.c.BuildHost.Host != "" {
+			exports += fmt.Sprintf(" AF_BUILD_HOST=%s", shellQuote(m.c.BuildHost.Host))
 		}
-		if m.buildHost.User != "" {
-			exports += fmt.Sprintf(" AF_BUILD_USER=%s", shellQuote(m.buildHost.User))
+		if m.c.BuildHost.User != "" {
+			exports += fmt.Sprintf(" AF_BUILD_USER=%s", shellQuote(m.c.BuildHost.User))
 		}
-		if m.buildHost.MountPath != "" {
-			exports += fmt.Sprintf(" AF_HOST_MOUNT=%s", shellQuote(m.buildHost.MountPath))
+		if m.c.BuildHost.MountPath != "" {
+			exports += fmt.Sprintf(" AF_HOST_MOUNT=%s", shellQuote(m.c.BuildHost.MountPath))
 		}
+	}
+	// Integration env (design K9) follows every af-owned family, and a key one of them already
+	// emitted is skipped so an integration can never redirect model or telemetry traffic. An af
+	// launch key is skipped by membership even when af emitted none, because most of them sit
+	// behind a presence gate and an integration must not fill the gap; it is not recorded in
+	// effective, which would cancel its stale-key unset. An invalid key is dropped outright — not
+	// exported and not unset — because it would otherwise ride the launch line unquoted; the
+	// composer reports both.
+	for _, ev := range m.c.IntegrationEnv {
+		if effective[ev.Key] || telemEffective[ev.Key] || config.IsAFLaunchKey(ev.Key) || !config.IsValidEnvKeyName(ev.Key) {
+			continue
+		}
+		if strings.HasPrefix(ev.Value, secretRefPrefix) {
+			exports += " " + m.derefFileRefInline(ev.Key, "", strings.TrimPrefix(ev.Value, secretRefPrefix))
+		} else {
+			exports += fmt.Sprintf(" %s=%s", ev.Key, shellQuote(ev.Value))
+		}
+		effective[ev.Key] = true
+	}
+	if m.c.HookFailModes != "" {
+		exports += fmt.Sprintf(" AF_INTEGRATION_HOOK_FAIL_MODES=%s", shellQuote(m.c.HookFailModes))
+		effective["AF_INTEGRATION_HOOK_FAIL_MODES"] = true
 	}
 
 	claude := "claude --dangerously-skip-permissions"
-	if len(m.modelEnv) > 0 {
+	if len(m.c.ModelEnv) > 0 {
 		// Single source of truth: the CLI flag mirrors the set's ANTHROPIC_MODEL
 		// (issue #480). A set without a model key (base_url-only profile) omits
 		// --model and lets the CLI fall back to its own default.
-		if model := modelFromModelEnv(m.modelEnv); model != "" {
+		if model := modelFromModelEnv(m.c.ModelEnv); model != "" {
 			claude += " --model " + shellQuote(model)
 		}
 	} else if m.agentEntry.Model != "" {
 		claude += " --model " + shellQuote(m.agentEntry.Model)
 	}
+	// Outside the claude literal above so a launch that binds nothing stays byte-identical.
+	for _, dir := range m.c.PluginDirs {
+		claude += " --plugin-dir " + shellQuote(dir)
+	}
 	if m.initialPrompt != "" {
 		claude += " " + shellQuote(m.initialPrompt)
 	}
 
-	// Profile-key-universe hygiene, inline twin (issue #602) — the ONLY clear a respawn ever
-	// emits, since the respawn paths rebuild through here and never call Start(). This class
-	// clears by a TRUE `unset` rather than the families' KEY='': the host's handling of an
+	// Profile-key-universe hygiene (issue #602), the ONLY clear any launch emits for this class.
+	// It clears by a TRUE `unset` rather than the families' KEY='': the host's handling of an
 	// empty value for these keys is unverified, whereas unset makes "absent" byte-identical to
 	// "never launched with the key". `unset` cannot ride the export statement — `export A=1
 	// unset B` parses, but exports a variable literally named `unset` — so it takes its own
@@ -994,14 +848,33 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
-// IsRunning checks if the agent session is active.
+// IsRunning reports only whether the agent's tmux session exists (HasSession), which
+// is true of a zombie session too.
+//
+// Deprecated: use Live to ask whether the agent is running.
 func (m *Manager) IsRunning() (bool, error) {
 	return m.tmux.HasSession(m.SessionID())
 }
 
-// BuildStartupCommand returns the startup command for testing.
-func (m *Manager) BuildStartupCommand() string {
-	return m.buildStartupCommand()
+func (m *Manager) probe() (present, live bool) {
+	id := m.SessionID()
+	present, _ = m.tmux.HasSession(id)
+	return present, present && m.tmux.IsClaudeRunning(id)
+}
+
+// Live reports whether Claude is running in the agent's session. Unlike IsRunning, a zombie
+// session (tmux alive, Claude dead) is not live: Start kills and relaunches it.
+func (m *Manager) Live() bool {
+	_, live := m.probe()
+	return live
+}
+
+// BuildStartupCommand returns the launch line a respawn hands to RespawnPane.
+func (m *Manager) BuildStartupCommand() (string, error) {
+	if m.c == nil {
+		return "", ErrLaunchContributionsMissing
+	}
+	return m.buildStartupCommand(), nil
 }
 
 // buildNudge constructs the startup nudge message.

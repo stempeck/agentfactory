@@ -3,9 +3,8 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -45,6 +44,25 @@ const (
 
 	modelsProbeTimeout = 5 * time.Second
 
+	// liveSmokeDeadline is the --live smoke's own deadline (issue #686 K3), decoupled from
+	// modelsProbeTimeout: a real agentic /v1/messages turn can run far longer than the 5s
+	// /v1/models probe budget, so reusing modelsProbeTimeout there was a correctness bug, not a
+	// simplification. The checked-in .agentfactory/litellm.yaml's router_settings.timeout must not
+	// undercut it (TestLiveSmokeUsesItsOwnDeadline).
+	liveSmokeDeadline = 300 * time.Second
+
+	// firstProbeDeadline is --first's own budget (issue #693 K14): a single classified
+	// /v1/messages request, deliberately far shorter than liveSmokeDeadline because --first is
+	// a fast auth pre-flight run from quickstart.sh's bootstrap path, not a per-class coverage
+	// sweep. Kept distinct on purpose — DO NOT repurpose or shrink liveSmokeDeadline for this.
+	firstProbeDeadline = 30 * time.Second
+
+	// firstProbeRetryBackoff is the fixed sleep before --first's single 429 retry. No spec
+	// text or existing codebase convention pins an exact duration (the spec says only "one
+	// backoff retry then classify"); 1s is a default that leaves ample room inside
+	// firstProbeDeadline for both the original request and the retry.
+	firstProbeRetryBackoff = 1 * time.Second
+
 	// claudeIDPrefix marks an id the host asks for by its own name rather than by anything the
 	// profile declares. fableClassPrefix is the sub-case with no env key at all: the class inventory
 	// has no ANTHROPIC_DEFAULT_FABLE_MODEL rung, so a Fable request leaves the host as claude-fable-*
@@ -73,8 +91,9 @@ const (
 )
 
 var (
-	configModelsShowAgent string
-	configModelsCheckLive bool
+	configModelsShowAgent  string
+	configModelsCheckLive  bool
+	configModelsCheckFirst bool
 )
 
 var configModelsShowCmd = &cobra.Command{
@@ -98,7 +117,9 @@ FAILS the check. The profile's own ANTHROPIC_MODEL not appearing in GET /v1/mode
 reported but does not fail on its own: every class derived from that id already has its own
 verdict. The verdicts are recorded under .runtime/model_coverage/ so a later launch can
 report them without probing anything. With --live, additionally send one minimal
-/v1/messages request per served class; that performs real, billable requests.
+streamed /v1/messages turn per served class, shaped like a session's turn (block-array
+system prompt); that performs real, billable requests. A failing probe prints the
+gateway's own error text verbatim.
 
 This is transport-level only — necessary, not sufficient, for fitness. Never prints
 token material.`,
@@ -119,7 +140,8 @@ attestation lives under .runtime, so an environment reset requires re-attestatio
 
 func init() {
 	configModelsShowCmd.Flags().StringVar(&configModelsShowAgent, "agent", "", "Explain which profile the named agent resolves to")
-	configModelsCheckCmd.Flags().BoolVar(&configModelsCheckLive, "live", false, "Also send one minimal /v1/messages request per served class (real, billable requests)")
+	configModelsCheckCmd.Flags().BoolVar(&configModelsCheckLive, "live", false, "Also send one minimal streamed /v1/messages turn, shaped like a session's, per served class (real, billable requests; spends ChatGPT-subscription plan quota against a subscription profile)")
+	configModelsCheckCmd.Flags().BoolVar(&configModelsCheckFirst, "first", false, "Send exactly one minimal streamed /v1/messages turn, shaped like a session's, against the named profile with a 30s deadline and print one classified, grep-able verdict line carrying the gateway's own error text (requires a profile argument)")
 	configModelsCmd.AddCommand(configModelsShowCmd)
 	configModelsCmd.AddCommand(configModelsCheckCmd)
 	configModelsCmd.AddCommand(configModelsAttestCmd)
@@ -177,6 +199,48 @@ var modelsMessagesDo = func(req *http.Request) (*http.Response, error) {
 	return http.DefaultClient.Do(req)
 }
 
+// modelInfoProbe is the routing cross-check's transport seam (issue #686 A11), modeled on
+// httpProbe/modelsMessagesDo (package-level var, ADR-009) so tests substitute it with no real
+// network (ADR-018). It reports GET <baseURL>/model/info's advertised routing: each model_name
+// LiteLLM serves mapped to its litellm_params.model backend (e.g. "chatgpt/gpt-5.6-sol" or
+// "openai/gpt-5.6-sol") — the value the subscription-mode routing cross-check compares against a
+// required chatgpt/ prefix.
+var modelInfoProbe = func(baseURL, authToken string) (map[string]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), modelsProbeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/model/info", nil)
+	if err != nil {
+		return nil, err
+	}
+	if authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authToken)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET /model/info returned %s", resp.Status)
+	}
+	var body struct {
+		Data []struct {
+			ModelName     string `json:"model_name"`
+			LitellmParams struct {
+				Model string `json:"model"`
+			} `json:"litellm_params"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	routes := make(map[string]string, len(body.Data))
+	for _, m := range body.Data {
+		routes[m.ModelName] = m.LitellmParams.Model
+	}
+	return routes, nil
+}
+
 func runConfigModelsShow(cmd *cobra.Command, _ []string) error {
 	_, cfg, err := loadModelsForRead()
 	if err != nil {
@@ -226,6 +290,13 @@ func runConfigModelsCheck(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if configModelsCheckFirst {
+		if len(args) == 0 || args[0] == "" {
+			return fmt.Errorf("--first requires a profile name: af config models check <profile> --first")
+		}
+		return runFirstProbe(cmd, root, cfg, args[0])
+	}
+
 	var names []string
 	if len(args) > 0 && args[0] != "" {
 		if _, ok := cfg.Models[args[0]]; !ok {
@@ -258,9 +329,10 @@ func runConfigModelsCheck(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(out, "af config models check — transport-level only (necessary, not sufficient for fitness).")
 
 	aliasIDs := directProfileClaudeIDs(cfg)
+	dispatchCfg := loadDispatchConfigForPinCheck(root, out)
 	hardFailures := 0
 	for _, name := range names {
-		if checkProfile(out, root, name, cfg.Models[name], aliasIDs) {
+		if checkProfile(out, root, name, cfg.Models[name], aliasIDs, name == cfg.Default, dispatchCfg) {
 			hardFailures++
 		}
 	}
@@ -471,7 +543,12 @@ func anyServedWithPrefix(served []string, prefix string) bool {
 //
 // aliasIDs are the registry's direct-profile claude-* ids (directProfileClaudeIDs); a caller holding
 // one profile passes them in because coverage is a property of the registry, not of the profile.
-func checkProfile(out io.Writer, root, name string, profile map[string]string, aliasIDs []string) (hardFailure bool) {
+//
+// isDefault and dispatchCfg feed the fleet-scale advisory (issue #686 D11/D15): whether this
+// profile is models.json's own .default, or named by a dispatch.json mapping/cron, is a fact about
+// the registry checkProfile cannot see from one profile map, so the caller resolves it once per run
+// and hands it in.
+func checkProfile(out io.Writer, root, name string, profile map[string]string, aliasIDs []string, isDefault bool, dispatchCfg *config.DispatchConfig) (hardFailure bool) {
 	base := profile[baseURLKey]
 	if base == "" {
 		fmt.Fprintf(out, "profile %q: no ANTHROPIC_BASE_URL — nothing to probe (local/default model)\n", name)
@@ -526,6 +603,52 @@ func checkProfile(out io.Writer, root, name string, profile map[string]string, a
 		fmt.Fprintf(out, "profile %q: direct endpoint (ANTHROPIC_AUTH_TOKEN is not a file: gateway secret) — claude-* alias rows are advisory, not hard failures\n", name)
 	}
 
+	// Derived-mode upstream-auth stage + /model/info routing cross-check (issue #686 Phase 2,
+	// F9/F10/D2; issue #693 Phase 6 K16/D3/D4/D9). Mode is DERIVED from the persisted
+	// gatewayAuthMode(root) record, never profile-carried (INV-1/INV-2): both secret handles present
+	// on disk is no longer a case that skips the cross-check — it prints an informational line (never
+	// refusing to decide) and the persisted record still decides which cross-check direction runs.
+	// An unresolvable mode (gatewayAuthMode error: no record, both handles present, no other signal)
+	// is a hard failure here — `af config models check` is the surface responsible for reporting
+	// auth-mode ambiguity loudly (decisions.md D3), unlike the launch/watchdog paths which degrade
+	// silently to avoid bricking a running agent. The A11 routing cross-check runs in BOTH modes
+	// (F9): subscription ⇒ an openai/ lane is a hard fail; key mode ⇒ a chatgpt/ lane with no handle
+	// is a hard fail. modelInfoProbe is fired for every gateway profile now, so setupConfigFactory
+	// stubs it (config_set_test.go) to keep pre-existing gateway tests hermetic (ADR-018).
+	if gateway {
+		subHandle := subscriptionHandlePresent(root)
+		if subHandle && apiKeySecretPresent(root) {
+			fmt.Fprintf(out, "profile %q: both an OpenAI API key and a ChatGPT-subscription handle are present on disk; the persisted gateway auth mode selects which credential is audited\n", name)
+		}
+		mode, _, modeErr := gatewayAuthMode(root)
+		if modeErr != nil {
+			fmt.Fprintf(out, "profile %q: gateway auth mode: %v\n", name, modeErr)
+			recordNoMeasurement(out, root, name)
+			return true
+		}
+		routes, routesErr := modelInfoProbe(base, secret)
+		if routesErr != nil {
+			fmt.Fprintf(out, "profile %q: routing not verified — /model/info unavailable: %v\n", name, routesErr)
+		}
+		subscription := mode == gatewayAuthProfileName
+		hardFail := false
+		if subscription {
+			if checkUpstreamAuthStage(out, root, name) {
+				hardFail = true
+			}
+			if routesErr == nil && subscriptionRoutingCrossCheck(out, name, routes, profile, aliasIDs) {
+				hardFail = true
+			}
+			fleetScaleAdvisory(out, name, isDefault, dispatchCfg)
+		} else if routesErr == nil && keyModeRoutingCrossCheck(out, name, routes, profile, aliasIDs) {
+			hardFail = true
+		}
+		if hardFail {
+			recordNoMeasurement(out, root, name)
+			return true
+		}
+	}
+
 	rows := endpointCoverageRows(profile, aliasIDs, ids, gateway)
 	for _, row := range rows {
 		fmt.Fprintf(out, "profile %q: %s\n", name, row.line)
@@ -555,15 +678,205 @@ func checkProfile(out io.Writer, root, name string, profile map[string]string, a
 	// warning, not a hard one — the verdicts above already reached the operator, and refusing the
 	// exit code over a .runtime write would turn a reporting problem into a coverage problem.
 	if err := writeModelCoverageRecord(root, modelCoverageRecord{
-		Profile:    name,
-		CheckedAt:  time.Now().UTC().Format(time.RFC3339),
-		ServedHash: servedListHash(ids),
-		Failing:    failing,
-		Classes:    verdicts,
+		Profile:   name,
+		CheckedAt: time.Now().UTC().Format(time.RFC3339),
+		Failing:   failing,
+		Classes:   verdicts,
 	}); err != nil {
 		fmt.Fprintf(out, "profile %q: warning: could not record the coverage verdicts: %v\n", name, err)
 	}
 	return failing > 0
+}
+
+// subscriptionHandlePresent reports whether the Phase-1 subscription handle exists on disk — the
+// on-disk artifact that IS "derived mode == subscription" (issue #686, gateway_auth.go's own
+// doc comment on gatewayAuthHandlePath).
+func subscriptionHandlePresent(root string) bool {
+	return gatewayHandleNonEmpty(root)
+}
+
+// apiKeySecretPresent reports whether a non-empty OpenAI API-key secret exists at the ladder's own
+// path (install.go:935) — the api-key half of INV-2's mode derivation. Non-empty, matching the
+// subscription handle's own predicate, so a 0-byte file counts on neither side.
+func apiKeySecretPresent(root string) bool {
+	fi, err := os.Stat(filepath.Join(config.ConfigDir(root), "secrets", "openai.key"))
+	return err == nil && !fi.IsDir() && fi.Size() > 0
+}
+
+// gatewayHandleExpiresAt reads the live handle's own exp (F1/D7): the authoritative expiry source,
+// since LiteLLM refreshes the handle in place while the .runtime state-record mirror goes stale. A
+// missing/unparseable handle, or one carrying no exp claim, returns (0, false) — judged "unknown",
+// never expired and never silently backfilled from the mirror.
+func gatewayHandleExpiresAt(root string) (int64, bool) {
+	data, err := os.ReadFile(gatewayAuthHandlePath(root))
+	if err != nil {
+		return 0, false
+	}
+	var h gatewayAuthHandle
+	if json.Unmarshal(data, &h) != nil || h.ExpiresAt == 0 {
+		return 0, false
+	}
+	return h.ExpiresAt, true
+}
+
+// subscriptionHardFailState is the enum-state hard-fail set checkProfile's upstream-auth stage and
+// sling's selecting-launch E5 refusal both key on (D13): a revoked/no-refresh-token credential must
+// refuse identically on both surfaces, or `af config models check` and a launch would disagree
+// about the very record they both read. An absent (`missing`) or unparseable/wrong-version
+// (`corrupt`) record is NOT in the set (F4/F27/D1, design E3 L175): it yields a loud `unverified`
+// warning, never a hard fail — a wiped `.runtime/` must not refuse launches on a healthy gateway,
+// and a wedged gateway with no state record must not be re-keyed to a credential cause at the
+// watchdog.
+func subscriptionHardFailState(state string) bool {
+	switch state {
+	case gatewayAuthStateRevoked, gatewayAuthStateNoRefreshToken:
+		return true
+	}
+	return false
+}
+
+// checkUpstreamAuthStage audits the Phase-1 state record for a derived-mode subscription profile
+// and reports a HARD failure for the closed state set (D13) or a derived past-exp credential
+// (D3/D5). A healthy, current credential is reported and its LastVerifiedAt stamped via a
+// read-modify-write (D4): writeGatewayAuthState is a full-struct overwrite, so mutating anything
+// less than the just-read record would silently erase Phase 1's ImportedAt/AuthDir/Mode/etc. on the
+// very first post-Phase-2 `check` run. An unverified state (the record itself unreadable — a
+// non-ENOENT error) is reported loudly but is neither a hard fail nor written back, since there is
+// nothing trustworthy to persist.
+func checkUpstreamAuthStage(out io.Writer, root, name string) (hardFail bool) {
+	st, state := readGatewayAuthState(root)
+	if subscriptionHardFailState(state) {
+		fmt.Fprintf(out, "profile %q: subscription credential state %q — run `af gateway auth import` after `codex login`\n", name, state)
+		return true
+	}
+	if state != gatewayAuthStateOK {
+		fmt.Fprintf(out, "profile %q: subscription credential state unverified — run `af config models check` again\n", name)
+		return false
+	}
+	exp, known := gatewayHandleExpiresAt(root)
+	if !known {
+		// F1/D7: the handle is the sole expiry source; a handle carrying no decodable exp is
+		// "unknown" — surfaced, never silently backfilled from the .runtime mirror, never judged
+		// expired.
+		fmt.Fprintf(out, "profile %q: subscription credential expiry unknown — the handle carries no decodable exp; run `af gateway auth import` after `codex login`\n", name)
+		return false
+	}
+	if !time.Now().UTC().Before(time.Unix(exp, 0).UTC()) {
+		fmt.Fprintf(out, "profile %q: subscription credential has expired — run `af gateway auth import` after `codex login`\n", name)
+		return true
+	}
+	fmt.Fprintf(out, "profile %q: subscription credential verified (state=%s)\n", name, state)
+	st.LastVerifiedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := writeGatewayAuthState(root, st); err != nil {
+		fmt.Fprintf(out, "profile %q: warning: could not record subscription verification: %v\n", name, err)
+	}
+	return false
+}
+
+// effectiveModelIDs is the routing cross-check's own universe: this profile's effective
+// (post-derivation) class ids plus the registry's demanded claude-* aliases — the same two
+// universes endpointCoverageRows checks for SERVED, checked here for chatgpt/ ROUTING instead.
+func effectiveModelIDs(profile map[string]string, aliasIDs []string) []string {
+	completed := config.CompleteEndpointProfile(profile)
+	seen := map[string]bool{}
+	var ids []string
+	for _, key := range config.DerivedEndpointClassKeys() {
+		id := completed[key]
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	for _, id := range aliasIDs {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// subscriptionRoutingCrossCheck is A11's subscription direction: every effective class id and
+// demanded claude-* alias must resolve, via /model/info, to a chatgpt/ litellm_params.model backend —
+// a subscription-mode profile routed to an openai/ lane is a HARD failure naming the id and the wrong
+// lane (D8: an independent axis, never folded into coverageRow.served). Routes are probed once by the
+// caller so the same observation drives mode derivation and both cross-check directions; an
+// unavailable /model/info is reported once at the probe site and this check is skipped (D7: uniform
+// soft treatment, never a definitive wrong answer).
+func subscriptionRoutingCrossCheck(out io.Writer, name string, routes map[string]string, profile map[string]string, aliasIDs []string) (hardFail bool) {
+	for _, id := range effectiveModelIDs(profile, aliasIDs) {
+		backend, ok := routes[id]
+		if !ok || strings.HasPrefix(backend, "chatgpt/") {
+			continue
+		}
+		fmt.Fprintf(out, "profile %q: routing cross-check: %q resolves to %q, not a chatgpt/ lane — subscription mode requires chatgpt/ routing\n", name, id, backend)
+		hardFail = true
+	}
+	return hardFail
+}
+
+// keyModeRoutingCrossCheck is A11's symmetric key-mode direction (F9/K3; issue #693 Phase 6
+// K16/AC-11(iv)): the caller only reaches this function when the persisted gatewayAuthMode record
+// says api-key, so a gateway advertising a chatgpt/ lane for this profile is a HARD failure naming
+// the id and lane — unconditionally. A stray subscription handle sitting on disk from a prior mode
+// (D10) must never suppress this: AC-11(iv) is exactly "the routing cross-check ... is never
+// silently skipped merely because the prior mode's credential exists." openai/ lanes are correct
+// for key mode and pass silently, keeping a clean api-key profile a true no-op for this stage.
+func keyModeRoutingCrossCheck(out io.Writer, name string, routes map[string]string, profile map[string]string, aliasIDs []string) (hardFail bool) {
+	for _, id := range effectiveModelIDs(profile, aliasIDs) {
+		backend, ok := routes[id]
+		if !ok || !strings.HasPrefix(backend, "chatgpt/") {
+			continue
+		}
+		fmt.Fprintf(out, "profile %q: routing cross-check: %q routes to %q, a subscription lane, but the persisted gateway auth mode is api-key — a subscription handle alone does not authorize this routing; run `af gateway auth import` after `codex login` and switch modes, or reroute the gateway through an openai/ lane\n", name, id, backend)
+		hardFail = true
+	}
+	return hardFail
+}
+
+// anyLaneHasPrefix reports whether any of ids resolves, in the observed /model/info routing, to a
+// backend under prefix — the online lane signal in INV-2's mode derivation.
+func anyLaneHasPrefix(routes map[string]string, ids []string, prefix string) bool {
+	for _, id := range ids {
+		if backend, ok := routes[id]; ok && strings.HasPrefix(backend, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// dispatchMapsModel reports whether profile is named by any dispatch.json mapping or cron (D15:
+// both slices count — the advisory is informational, so a false positive from a cron-only mapping
+// costs nothing while a false negative defeats its purpose).
+func dispatchMapsModel(cfg *config.DispatchConfig, name string) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, m := range cfg.Mappings {
+		if m.Model == name {
+			return true
+		}
+	}
+	for _, c := range cfg.Crons {
+		if c.Model == name {
+			return true
+		}
+	}
+	return false
+}
+
+// fleetScaleAdvisory prints one informational line (D11: per-profile, never deduplicated across
+// reasons) when a subscription profile is scaled across a fleet — models.json's own .default or a
+// dispatch.json mapping/cron — so an operator sees the shared-plan-quota cost before dispatching
+// broadly. Advisory only: it never affects checkProfile's hard-failure count or the check's exit
+// code (D19).
+func fleetScaleAdvisory(out io.Writer, name string, isDefault bool, dispatchCfg *config.DispatchConfig) {
+	if !isDefault && !dispatchMapsModel(dispatchCfg, name) {
+		return
+	}
+	fmt.Fprintf(out, "profile %q: fleet-scale advisory: this ChatGPT-subscription profile is scaled across the fleet (default or dispatch-mapped) — sessions against it spend shared plan quota; monitor usage before dispatching broadly\n", name)
 }
 
 // liveSmokeRows sends one minimal request per row that listed and demotes any row the gateway
@@ -577,7 +890,15 @@ func liveSmokeRows(out io.Writer, name, base, secret string, rows []coverageRow)
 			continue
 		}
 		if err := liveSmokeModel(base, secret, row.model); err != nil {
-			fmt.Fprintf(out, "profile %q: --live %s → %q: NOT SERVED — %v\n", name, row.class, row.model, err)
+			// A deadline exceeded is a DISTINCT verdict from NOT SERVED (issue #686 K3/AC-3): the
+			// gateway may be reachable and correctly configured but simply slower than
+			// liveSmokeDeadline on this turn, which "not served" would misreport as a routing
+			// problem.
+			if errors.Is(err, context.DeadlineExceeded) {
+				fmt.Fprintf(out, "profile %q: --live %s → %q: timed out after %s — %v\n", name, row.class, row.model, liveSmokeDeadline, err)
+			} else {
+				fmt.Fprintf(out, "profile %q: --live %s → %q: NOT SERVED — %v\n", name, row.class, row.model, err)
+			}
 			row.served = false
 			continue
 		}
@@ -597,47 +918,253 @@ func recordNoMeasurement(out io.Writer, root, name string) {
 	}
 }
 
-// liveSmokeModel asks the gateway for the smallest possible completion and reports whether it
-// answered with a message. max_tokens is 16 rather than 1 because a model routed through OpenAI's
-// Responses API rejects a lower max_output_tokens outright, which would read as an unserved class;
-// quickstart.sh's own smoke test uses the same floor for the same reason.
-func liveSmokeModel(base, secret, model string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), modelsProbeTimeout)
-	defer cancel()
+// smokeSystemPrompt rides along as a block-array system prompt because that is the shape Claude
+// Code sends on every turn. A bare user message is the one shape a broken translation layer still
+// answers: LiteLLM 1.93.0's ChatGPT/Codex route answers "ping" and rejects every real session with
+// "System messages are not allowed", so a probe without it certified a gateway no agent could use.
+const smokeSystemPrompt = "You are a connectivity probe. Answer with one word."
+
+// smokeBodyLimit caps how much of a probe response is read for its verdict and error text.
+const smokeBodyLimit = 64 << 10
+
+// doLiveSmokeRequest builds and sends one streamed /v1/messages turn in the shape a Claude Code
+// session sends, shared by liveSmokeModel's per-class sweep and firstProbe's single-shot pre-flight
+// (issue #693 K14) so both send byte-identical request shapes through the one modelsMessagesDo
+// seam. It streams because sessions stream, and a gateway's non-streaming path can fail where its
+// streaming path works (LiteLLM #37039). max_tokens is 16 rather than 1 because a model routed
+// through OpenAI's Responses API rejects a lower max_output_tokens outright, which would read as an
+// unserved class.
+func doLiveSmokeRequest(ctx context.Context, base, secret, model string) (*http.Response, error) {
 	body, err := json.Marshal(map[string]any{
 		"model":      model,
 		"max_tokens": 16,
+		"stream":     true,
+		"system":     []map[string]string{{"type": "text", "text": smokeSystemPrompt}},
 		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if secret != "" {
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("content-type", "application/json")
+	return modelsMessagesDo(req)
+}
 
-	resp, err := modelsMessagesDo(req)
+// liveSmokeModel asks the gateway for the smallest possible completion and reports whether it
+// answered with a message. Kept as a thin wrapper over doLiveSmokeRequest, supplying
+// liveSmokeDeadline, so --live's existing generic-error return and every STAYS test pinning its
+// wording (config_models_subscription_test.go, model_coverage_test.go) stay untouched.
+func liveSmokeModel(base, secret, model string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), liveSmokeDeadline)
+	defer cancel()
+	resp, err := doLiveSmokeRequest(ctx, base, secret, model)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("POST /v1/messages returned %s", resp.Status)
-	}
-	var answer struct {
-		Type string `json:"type"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&answer); err != nil {
+	body, err := readSmokeBody(resp)
+	if err != nil {
 		return err
 	}
-	if answer.Type != "message" {
-		return fmt.Errorf("POST /v1/messages answered type %q, want a message", answer.Type)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("POST /v1/messages returned %s%s", resp.Status, gatewayErrorSuffix(body))
+	}
+	return checkStreamedMessage(body)
+}
+
+func readSmokeBody(resp *http.Response) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, smokeBodyLimit))
+	if err != nil {
+		return nil, fmt.Errorf("POST /v1/messages returned %s but its body could not be read: %w", resp.Status, err)
+	}
+	return body, nil
+}
+
+// checkStreamedMessage accepts a body only when it is a completed streamed Anthropic message
+// (message_start through message_stop). A JSON message with no stream is refused too: a session
+// asks to stream, so a gateway that ignores that would not serve it either. An error event carries
+// the gateway's own words into the verdict, since that text is what names an upstream defect.
+func checkStreamedMessage(body []byte) error {
+	sawStart, sawStop := false, false
+	for _, line := range strings.Split(string(body), "\n") {
+		payload, ok := strings.CutPrefix(strings.TrimSpace(line), "data:")
+		if !ok {
+			continue
+		}
+		var event struct {
+			Type  string `json:"type"`
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal([]byte(payload), &event) != nil {
+			continue
+		}
+		switch event.Type {
+		case "message_start":
+			sawStart = true
+		case "message_stop":
+			sawStop = true
+		case "error":
+			if event.Error.Message == "" {
+				event.Error.Message = strings.TrimSpace(payload)
+			}
+			return fmt.Errorf("POST /v1/messages streamed an error: %s", event.Error.Message)
+		}
+	}
+	if sawStart && sawStop {
+		return nil
+	}
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(body, &envelope) == nil && envelope.Type != "" {
+		return fmt.Errorf("POST /v1/messages answered type %q, want a streamed message%s", envelope.Type, gatewayErrorSuffix(body))
+	}
+	return fmt.Errorf("POST /v1/messages answered 200 without a completed streamed message (message_start=%t, message_stop=%t)", sawStart, sawStop)
+}
+
+// gatewayErrorSuffix pulls the gateway's own error text out of a response body so the verdict
+// carries it: the status line alone said "500" for a translation bug whose message (LiteLLM's
+// "Unknown items in responses API response") is the searchable key to the upstream issue. The
+// JSON envelope's error.message is preferred; any other non-empty body is quoted on one line.
+func gatewayErrorSuffix(body []byte) string {
+	var envelope struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		Message string `json:"message"`
+	}
+	text := ""
+	if json.Unmarshal(body, &envelope) == nil {
+		text = envelope.Error.Message
+		if text == "" {
+			text = envelope.Message
+		}
+	}
+	if text == "" {
+		text = strings.Join(strings.Fields(string(body)), " ")
+	}
+	if text == "" {
+		return ""
+	}
+	if runes := []rune(text); len(runes) > 600 {
+		text = string(runes[:600]) + "…"
+	}
+	return ": " + text
+}
+
+// firstProbeVerdict is --first's classified outcome (issue #693 K14, decisions D1-D3): a distinct,
+// grep-able bucket per HTTP status class so a bash caller can branch on stdout text — Execute()
+// (root.go:29-39) collapses every command failure to exit code 1, so the verdict cannot travel
+// through the exit code. quickstart.sh's forced-relogin ladder anchors on the printed verdict
+// token — `grep -qE -- '--first → (AUTH|TIMEOUT)'` — so only these two buckets drive a re-login and
+// an unrelated "auth" substring (e.g. ANTHROPIC_AUTH_TOKEN in an error) cannot; keep the AUTH and
+// TIMEOUT names and runFirstProbe's `--first → ` prefix exactly as printed.
+type firstProbeVerdict string
+
+const (
+	firstProbeOK          firstProbeVerdict = "OK"
+	firstProbeAuth        firstProbeVerdict = "AUTH"
+	firstProbeNotFound    firstProbeVerdict = "NOT FOUND"
+	firstProbeRateLimited firstProbeVerdict = "RATE LIMITED"
+	firstProbeServerError firstProbeVerdict = "SERVER ERROR"
+	firstProbeTimeout     firstProbeVerdict = "TIMEOUT"
+	firstProbeUnexpected  firstProbeVerdict = "UNEXPECTED"
+)
+
+// firstProbe sends exactly one classified /v1/messages request against model, bounded by
+// firstProbeDeadline (D1: a distinct 30s budget, never liveSmokeDeadline). A 429 gets exactly one
+// backoff-and-retry (D1/D2/decision D1 backoff=1s); the retry's own response is classified by the
+// same rule as a first-attempt response — a second 429 resolves to firstProbeRateLimited again
+// (D2), not a distinct bucket. Any transport-level error (connect refused, DNS, the 30s deadline
+// itself) — on the initial attempt or the retry — resolves to firstProbeTimeout.
+//
+// The classification deliberately lives ONLY here, not inside liveSmokeModel/liveSmokeRows:
+// liveSmokeRows' printed wording ("timed out"/"NOT SERVED") is pinned verbatim by
+// TestLiveSmokeTimeoutIsNotNotServed and the model-coverage 400/os.ErrDeadlineExceeded tests — giving
+// liveSmokeModel's non-200 branch a classified return would change what those tests observe. --live's
+// per-class sweep and --first's single pre-flight probe answer different questions ("which classes
+// does the gateway serve" vs. "is this endpoint reachable and authenticated at all"), so they keep
+// distinct verdict vocabularies over the one shared doLiveSmokeRequest transport.
+func firstProbe(base, secret, model string) (firstProbeVerdict, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), firstProbeDeadline)
+	defer cancel()
+
+	resp, err := doLiveSmokeRequest(ctx, base, secret, model)
+	if err == nil && resp.StatusCode == http.StatusTooManyRequests {
+		resp.Body.Close()
+		time.Sleep(firstProbeRetryBackoff)
+		resp, err = doLiveSmokeRequest(ctx, base, secret, model)
+	}
+	if err != nil {
+		return firstProbeTimeout, err
+	}
+	defer resp.Body.Close()
+	body, err := readSmokeBody(resp)
+	if err != nil {
+		return firstProbeUnexpected, err
+	}
+	statusErr := fmt.Errorf("POST /v1/messages returned %s%s", resp.Status, gatewayErrorSuffix(body))
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		if err := checkStreamedMessage(body); err != nil {
+			return firstProbeUnexpected, err
+		}
+		return firstProbeOK, nil
+	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+		return firstProbeAuth, statusErr
+	case resp.StatusCode == http.StatusNotFound:
+		return firstProbeNotFound, statusErr
+	case resp.StatusCode == http.StatusTooManyRequests:
+		return firstProbeRateLimited, statusErr
+	case resp.StatusCode >= http.StatusInternalServerError:
+		return firstProbeServerError, statusErr
+	default:
+		return firstProbeUnexpected, statusErr
+	}
+}
+
+// runFirstProbe is --first's dispatch path (D3/D4): a fast auth-shaped pre-check that bypasses
+// checkProfile's httpProbe/routing-cross-check/per-class-row machinery entirely, since its whole
+// purpose is "exactly one request," not a coverage sweep. Secret resolution mirrors checkProfile's
+// own block (config_models.go's checkProfile) but stays local — --first never records a coverage
+// verdict or writes to .runtime, it only prints one classified line and returns an error for a
+// non-OK verdict so the CLI's binary exit code still fails the run.
+func runFirstProbe(cmd *cobra.Command, root string, cfg *config.ModelsConfig, name string) error {
+	profile, ok := cfg.Models[name]
+	if !ok {
+		return fmt.Errorf("unknown model profile %q: not defined in models.json", name)
+	}
+	base := profile[baseURLKey]
+	if base == "" {
+		return fmt.Errorf("profile %q: no ANTHROPIC_BASE_URL — nothing to probe", name)
+	}
+	secret := profile[authTokenKey]
+	if strings.HasPrefix(secret, secretPrefix) {
+		data, err := os.ReadFile(secretRefPath(root, secret))
+		if err != nil {
+			return fmt.Errorf("profile %q: secret reference ANTHROPIC_AUTH_TOKEN: %w", name, err)
+		}
+		secret = strings.TrimSpace(string(data))
+	}
+
+	verdict, probeErr := firstProbe(base, secret, profile[modelKey])
+	out := cmd.OutOrStdout()
+	if probeErr != nil {
+		fmt.Fprintf(out, "profile %q: --first → %s — %v\n", name, verdict, probeErr)
+	} else {
+		fmt.Fprintf(out, "profile %q: --first → %s\n", name, verdict)
+	}
+	if verdict != firstProbeOK {
+		return fmt.Errorf("profile %q: --first %s", name, verdict)
 	}
 	return nil
 }
@@ -682,7 +1209,7 @@ type modelFitnessAttestation struct {
 // hasFitnessAttestation reports whether a valid attestation exists for profile at the
 // factory-root .runtime/model_fitness/<profile>.json. Fail-closed: any read/parse
 // error or a profile mismatch counts as UNATTESTED, so a corrupt marker never grants
-// fitness. Read by the selecting-launch interlock in resolveLaunchModelEnv.
+// fitness. Read by the selecting-launch interlock in resolveModelEnvForSession.
 func hasFitnessAttestation(root, profile string) bool {
 	data, err := os.ReadFile(modelFitnessPath(root, profile))
 	if err != nil {
@@ -794,20 +1321,14 @@ type modelCoverageVerdict struct {
 
 // modelCoverageRecord carries what `af config models check` last observed for one endpoint profile,
 // so a launch can report class coverage without probing anything — the launch path must never wait
-// on a gateway that has not come up yet.
-//
-// ServedHash fingerprints the gateway's advertised model list. It is not read by anything today; it
-// is recorded because "the verdicts are the same but the gateway's inventory changed underneath
-// them" is the question an operator asks after a litellm reload, and the answer has to have been
-// captured at check time or it is gone. Only model ids and their verdicts are stored — never the
+// on a gateway that has not come up yet. Only model ids and their verdicts are stored — never the
 // endpoint, never token material.
 type modelCoverageRecord struct {
-	V          int                    `json:"v"`
-	Profile    string                 `json:"profile"`
-	CheckedAt  string                 `json:"checked_at"`
-	ServedHash string                 `json:"served_hash"`
-	Failing    int                    `json:"failing"`
-	Classes    []modelCoverageVerdict `json:"classes"`
+	V         int                    `json:"v"`
+	Profile   string                 `json:"profile"`
+	CheckedAt string                 `json:"checked_at"`
+	Failing   int                    `json:"failing"`
+	Classes   []modelCoverageVerdict `json:"classes"`
 }
 
 // readModelCoverageRecord returns the recorded verdicts for a profile. Fail-closed in the same sense
@@ -851,18 +1372,9 @@ func modelCoveragePath(root, profile string) string {
 	return filepath.Join(root, ".runtime", "model_coverage", profile+".json")
 }
 
-// servedListHash fingerprints a gateway's advertised ids, order-independently so a gateway that
-// merely reorders its model_list does not read as a changed inventory.
-func servedListHash(ids []string) string {
-	sorted := append([]string(nil), ids...)
-	sort.Strings(sorted)
-	sum := sha256.Sum256([]byte(strings.Join(sorted, "\n")))
-	return hex.EncodeToString(sum[:])
-}
-
 // secretRefPath resolves a file: secret reference to a path. A relative path is taken
 // against root (the factory root), matching the Phase-2 emission deref; an absolute
-// path is used as-is. Shared by the launch preflight (resolveLaunchModelEnv) and
+// path is used as-is. Shared by the launch preflight (resolveModelEnvForSession) and
 // `check`.
 func secretRefPath(root, ref string) string {
 	path := strings.TrimPrefix(ref, secretPrefix)

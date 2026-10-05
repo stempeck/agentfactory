@@ -78,6 +78,29 @@ func TestFindFormulaFile_NotFound(t *testing.T) {
 	}
 }
 
+// TestFindFormulaFile_PluginsSubdirNotResolved pins AC-2's mechanical enforcement:
+// an acquired plugin clone under store/plugins/<x>/ is invisible to FindFormulaFile,
+// because the search is flat and non-recursive (it only stats
+// FormulasDir(root)/name+ext, never a nested plugins subdir). An improbable formula
+// name is used so the home-dir FormulasDir search path cannot cause a false result.
+func TestFindFormulaFile_PluginsSubdirNotResolved(t *testing.T) {
+	root := t.TempDir()
+
+	seed := filepath.Join(config.PluginsDir(root), "acme-agents")
+	if err := os.MkdirAll(seed, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(seed, "plugin-nested-xyz.formula.toml"), []byte("# nested"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := FindFormulaFile("plugin-nested-xyz", root); err == nil {
+		t.Error("FindFormulaFile resolved a formula nested under store/plugins/ — the flat search must not descend into acquired clones")
+	} else if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %q, want it to contain 'not found'", err.Error())
+	}
+}
+
 func TestFindFormulaFile_JSONFallback(t *testing.T) {
 	// Create a temp factory with a .formula.json file (fallback extension)
 	root := t.TempDir()

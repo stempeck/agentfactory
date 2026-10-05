@@ -35,6 +35,8 @@ func TestGuard_PanicsOnProductionIdentity(t *testing.T) {
 	}{
 		{"kill-session", func() { _ = tx.KillSession(target) }},
 		{"new-session", func() { _ = tx.NewSession(target, "/tmp") }},
+		// #695 Phase 2 AC9: the service launcher is guarded under the same op name.
+		{"new-session", func() { _ = tx.NewSessionWithCommand(target, "", "true") }},
 		{"send-keys", func() { _ = tx.SendKeys(target, "echo hi") }},
 		{"attach-session", func() { _ = tx.AttachSession(target) }},
 		{"set-option", func() { _ = tx.SetOption(target, "mouse", "on") }},
@@ -130,7 +132,6 @@ func TestGuard_ZeroProductionRealOps(t *testing.T) {
 	_ = tx.KillSession("af-test-ab12cd34-x")
 	_ = tx.NewSession("af-test-ab12cd34-y", "/tmp")
 	_ = tx.SetEnvironment("af-test-ab12cd34-z", "K", "V")
-	_ = tx.UnsetEnvironment("af-test-ab12cd34-z", "K")
 
 	if _, err := tx.HasSession("af-manager"); err != nil {
 		t.Errorf("HasSession read-only probe returned err: %v", err)

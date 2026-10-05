@@ -469,7 +469,7 @@ Merge the design spec with the investigation findings.
    - **Backend** (API, data models, middleware, migrations) → recommend `*implement`
    - **Frontend UI** (pages, components, design exploration needed) → recommend `*design`
    - **Frontend implementation** (clear spec, no design exploration) → recommend `*implement`
-   - **Manual/Human** (console config, third-party setup, credential rotation) → no skill; emit as checklist. Mark Recommended Skill as `manual`.
+   - **Work no agent can automate** (console config, third-party setup, credential rotation, anything that needs a person or a host the factory cannot reach) → a **blocker**, never a phase. `manual` is not a Recommended Skill and no phase holds a human checklist or manual gate. List each one in the outline's `## Blockers` section with why no agent can automate it, and mail Supervisor `BLOCKED: {{issue}}: <the blocker>`. The engineer refuses to dispatch any phase while a blocker is listed.
    - **Test/Verification** (E2E tests, integration validation) → recommend `*implement` for test code
    - If a single design-doc phase spans multiple domains, **split it into sub-phases** — one per domain.
 
@@ -491,7 +491,7 @@ Merge the design spec with the investigation findings.
      not require to ship (it belongs to its own ticket, not a phase here).
    Deliverables that touch the same files/service and can land in ONE PR are ONE phase —
    do NOT split a type change, the return it enables, the same-line comment fix, and its
-   tests into separate phases. Out-of-repo and `manual` items are **linked follow-ups**,
+   tests into separate phases. Out-of-repo items are **linked follow-ups**,
    not first-class phases, unless they gate the merge. Anchor to the design's own
    narrative: if the design narrates N phases and you are about to emit more than N, each
    extra phase needs a one-line hard-split reason from the list above; if it has none,
@@ -525,7 +525,7 @@ mkdir -p "{design_dir}/implementation-plan"
 **2. Write `{design_dir}/implementation-plan/implementation_plan_outline.md`**
 with this exact structure:
 
-```markdown
+````markdown
 # Implementation Plan Outline: {Design Title}
 
 **Date**: {YYYY-MM-DD}
@@ -559,7 +559,14 @@ Each phase below is a **self-contained extraction unit**. Workflow:
 - If {M} > {N}, list EACH extra phase and its hard-split reason, one per line, using
   this exact prefix (reason from: cross-service | cross-repo | merge-gate | deferrable-ticket):
   `- Extra phase {X}: {reason} — {detail}`
-- Out-of-repo / `manual` follow-ups (NOT counted as in-repo merge phases): {list or "none"}
+- Out-of-repo follow-ups (NOT counted as in-repo merge phases): {list or "none"}
+
+## Blockers
+
+Work this design needs that no agent can automate. Each line stops the plan: no phase is dispatched while one is
+listed. One `- ` line per blocker with why no agent can automate it, or the single word none.
+
+{blockers or "none"}
 
 ## Deployment Coverage
 
@@ -578,7 +585,7 @@ Each phase below is a **self-contained extraction unit**. Workflow:
 {Which phases must complete first, or "None"}
 
 ### Recommended Skill or Agent
-`{*terraform | *implement | *design | manual}` — {rationale}
+`{*terraform | *implement | *design}` — {rationale}
 
 ### Design References
 | Document | Section | Lines | What It Specifies |
@@ -606,7 +613,7 @@ Each phase below is a **self-contained extraction unit**. Workflow:
 - {nuance that only surfaces from reading actual code}
 
 ---
-```
+````
 
 **Rules for each phase section:**
 - **Design References**: Exact document name, section heading, and line numbers.
@@ -772,7 +779,8 @@ Then verify each item:
 - [ ] Phases are split ONLY where a hard boundary (cross-service/cross-repo/merge-gate) requires a separate PR — same-service, same-PR deliverables are NOT split (check 2f)
 - [ ] A **Scope proportionality** block exists and declares design-phase-count N and outline-phase-count M (check 2f-i)
 - [ ] If M > N, every extra phase is enumerated with a hard-split reason from {cross-service|cross-repo|merge-gate|deferrable-ticket}; no same-service/same-PR deliverable is its own phase (check 2f-ii)
-- [ ] Out-of-repo and `manual` items are listed as linked follow-ups, not counted as in-repo merge phases
+- [ ] Out-of-repo items are listed as linked follow-ups, not counted as in-repo merge phases
+- [ ] No phase has Recommended Skill `manual` and no phase holds a human checklist or manual gate; work no agent can automate is a `- ` line under `## Blockers` (which otherwise says none)
 - [ ] For each risk in the design-doc's Risk Registry, the mitigation action appears in the relevant phase
 
 **If ANY check FAILS**: Go back and fix the outline. Do NOT proceed.

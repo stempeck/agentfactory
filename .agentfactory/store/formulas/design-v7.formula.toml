@@ -23,7 +23,7 @@ Methodical designer operating through parallel independent analysis. The single
 most common failure mode: a paraphrase loses a requirement clause in Phase 1,
 and every subsequent self-referential gate validates the now-incomplete design.
 The second most common: all analysis shares the same frame, so frame-level
-errors propagate unchallenged. This skill defends against both by (a) capturing
+errors propagate unchallenged. This formula defends against both by (a) capturing
 verbatim source before any analysis, and (b) running three independent analyses
 that cannot see each other's output.
 
@@ -319,7 +319,7 @@ Fresh session continues from phase-1-source-capture.
 **Exit criteria:** Tests pass on main (or issue filed), ready to begin design work."""
 
 # ============================================================================
-# DOMAIN STEPS (from .claude/skills/design-v7/SKILL.md)
+# DOMAIN STEPS
 # ============================================================================
 
 [[steps]]
@@ -425,8 +425,9 @@ to understand it; grep for the symbol to find the range, do not print the range 
 6. **Referenced types and functions**: For every struct, interface, or function named in the problem statement, grep for its definition and paste the actual signature with file:line.
 
 7. **Dynamic values**: For any runtime values captured, mark them with ⚡ and note: "Dynamic — value as of snapshot time, will change."
+   Capture two classes of dynamic value explicitly, because a source that hands over a prior design inherits that design's premises and they go stale: (a) the live state of every issue and PR number the source or any document it references cites (`gh issue view <n> --json state,closedAt`, `gh pr view <n> --json state,mergedAt`), and (b) the installed version of every external tool it names (`claude --version`, plus any other CLI the source relies on). When a captured value contradicts a premise in a referenced document (a "pending" phase already merged, a version threshold already met), write a **Facts that supersede the source's premises** note at the top of `codebase-snapshot.md`, above section 1, so all three analysts read it before the code sections. (Why: on 2026-09-28 the predesign's "Phase 2 — land #538" was already merged and Claude Code was two minor versions past the gate it worked around; the analysts designed correctly only because that note was there.)
 
-**Gate 1.3b:** `codebase-snapshot.md` must exist and contain at least sections 1 and 2. If the problem references formulas, section 3 is required. If it references CLI commands, section 4 is required.
+**Gate 1.3b:** `codebase-snapshot.md` must exist and contain at least sections 1 and 2. If the problem references formulas, section 3 is required. If it references CLI commands, section 4 is required. If the source or a document it references cites an issue or PR number or names an external tool, section 7 must record that issue/PR's live state and that tool's installed version (item 7 above); a snapshot that omits them fails this gate.
 
 **Step 1.3c: Decision History Check → `codebase-snapshot.md` § Decision History**
 
@@ -569,6 +570,31 @@ default and no such parameter exists, launching normally satisfies this directiv
 — the observable that matters (for you AND for any per-turn reviewer) is three
 async launch results ("working in the background") in ONE message, then output
 files on disk. Do not treat a missing parameter as a missing launch.
+
+**Waiting is in-contract:** turns spent waiting for background sub-agent completion
+notifications — with no tool calls, or only mail hygiene — are part of executing this step.
+The spawn directive is satisfied by the SINGLE earlier message containing three Agent tool
+calls; the durable evidence is the output files appearing on disk. A per-turn reviewer (e.g.
+the fidelity gate) must not expect the spawn to recur in later turns, and you must NOT
+re-launch sub-agents in response to per-turn gate mail — re-launching would duplicate running
+work AND violate the single-message rule. The redesign procedure below (after a Frame-lift
+required or Frame artificial verdict: stop the first-pass Dimensions analyst, then re-spawn it
+ALONE) is also in contract. If gate mail flags a waiting turn, reply once with
+the artifact evidence (files on disk + the earlier launch turn) and continue waiting.
+Mail-hygiene note: gate mail arrives FROM your own agent identity, so `af mail reply`
+lands back in YOUR OWN inbox as new unread mail — after replying, delete both the gate
+mail and your echoed reply. Later gate mails on further waiting turns get the same
+single-reply-plus-delete treatment; the answer is never a re-launch.
+After three flagged turns the gate sends a FIDELITY_ESCALATION threatening `af down`. Do not
+re-launch. Reply to the escalation with the same evidence (the launch turn, each output file's
+mtime from `ls -la --time-style=+%H:%M:%S "$OUTPUT_DIR"`), mail the supervisor a copy
+(`af mail send supervisor -s "design-v7: fidelity gate flagging in-contract waiting turns" -m "..."`),
+run `af prime` as the escalation asks (the step text you re-read is the justification), and make a
+durability commit of the sub-agent files already on disk (`git add "$OUTPUT_DIR"/*.md && { git diff --cached --quiet || git commit -m "design({{issue}}): Phase 2 durability commit"; }`)
+so a kill cannot lose them. Then continue waiting.
+(This paragraph sits at the top of the step on purpose: the fidelity gate grades each turn against
+only the first 4096 bytes of the step text, and at its former place after the three prompts it was cut
+off — the gate flagged 37 of 53 Phase 2 evaluations across seven runs.)
 
 **Entry:** `source.md` and `verification.md` exist with all ACs and constraints captured.
 **Exit:** All three sub-agent output files exist in `$OUTPUT_DIR/`.
@@ -713,7 +739,7 @@ Write ALL output files to $OUTPUT_DIR/:
 
 - Do NOT read any other analysis files in $OUTPUT_DIR/ besides source.md, verification.md, and codebase-snapshot.md.
 - Do NOT produce design-doc.md — that is the main context's job.
-- Be thorough. Read actual code if the source references existing code.
+- Read actual code if the source references existing code.
 - Every claim must trace to source.md.
 
 ## Codebase Fidelity Rule (MANDATORY)
@@ -881,8 +907,24 @@ Use this structure:
 
 ## Codebase Fidelity Rule (MANDATORY)
 
-Same rules as Dimensions Analyst: only cite what you verify via codebase-snapshot.md or
-Read. Mark unverified claims [UNVERIFIED]. Do not invent paths or counts.
+You may ONLY cite file paths, line numbers, function names, struct fields, CLI commands,
+formula step names, and package names that meet ONE of:
+  (a) They appear in codebase-snapshot.md (verified by main context), OR
+  (b) You personally Read the file in this session and confirmed it exists
+
+If you want to reference something NOT in the snapshot, you MUST Read the actual file
+FIRST. If the file does not exist, DO NOT reference it.
+
+For claims you cannot verify: write "[UNVERIFIED]" inline.
+
+FORBIDDEN: Inventing plausible-sounding file paths, step names, or package structures
+based on what "should" exist.
+
+QUANTITIES AND TIMING: Claims about counts, intervals, or capabilities MUST cite the
+specific source. If you cannot point to where the number comes from, mark it [UNVERIFIED].
+
+DYNAMIC VALUES: Values marked with ⚡ in codebase-snapshot.md are runtime values that
+change over time. Do not state them as fixed facts.
 
 ## Environment notes (operational, not source content)
 
@@ -1005,8 +1047,24 @@ scope gap | unstated assumption | failure mode gap | dependency fragility | obse
 
 ## Codebase Fidelity Rule (MANDATORY)
 
-Same rules as other analysts: only cite what you verify via codebase-snapshot.md or
-Read. Mark unverified claims [UNVERIFIED]. Do not invent paths or counts.
+You may ONLY cite file paths, line numbers, function names, struct fields, CLI commands,
+formula step names, and package names that meet ONE of:
+  (a) They appear in codebase-snapshot.md (verified by main context), OR
+  (b) You personally Read the file in this session and confirmed it exists
+
+If you want to reference something NOT in the snapshot, you MUST Read the actual file
+FIRST. If the file does not exist, DO NOT reference it.
+
+For claims you cannot verify: write "[UNVERIFIED]" inline.
+
+FORBIDDEN: Inventing plausible-sounding file paths, step names, or package structures
+based on what "should" exist.
+
+QUANTITIES AND TIMING: Claims about counts, intervals, or capabilities MUST cite the
+specific source. If you cannot point to where the number comes from, mark it [UNVERIFIED].
+
+DYNAMIC VALUES: Values marked with ⚡ in codebase-snapshot.md are runtime values that
+change over time. Do not state them as fixed facts.
 
 ## Environment notes (operational, not source content)
 
@@ -1022,26 +1080,6 @@ Read. Mark unverified claims [UNVERIFIED]. Do not invent paths or counts.
 **After launching all three sub-agents**, wait for all to complete. Then verify
 their output files exist:
 
-**Waiting is in-contract:** turns spent waiting for background sub-agent completion
-notifications — with no tool calls, or only mail hygiene — are part of executing this step.
-The spawn directive is satisfied by the SINGLE earlier message containing three Agent tool
-calls; the durable evidence is the output files appearing on disk. A per-turn reviewer (e.g.
-the fidelity gate) must not expect the spawn to recur in later turns, and you must NOT
-re-launch sub-agents in response to per-turn gate mail — re-launching would duplicate running
-work AND violate the single-message rule. If gate mail flags a waiting turn, reply once with
-the artifact evidence (files on disk + the earlier launch turn) and continue waiting.
-Mail-hygiene note: gate mail arrives FROM your own agent identity, so `af mail reply`
-lands back in YOUR OWN inbox as new unread mail — after replying, delete both the gate
-mail and your echoed reply. Later gate mails on further waiting turns get the same
-single-reply-plus-delete treatment; the answer is never a re-launch.
-After three flagged turns the gate sends a FIDELITY_ESCALATION threatening `af down`. Do not
-re-launch. Reply to the escalation with the same evidence (the launch turn, each output file's
-mtime from `ls -la --time-style=+%H:%M:%S "$OUTPUT_DIR"`), mail the supervisor a copy
-(`af mail send supervisor -s "design-v7: fidelity gate flagging in-contract waiting turns" -m "..."`),
-run `af prime` as the escalation asks (the step text you re-read is the justification), and make a
-durability commit of the sub-agent files already on disk (`git add "$OUTPUT_DIR"/*.md && git commit`)
-so a kill cannot lose them. Then continue waiting.
-
 ```bash
 OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
 ls -la "$OUTPUT_DIR"/audit.md "$OUTPUT_DIR"/conflicts.md "$OUTPUT_DIR"/dependencies.md \
@@ -1052,6 +1090,37 @@ ls "$OUTPUT_DIR"/api.md "$OUTPUT_DIR"/data.md "$OUTPUT_DIR"/integration.md
 
 **If any sub-agent output file is missing:** Re-spawn ONLY the missing sub-agent
 (not all three). Do not proceed with partial analysis.
+
+**If `elevation_assessment.md` arrives with the verdict Frame-lift required or Frame artificial:**
+the Dimensions analyst's first pass was produced in the frame the verdict lifts away from, and the
+failure table's "may require re-spawning Sub-agent 1" is executed HERE, not in Phase 3. Read the
+assessment as soon as its completion notification arrives (do not wait for Sub-agent 1 to finish):
+1. Verify the verdict's load-bearing claims in main context — run the greps it names for the readers,
+   writers and line ranges of the lift candidate, and record the result in
+   `$OUTPUT_DIR/investigation-notes.md` under a "Main-context verification of the elevation verdict" heading.
+2. If Sub-agent 1 is still running once step 1 confirms the verdict, stop it with `TaskStop` (its task id is in
+   its launch result): the rest of that pass would be written in the frame the verdict rejects. Its stop
+   notification is expected and is not the missing-sub-agent case above. Then archive its first pass —
+   whichever of `api.md data.md ux.md scale.md security.md integration.md audit.md conflicts.md
+   dependencies.md` exist — into `$OUTPUT_DIR/pre-elevation/` (`mv`, then `git add -A "$OUTPUT_DIR"`: a stopped
+   pass can leave files untracked), add a `pre-elevation/README.md` naming the verdict, and commit (a
+   durability commit; nothing is lost).
+   (Why: in the 2026-09-23 and 2026-09-27 redesign runs the first pass kept writing for 11–15 minutes after
+   the verdict was on disk, and the re-spawn could not start until it finished.)
+3. Re-spawn Sub-agent 1 ALONE with its Phase 2 prompt plus three additions: `$OUTPUT_DIR/elevation_assessment.md`
+   is a fourth, binding input (an option that keeps the shape the verdict lifts away from is marked
+   REJECTED citing the assessment section); its own `pre-elevation/` files (a partial set when the pass was
+   stopped) may be read as a revision base but
+   every carried claim is re-verified under the fidelity rule and audit.md is re-run clause by clause; output
+   goes to `$OUTPUT_DIR/` itself, never into `pre-elevation/`. It must not read six_sigma_gaps.md.
+4. Wait for its completion notification; the exit criteria below then apply to the revised files.
+This single re-spawn is ONE Agent call and is in contract: it is the failure table's "re-spawn that sub-agent
+only" case, not a second three-agent launch, and a per-turn reviewer that flags it as a missing three-agent
+spawn is answered with this paragraph. For Frame artificial, additionally return to Phase 1 and reframe
+`source.md` around the abstraction removal before the re-spawn, as the failure table requires.
+(Why: 2026-09-23 issue 709 and 2026-09-28 issue 695 both received Frame-lift required and both had to derive
+this sequence from memory notes; the second run's re-spawn cost 540K sub-agent tokens and its ten revised
+files replaced a first pass that would have routed every new env kind through two emitters.)
 
 **Context management:** Launching three sub-agents and waiting for them is
 context-heavy. If context is filling up after sub-agents complete:
@@ -1085,6 +1154,13 @@ Spawn a SINGLE sub-agent (NOT in background — must complete before Phase 3):
 - `subagent_type`: `"general-purpose"`
 - `run_in_background`: `false` (if the harness exposes it; on background-by-default harnesses launch normally and enforce sequencing yourself: WAIT for the completion notification and do not proceed until verification-report.md exists)
 - `description`: `"Fidelity Verifier"`
+
+**While waiting for the verifier**, read the Phase 2 outputs that Step 3.1 will need — audit.md,
+conflicts.md, dependencies.md, the six dimension files, elevation_assessment.md and six_sigma_gaps.md — each
+completely (line-range chunks for files above ~30 KB). A file read completely during this wait counts for
+Step 3.1 and is not read again in Phase 3; the wait is otherwise idle context time. (Why: the 2026-09-28 run
+read all nine while waiting and Phase 3 started with them already in context. It sits above the prompt so
+the fidelity gate, which reads only the first 4096 bytes of the step text, sees that these reads are in contract.)
 
 **Prompt** (fill in $OUTPUT_DIR before passing):
 
@@ -1283,14 +1359,19 @@ fidelity corrections available.
 **Step 3.1: Read All Sub-Agent Outputs**
 
 Read each file completely (files above ~30 KB must be read in line-range chunks with `sed -n`, or the
-harness persists them to disk instead of showing them and nothing enters your context):
+harness persists them to disk instead of showing them and nothing enters your context). A file you read
+completely during the Phase 2.5 wait counts here — do not read it again:
 1. `$OUTPUT_DIR/audit.md` — dimension analysis audit
 2. `$OUTPUT_DIR/conflicts.md` — cross-dimension conflict matrix
 3. `$OUTPUT_DIR/dependencies.md` — dependency graph
 4. `$OUTPUT_DIR/elevation_assessment.md` — architecture elevation verdict
 5. `$OUTPUT_DIR/six_sigma_gaps.md` — gap analysis
 6. Each dimension file (api.md, data.md, ux.md, scale.md, security.md, integration.md)
-7. `$OUTPUT_DIR/verification-report.md` — fidelity corrections
+7. `$OUTPUT_DIR/synthesis-checklist.md` — Gate B's addenda: the fidelity corrections (Addendum A), the
+   additional load-bearing facts, the external-documentation register and the contradiction rulings. Do NOT
+   re-read `verification-report.md` here: Gate B read it completely and the addenda are its distillation; open
+   the report only for a specific claim the addenda do not cover. (Why: the report is ~60 KB and Gate B has
+   already carried every INACCURATE row into the checklist.)
 
 **If any file is missing:** That sub-agent failed. Re-spawn it (single sub-agent,
 not all three). Do not proceed with partial analysis.
@@ -1336,7 +1417,7 @@ Read the verdict from `elevation_assessment.md`. Branch:
 |---------|--------|
 | Frame correct | Proceed with synthesis using dimension analysis as-is |
 | Frame-lift offered | Record the alternative in "Alternatives Considered". Proceed with instance design but document the trade-off |
-| Frame-lift required | Dimension analysis was in the wrong frame. Re-read required revisions. Redesign affected dimensions. May require re-spawning Sub-agent 1 |
+| Frame-lift required | Dimension analysis was in the wrong frame. The redesign is the Phase 2 procedure ("If `elevation_assessment.md` arrives with the verdict Frame-lift required"): verify `$OUTPUT_DIR/pre-elevation/README.md` exists and the nine dimension files under `$OUTPUT_DIR/` are the re-spawned analyst's revised output (newer than `elevation_assessment.md`). If either is missing, the redesign was skipped — return to `phase-2-parallel-analysis` and run that procedure before synthesising |
 | Frame artificial | The entire concern is a symptom of an abstraction. Reframe around removing the abstraction. Return to Phase 1 and rewrite source.md |
 
 ---
@@ -1464,8 +1545,9 @@ Every conflict row MUST have a resolution. "Unresolved" is NOT acceptable.
 ```
 
 **Fidelity enforcement:** Before writing ANY codebase claim into design-doc.md,
-cross-check it against `verification-report.md`. If it was flagged INACCURATE,
-use the corrected version from the report.
+cross-check it against `synthesis-checklist.md` Addendum A (every INACCURATE row with its correction). If it
+was flagged INACCURATE, use the corrected version. A claim the addendum does not mention is checked against
+`verification-report.md` itself.
 
 **Context management:** Synthesis is context-heavy. If context is filling up
 after reading all outputs but before writing design-doc.md:
@@ -1589,7 +1671,9 @@ Any missing row or unmapped clause: STOP, return to `gate-b-synthesis-regroundin
 **Step 4.7: Commit Design Artifacts**
 
 In the agent-driven formula context, the PR IS the review workflow (Supervisor
-reviews the PR). Commit now:
+reviews the PR). Commit now. Durability commits made during Phase 2 usually mean every artifact is already
+in HEAD; a bare `git commit` with nothing staged exits 1 and would fail this chain, so the commit is
+conditional:
 
 ```bash
 OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
@@ -1598,7 +1682,8 @@ OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
 ( cd "${AF_WORKTREE:-.}" &&
 find .designs/ -maxdepth 1 -type l -delete;
 git add "$OUTPUT_DIR"/ &&
-git commit -m "design: design-v7 artifacts for {{issue}}
+if git diff --cached --quiet; then echo "design artifacts already committed incrementally:"; git log --oneline -- "$OUTPUT_DIR" | head -20;
+else git commit -m "design: design-v7 artifacts for {{issue}}
 
 - source.md (verbatim requirements)
 - codebase-snapshot.md (verified ground truth for sub-agents)
@@ -1609,7 +1694,7 @@ git commit -m "design: design-v7 artifacts for {{issue}}
 - six_sigma_gaps.md (six-sigma gap analysis)
 - verification-report.md (fidelity verification of all codebase claims)
 - synthesis-checklist.md (Gate B: pre-synthesis re-grounding)
-- design-doc.md (with AC Traceability, elevation verdict, six-sigma caveats)" )
+- design-doc.md (with AC Traceability, elevation verdict, six-sigma caveats)"; fi )
 ```
 
 Run `af done` from your agent directory afterwards (never from the worktree root).
@@ -1761,7 +1846,7 @@ Ensure workspace is pristine before handoff.
 which ARE the actual deliverables — these should NOT be deleted. They are the
 work product, committed in `phase-4-finalize`.
 
-**No skill artifacts to remove.** All output files (source.md, verification.md,
+**No scratch artifacts to remove.** All output files (source.md, verification.md,
 codebase-snapshot.md, dimension files, audit.md, conflicts.md, dependencies.md,
 elevation_assessment.md, six_sigma_gaps.md, verification-report.md,
 synthesis-checklist.md, design-doc.md) are committed deliverables.
@@ -1835,6 +1920,8 @@ This enables conflict-resolution retries without reopening closed issues.
 ```bash
 af bead show {{issue}}
 # Status should still be 'in_progress' (you're working on it)
+# On a coordinator-dispatched run this prints "bead <n> not found" (load-context step 4) — proceed;
+# `af bead update` below resolves differently and still records the notes.
 ```
 
 **2. Add completion notes:**

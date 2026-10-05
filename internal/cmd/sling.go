@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -68,6 +69,8 @@ type InstantiateParams struct {
 	// arguments — a record field whose value depended on the previously-run test's leftovers would
 	// be exactly the kind of unattributable figure this family exists to eliminate.
 	InputDigest string
+
+	Cmd *cobra.Command
 }
 
 var slingCmd = &cobra.Command{
@@ -227,6 +230,16 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 		return err
 	}
 
+	// Refuse before the --reset branch stops a live agent or a worktree is created, so a refused dispatch
+	// leaves nothing behind; the admission inside instantiateFormulaWorkflow stays authoritative.
+	if err := precheckNamedFormula(root, entry.Formula); err != nil {
+		var r *integrationRefusal
+		if errors.As(err, &r) {
+			reportSlingRefusal(cmd.OutOrStdout(), cmd.ErrOrStderr(), root, dispatchCaller(callerWd, root), agentName, dispatchRefusalItem(task, entry.Formula), r)
+		}
+		return err
+	}
+
 	agentDir := config.AgentDir(root, agentName)
 
 	// Pre-flight: check if agent is already running BEFORE creating beads
@@ -326,6 +339,7 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 	os.Remove(filepath.Join(agentDir, ".runtime", "formula_caller"))
 	os.Remove(filepath.Join(agentDir, ".runtime", "hooked_formula"))
 	os.Remove(filepath.Join(agentDir, ".runtime", "dispatch_owner"))
+	os.Remove(integrationPinPath(agentDir))
 	var callerIdentity string
 	if slingCaller != "" {
 		callerIdentity = slingCaller
@@ -358,10 +372,17 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 		CallerIdentity:  callerIdentity,
 		Model:           slingModel,
 		InputDigest:     slingInputDigest,
+		Cmd:             cmd,
 	}
 
 	if _, _, _, err := instantiateFormulaWorkflow(params, cmd.OutOrStdout()); err != nil {
-		if callerIdentity != "" && callerIdentity != "@cli" {
+		var r *integrationRefusal
+		if errors.As(err, &r) {
+			if worktreePath != "" && outcome.IsCreated() {
+				removeRefusedWorktree(cmd, root, worktreeID, agentName)
+			}
+			reportSlingRefusal(cmd.OutOrStdout(), cmd.ErrOrStderr(), root, callerIdentity, agentName, dispatchRefusalItem(task, entry.Formula), r)
+		} else if callerIdentity != "" && callerIdentity != "@cli" {
 			if store, storeErr := storeForMail(root); storeErr == nil {
 				if router, routerErr := mail.NewRouter(root, store); routerErr == nil {
 					msg := mail.NewMessage(agentName, callerIdentity, "SKILL_MISSING: "+agentName, fmt.Sprintf("Dispatch to %s failed: %v", agentName, err))
@@ -372,6 +393,7 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 		return err
 	}
 
+	clearSlingRefusalReports(root, agentName, dispatchRefusalItem(task, entry.Formula))
 	fmt.Fprintf(cmd.OutOrStdout(), "Dispatched to %s: %s\n", session.SessionName(agentName), task)
 
 	// 4. Launch the agent session (unless --no-launch)
@@ -421,7 +443,40 @@ func resolveSpecialistAgent(root, agentName string) (config.AgentEntry, error) {
 		return config.AgentEntry{}, fmt.Errorf("agent %q is not a specialist (no formula field in agents.json)", agentName)
 	}
 
+	if err := refusePluginAgentWithoutTemplate(root, agentName); err != nil {
+		return config.AgentEntry{}, err
+	}
+
 	return entry, nil
+}
+
+// refusePluginAgentWithoutTemplate is the K14 gated runtime refusal (issue #538). A
+// manifest-owned agent whose role template is NOT embedded in THIS binary would launch
+// under a substituted generic identity: its CLAUDE.md is rendered from the
+// manager/supervisor template, and templates.RenderIdentity only warns on stderr. A
+// warning is not a refusal, so we refuse here, upstream of prime (whose HasRole warning
+// is stderr-to-nobody in the headless hook path) and of dispatch (membership-only,
+// config/dispatch.go:113-116). Dormant
+// without plugins.json: LoadPluginsConfig returns an empty map for an absent file, so
+// OwnsAgent is always false and this never fires (AC-6).
+//
+// An embedded agent is never refused: substitution happens only when the role is not
+// embedded, so no manifest state can put it at risk. For a non-embedded agent a present
+// but unloadable plugins.json fails closed — its ownership is unknowable, and treating it
+// as unowned would reopen exactly the substitution this guard exists to stop.
+func refusePluginAgentWithoutTemplate(root, agentName string) error {
+	if templates.New().HasRole(agentName) {
+		return nil
+	}
+	manifestPath := config.PluginsConfigPath(root)
+	manifest, err := config.LoadPluginsConfig(manifestPath)
+	if err != nil {
+		return fmt.Errorf("agent %q has no role template embedded in this binary and plugin ownership is unknown because %s cannot be loaded: %w; refusing to launch it under a substituted identity — repair or restore plugins.json, then retry", agentName, manifestPath, err)
+	}
+	if plugin, owned := manifest.OwnsAgent(agentName); owned {
+		return fmt.Errorf("agent %q is owned by plugin %q but its role template is NOT embedded in this binary; re-run `af plugin install %s` from the main checkout, then `af plugin verify %s`", agentName, plugin, plugin, plugin)
+	}
+	return nil
 }
 
 // resolveCallerAgent loads agents.json and returns the entry for the named agent.
@@ -442,6 +497,10 @@ func resolveCallerAgent(root, agentName string) (config.AgentEntry, error) {
 // to instantiateFormulaWorkflow. The launch decision stays here.
 func runFormulaInstantiation(cmd *cobra.Command, root, wd string, args []string) error {
 	if slingReset {
+		// A refused formula must not close the agent's beads and wipe its .runtime first (D20).
+		if err := precheckNamedFormula(root, slingFormulaName); err != nil {
+			return err
+		}
 		if slingAgent != "" {
 			store, err := newIssueStore(root, slingAgent)
 			if err != nil {
@@ -466,6 +525,7 @@ func runFormulaInstantiation(cmd *cobra.Command, root, wd string, args []string)
 		WorkDir:     wd,
 		Model:       slingModel,
 		InputDigest: slingInputDigest,
+		Cmd:         cmd,
 	}
 
 	_, _, agentName, err := instantiateFormulaWorkflow(params, cmd.OutOrStdout())
@@ -481,6 +541,12 @@ func runFormulaInstantiation(cmd *cobra.Command, root, wd string, args []string)
 	if agentName == "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: no agent specified and could not detect role, skipping session launch\n")
 		return nil
+	}
+
+	// K14 must run before worktree setup, which would otherwise render a substituted
+	// CLAUDE.md for a non-embedded plugin agent. Fatal, unlike a launch failure below.
+	if err := refusePluginAgentWithoutTemplate(root, agentName); err != nil {
+		return fmt.Errorf("formula beads for %s were created, but its session was not set up or launched: %w; after remediating, run `af up %s`", agentName, err, agentName)
 	}
 
 	fmFactoryCfg, fmFcErr := config.LoadFactoryConfig(config.FactoryConfigPath(root))
@@ -548,6 +614,15 @@ func instantiateFormulaWorkflow(params InstantiateParams, w io.Writer) (string, 
 		return "", nil, "", fmt.Errorf("validating formula skills: %w", err)
 	}
 
+	// 2.3 Admit declared integrations before any bead, hooked_formula or pin exists.
+	bound, integrationReports, err := admitFormulaIntegrations(ctx, params.Cmd, params.Root, f)
+	for _, r := range integrationReports {
+		fmt.Fprintln(w, r)
+	}
+	if err != nil {
+		return "", nil, "", err
+	}
+
 	// 3. Resolve variables
 	cliVars, err := parseCLIVars(params.CLIVars)
 	if err != nil {
@@ -582,6 +657,23 @@ func instantiateFormulaWorkflow(params InstantiateParams, w io.Writer) (string, 
 			priorInstanceID,
 		)
 	}
+
+	// The pin precedes the first bead: a pin that cannot be written must refuse before any step bead exists,
+	// or the beads are orphaned without the hooked_formula that would block the next sling (D72).
+	if err := pinAdmittedIntegrations(params.Root, params.WorkDir, f.Name, bound, integrationReports); err != nil {
+		return "", nil, agentName, err
+	}
+	// Every failure below leaves no hooked_formula, and a pin without one would switch the guard on for a
+	// session that runs no instance.
+	hooked := false
+	defer func() {
+		if hooked {
+			return
+		}
+		if err := clearIntegrationPin(params.WorkDir); err != nil {
+			fmt.Fprintf(w, "warning: %v\n", err)
+		}
+	}()
 
 	actor := os.Getenv("AF_ACTOR")
 	store, err := newIssueStore(params.WorkDir, actor)
@@ -742,9 +834,11 @@ func instantiateFormulaWorkflow(params InstantiateParams, w io.Writer) (string, 
 		fmt.Fprintf(w, "  %s → %s\n", id, beadID)
 	}
 
-	// 7.5. Persist formula instance ID for af prime
+	// 7.5. Persist formula instance ID for af prime, after the pin: an instance af prime can find must never
+	// run without the pin that guards it.
 	if agentName != "" {
 		persistFormulaInstanceID(params.WorkDir, instanceID)
+		hooked = true
 	}
 
 	// 7.6. Persist caller identity for af done WORK_DONE mail
@@ -1016,7 +1110,7 @@ func detectAgentName(wd, root string) (string, error) {
 // helpers.go and lets dispatch-path tests exercise the full pipeline
 // without depending on tmux + claude being present on PATH.
 var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath, worktreeID, cliModel string, skipFitness bool) error {
-	t := tmux.NewTmux()
+	t := newCmdTmux()
 	if !t.IsAvailable() {
 		return fmt.Errorf("tmux is not installed or not available")
 	}
@@ -1032,6 +1126,10 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 		return fmt.Errorf("agent %q not found in agents.json", agentName)
 	}
 
+	if err := refusePluginAgentWithoutTemplate(root, agentName); err != nil {
+		return err // K14: never launch a plugin-owned agent whose template isn't embedded
+	}
+
 	mgr := session.NewManager(root, agentName, entry)
 	if worktreePath != "" {
 		if err := mgr.SetWorktree(worktreePath, worktreeID); err != nil {
@@ -1039,38 +1137,24 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 			return err
 		}
 	}
-	wireGitIdentity(mgr, root, worktreePath)
 
-	// Resolve the per-agent model export set (issue #480) and fail fast BEFORE
-	// mgr.Start() — an unknown profile or incomplete endpoint must never launch a
-	// half-configured tmux session. The marker dir matches where a respawn
+	// Compose (and fail fast on an unknown profile or incomplete endpoint) BEFORE mgr.Start():
+	// a half-configured tmux session must never launch. The marker dir matches where a respawn
 	// will read it (worktree agent dir when a worktree exists).
 	agentDir := config.AgentDir(root, agentName)
 	if worktreePath != "" {
 		agentDir = config.AgentDir(worktreePath, agentName)
 	}
-	modelName, modelEnv, modelErr := resolveLaunchModelEnv(root, agentName, agentDir, cliModel, entry.Model, skipFitness, cmd.ErrOrStderr())
-	if modelErr != nil {
-		return modelErr
+	ensureFactoryIntegrationServices(cmd.Context(), cmd, root, cmd.ErrOrStderr())
+	c, reports, err := launchContributions(cmd.Context(), root, agentName, agentDir, entry, cliModel, skipFitness, true, cmd.ErrOrStderr())
+	if err != nil {
+		return err
 	}
-	if len(modelEnv) > 0 {
-		nextStep, formula := nextReadyStep(cmd.Context(), root, agentDir)
-		mgr.SetModelEnv(withEffortLevel(root, agentDir, modelEnv, nextStep, formula))
-	}
-	// Profile-key universe (issue #602), wired UNCONDITIONALLY — deliberately not inside the
-	// guard above. A launch that resolves no profile is exactly the case that must still clear
-	// the keys a previous profile left on the reused session.
-	mgr.SetModelKeyUniverse(launchModelKeyUniverse(root))
+	mgr.SetLaunchContributions(&c)
 	// Persist ONLY an explicit per-launch --model override (precedence step 2); a
 	// durable agents-map/agents.json default writes no marker (it resolves durably).
-	if cliModel != "" && modelName != "" {
-		writeModelOverride(agentDir, modelName)
-	}
-
-	// Telemetry env (issue #329): gate-checked at the cmd layer, built from the resolved
-	// model name so the launch keys match the record keys. Gate off ⇒ nil ⇒ zero OTel vars.
-	if env := telemetryLaunchEnv(root, agentDir, agentName, modelName, cmd.ErrOrStderr()); env != nil {
-		mgr.SetTelemetryEnv(env)
+	if cliModel != "" && reports.ModelName != "" {
+		writeModelOverride(agentDir, reports.ModelName)
 	}
 
 	if err := mgr.Start(); err != nil {
@@ -1080,11 +1164,12 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 		}
 		return err
 	}
+	reports.mailIntegrations(root, cmd.ErrOrStderr())
 
 	var parts []string
 	displayModel := entry.Model
-	if modelName != "" {
-		displayModel = modelName
+	if reports.ModelName != "" {
+		displayModel = reports.ModelName
 	}
 	if displayModel != "" {
 		parts = append(parts, "model: "+displayModel)
@@ -1092,7 +1177,7 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 	// Endpoint echo from the resolved set (names only, never auth_token), falling
 	// back to the legacy field; empty when neither applies.
 	endpoint := entry.BaseURL
-	if u := modelEnvValue(modelEnv, "ANTHROPIC_BASE_URL"); u != "" {
+	if u := modelEnvValue(c.ModelEnv, "ANTHROPIC_BASE_URL"); u != "" {
 		endpoint = u
 	}
 	if endpoint != "" {
@@ -1109,9 +1194,8 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 // resolveLaunchModelEnv resolves the per-agent model-env export set for a launch
 // (issue #480). It loads models.json, reads the .runtime/model_override marker
 // (precedence step 2), applies the unknown-profile / incomplete-endpoint fail-fast,
-// and runs the pure config.ResolveModelEnv. It is the single shared resolver for
-// every launch path (sling launch and respawn; af up in Phase 4) so fail-fast and
-// precedence stay uniform.
+// and runs the pure config.ResolveModelEnv. The launch paths reach the shared body through the
+// launch composer; this wrapper keeps the launch-shaped call the resolver tests drive.
 //
 // A non-empty cliModel makes the launch "profile-selecting": a broken models.json or
 // a bad selection fails loud (a structured error the caller must return BEFORE
@@ -1130,10 +1214,8 @@ func resolveLaunchModelEnv(root, agentName, agentDir, cliModel, legacyModel stri
 // respawn is a continuation, not a decision, so it must add no line the operator did not already see
 // when they started the agent, and repeating a coverage warning on every compact would train them to
 // ignore it. Only the reports are dropped; the fail-safe warnings a respawn has always emitted (a
-// broken models.json, a missing secret) are untouched, as is the resolved env.
-//
-// Its existence is what makes the respawn's silence structural rather than incidental: the caller
-// that must stay quiet is the one that cannot ask for the reports.
+// broken models.json, a missing secret) are untouched, as is the resolved env. The production
+// respawn gets the same silence by passing reportCoverage=false to the launch composer.
 func resolveRespawnModelEnv(root, agentName, agentDir, legacyModel string, warn io.Writer) (string, []config.EnvVar, error) {
 	return resolveModelEnvForSession(root, agentName, agentDir, "", legacyModel, false, false, warn)
 }
@@ -1178,12 +1260,11 @@ func resolveModelEnvForSession(root, agentName, agentDir, cliModel, legacyModel 
 		// this launch resolved no profile, so the agent runs against a gateway af never selected and
 		// has no coverage verdicts for.
 		//
-		// None of the redirect hygiene catches this one. The tmux unset-environment pass reaches new
-		// panes, but the pane already exists by then and the launch command is sent into its process
-		// env; the inline KEY='' twin that WOULD reach it sits inside the resolved-model-env branch,
-		// which this path never enters; and the profile-key universe clears only keys some profile in
-		// models.json declares — so a registry with no endpoint profile, the likeliest one to launch
-		// with nothing resolved, clears nothing at all.
+		// None of the redirect hygiene catches this one. The launch line's KEY='' clear that WOULD
+		// reach it sits inside the resolved-model-env branch, which this path never enters; and the
+		// profile-key universe clears only keys some profile in models.json declares — so a registry
+		// with no endpoint profile, the likeliest one to launch with nothing resolved, clears nothing
+		// at all.
 		//
 		// Presence only. The value is never read into the message, because an endpoint URL can carry
 		// credentials in its userinfo and this warning reaches a terminal and a log.
@@ -1208,6 +1289,39 @@ func resolveModelEnvForSession(root, agentName, agentDir, cliModel, legacyModel 
 			}
 			fmt.Fprintf(warn, "warning: agent %s: model %q secret %s missing; falling back to %s\n", agentName, name, path, globalDefaultDesc(legacyModel))
 			return "", nil, nil
+		}
+	}
+
+	// Subscription credential audit (issue #686 Phase 2): a launch of a gateway profile in derived
+	// subscription mode (a file: gateway secret, D1, with the Phase-1 handle present on disk) must not
+	// proceed on a credential the gateway cannot actually use. The hard-fail set matches checkProfile's
+	// own (D13/subscriptionHardFailState) so `af config models check` and a launch never disagree about
+	// the same record; `unverified` is a warning, never a refusal (D9). Gated on reportCoverage, not
+	// profileSelecting (F2/BODY-1/D4): a plain `af up` passes no --model yet is a launch the operator
+	// is watching (K4 names `af up` explicitly), so gating on profile SELECTION would skip the very
+	// path that runs most; a respawn (reportCoverage == false) still never reaches it, so a routine
+	// handoff can never brick on a credential problem it cannot fix mid-session. Expiry is judged
+	// from the LIVE handle's own exp (F1/D7), never the .runtime mirror LiteLLM lets go stale; an
+	// unreadable/no-exp handle is "unknown" — surfaced, never judged expired and never backfilled
+	// from the mirror. Mode is derived from the persisted gatewayAuthMode(root) record (issue #693
+	// Phase 6 K17), not raw credential presence, so a stray credential on disk can never suppress or
+	// wrongly trigger the audit once a record is written. An unresolvable mode (gatewayAuthMode
+	// error — no record, both credentials present, INV-2 ambiguous) is swallowed as "not confirmed
+	// subscription mode" and skips the audit (decisions.md D1): offline af cannot decide which
+	// credential the gateway uses, so a launch must not refuse on the subscription handle's state —
+	// `af config models check` is the surface that reports that ambiguity.
+	mode, _, modeErr := gatewayAuthMode(root)
+	if tok := modelEnvValue(env, "ANTHROPIC_AUTH_TOKEN"); reportCoverage && strings.HasPrefix(tok, secretPrefix) && modeErr == nil && mode == gatewayAuthProfileName {
+		_, state := readGatewayAuthState(root)
+		if subscriptionHardFailState(state) {
+			return "", nil, fmt.Errorf("model %q: E5: subscription credential state %q refuses launch — run `af gateway auth import` after `codex login`", name, state)
+		}
+		if state == gatewayAuthStateUnverified {
+			fmt.Fprintf(warn, "warning: model %q: subscription credential state is unverified; run `af config models check` to confirm it\n", name)
+		} else if exp, known := gatewayHandleExpiresAt(root); !known {
+			fmt.Fprintf(warn, "warning: model %q: subscription credential expiry unknown — the handle carries no decodable exp; run `af gateway auth import` after `codex login`\n", name)
+		} else if !time.Now().UTC().Before(time.Unix(exp, 0).UTC()) {
+			return "", nil, fmt.Errorf("model %q: E5: subscription credential has expired — run `af gateway auth import` after `codex login`", name)
 		}
 	}
 
@@ -1326,11 +1440,11 @@ func globalDefaultDesc(legacyModel string) string {
 //
 // A registry that fails to load yields an empty universe, so nothing is cleared and the launch
 // line is exactly today's — one bad models.json must never brick a launch, and the caller has
-// already warned about it (resolveLaunchModelEnv shares this load; warning again would
+// already warned about it (resolveModelEnvForSession shares this load; warning again would
 // double-print). An absent models.json is not an error: LoadModelsConfig returns an empty
 // config, whose nil map ranges zero times and yields the same empty universe.
 //
-// Deliberately a sibling of resolveLaunchModelEnv rather than a fourth return value on it: the
+// Deliberately a sibling of resolveModelEnvForSession rather than a fourth return value on it: the
 // universe must be present on EVERY branch that still launches — including the one where no
 // profile resolves at all, which is precisely the switch-away case that must clear. Expressing
 // that as one function body makes it structural, instead of a rule nine separate returns each

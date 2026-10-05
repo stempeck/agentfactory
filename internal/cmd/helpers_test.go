@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -155,16 +158,35 @@ type mockTmux struct {
 	clearHistoryCalls []string
 	respawnPaneCalls  []struct{ pane, cmd string }
 	respawnErr        error
+	unsetCalls        []struct {
+		target string
+		keys   []string
+	}
+	unsetErr error
+	// calls is the cross-method call order, so a test can pin that a tmux effect happens
+	// before the pane is respawned rather than merely at some point.
+	calls []string
 }
 
 func (m *mockTmux) ClearHistory(pane string) error {
+	m.calls = append(m.calls, "ClearHistory")
 	m.clearHistoryCalls = append(m.clearHistoryCalls, pane)
 	return nil
 }
 
 func (m *mockTmux) RespawnPane(pane, command string) error {
+	m.calls = append(m.calls, "RespawnPane")
 	m.respawnPaneCalls = append(m.respawnPaneCalls, struct{ pane, cmd string }{pane, command})
 	return m.respawnErr
+}
+
+func (m *mockTmux) UnsetEnvironment(target string, keys ...string) error {
+	m.calls = append(m.calls, "UnsetEnvironment")
+	m.unsetCalls = append(m.unsetCalls, struct {
+		target string
+		keys   []string
+	}{target, append([]string(nil), keys...)})
+	return m.unsetErr
 }
 
 func TestRespawnSession_CallsFullSequence(t *testing.T) {
@@ -193,6 +215,108 @@ func TestRespawnSession_CallsFullSequence(t *testing.T) {
 	}
 	if mock.respawnPaneCalls[0].cmd == "" {
 		t.Error("RespawnPane command should not be empty")
+	}
+}
+
+// An older af wrote every launch family into the tmux SESSION env, and respawn-pane -k hands those
+// copies to the new process, so the recycle must unset them before the pane is replaced.
+func TestPR724_T9_RespawnUnsetsStaleSessionEnvBeforeRespawnPane(t *testing.T) {
+	mock := &mockTmux{}
+	opts := RespawnOptions{
+		FactoryRoot: t.TempDir(),
+		AgentName:   "test-agent",
+		AgentEntry:  config.AgentEntry{Type: "autonomous"},
+		PaneID:      "%5",
+		Tx:          mock,
+	}
+
+	if err := respawnSession(opts); err != nil {
+		t.Fatalf("respawnSession: %v", err)
+	}
+
+	if len(mock.unsetCalls) != 1 {
+		t.Fatalf("respawnSession issued %d UnsetEnvironment calls, want exactly 1 batched scrub; tmux call order: %v", len(mock.unsetCalls), mock.calls)
+	}
+	unset := mock.unsetCalls[0]
+	if unset.target != "%5" {
+		t.Errorf("scrub targets %q, want the respawned pane %%5", unset.target)
+	}
+	if u, r := slices.Index(mock.calls, "UnsetEnvironment"), slices.Index(mock.calls, "RespawnPane"); r < 0 || u > r {
+		t.Errorf("scrub must run before RespawnPane, or the new process inherits the stale copies; tmux call order: %v", mock.calls)
+	}
+
+	named := slices.Concat([]string{
+		"AF_BUILD_MODE", "AF_BUILD_HOST", "AF_BUILD_USER", "AF_HOST_MOUNT",
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+		"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+		"AF_COAUTHOR_NAME", "AF_COAUTHOR_EMAIL",
+		config.EnvEffortLevel,
+	}, config.RedirectFamilyEnvVars)
+	for _, k := range named {
+		if !slices.Contains(unset.keys, k) {
+			t.Errorf("scrub does not unset %s, so its stale session copy survives the recycle\nkeys: %v", k, unset.keys)
+		}
+	}
+	for _, k := range []string{"AF_ROOT", "AF_ROLE", "AF_ACTOR", "AF_WORKTREE", "AF_WORKTREE_ID"} {
+		if slices.Contains(unset.keys, k) {
+			t.Errorf("scrub unsets identity key %s, which tmux must keep for the session\nkeys: %v", k, unset.keys)
+		}
+	}
+}
+
+func TestPR724_T9_RefusedRespawnScrubsNothing(t *testing.T) {
+	mock := &mockTmux{}
+	opts := RespawnOptions{
+		FactoryRoot: k14Factory(t),
+		AgentName:   "acme-triage",
+		AgentEntry:  config.AgentEntry{Type: "autonomous"},
+		PaneID:      "%5",
+		Tx:          mock,
+	}
+
+	if err := respawnSession(opts); err == nil {
+		t.Fatal("respawnSession must refuse a plugin agent whose template is not embedded; this test needs a refused recycle")
+	}
+	if len(mock.unsetCalls) != 0 {
+		t.Errorf("a refused recycle scrubbed tmux env it will not replace: %v", mock.unsetCalls)
+	}
+}
+
+// A failed scrub leaves the stale copies in place, which is the defect itself, so it must be loud;
+// but it must not cost the agent its respawn, whose error alone decides the return value.
+func TestPR724_T9_RespawnSurfacesScrubFailureAndStillRespawns(t *testing.T) {
+	const scrubErr = "pr724-d1 unset exploded"
+	mock := &mockTmux{unsetErr: errors.New(scrubErr)}
+	opts := RespawnOptions{
+		FactoryRoot: t.TempDir(),
+		AgentName:   "test-agent",
+		AgentEntry:  config.AgentEntry{Type: "autonomous"},
+		PaneID:      "%5",
+		Tx:          mock,
+	}
+
+	var err error
+	stderr := captureStderr(t, func() { err = respawnSession(opts) })
+
+	if err != nil {
+		t.Errorf("a failed scrub must not fail the recycle; respawnSession = %v", err)
+	}
+	if len(mock.respawnPaneCalls) != 1 {
+		t.Errorf("RespawnPane must still run once after a failed scrub, ran %d times", len(mock.respawnPaneCalls))
+	}
+	surfaced := slices.ContainsFunc(strings.Split(stderr, "\n"), func(line string) bool {
+		return strings.Contains(line, "test-agent") && strings.Contains(line, scrubErr)
+	})
+	if !surfaced {
+		t.Errorf("stderr carries no line naming the agent and the scrub error %q:\n%s", scrubErr, stderr)
+	}
+}
+
+// The unset primitive belongs to the respawn seam only; keeping it off the wider cmd seam keeps
+// every non-recycle launch path structurally unable to scrub.
+func TestPR724_T9_KeepCmdTmuxSeamFreeOfUnset(t *testing.T) {
+	if _, ok := reflect.TypeOf((*cmdTmux)(nil)).Elem().MethodByName("UnsetEnvironment"); ok {
+		t.Error("cmdTmux must not carry UnsetEnvironment; the scrub belongs to respawnTmux only")
 	}
 }
 

@@ -365,8 +365,10 @@ func TestQuickstartLitellmSeedCarriesClaudeAliases(t *testing.T) {
 
 	// Adding aliases must not turn the seed into a rewrite. The guard is what makes a rerun safe, and
 	// an operator who has tuned their gateway would lose that work silently — the seed writes no
-	// backup and says nothing.
-	if !strings.Contains(setup, `if [ ! -f ".agentfactory/litellm.yaml" ]; then`) {
+	// backup and says nothing. K9 (issue af-d0bff338, PR #694 Phase 3) replaced the naive
+	// file-exists guard with the _ensure_mode_yaml gate/migration helper; the rerun-safety
+	// invariant is the same, just enforced by the new gate's name (decisions.md D7).
+	if !strings.Contains(setup, `if _ensure_mode_yaml "api-key"; then`) {
 		t.Error("the seed-when-absent guard is gone from setup_litellm(); a rerun would overwrite an " +
 			"operator's edited litellm.yaml")
 	}
@@ -449,5 +451,49 @@ func TestQuickstartLitellmSeedCarriesClaudeAliases(t *testing.T) {
 			t.Errorf("the check reported no verdict for %q; a silent pass is the hole this surface exists to "+
 				"close:\n%s", id, out)
 		}
+	}
+}
+
+// TestQuickstartSubscriptionSeedCarriesClaudeAliases pins AC-5 (Peer Review Finding 2): the
+// subscription heredoc (#2) must ALSO advertise every claude-* id the api-key seed advertises —
+// lane routing alone (RoutesEveryLaneToChatgptResponses) does not prove alias presence. Lives here
+// (not quickstart_litellm_auth_shape_test.go) because AC-5's own verification command greps this
+// file by name.
+func TestQuickstartSubscriptionSeedCarriesClaudeAliases(t *testing.T) {
+	root := findModuleRoot(t)
+	setup := setupLitellmSource(t, root)
+	apiKeyEntries := parseLitellmSeedEntries(t, litellmSeedBlock(t, setup))
+	subEntries := parseLitellmSeedEntries(t, subscriptionSeedBlock(t, setup))
+
+	apiKeyNames := map[string]bool{}
+	for _, e := range apiKeyEntries {
+		if strings.HasPrefix(e.name, "claude-") {
+			apiKeyNames[e.name] = true
+		}
+	}
+	if len(apiKeyNames) == 0 {
+		t.Fatal("the api-key seed advertises no claude-* alias at all — nothing to compare against")
+	}
+	subNames := map[string]bool{}
+	for _, e := range subEntries {
+		subNames[e.name] = true
+	}
+	for name := range apiKeyNames {
+		if !subNames[name] {
+			t.Errorf("subscription seed does not advertise claude-* alias %q (present in the api-key seed)", name)
+		}
+	}
+}
+
+// TestQuickstartScriptIsSyntacticallyValidBash is a syntax-validity backstop independent of the
+// function-scoped shape tests above, which extract and test individual functions/blocks and so
+// cannot catch an unbalanced if/fi elsewhere in the file (e.g. from the nested if/else/fi blocks
+// PR #688 Phase 3 added around the seed-heredoc and jq-profile sections).
+func TestQuickstartScriptIsSyntacticallyValidBash(t *testing.T) {
+	root := findModuleRoot(t)
+	scriptPath := filepath.Join(root, "quickstart.sh")
+	out, err := exec.Command("bash", "-n", scriptPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("quickstart.sh is not syntactically valid bash: %v\n%s", err, out)
 	}
 }

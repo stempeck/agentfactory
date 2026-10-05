@@ -51,6 +51,8 @@ func TestSettings_CanaryNotInPayload(t *testing.T) {
 		{"build-host.json", "zq7f3aBuildHost"},
 		{"litellm.yaml", "zq7f3aLitellmKey"},
 		{".agentfactory/secrets/gateway.env", "zq7f3aSecretsDirContent"},
+		{".agentfactory/secrets/chatgpt/auth.json", "zq7f3aChatgptAuthAccessToken"},
+		{".runtime/gateway_auth/codex-subscription.json", "zq7f3aGatewayAuthState"},
 	}
 
 	write := func(name, content string) {
@@ -70,6 +72,28 @@ func TestSettings_CanaryNotInPayload(t *testing.T) {
 	// The raw tier's documents ARE served in full. These two are the anti-vacuity control: if the
 	// scan below cannot see them either, it is scanning nothing.
 	write("dispatch.json", `{"repos":["o/r"],"trigger_label":"zq7f3aExposedTriggerLabel","mappings":[{"labels":["bug"],"agent":"rootcause"}]}`)
+
+	// gatewayAuthHandlePath (internal/cmd/gateway_auth.go) — under dir/.agentfactory, so write()'s
+	// dir-relative join reaches it once the chatgpt/ subdirectory exists.
+	if err := os.MkdirAll(filepath.Join(dir, "secrets", "chatgpt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join("secrets", "chatgpt", "auth.json"),
+		`{"access_token":"zq7f3aChatgptAuthAccessToken","refresh_token":"rt","id_token":"it","expires_at":1234567890,"account_id":"acct"}`)
+
+	// gatewayAuthStatePath (internal/cmd/gateway_auth.go) sits at root/.runtime/gateway_auth/, a
+	// sibling of .agentfactory — outside dir entirely, so write()'s dir-relative join cannot reach
+	// it. A plant here MUST be root-relative, or it silently lands under .agentfactory and this
+	// canary passes without ever protecting the real path.
+	gatewayAuthStateDir := filepath.Join(root, ".runtime", "gateway_auth")
+	if err := os.MkdirAll(gatewayAuthStateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gatewayAuthStateDir, "codex-subscription.json"),
+		[]byte(`{"v":1,"mode":"codex-subscription","auth_dir":"zq7f3aGatewayAuthState","imported_at":"2026-01-01T00:00:00Z","state":"ok"}`),
+		0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	// The REAL config.Service — a fake here would only prove the fake is clean. The nil af seam is
 	// the read path's supported configuration (the schema fingerprint degrades to "").

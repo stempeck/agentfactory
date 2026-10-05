@@ -185,11 +185,23 @@ func TestWireGitIdentity_RespectsRepoLocalIdentity(t *testing.T) {
 	gitRun(t, repo, env, "config", "user.name", "Repo Local")
 	gitRun(t, repo, env, "config", "user.email", "local@repo.test")
 
-	mgr := session.NewManager(t.TempDir(), "agent", config.AgentEntry{Type: "autonomous", Description: "test"})
 	// workDir = the repo with a present identity ⇒ presence-gate must skip the export.
-	wireGitIdentity(mgr, t.TempDir(), repo)
+	name, email, hooksDir, coName, coEmail := wireGitIdentity(t.TempDir(), repo)
+	if name != "" || email != "" {
+		t.Errorf("present repo-local identity must NOT be overridden (C-4), got name=%q email=%q", name, email)
+	}
+	if hooksDir == "" || coName == "" || coEmail == "" {
+		t.Errorf("trailer should still be active regardless of identity, got hooksDir=%q coName=%q coEmail=%q", hooksDir, coName, coEmail)
+	}
 
-	cmd := mgr.BuildStartupCommand()
+	mgr := session.NewManager(t.TempDir(), "agent", config.AgentEntry{Type: "autonomous", Description: "test"})
+	mgr.SetLaunchContributions(&session.LaunchContributions{
+		GitAuthorName: name, GitAuthorEmail: email, GitHooksDir: hooksDir, CoauthorName: coName, CoauthorEmail: coEmail,
+	})
+	cmd, err := mgr.BuildStartupCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Contains(cmd, "GIT_AUTHOR_NAME") {
 		t.Errorf("present repo-local identity must NOT be overridden (C-4), got: %s", cmd)
 	}

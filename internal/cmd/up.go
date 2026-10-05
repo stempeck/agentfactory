@@ -59,8 +59,8 @@ Positional 'af up <names>' ignores startup.json and starts exactly those agents.
 
 // upModel is the optional per-launch model profile (or raw model id) applied to
 // EVERY agent started by an `af up` invocation (issue #480). It resolves through
-// the same shared resolveLaunchModelEnv helper sling/respawn use, so fail-fast and
-// precedence stay uniform across entrypoints.
+// the same launch composer sling/respawn use, so fail-fast and precedence stay uniform
+// across entrypoints.
 var upModel string
 
 // upSkipFitness applies the fitness-attestation-skip override (issue #508) to EVERY agent started by an
@@ -119,11 +119,6 @@ func runUp(cmd *cobra.Command, args []string) error {
 	factoryCfg, err := config.LoadFactoryConfig(config.FactoryConfigPath(root))
 	if err != nil {
 		return fmt.Errorf("loading factory config: %w", err)
-	}
-
-	buildHostCfg, err := config.LoadBuildHostConfig(config.BuildHostConfigPath(root))
-	if err != nil {
-		return fmt.Errorf("invalid build-host config: %w", err)
 	}
 
 	// Load startup config (C-4: an absent file yields defaults, never ErrNotFound;
@@ -189,9 +184,6 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// factory-root breadcrumb and escalate any ambiguous recovery — neither of
 	// which is visible from the per-agent stderr line under a bulk `af up`.
 	var runRecords []agentRunRecord
-	// The profile-key universe (issue #602) is factory-wide, not per-agent, so it is read once
-	// here rather than re-read inside the loop for every agent being started.
-	modelKeyUniverse := launchModelKeyUniverse(root)
 	for _, name := range agents {
 		entry, ok := agentsCfg.Agents[name]
 		if !ok {
@@ -200,6 +192,16 @@ func runUp(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		// K14 (issue #538): refuse a plugin-owned agent whose role template is not
+		// embedded in this binary — it would otherwise launch under a substituted generic
+		// identity, which RenderIdentity only warns about. Dormant without plugins.json.
+		if err := refusePluginAgentWithoutTemplate(root, name); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "%s: %v\n", name, err)
+			allOK = false
+			continue
+		}
+
+		var agentFormula *formula.Formula
 		if entry.Formula != "" {
 			formulaPath, findErr := formula.FindFormulaFile(entry.Formula, root)
 			if findErr != nil {
@@ -220,6 +222,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 				allOK = false
 				continue
 			}
+			agentFormula = f
 		}
 
 		envWT := os.Getenv("AF_WORKTREE")
@@ -254,9 +257,6 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 
 		mgr := session.NewManager(root, name, entry)
-		if buildHostCfg != nil {
-			mgr.SetBuildHost(buildHostCfg)
-		}
 		if wtPath != "" {
 			if err := mgr.SetWorktree(wtPath, wtID); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: SetWorktree for %s: %v\n", name, err)
@@ -264,7 +264,22 @@ func runUp(cmd *cobra.Command, args []string) error {
 				continue
 			}
 		}
-		wireGitIdentity(mgr, root, wtPath)
+		// af up on a live agent must change nothing, so this guard precedes every .runtime/
+		// mutation below: those files are the running session's state, not a dead one's leftovers.
+		// A live agent that was never going to launch is not an error, so it also skips
+		// the launch composer's error path (an unresolvable --model no longer fails af up's exit
+		// code), the model/telemetry warnings, and reconstructHookedFormula (its af_up_last_run line
+		// reads recovered=false; no "Recovered in-flight formula" notice, no ambiguous-recovery
+		// mail). A probe error reads as not live and falls through to Start, which probes again; a
+		// session that turns live in that microsecond window is refused by Start as before.
+		if mgr.Live() {
+			runRecords = append(runRecords, agentRunRecord{Agent: name, Outcome: outcome})
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: already running\n", session.SessionName(name))
+			if upModel != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "%s: --model %s not applied: a running session is not relaunched\n", session.SessionName(name), upModel)
+			}
+			continue
+		}
 		// Relaunch clears the dispatched marker AND the scoped-stop provenance datum (#548 P3,
 		// L-3) at both the main-root and worktree agent dirs: a fresh session must not inherit
 		// the previous dispatch's stop-rights, and this bounds the stale-owner window after an
@@ -300,6 +315,28 @@ func runUp(cmd *cobra.Command, args []string) error {
 		if wtPath != "" {
 			agentDir = config.AgentDir(wtPath, name)
 		}
+		// Admission runs only here, past the Live() skip, so af up on a running agent runs no [check] (D7).
+		if agentFormula != nil && formulaDeclaresIntegrations(agentFormula) {
+			bound, admitReports, admitErr := admitFormulaIntegrations(cmd.Context(), cmd, root, agentFormula)
+			for _, r := range admitReports {
+				fmt.Fprintf(cmd.ErrOrStderr(), "%s: %s\n", name, r)
+			}
+			if admitErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "%s: %v\n", name, admitErr)
+				skipped = append(skipped, skippedAgent{name: name, reason: admitErr.Error()})
+				allOK = false
+				if outcome.IsCreated() {
+					removeRefusedWorktree(cmd, root, wtID, name)
+				}
+				continue
+			}
+			// An existing pin is the in-flight instance's bound set; a relaunch must not replace it (D6).
+			if _, found, _ := readIntegrationPin(agentDir); !found {
+				if err := pinAdmittedIntegrations(root, agentDir, agentFormula.Name, bound, admitReports); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "%s: %v\n", name, err)
+				}
+			}
+		}
 		rr := reconstructHookedFormula(cmd.Context(), agentDir, name, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		runRecords = append(runRecords, agentRunRecord{
 			Agent:     name,
@@ -308,31 +345,17 @@ func runUp(cmd *cobra.Command, args []string) error {
 			Ambiguous: rr.Ambiguous,
 			OpenCount: rr.OpenCount,
 		})
-		// Per-agent model selection (issue #480): resolve the model-env export set
-		// through the SHARED resolver (same one sling/respawn use) BEFORE Start, so
-		// fail-fast and precedence stay uniform. A profile-selecting `--model` that
-		// cannot resolve is surfaced per-agent (warn + allOK=false + continue), mirroring
-		// every other best-effort sub-failure in this loop — one bad agent must not abort
-		// the rest. agentDir (worktree-aware) was derived just above.
-		modelName, modelEnv, modelErr := resolveLaunchModelEnv(root, name, agentDir, upModel, entry.Model, upSkipFitness, cmd.ErrOrStderr())
-		if modelErr != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "%s: %v\n", name, modelErr)
+		// Composed BEFORE Start so fail-fast and precedence stay uniform with sling and respawn. A
+		// profile-selecting `--model` that cannot resolve is surfaced per-agent (warn + allOK=false +
+		// continue), mirroring every other best-effort sub-failure in this loop — one bad agent must
+		// not abort the rest. agentDir (worktree-aware) was derived just above.
+		c, reports, err := launchContributions(cmd.Context(), root, name, agentDir, entry, upModel, upSkipFitness, true, cmd.ErrOrStderr())
+		if err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "%s: %v\n", name, err)
 			allOK = false
 			continue
 		}
-		if len(modelEnv) > 0 {
-			nextStep, formula := nextReadyStep(cmd.Context(), root, agentDir)
-			mgr.SetModelEnv(withEffortLevel(root, agentDir, modelEnv, nextStep, formula))
-		}
-		// Profile-key universe (issue #602), wired UNCONDITIONALLY — deliberately not inside
-		// the guard above, since an agent that resolves no profile is exactly the one that
-		// must still shed a previous profile's keys. Computed once above the loop.
-		mgr.SetModelKeyUniverse(modelKeyUniverse)
-		// Telemetry env (issue #329): symmetric with af sling — gate-checked, built from the
-		// resolved model name. Gate off ⇒ nil ⇒ the session carries zero OTel vars.
-		if env := telemetryLaunchEnv(root, agentDir, name, modelName, cmd.ErrOrStderr()); env != nil {
-			mgr.SetTelemetryEnv(env)
-		}
+		mgr.SetLaunchContributions(&c)
 		if err := mgr.Start(); err != nil {
 			if errors.Is(err, session.ErrAlreadyRunning) {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s: already running\n", session.SessionName(name))
@@ -346,14 +369,15 @@ func runUp(cmd *cobra.Command, args []string) error {
 			allOK = false
 			continue
 		}
+		reports.mailIntegrations(root, cmd.ErrOrStderr())
 		var parts []string
 		// Echo the RESOLVED model (issue #480 discoverability, design-doc.md:109),
 		// falling back to the legacy entry.Model — mirrors the sling.go launch echo
 		// (PR #482). Without this, --model on an empty-entry.Model agent prints no
 		// model, and an overridden agent prints the stale original.
 		displayModel := entry.Model
-		if modelName != "" {
-			displayModel = modelName
+		if reports.ModelName != "" {
+			displayModel = reports.ModelName
 		}
 		if displayModel != "" {
 			parts = append(parts, "model: "+displayModel)
@@ -361,7 +385,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		// Endpoint echo from the resolved set (names only, never auth_token), falling
 		// back to the legacy field; empty when neither applies.
 		endpoint := entry.BaseURL
-		if u := modelEnvValue(modelEnv, "ANTHROPIC_BASE_URL"); u != "" {
+		if u := modelEnvValue(c.ModelEnv, "ANTHROPIC_BASE_URL"); u != "" {
 			endpoint = u
 		}
 		if endpoint != "" {
@@ -453,6 +477,19 @@ func runUp(cmd *cobra.Command, args []string) error {
 		// attempt completes, silently discarding the cold-start attempt
 		// (decisions.md D4). Best-effort by contract: never fails the verb.
 		ensureTelemetryBackendFn(cmd.Context(), cmd, root)
+		// K19 (fable-implement PR #694 Phase 7): same contract as the telemetry guard
+		// above — synchronous, best-effort, never fails the verb.
+		ensureGatewayBackendFn(cmd.Context(), cmd, root)
+	}
+	// Design 695 K10: reports and warnings, never a failed verb (D53). Unlike gates and dispatch it runs
+	// for `af up <names>` too: the factory-scope services back every agent launched here (Phase 3 C21, D63).
+	for _, r := range ensureIntegrationServicesFn(cmd.Context(), cmd, root, serviceScopeFactory) {
+		fmt.Fprintln(cmd.ErrOrStderr(), r)
+	}
+	if blanket {
+		if rows := withoutQuickstartUserScope(detectUnaccountedUserScopeFn(root)); len(rows) > 0 {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: user-scope Claude Code channels load in every agent session and no installed integration accounts for them: %s\n", strings.Join(rows, ", "))
+		}
 
 		// AC-5: start the dispatcher when configured (friendly-skips internally when
 		// dispatch.json is absent/unconfigured, warns on real config errors; an
@@ -900,5 +937,21 @@ func reconstructHookedFormula(ctx context.Context, agentDir, agentName string, o
 	default:
 		fmt.Fprintf(errw, "WARNING: %s: %d open formula instances — cannot auto-resume; resolve manually\n", agentName, len(inFlight))
 		return recoveryResult{Ambiguous: true, OpenCount: len(inFlight)}
+	}
+}
+
+// removeRefusedWorktree takes back a worktree that an af up or a dispatch created for an agent admission then
+// refused, so a refusal leaves nothing behind. A worktree it merely joined belongs to others and is left alone.
+func removeRefusedWorktree(cmd *cobra.Command, root, wtID, name string) {
+	meta, empty, err := worktree.RemoveAgent(root, wtID, name)
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "%s: warning: worktree RemoveAgent: %v\n", name, err)
+		return
+	}
+	if !empty {
+		return
+	}
+	if err := worktree.Remove(root, meta); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "%s: warning: removing refused worktree %s: %v\n", name, wtID, err)
 	}
 }

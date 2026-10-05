@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -234,6 +235,18 @@ const statuslineSentinel = "\u200b\u2060"
 // showing both a gateway outage and one model refusal is a sick endpoint, which is a respawn, and
 // only the LiteLLM class prefixes below are less specific than it. An entry's position is
 // therefore a decision, not formatting.
+//
+// subscriptionAuthRejectedCause and upstreamRateLimitCause (issue #686 D6) are named constants
+// rather than inline literals because attributeEndpointFailure and watchdogFailureMail both need to
+// compare against these exact strings later — the needle table, the re-key target, and the mail
+// mode-key must all agree on one spelling. Both causes are mode-NEUTRAL (F3/decisions.md D3): the
+// same upstream 401/429 surfaces in api-key and subscription mode alike, so the cause names the
+// symptom and the remedy line — not the cause — is derived from the mode at watchdogFailureMail.
+const (
+	subscriptionAuthRejectedCause = "endpoint failure: upstream authentication rejected by the gateway"
+	upstreamRateLimitCause        = "endpoint failure: upstream rate limit (plan window exhausted)"
+)
+
 var endpointFailureSignatures = []struct {
 	needle, context, cause string
 	mailOnly               bool
@@ -245,6 +258,8 @@ var endpointFailureSignatures = []struct {
 	{"connection timed out", apiRequestMarker, "endpoint failure: connection timed out (endpoint unreachable)", false},
 	{"unsupported_api_for_model", "", "endpoint failure: unsupported_api_for_model (model not served on this endpoint)", false},
 	{"Invalid model name", "model=", "endpoint failure: model not served on this endpoint", true},
+	{"litellm.AuthenticationError", "", subscriptionAuthRejectedCause, true},
+	{"litellm.RateLimitError", "", upstreamRateLimitCause, true},
 	{"litellm.InternalServerError", "", "endpoint failure: LiteLLM proxy internal server error", false},
 	{"litellm.ServiceUnavailableError", "", "endpoint failure: LiteLLM proxy service unavailable", false},
 	{"litellm.APIConnectionError", "", "endpoint failure: LiteLLM proxy connection error", false},
@@ -267,6 +282,96 @@ func detectErrorPattern(output string) (detected bool, cause string, mailOnly bo
 	return false, "", false
 }
 
+// subscriptionRekeyEligible is the closed set attributeEndpointFailure may re-key (issue #686
+// design-doc K5 / IMPLREADME File 3): exactly the three respawn-posture litellm.* causes named
+// there. litellm.ServiceUnavailableError is deliberately absent — generalizing the guard to every
+// litellm.* class was the named real boundary risk (gateway_watchdog_test.go
+// service_unavailable_never_rekeys).
+func subscriptionRekeyEligible(cause string) bool {
+	switch cause {
+	case "endpoint failure: LiteLLM proxy timeout",
+		"endpoint failure: LiteLLM proxy connection error",
+		"endpoint failure: LiteLLM proxy internal server error":
+		return true
+	}
+	return false
+}
+
+// subscriptionHandleRaw is the Phase-2-local raw-JSON shape decisions.md D2 calls for: a bypass of
+// gatewayAuthHandle (gateway_auth.go:51-57, DO-NOT-CHANGE, no device_code_requested_at field) so the
+// guard reads the CURRENT on-disk handle directly rather than a value only as fresh as the last
+// operator-triggered `af config models check`. DeviceCodeRequestedAt is json.RawMessage rather than
+// a typed field because the guard fires on the field's PRESENCE, not its value (design-doc K5/K1).
+type subscriptionHandleRaw struct {
+	ExpiresAt             int64           `json:"expires_at"`
+	DeviceCodeRequestedAt json.RawMessage `json:"device_code_requested_at,omitempty"`
+}
+
+// subscriptionHandlePastExpiry mirrors decisions.md D5's boundary semantics (now >= exp fails;
+// ExpiresAt == 0 is NOT past-exp) against the raw handle's OWN expires_at, independent of the state
+// record's AccessExpiresAt mirror.
+func subscriptionHandlePastExpiry(raw subscriptionHandleRaw) bool {
+	if raw.ExpiresAt == 0 {
+		return false
+	}
+	return time.Now().UTC().Unix() >= raw.ExpiresAt
+}
+
+// gatewayAuthModeIsSubscription is K18's record-derived subscription-mode signal (issue #693 Phase
+// 6, decisions.md D2): callers use this instead of raw credential-file presence, so a stray
+// credential on disk can never suppress or wrongly trigger attribution/remedy once a record is
+// written. An unresolvable mode (gatewayAuthMode error) degrades to "not codex-subscription"
+// behaviorally, plus a stderr line matching this file's existing idiom (:632,647,653,671,673), so
+// the watchdog never blocks its tick loop on a resolver error.
+func gatewayAuthModeIsSubscription(root string) bool {
+	mode, _, err := gatewayAuthMode(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "watchdog: gateway auth mode: %v\n", err)
+		return false
+	}
+	return mode == gatewayAuthProfileName
+}
+
+// subscriptionCredentialSignalPresent reports whether the on-disk subscription record (handle or
+// state) shows a credential cause: device_code_requested_at present on the raw handle, the raw
+// handle itself past-exp, or the Phase-1 state record in one of the closed hard-fail states
+// (subscriptionHardFailState, config_models.go — shared with checkProfile/sling's E5 so all three
+// surfaces agree on what "credential-caused" means). Caller has already established the derived
+// mode is codex-subscription (gatewayAuthModeIsSubscription); a handle may now be absent even when
+// the record says codex-subscription — an unreadable/absent/corrupt handle here reports no signal
+// from the handle half and falls through to the state check alone.
+func subscriptionCredentialSignalPresent(root string) bool {
+	if data, err := os.ReadFile(gatewayAuthHandlePath(root)); err == nil {
+		var raw subscriptionHandleRaw
+		if json.Unmarshal(data, &raw) == nil {
+			if len(raw.DeviceCodeRequestedAt) > 0 || subscriptionHandlePastExpiry(raw) {
+				return true
+			}
+		}
+	}
+	_, state := readGatewayAuthState(root)
+	return subscriptionHardFailState(state)
+}
+
+// attributeEndpointFailure wraps detectErrorPattern's sole call site (issue #686 design-doc K5): a
+// wedged subscription gateway must be named as a credential failure (mail-only, no respawn) instead
+// of respawning the agent toward RECOVERY HALTED. detectErrorPattern itself stays pure — this is the
+// one place derived mode and on-disk credential state enter the detection path, and only for the
+// closed re-key-eligible cause set.
+func attributeEndpointFailure(output, root string) (detected bool, cause string, mailOnly bool) {
+	detected, cause, mailOnly = detectErrorPattern(output)
+	if !detected || !subscriptionRekeyEligible(cause) {
+		return detected, cause, mailOnly
+	}
+	if !gatewayAuthModeIsSubscription(root) {
+		return detected, cause, mailOnly
+	}
+	if !subscriptionCredentialSignalPresent(root) {
+		return detected, cause, mailOnly
+	}
+	return true, subscriptionAuthRejectedCause, true
+}
+
 // watchdogFailureMail formats the operator escalation mail for a detected session
 // failure. It is a pure formatter (no send) so the cause threading — including the
 // endpoint-failure signatures — is directly unit-testable; recoverAgent feeds its
@@ -276,8 +381,27 @@ func detectErrorPattern(output string) (detected bool, cause string, mailOnly bo
 // that posture the mail is the ENTIRE response, so the operator who reads it and assumes the
 // factory already acted is the failure mode this branch exists to prevent (the same reason
 // escalateDarkChannel spells out what was not done).
-func watchdogFailureMail(agentName, pattern string, mailOnly bool) (subject, body string) {
+//
+// D14 (decisions.md) mode-keys the remedy line by comparing pattern against the two named
+// upstream cause constants directly — never a broad "is this mail-only" heuristic — so the
+// pre-existing #598 invalid-model remedy (also mail-only) cannot be misrouted to the codex-login
+// wording. The two upstream causes are mode-neutral (F3/D3), so subscriptionMode — resolved
+// upstream by recoverAgent, where root is available — selects the remedy: a subscription session
+// is repaired with `codex login`, an api-key gateway by its openai.key/plan, and advising the
+// wrong one wastes the operator's first move.
+func watchdogFailureMail(agentName, pattern string, mailOnly, subscriptionMode bool) (subject, body string) {
 	subject = fmt.Sprintf("WATCHDOG: %s session failure detected: %s", agentName, pattern)
+	if pattern == subscriptionAuthRejectedCause || pattern == upstreamRateLimitCause {
+		kind, remedy := "a gateway credential/quota failure",
+			"Check the gateway's OpenAI api key (.agentfactory/secrets/openai.key) and the upstream plan quota, then recycle the agent manually if it is still stuck."
+		if subscriptionMode {
+			kind, remedy = "a subscription credential/quota failure",
+				"Run `af gateway auth import` after `codex login` to refresh the gateway's subscription credential, then recycle the agent manually if it is still stuck."
+		}
+		body = fmt.Sprintf("Watchdog detected failure in agent %s: %s. The session was NOT respawned — "+
+			"this is %s, not a dead session. %s", agentName, pattern, kind, remedy)
+		return subject, body
+	}
 	if mailOnly {
 		body = fmt.Sprintf("Watchdog detected failure in agent %s: %s. The session was NOT respawned — "+
 			"this class reports a failed model request rather than a dead session, and the agent may still "+
@@ -439,18 +563,22 @@ func mailOnlyKey(name string) string { return name + "\x00mail" }
 // ONE final notice; unlike checkCircuitBreaker its wording never claims "consecutive recoveries" — this
 // posture attempts none. It reuses watchdogMaxConsecutiveFailures so the cadence matches the crash path
 // without an unexplained second constant (decision D6).
-func checkMailOnlyEscalation(failures map[string]int, name string) bool {
+//
+// The final notice names the actual cause (F11/D3) rather than a fixed "model coverage" line: the
+// mail-only posture now also carries credential/auth wedges, so an operator must learn WHICH failure
+// stopped re-escalating — a model-coverage-only wording would misdescribe an auth cause.
+func checkMailOnlyEscalation(failures map[string]int, name, cause string) bool {
 	key := mailOnlyKey(name)
 	if failures[key] < watchdogMaxConsecutiveFailures {
 		return false
 	}
 	if failures[key] == watchdogMaxConsecutiveFailures {
 		_ = sendHandoffMail(escalationTarget,
-			fmt.Sprintf("WATCHDOG: %s repeated model-request failure — no longer re-escalating", name),
-			fmt.Sprintf("Agent %s has reported the same unserved model request %d times. No recovery was attempted — "+
-				"this posture leaves the session running — so the watchdog has stopped re-escalating it. Investigate the "+
-				"endpoint's model coverage, then recycle the agent manually if it is stuck.",
-				name, watchdogMaxConsecutiveFailures))
+			fmt.Sprintf("WATCHDOG: %s repeated session failure — no longer re-escalating", name),
+			fmt.Sprintf("Agent %s has reported the same failure %d times: %s. No recovery was attempted — "+
+				"this posture leaves the session running — so the watchdog has stopped re-escalating it. Investigate "+
+				"that cause, then recycle the agent manually if it is stuck.",
+				name, watchdogMaxConsecutiveFailures, cause))
 		failures[key]++
 	}
 	return true
@@ -520,7 +648,7 @@ func recoverAgent(root, agentName string, entry config.AgentEntry, pattern, trig
 		fmt.Fprintf(os.Stderr, "watchdog: %s: failed to write last_error: %v\n", agentName, err)
 	}
 
-	subject, body := watchdogFailureMail(agentName, pattern, mailOnly)
+	subject, body := watchdogFailureMail(agentName, pattern, mailOnly, gatewayAuthModeIsSubscription(root))
 	_ = sendHandoffMail(escalationTarget, subject, body)
 
 	// The breadcrumbs above still run for a mail-only class: the checkpoint and last_error are what
@@ -672,6 +800,10 @@ func runWatchdog(cmd *cobra.Command, args []string) error {
 // existing sync/atomic idiom elsewhere in this package to copy; this is the first.
 var telemetryBackendGuardInFlight atomic.Bool
 
+// gatewayBackendGuardInFlight is telemetryBackendGuardInFlight's twin for the
+// gateway relaunch guard (fable-implement PR #694 Phase 7 / K19).
+var gatewayBackendGuardInFlight atomic.Bool
+
 // watchdogTick is one tick's work: the occupancy sweep, then the existing agent poll,
 // plus the telemetry-backend liveness guard — all fired BESIDE each other and never
 // folded into pollAgents, which stays agent-scoped (DO-NOT-CHANGE, decisions.md,
@@ -702,6 +834,8 @@ func watchdogTick(cmd *cobra.Command, root string, scope map[string]struct{}, ag
 
 	pollAgents(cmd, root, paneScopeExcludingRecovered(scope, now), agentStates, failures, silenceThreshold)
 	triggerTelemetryBackendGuard(cmd, root)
+	triggerGatewayBackendGuard(cmd, root)
+	triggerIntegrationServicesGuard(cmd, root)
 
 	if err := writeWatchdogHeartbeat(root, now); err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "watchdog: heartbeat write failed: %v\n", err)
@@ -887,11 +1021,11 @@ func watchdogHeartbeatPath(root string) string {
 // Scope: that guarantee is PROCESS-LOCAL. telemetryBackendGuardInFlight is a
 // package-level atomic, so it orders this process's ticks against each other and
 // nothing else. On a first af up the two callers are sequential anyway (the
-// cold-start guard at up.go:398 completes before launchWatchdog at :423), but af up
+// cold-start guard at up.go:479 completes before launchWatchdog at up.go:523), but af up
 // is idempotent and routinely re-run against a factory whose watchdog is already
 // ticking — two processes, one of them holding no knowledge of the other's attempt.
 // What bounds that case is not this flag: it is relaunch.sh's own
-// `tmux has-session -t telemetry || …` check-then-act (quickstart.sh:1105-1107) plus
+// `tmux has-session -t telemetry || …` check-then-act (quickstart.sh:1930) plus
 // tmux's refusal to create a duplicate session name, so the worst outcome is a
 // redundant probe and a refused second launch, never two backends.
 //
@@ -911,6 +1045,42 @@ func triggerTelemetryBackendGuard(cmd *cobra.Command, root string) {
 	go func() {
 		defer telemetryBackendGuardInFlight.Store(false)
 		ensureTelemetryBackendFn(context.Background(), cmd, root)
+	}()
+}
+
+// triggerGatewayBackendGuard is triggerTelemetryBackendGuard's twin for the gateway
+// relaunch guard (fable-implement PR #694 Phase 7 / K19) — same single-flight,
+// process-local, async shape; same caveat about goroutine writes to
+// cmd.OutOrStdout()/cmd.ErrOrStderr() racing the main loop's under CGO_ENABLED=0.
+func triggerGatewayBackendGuard(cmd *cobra.Command, root string) {
+	if !gatewayBackendGuardInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer gatewayBackendGuardInFlight.Store(false)
+		ensureGatewayBackendFn(context.Background(), cmd, root)
+	}()
+}
+
+// triggerIntegrationServicesGuard is the third twin (design 695 K10): factory-scope
+// and pinned formula-scope services, under integrationServicesWatchdogBound so a
+// wedged probe or launch cannot pin the single-flight forever. Same single-flight,
+// process-local, async shape; same caveat as triggerTelemetryBackendGuard, except
+// the racing write is this goroutine's own: it prints the ensure's reports to
+// cmd.ErrOrStderr(), which the main loop also writes, and -race never sees that
+// under CGO_ENABLED=0. A stubbed ensureIntegrationServicesFn keeps a test off that
+// writer only while it returns no reports.
+func triggerIntegrationServicesGuard(cmd *cobra.Command, root string) {
+	if !integrationServicesGuardInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer integrationServicesGuardInFlight.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), integrationServicesWatchdogBound)
+		defer cancel()
+		for _, r := range ensureIntegrationServicesFn(ctx, cmd, root, serviceScopeFactory) {
+			fmt.Fprintln(cmd.ErrOrStderr(), r)
+		}
 	}()
 }
 
@@ -1123,12 +1293,12 @@ func pollAgents(cmd *cobra.Command, root string, scope map[string]struct{}, agen
 			continue
 		}
 
-		if detected, pattern, mailOnly := detectErrorPattern(output); detected {
+		if detected, pattern, mailOnly := attributeEndpointFailure(output, root); detected {
 			// The mail-only posture (recoverAgent leaves the session running) gets its OWN bounded
 			// counter so it cannot consume the crash-respawn budget keyed under the bare name; a later
 			// genuine crash then still finds failures[name] clear and recycles (BODY-1/F5).
 			if mailOnly {
-				if checkMailOnlyEscalation(failures, name) {
+				if checkMailOnlyEscalation(failures, name, pattern) {
 					continue
 				}
 				failures[mailOnlyKey(name)]++

@@ -230,7 +230,7 @@ func runDoneCore(ctx context.Context, cwd string, phaseComplete bool, gate strin
 		ev.CtxBoundTokens = int64(stepCtx.BoundTokens)
 		ev.CumTokensDelta = stepCumTokensDelta(span, ev)
 		attachGenerationScalars(&ev, span, cwd)
-		// #678 K1. effort_level is echoed from the launch env rather than re-derived: the level a
+		// #678 K1. The effort level is echoed from the launch env rather than re-derived: the level a
 		// step ran AT is the level its session was started with, and asking the plan again here
 		// would record what the NEXT step should get on the record for the one that just finished.
 		ev.EffortLevel = launchEffortLevel()
@@ -1162,11 +1162,9 @@ func cleanupRuntimeArtifacts(cwd string) {
 	os.Remove(filepath.Join(cwd, ".runtime", "step_primed"))
 	os.Remove(filepath.Join(cwd, ".runtime", "done_velocity"))
 	os.Remove(filepath.Join(cwd, ".runtime", "tokenomics_advisories.json"))
-	// #678 K5/K6, swept for the advisory ledger's reason: both are scoped to the formula that earned
-	// them. A relaunch count carried into the next formula would arrive at its first step already
-	// spent, and an effort breadcrumb naming a step label of the formula that just finished would make
-	// the next formula's first boundary compare its plan against a level nothing is running at.
-	os.Remove(effortBreadcrumbPath(cwd))
+	os.Remove(integrationPinPath(cwd))
+	// #678 K6, swept for the advisory ledger's reason: it is scoped to the formula that earned it. A
+	// relaunch count carried into the next formula would arrive at its first step already spent.
 	os.Remove(efficiencyRelaunchPath(cwd))
 	// #678 K8(b)'s counter, swept beside them. It is session-keyed and self-resets on a session
 	// change, so a stale one is never READ wrong — this sweeps it so a completed formula leaves no

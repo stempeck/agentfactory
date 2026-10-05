@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -36,7 +37,9 @@ status is the read side, and it always covers the whole factory: the toggle stat
 the agents that currently have an override recorded, a per-agent table of
 evaluations, failures, the last recorded violation count and the last graded step —
 read from that agent's own .runtime/fidelity_log.jsonl — plus the escalated step id
-from its separate .runtime/fidelity_escalated_step latch, and the last few lines of
+from its separate .runtime/fidelity_escalated_step latch, the last graded turn's
+interventions count and standing effort level (the count reads - for a record written
+by a hook older than the last af install --init), and the last few lines of
 the provenance log, which answer who last moved the switch. Evaluation and failure
 counts are a floor rather than a total: the reader tail-reads a bounded 64 KiB window
 of each run record, so earlier evaluations are not counted, and a row that was
@@ -286,16 +289,20 @@ func printFidelityStatus(factoryRoot, cwd string) error {
 
 	if reports := fidelityAgentReports(factoryRoot); len(reports) > 0 {
 		tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(tw, "  agent\tevaluations\tfailures\tviolations\tlast step\tescalated")
+		fmt.Fprintln(tw, "  agent\tevaluations\tfailures\tviolations\tlast step\tescalated\tinterventions\teffort")
 		anyPartial := false
 		for _, r := range reports {
 			floor := ""
 			if r.partial {
 				floor, anyPartial = "+", true
 			}
-			fmt.Fprintf(tw, "  %s\t%d%s\t%d%s\t%d\t%s\t%s\n",
+			interventions := "-"
+			if r.interventions != nil {
+				interventions = strconv.Itoa(*r.interventions)
+			}
+			fmt.Fprintf(tw, "  %s\t%d%s\t%d%s\t%d\t%s\t%s\t%s\t%s\n",
 				r.name, r.evaluations, floor, r.failures, floor, r.violations,
-				dashIfEmpty(r.lastStep), dashIfEmpty(r.escalatedStep))
+				dashIfEmpty(r.lastStep), dashIfEmpty(r.escalatedStep), interventions, dashIfEmpty(r.effortLevel))
 		}
 		tw.Flush()
 		if anyPartial {
@@ -313,8 +320,8 @@ func printFidelityStatus(factoryRoot, cwd string) error {
 	return nil
 }
 
-// fidelityRecord is the frozen K7 run-record line (design-doc.md:76, data.md:107). Phase 6 writes
-// it from the hook; this phase only reads, so the schema is honored here before any writer exists.
+// fidelityRecord is the hook's run-record line (K7 schema, extended by K12); the hook is its only
+// writer and this command only reads it.
 type fidelityRecord struct {
 	TS              string `json:"ts"`
 	StepID          string `json:"step_id"`
@@ -323,6 +330,8 @@ type fidelityRecord struct {
 	CallsShown      int    `json:"calls_shown"`
 	ViolationsAfter int    `json:"violations_after"`
 	Escalated       bool   `json:"escalated"`
+	Interventions   *int   `json:"interventions"` // nil, not 0, for a record from a hook that predates the key
+	EffortLevel     string `json:"effort_level"`
 }
 
 type fidelityAgentReport struct {
@@ -332,6 +341,8 @@ type fidelityAgentReport struct {
 	violations    int
 	lastStep      string
 	escalatedStep string
+	interventions *int
+	effortLevel   string
 	// partial marks counts derived from a bounded read of a longer log, so status can render them
 	// as floors. violations and lastStep are last-value fields and stay exact either way.
 	partial bool
@@ -382,6 +393,8 @@ func readFidelityAgentReport(factoryRoot, name string) fidelityAgentReport {
 		}
 		report.violations = rec.ViolationsAfter
 		report.lastStep = rec.StepID
+		report.interventions = rec.Interventions
+		report.effortLevel = rec.EffortLevel
 	}
 
 	if data, err := os.ReadFile(filepath.Join(runtimeDir, "fidelity_escalated_step")); err == nil {

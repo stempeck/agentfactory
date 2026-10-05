@@ -394,7 +394,7 @@ statusline knows how to render is rendered by default.
 
 | Element | Row | What you see | When it is dropped |
 |---|---|---|---|
-| `model` | 1 | the model's display name | the session reports no model |
+| `model` | 1 | `Opus 5.5 · high` — the model's display name and the reasoning effort Claude Code reports for the session; the effort half is left off when it reports none (it omits effort for models without an effort setting, e.g. Haiku 4.5) | the session reports no model |
 | `dir` | 1 | the project directory | no directory in the session payload |
 | `branch` | 1 | the current git branch | detached HEAD, or not a repository |
 | `diff` | 1 | `+10 -2` — lines added and removed this session | nothing added and nothing removed |

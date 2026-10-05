@@ -491,6 +491,7 @@ func generateAgentTemplate(f *formula.Formula, agentName string, agentType strin
 	b.WriteString(escapeTmplDelimiters(generateGateProtocol(f)))
 	b.WriteString(escapeTmplDelimiters(generateStructureTable(f)))
 	b.WriteString(escapeTmplDelimiters(generateVariablesTable(f)))
+	b.WriteString(escapeTmplDelimiters(generateIntegrationsSection(f)))
 
 	// Available Commands (merged: formula-specific + standard from supervisor.md.tmpl)
 	hasGates := formulaHasGates(f)
@@ -756,6 +757,26 @@ func generateStructureTable(f *formula.Formula) string {
 		}
 	}
 
+	return b.String()
+}
+
+// generateIntegrationsSection lists the integrations the formula declares, required first. It renders
+// nothing for a formula that declares none, so existing generated agents stay byte-identical.
+func generateIntegrationsSection(f *formula.Formula) string {
+	if len(f.Integrations) == 0 && len(f.IntegrationsOptional) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("### Integrations\n\n")
+	b.WriteString("| Integration | Required |\n")
+	b.WriteString("|-------------|----------|\n")
+	for _, name := range f.Integrations {
+		b.WriteString(fmt.Sprintf("| %s | yes |\n", name))
+	}
+	for _, name := range f.IntegrationsOptional {
+		b.WriteString(fmt.Sprintf("| %s | no |\n", name))
+	}
+	b.WriteString("\n")
 	return b.String()
 }
 

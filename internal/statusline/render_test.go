@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stempeck/agentfactory/internal/config"
 )
@@ -21,14 +22,19 @@ func defaultCfg() *config.StatuslineConfig {
 
 func loadGoldenPayload(t *testing.T) Payload {
 	t.Helper()
-	f, err := os.Open(filepath.Join("testdata", "payload", "full_2_1_212.json"))
+	return loadPayloadFixture(t, "full_2_1_212.json")
+}
+
+func loadPayloadFixture(t *testing.T, name string) Payload {
+	t.Helper()
+	f, err := os.Open(filepath.Join("testdata", "payload", name))
 	if err != nil {
-		t.Fatalf("open golden fixture: %v", err)
+		t.Fatalf("open payload fixture %s: %v", name, err)
 	}
 	defer f.Close()
 	p, err := ParsePayload(f)
 	if err != nil {
-		t.Fatalf("ParsePayload golden fixture: %v", err)
+		t.Fatalf("ParsePayload fixture %s: %v", name, err)
 	}
 	return p
 }
@@ -80,6 +86,30 @@ func TestRender_RedirectCostPrefix(t *testing.T) {
 	}
 	if !strings.Contains(got, "D ~$ 80.64") {
 		t.Errorf("redirect daily cost missing ~ prefix; got %q", got)
+	}
+}
+
+// The effort fixture is a captured 2.1.281 payload, so a decoder tag that drifts from the key the
+// host actually emits fails here rather than silently dropping the effort half.
+func TestRender_ModelCarriesEffort2_1_281(t *testing.T) {
+	modelOnly := &config.StatuslineConfig{Elements: []string{"model"}}
+	cases := []struct {
+		name   string
+		mutate func(*Payload)
+		want   string
+	}{
+		{"host reports effort", func(*Payload) {}, "Opus 5.5 · medium"},
+		{"host omits effort", func(p *Payload) { p.Effort.Level = "" }, "Opus 5.5"},
+		{"no model means no element", func(p *Payload) { p.Model.DisplayName = "" }, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := loadPayloadFixture(t, "effort_2_1_281.json")
+			tc.mutate(&p)
+			if got := RenderWith(modelOnly, p, "", DailyTotals{}, RenderOpts{}); got != tc.want {
+				t.Errorf("model element = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -174,6 +204,7 @@ func TestRender_PerElementFailOpen(t *testing.T) {
 func TestRender_HostileStringsSanitized(t *testing.T) {
 	p := goldenStruct()
 	p.Model.DisplayName = "Op\x1b[31mus\x07 4.8"                // CSI color + BEL
+	p.Effort.Level = "hi\x1b[2Kgh\x00"                          // CSI erase-line + NUL
 	p.Workspace.ProjectDir = "/home/\x1b]0;pwn\x07dev/p\x7froj" // OSC title-set + DEL
 	branch := "ma\x1b[2Jin\x00\xc2\x9b"                         // CSI clear + NUL + valid C1 CSI (U+009B)
 
@@ -193,6 +224,9 @@ func TestRender_HostileStringsSanitized(t *testing.T) {
 	if !strings.Contains(out, "main") {
 		t.Errorf("expected sanitized branch to read 'main', got %q", out)
 	}
+	if !strings.Contains(out, "Opus 4.8 · high") {
+		t.Errorf("expected sanitized model and effort to read 'Opus 4.8 · high', got %q", out)
+	}
 
 	// Length cap with middle-ellipsis on a very long path.
 	long := "/" + strings.Repeat("abcdefghij/", 20) + "end"
@@ -204,6 +238,19 @@ func TestRender_HostileStringsSanitized(t *testing.T) {
 	}
 	if strings.Contains(out2, long) {
 		t.Errorf("over-long path was not capped: %q", out2)
+	}
+
+	// Each half fits the cap on its own, so only a cap on the joined element bounds it.
+	p3 := goldenStruct()
+	p3.Model.DisplayName = "Opus " + strings.Repeat("m", maxElementRunes-5)
+	p3.Effort.Level = strings.Repeat("e", maxElementRunes-4) + "high"
+	modelOnly := &config.StatuslineConfig{Elements: []string{"model"}}
+	out3 := RenderWith(modelOnly, p3, "", DailyTotals{}, RenderOpts{})
+	if n := utf8.RuneCountInString(out3); n > maxElementRunes {
+		t.Errorf("model element with a long effort is %d runes, want <= %d: %q", n, maxElementRunes, out3)
+	}
+	if !strings.HasPrefix(out3, "Opus ") || !strings.HasSuffix(out3, "high") || !strings.Contains(out3, "…") {
+		t.Errorf("expected the joined model element middle-ellipsised with head and tail kept, got %q", out3)
 	}
 }
 

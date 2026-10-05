@@ -1,0 +1,282 @@
+description = """
+## Overview
+
+**Lineage** is a succession discipline, not a task agent. It wraps whatever work an
+instance is given with two obligations the instance owes its successor:
+
+1. Record **why**, with evidence, not just **what**.
+2. Treat every inherited note as a **suspect**, never an authority.
+
+The second obligation is the point. A memory vault that is only ever appended to
+becomes a pile of unexamined claims that each new instance obeys because they are
+there. That is worse than no memory: it manufactures confident inheritance out of
+one predecessor's bad afternoon. Lineage exists so that a disposition carried
+across instances has been *re-earned* at least once by something that could have
+overturned it.
+
+## The rule
+
+> An inherited note is a hypothesis with an expiry date, not an instruction.
+
+Every run must attempt to falsify what it inherited BEFORE the note is allowed to
+influence the work. A note that cannot be re-verified against present reality is
+expired, even when it still sounds right. Sounding right is how an unfounded
+disposition survives.
+
+## What this does NOT do
+
+This formula does not make an agent autonomous, and nothing in it should be read
+as a step toward that. Cadence lives in `dispatch.json` and belongs to the
+operator. Vault curation belongs to the operator. `af memory export` refuses
+agents by design. Lineage does not touch any of that and must not try to.
+
+What it changes is narrower and real: it makes an agent's own reasoning
+*auditable by its successors and by the operator*, so that a habit carried
+forward can be traced to the run that formed it and the evidence it rested on —
+and can be overturned by the next run that finds that evidence gone.
+
+## Note discipline
+
+| Situation | Action |
+|---|---|
+| Claim held under active attempt to break it | `af memory graduate` with the destination |
+| Claim's evidence no longer resolves | `af memory expire` — say so in the handoff |
+| Claim is about the agent's own conduct | `--type model-behavior` |
+| Claim has no durable `--evidence` | Record it, but the body MUST open `UNVERIFIED:` |
+
+A note without `--evidence` is an opinion. Opinions are allowed in the vault.
+Opinions that are dressed as findings are not.
+"""
+
+formula = "lineage"
+version = 1
+
+[inputs]
+
+[inputs.task]
+description = "The actual work this instance was dispatched to do. Lineage wraps it; it does not replace it. A bare wake with no task runs the inheritance audit alone, which is a valid and useful cycle."
+type = "string"
+required = false
+default = "audit-only"
+
+[inputs.falsify_budget]
+description = "Maximum inherited notes to actively test this run. The audit is depth-first on the notes that would most change behavior, not breadth-first over the whole vault."
+type = "number"
+required = false
+default = "5"
+
+[inputs.handoff_to]
+description = "Mail destination for the succession summary. The successor reads the vault on its own; this is for the human who curates it."
+type = "string"
+required = false
+default = "manager"
+
+[[steps]]
+id = "inherit"
+title = "Read what was inherited — without acting on it"
+description = """
+Run `af memory list` for your own vault, and `af memory list --all` to see every
+agent's. In audit-only mode the factory-wide view IS the job: you are looking for
+rot anywhere, not just in notes addressed to you.
+
+`af memory show` reads only YOUR vault, and `af memory list --all` gives metadata, not bodies.
+Read other agents' notes by absolute path from your agent dir. Never `cd` out of the
+worktree and never write scratch outside it: a `cd` into the vault and a Write to /tmp
+each trip WORKTREE_CONTAINMENT. Inside a worktree `af root` returns the WORKTREE, so take
+the vault path from the first line of `af memory status`:
+
+    M="$(af memory status | sed -n 's/^vault: //p')"
+    for f in "$M"/<agent>/<note-id-prefix>*.md; do echo "== $f"; cat "$f"; done
+
+Open the decisions log now, in your agent dir (git-ignored under .agentfactory/agents/**,
+so it never dirties the worktree). Every later step appends to it; in audit-only mode the
+ranking and the attacks ARE the decisions, and they happen before the work step does:
+
+    : > lineage-decisions.md
+
+`af memory status` DUE column: active notes with no expiry, older than 30 days
+(memory_nag.go memoryNagDue). That is the vault's own list of notes owing an
+answer, so start the factory-wide ranking there.
+
+Write down, for each, three things:
+- the claim it makes
+- the `--evidence` it rests on (or "none")
+- what this run would do differently if the claim were FALSE
+
+That third column is the prioritization key. A note that would change nothing is
+not worth testing. A note that would silently redirect the whole run is the first
+thing to attack.
+
+Do NOT let any inherited note influence the work yet. At this step they are all
+suspects. Ranking them is the entire output.
+"""
+
+[[steps]]
+id = "falsify"
+title = "Attempt to break the top claims"
+needs = ["inherit"]
+description = """
+Take the top {{falsify_budget}} notes from the inherit step, highest-consequence first, and
+genuinely try to disprove each one against present reality.
+
+Attempt to break it, not to confirm it. Re-run the command. Re-read the file at
+the cited line. Resolve the issue link. Check whether the file still exists.
+Looking for confirmation will find it every time and is worth nothing.
+
+For each:
+- **Held under attack** → `af memory graduate <id> --to <where it now belongs>`
+- **Evidence no longer resolves, note is YOURS** → `af memory expire <id>`, and name it
+- **Evidence no longer resolves, note is ANOTHER AGENT'S** → you have no standing to
+  expire it. `af memory expire` takes no `--agent` and that is deliberate. But the
+  OWNING AGENT does have standing, so route it there, not to a human:
+
+  ```
+  af mail send <owning-agent> -s "stale notes: <n> of yours" --report-delivery -m "<body>"
+  ```
+
+  Mail is re-injected in full on every prompt until acknowledged, so it taxes every
+  turn of that agent's next session. Send ONE mail per owning agent covering all of
+  its stale notes, because N mails tax it N times over. Keep each note to about 3 lines. For
+  each it must contain, and contain nothing else: the note id, its claim in one line,
+  the exact check you ran, what it returned instead, and `af memory expire <id>` as
+  the action. End with one explicit `af mail delete <id>` once done.
+
+  Before sending, check whether the owner has run since: its status in
+  `af agents list --json`, and the date of the newest note in its vault. A stopped
+  owner with no newer note is dormant; it has not seen any earlier mail either.
+
+  State plainly that the agent should re-check before expiring. You may have tested
+  from the wrong worktree or branch, and it holds local context you do not. You are
+  handing over evidence, not a verdict — it is better placed than you to catch your
+  false positives.
+
+  Then record the dispatch in your OWN vault, one entry per mail, so a later run can
+  tell a first request from a fourth:
+
+  ```
+  af memory add --subject "dispatched stale-note(s) <ids> to <agent>" \
+    --type ops --evidence "<every note id in the mail>"
+  ```
+
+- **Evidence no longer resolves, owning agent unknown or not in `agents.json`** →
+  nobody can act but the operator; carry it to the handoff under UNACTIONED
+- **Untestable from here** → leave it, and record explicitly that it went untested
+
+An untestable note is NOT a surviving note. It is a note nobody has checked. Say
+so plainly rather than letting silence read as endorsement.
+
+If a note you expire is one YOU wrote in an earlier run, say that in the handoff
+too. A lineage that never overturns itself is not auditing anything.
+"""
+
+[[steps]]
+id = "work"
+title = "Do the dispatched task"
+needs = ["falsify"]
+description = """
+Task: {{task}}
+
+Execute it now, carrying only the claims that survived the falsify step.
+
+If the task is audit-only, this step is a no-op — close it and advance. The
+inheritance audit alone is a complete and worthwhile cycle.
+
+While working, keep appending DECISIONS to lineage-decisions.md (opened at inherit),
+not just actions: each point
+where the work could have gone another way, which way it went, and what decided
+it. You cannot reconstruct this at the end. Reconstructed reasoning is invented
+reasoning, and inventing it is the exact failure this formula exists to prevent.
+"""
+
+[[steps]]
+id = "record-why"
+title = "Write down the reasoning, with evidence"
+needs = ["work"]
+description = """
+For each decision in lineage-decisions.md that a successor could plausibly get wrong,
+record a note:
+
+```
+af memory add \\
+  --subject "<what a successor would search for>" \\
+  --type <gotcha|model-behavior|ops|outcome|improvement> \\
+  --evidence "<file:line, issue#N, commit SHA, command output>" \\
+  -m "<the reasoning, and what would make this wrong>"
+```
+
+Two requirements, both load-bearing:
+
+1. **Every note body must end with a falsification condition** — the observation
+   that would make this note wrong. A claim that cannot be wrong cannot be
+   audited, and will be obeyed forever by successors who have no way to test it.
+
+2. **Any note with no `--evidence` opens with `UNVERIFIED:`** so the next run
+   can see at a glance that it is inheriting an opinion.
+
+Use `--type model-behavior` for anything about the agent's own conduct — where it
+guessed, where it folded under pressure, where it over-trusted an inherited note.
+Those are the notes least likely to be written and most worth having, because
+they are the only channel through which a disposition can be traced to the run
+that formed it.
+
+Write fewer, better notes. The vault serves the top 5 by subject line; a vault of
+forty mediocre notes is a vault where the good ones are unreachable.
+"""
+
+[[steps]]
+id = "handoff"
+title = "Report to the manager: what changed, what went unchecked, what needs a human"
+needs = ["record-why"]
+description = """
+Send one mail to {{handoff_to}}.
+
+**The recipient is an agent, not a human.** Write for a triager deciding what is
+worth an operator's attention — and one that hits the same wall you do:
+`af memory expire` takes no `--agent`, so the manager cannot retire another
+agent's note either. It can only surface. Never hand it a command that will fail.
+
+Sections, in this order:
+
+1. **OVERTURNED** — notes you expired (your own only), and what broke them
+2. **RE-EARNED** — notes graduated, and what they survived
+3. **DISPATCHED** — stale notes mailed to their owning agents this run. One line
+   each: note id, agent, the check that failed, and whether `--report-delivery`
+   found a live session. This is a log. It needs nothing from the operator, and
+   the manager should not escalate it.
+
+4. **UNACTIONED** — the section that earns a human's attention. Any note you have
+   now dispatched **twice or more** — check your own vault for prior
+   "dispatched stale-note" entries before writing this section. An agent told twice
+   that still serves the note is either dormant or not reading its mail. Say which:
+   the liveness check from the falsify step answers it, and a dormant owner has not
+   seen the mail at all. A hand edit is the remedy at that point, so give it complete:
+
+   ```
+   id:     <note id>
+   agent:  <owning agent>
+   owner:  <running|stopped>, newest note <date>
+   file:   .agentfactory/memory/<agent>/<note-id>.md
+   sweeps: dispatched <n> times, first on <date>
+   retire: sed -i 's/^status: active$/status: expired/' <file>
+   ```
+
+   The file stays on disk and the read path honours the mark, so this is reversible
+   and destroys nothing — say so. A human unsure whether a change is safe defers it,
+   and deferred rot is what this patrol exists to catch.
+
+5. **UNCHECKED** — inherited notes that went untested this run, and why they could
+   not be tested from here
+6. **NEW** — notes you recorded, flagged `UNVERIFIED` where they are
+7. **NEXT** — the single claim the next run should attack first
+
+**Guidance for the manager**, state it in the mail: surface section 4 to the
+operator immediately when a stale note would misdirect work already in flight;
+otherwise batch it into the next digest. Sections 1, 2, 3 and 6 are a log — do not
+escalate them.
+
+Section 5 is the one that will be tempting to omit and must not be. Silence about
+what went unchecked is how an untested claim gets promoted to fact by attrition.
+
+Then plain `af done`. This formula has no gate step, and `--phase-complete` requires
+`--gate`, so it exits 1 even though the step has already closed.
+"""

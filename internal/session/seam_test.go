@@ -9,7 +9,7 @@ import (
 
 // fakeTmuxClient is a no-op tmuxClient double used to prove the newManagerTmux
 // seam wires an injected client into NewManager. It implements the exact
-// 14-method tmuxClient union.
+// 13-method tmuxClient union.
 type fakeTmuxClient struct{ id string }
 
 func (f *fakeTmuxClient) HasSession(name string) (bool, error)            { return false, nil }
@@ -17,7 +17,6 @@ func (f *fakeTmuxClient) IsClaudeRunning(session string) bool             { retu
 func (f *fakeTmuxClient) KillSession(name string) error                   { return nil }
 func (f *fakeTmuxClient) NewSession(name, workDir string) error           { return nil }
 func (f *fakeTmuxClient) SetEnvironment(session, key, value string) error { return nil }
-func (f *fakeTmuxClient) UnsetEnvironment(session, key string) error      { return nil }
 func (f *fakeTmuxClient) SetOption(session, name, value string) error     { return nil }
 func (f *fakeTmuxClient) ShowOption(session, name string) (string, error) { return "", nil }
 func (f *fakeTmuxClient) WaitForShellReady(session string, timeout time.Duration) error {
@@ -73,7 +72,7 @@ func TestNewManagerUsesTmuxSeam(t *testing.T) {
 	fake := &fakeTmuxClient{id: "fake"}
 	newManagerTmux = func() tmuxClient { return fake }
 
-	m := NewManager("/root", "manager", config.AgentEntry{})
+	m := newTestManager("/root", "manager", config.AgentEntry{})
 	if m.tmux != fake {
 		t.Fatalf("NewManager did not use newManagerTmux seam; m.tmux = %v", m.tmux)
 	}

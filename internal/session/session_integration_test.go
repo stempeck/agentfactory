@@ -3,13 +3,17 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stempeck/agentfactory/internal/config"
+	"github.com/stempeck/agentfactory/internal/tmux"
 )
 
 // These tests drive the REAL tmux server via mgr.Start()/Stop(). Under the
@@ -52,7 +56,7 @@ func TestStartAndStop(t *testing.T) {
 	}
 
 	entry := config.AgentEntry{Type: "interactive", Description: "test"}
-	mgr := NewManager(tmpDir, "testagent", entry)
+	mgr := newTestManager(tmpDir, "testagent", entry)
 	if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
 		t.Fatalf("SetWorktree: %v", err)
 	}
@@ -85,7 +89,7 @@ func TestSessionStart_RefusesWhenMemoryLow(t *testing.T) {
 	t.Cleanup(func() { checkAvailableMemoryFunc = orig })
 
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
-	mgr := NewManager("/tmp/factory", "testmem", entry)
+	mgr := newTestManager("/tmp/factory", "testmem", entry)
 	_ = mgr.SetWorktree("/tmp/worktree", "wt-abc123")
 
 	// Create the workspace directory so we don't fail on ErrNotProvisioned
@@ -115,144 +119,258 @@ func TestSessionStart_RefusesWhenMemoryLow(t *testing.T) {
 	}
 }
 
-func TestStart_SetsAnthropicModelEnv(t *testing.T) {
-	requireClaude(t)
-	tmpDir := t.TempDir()
-	wtPath := filepath.Join(tmpDir, ".worktrees", "wt-test")
+// quintet is the only env tmux carries for an af session; every config-derived value rides the
+// launch line into the process instead.
+var quintet = []string{"AF_ROOT", "AF_ROLE", "AF_ACTOR", "AF_WORKTREE", "AF_WORKTREE_ID"}
 
-	// Test with model set
-	t.Run("with_model", func(t *testing.T) {
-		agentDir := filepath.Join(wtPath, ".agentfactory", "agents", "testmodel")
-		if err := os.MkdirAll(agentDir, 0755); err != nil {
-			t.Fatalf("creating agent dir: %v", err)
-		}
+// afFamilyPrefixes are the key families af writes. A tmux-env key under one of them that is not
+// in the quintet is a config-derived copy the launch line can disagree with.
+var afFamilyPrefixes = []string{"AF_", "ANTHROPIC_", "OTEL_", "CLAUDE_CODE_", "GIT_AUTHOR_", "GIT_COMMITTER_", "GIT_CONFIG_"}
 
-		entry := config.AgentEntry{Type: "interactive", Description: "test", Model: "sonnet"}
-		mgr := NewManager(tmpDir, "testmodel", entry)
-		if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
-			t.Fatalf("SetWorktree: %v", err)
-		}
-
-		_ = mgr.Start()
-
-		running, _ := mgr.IsRunning()
-		if !running {
-			t.Skip("session did not start — tmux may not be available")
-		}
-		defer mgr.Stop()
-
-		out, err := exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_MODEL").Output()
-		if err != nil {
-			t.Fatalf("failed to read ANTHROPIC_MODEL from tmux: %v", err)
-		}
-		if !strings.Contains(string(out), "ANTHROPIC_MODEL=sonnet") {
-			t.Errorf("expected ANTHROPIC_MODEL=sonnet, got: %s", string(out))
-		}
-	})
-
-	// Test without model
-	t.Run("without_model", func(t *testing.T) {
-		agentDir := filepath.Join(wtPath, ".agentfactory", "agents", "testnomodel")
-		if err := os.MkdirAll(agentDir, 0755); err != nil {
-			t.Fatalf("creating agent dir: %v", err)
-		}
-
-		entry := config.AgentEntry{Type: "interactive", Description: "test"}
-		mgr := NewManager(tmpDir, "testnomodel", entry)
-		if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
-			t.Fatalf("SetWorktree: %v", err)
-		}
-
-		_ = mgr.Start()
-
-		running, _ := mgr.IsRunning()
-		if !running {
-			t.Skip("session did not start — tmux may not be available")
-		}
-		defer mgr.Stop()
-
-		out, err := exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_MODEL").CombinedOutput()
-		if err == nil && strings.Contains(string(out), "ANTHROPIC_MODEL=") {
-			t.Errorf("ANTHROPIC_MODEL should NOT be set when model is empty, got: %s", string(out))
-		}
+// isolateTmuxServer points every tmux call in this test at a private server started from this
+// process, so the panes inherit the stub `claude` on PATH and the factory's own server is never
+// touched. The login shell tmux starts resets PATH from /etc/profile, so HOME's .bash_profile
+// puts the stub back in front.
+func isolateTmuxServer(t *testing.T, binDir string) {
+	t.Helper()
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not available")
+	}
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("/bin/bash not available")
+	}
+	// t.TempDir paths carry the test name and can push the socket past the sun_path limit.
+	sockDir, err := os.MkdirTemp("", "afenv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	profile := "export PATH='" + binDir + "':\"$PATH\"\n"
+	if err := os.WriteFile(filepath.Join(home, ".bash_profile"), []byte(profile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMUX", "")
+	t.Setenv("TMUX_TMPDIR", sockDir)
+	t.Setenv("HOME", home)
+	t.Setenv("SHELL", "/bin/bash")
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "kill-server").Run()
+		_ = os.RemoveAll(sockDir)
 	})
 }
 
-func TestStart_SetsEndpointEnvVars(t *testing.T) {
-	requireClaude(t)
-	tmpDir := t.TempDir()
-	wtPath := filepath.Join(tmpDir, ".worktrees", "wt-test")
+// writeStubClaude installs a `claude` that records its environment as launch-<n>.env in envDir
+// and then stays alive, so Start's WaitForCommand sees a non-shell foreground command.
+func writeStubClaude(t *testing.T, binDir, envDir string) {
+	t.Helper()
+	script := "#!/bin/sh\n" +
+		"n=$(ls '" + envDir + "' | grep -c '^launch-')\n" +
+		"env > '" + envDir + "'/launch-$n.env.tmp && mv '" + envDir + "'/launch-$n.env.tmp '" + envDir + "'/launch-$n.env\n" +
+		"exec sleep 600\n"
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
 
-	t.Run("with_endpoint", func(t *testing.T) {
-		agentDir := filepath.Join(wtPath, ".agentfactory", "agents", "testendpoint")
-		if err := os.MkdirAll(agentDir, 0755); err != nil {
-			t.Fatalf("creating agent dir: %v", err)
+// awaitLaunchEnv returns the environment the n-th launch of the stub recorded.
+func awaitLaunchEnv(t *testing.T, envDir string, n int) map[string]string {
+	t.Helper()
+	path := filepath.Join(envDir, fmt.Sprintf("launch-%d.env", n))
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			env := map[string]string{}
+			for _, line := range strings.Split(string(data), "\n") {
+				if k, v, ok := strings.Cut(line, "="); ok {
+					env[k] = v
+				}
+			}
+			return env
 		}
+		if time.Now().After(deadline) {
+			t.Fatalf("launch %d never recorded its env at %s", n, path)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
 
-		entry := config.AgentEntry{
-			Type: "interactive", Description: "test",
-			BaseURL: "http://localhost:9999/v1/messages", AuthToken: "endpoint-tok-42",
-		}
-		mgr := NewManager(tmpDir, "testendpoint", entry)
-		if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
-			t.Fatalf("SetWorktree: %v", err)
-		}
+// TestStart_LaunchEnvInProcessNotTmux drives real tmux end to end: the config-derived env reaches
+// the launched process on the first Start and again after a respawn, and the tmux session env holds
+// no af-family key beyond the quintet for a manually opened window to inherit.
+func TestStart_LaunchEnvInProcessNotTmux(t *testing.T) {
+	binDir, envDir := t.TempDir(), t.TempDir()
+	writeStubClaude(t, binDir, envDir)
+	isolateTmuxServer(t, binDir)
 
-		_ = mgr.Start()
+	root := t.TempDir()
+	wtPath := filepath.Join(root, ".worktrees", "wt-env")
+	agent := "test-" + hashName(t.Name())
+	if err := os.MkdirAll(filepath.Join(wtPath, ".agentfactory", "agents", agent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mgr := newTestManager(root, agent, config.AgentEntry{Type: "autonomous", Description: "test"})
+	if err := mgr.SetWorktree(wtPath, "wt-env"); err != nil {
+		t.Fatalf("SetWorktree: %v", err)
+	}
+	mgr.c.ModelEnv = []config.EnvVar{
+		{Key: "ANTHROPIC_MODEL", Value: "claude-launchenv"},
+		{Key: "ANTHROPIC_BASE_URL", Value: "http://127.0.0.1:9/v1"},
+	}
+	mgr.c.GitAuthorName, mgr.c.GitAuthorEmail = "Launch Env", "launchenv@example.com"
+	mgr.c.BuildHost = &config.BuildHostConfig{Mode: "local"}
 
-		running, _ := mgr.IsRunning()
-		if !running {
-			t.Skip("session did not start — tmux may not be available")
-		}
-		defer mgr.Stop()
+	if err := mgr.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Stop() })
 
-		out, err := exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_BASE_URL").Output()
-		if err != nil {
-			t.Fatalf("failed to read ANTHROPIC_BASE_URL from tmux: %v", err)
+	want := map[string]string{
+		"AF_ROOT":            root,
+		"AF_ROLE":            agent,
+		"AF_ACTOR":           agent,
+		"AF_WORKTREE":        wtPath,
+		"AF_WORKTREE_ID":     "wt-env",
+		"ANTHROPIC_MODEL":    "claude-launchenv",
+		"ANTHROPIC_BASE_URL": "http://127.0.0.1:9/v1",
+		envGitAuthorName:     "Launch Env",
+		envGitAuthorEmail:    "launchenv@example.com",
+		"AF_BUILD_MODE":      "local",
+	}
+	assertProcessEnv := func(label string, env map[string]string) {
+		t.Helper()
+		for k, v := range want {
+			if env[k] != v {
+				t.Errorf("%s: process %s=%q, want %q", label, k, env[k], v)
+			}
 		}
-		if !strings.Contains(string(out), "ANTHROPIC_BASE_URL=http://localhost:9999/v1/messages") {
-			t.Errorf("expected ANTHROPIC_BASE_URL=http://localhost:9999/v1/messages, got: %s", string(out))
-		}
+	}
+	assertProcessEnv("Start", awaitLaunchEnv(t, envDir, 0))
 
-		out, err = exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_AUTH_TOKEN").Output()
-		if err != nil {
-			t.Fatalf("failed to read ANTHROPIC_AUTH_TOKEN from tmux: %v", err)
+	line, err := mgr.BuildStartupCommand()
+	if err != nil {
+		t.Fatalf("BuildStartupCommand: %v", err)
+	}
+	if err := tmux.NewTmux().RespawnPane(mgr.SessionID(), line); err != nil {
+		t.Fatalf("RespawnPane: %v", err)
+	}
+	assertProcessEnv("respawn", awaitLaunchEnv(t, envDir, 1))
+
+	out, err := exec.Command("tmux", "show-environment", "-t", mgr.SessionID()).Output()
+	if err != nil {
+		t.Fatalf("tmux show-environment: %v", err)
+	}
+	got := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		key, _, _ := strings.Cut(strings.TrimPrefix(line, "-"), "=")
+		got[key] = true
+	}
+	for _, key := range quintet {
+		if !got[key] {
+			t.Errorf("tmux env lacks quintet key %s:\n%s", key, out)
 		}
-		if !strings.Contains(string(out), "ANTHROPIC_AUTH_TOKEN=endpoint-tok-42") {
-			t.Errorf("expected ANTHROPIC_AUTH_TOKEN=endpoint-tok-42, got: %s", string(out))
+	}
+	for key := range got {
+		if slices.Contains(quintet, key) {
+			continue
 		}
+		for _, prefix := range afFamilyPrefixes {
+			if strings.HasPrefix(key, prefix) {
+				t.Errorf("tmux env carries af-family key %s beyond the quintet:\n%s", key, out)
+			}
+		}
+	}
+}
+
+// TestPR724_T9_RespawnScrubDropsStaleSessionCopiesKeepsGlobal mirrors a session an older af left
+// behind: its tmux session env still holds config-derived copies. Scrubbing them before the respawn
+// must hand the new process none of the stale values while a tmux-global value shows through.
+func TestPR724_T9_RespawnScrubDropsStaleSessionCopiesKeepsGlobal(t *testing.T) {
+	binDir, envDir := t.TempDir(), t.TempDir()
+	writeStubClaude(t, binDir, envDir)
+	isolateTmuxServer(t, binDir)
+
+	tm := tmux.NewTmux()
+	unsetter, ok := any(tm).(interface {
+		UnsetEnvironment(target string, keys ...string) error
 	})
+	if !ok {
+		t.Fatal("*tmux.Tmux has no UnsetEnvironment(target string, keys ...string) error, so a recycle cannot scrub stale session env")
+	}
 
-	t.Run("without_endpoint", func(t *testing.T) {
-		agentDir := filepath.Join(wtPath, ".agentfactory", "agents", "testnoendpoint")
-		if err := os.MkdirAll(agentDir, 0755); err != nil {
-			t.Fatalf("creating agent dir: %v", err)
+	root := t.TempDir()
+	wtPath := filepath.Join(root, ".worktrees", "wt-scrub")
+	agent := "test-" + hashName(t.Name())
+	if err := os.MkdirAll(filepath.Join(wtPath, ".agentfactory", "agents", agent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mgr := newTestManager(root, agent, config.AgentEntry{Type: "autonomous", Description: "test"})
+	if err := mgr.SetWorktree(wtPath, "wt-scrub"); err != nil {
+		t.Fatalf("SetWorktree: %v", err)
+	}
+	if err := mgr.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = mgr.Stop() })
+	awaitLaunchEnv(t, envDir, 0)
+
+	session := mgr.SessionID()
+	stale := map[string]string{
+		"AF_BUILD_HOST":       "stale-mac.example",
+		envGitAuthorName:      "stale-sess",
+		config.EnvEffortLevel: "stale-high",
+	}
+	for k, v := range stale {
+		if out, err := exec.Command("tmux", "set-environment", "-t", session, k, v).CombinedOutput(); err != nil {
+			t.Fatalf("seeding session-scope %s: %v: %s", k, err, out)
 		}
+	}
+	if out, err := exec.Command("tmux", "set-environment", "-g", envGitAuthorName, "global-op").CombinedOutput(); err != nil {
+		t.Fatalf("seeding global %s: %v: %s", envGitAuthorName, err, out)
+	}
+	paneOut, err := exec.Command("tmux", "display-message", "-p", "-t", session, "#{pane_id}").Output()
+	if err != nil {
+		t.Fatalf("resolving pane id: %v", err)
+	}
+	pane := strings.TrimSpace(string(paneOut))
 
-		entry := config.AgentEntry{Type: "interactive", Description: "test"}
-		mgr := NewManager(tmpDir, "testnoendpoint", entry)
-		if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
-			t.Fatalf("SetWorktree: %v", err)
+	if err := unsetter.UnsetEnvironment(pane, mgr.StaleTmuxEnvKeys()...); err != nil {
+		t.Fatalf("UnsetEnvironment(%s): %v", pane, err)
+	}
+	line, err := mgr.BuildStartupCommand()
+	if err != nil {
+		t.Fatalf("BuildStartupCommand: %v", err)
+	}
+	if err := tm.RespawnPane(session, line); err != nil {
+		t.Fatalf("RespawnPane: %v", err)
+	}
+	env := awaitLaunchEnv(t, envDir, 1)
+
+	for k, v := range stale {
+		if env[k] == v {
+			t.Errorf("respawned process inherited the stale session copy %s=%q", k, v)
 		}
+	}
+	if got := env[envGitAuthorName]; got != "global-op" {
+		t.Errorf("respawned process %s=%q, want the tmux-global %q to show through once the session copy is gone", envGitAuthorName, got, "global-op")
+	}
 
-		_ = mgr.Start()
-
-		running, _ := mgr.IsRunning()
-		if !running {
-			t.Skip("session did not start — tmux may not be available")
+	out, err := exec.Command("tmux", "show-environment", "-t", session).Output()
+	if err != nil {
+		t.Fatalf("tmux show-environment: %v", err)
+	}
+	for _, entry := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		key, _, _ := strings.Cut(strings.TrimPrefix(entry, "-"), "=")
+		if slices.Contains(quintet, key) {
+			continue
 		}
-		defer mgr.Stop()
-
-		out, err := exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_BASE_URL").CombinedOutput()
-		if err == nil && strings.Contains(string(out), "ANTHROPIC_BASE_URL=") {
-			t.Errorf("ANTHROPIC_BASE_URL should NOT be set when endpoint is empty, got: %s", string(out))
+		for _, prefix := range afFamilyPrefixes {
+			if strings.HasPrefix(key, prefix) {
+				t.Errorf("tmux session env still lists af-family key %s after the scrub:\n%s", key, out)
+			}
 		}
-
-		out, err = exec.Command("tmux", "show-environment", "-t", mgr.SessionID(), "ANTHROPIC_AUTH_TOKEN").CombinedOutput()
-		if err == nil && strings.Contains(string(out), "ANTHROPIC_AUTH_TOKEN=") {
-			t.Errorf("ANTHROPIC_AUTH_TOKEN should NOT be set when endpoint is empty, got: %s", string(out))
-		}
-	})
+	}
 }
 
 func TestStop_CleansUpGateLocks(t *testing.T) {
@@ -275,7 +393,7 @@ func TestStop_CleansUpGateLocks(t *testing.T) {
 	}
 
 	entry := config.AgentEntry{Type: "interactive", Description: "test"}
-	mgr := NewManager(tmpDir, "testagent", entry)
+	mgr := newTestManager(tmpDir, "testagent", entry)
 	if err := mgr.SetWorktree(wtPath, "wt-test"); err != nil {
 		t.Fatalf("SetWorktree: %v", err)
 	}

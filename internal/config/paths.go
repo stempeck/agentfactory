@@ -19,6 +19,7 @@ func MessagingConfigPath(root string) string  { return filepath.Join(root, dotDi
 func DispatchConfigPath(root string) string   { return filepath.Join(root, dotDir, "dispatch.json") }
 func StartupConfigPath(root string) string    { return filepath.Join(root, dotDir, "startup.json") }
 func ModelsConfigPath(root string) string     { return filepath.Join(root, dotDir, "models.json") }
+func PluginsConfigPath(root string) string    { return filepath.Join(root, dotDir, "plugins.json") }
 func TelemetryConfigPath(root string) string  { return filepath.Join(root, dotDir, "telemetry.json") }
 func TelemetryDir(root string) string         { return filepath.Join(root, dotDir, "telemetry") }
 func StatuslineConfigPath(root string) string { return filepath.Join(root, dotDir, "statusline.json") }
@@ -32,6 +33,8 @@ func HooksDir(root string) string             { return filepath.Join(root, dotDi
 func GitHooksDir(root string) string         { return filepath.Join(root, dotDir, "githooks") }
 func StoreDir(root string) string            { return filepath.Join(root, dotDir, "store") }
 func FormulasDir(root string) string         { return filepath.Join(StoreDir(root), "formulas") }
+func PluginsDir(root string) string          { return filepath.Join(StoreDir(root), "plugins") }
+func IntegrationsDir(root string) string     { return filepath.Join(StoreDir(root), "integrations") }
 func BuildHostConfigPath(root string) string { return filepath.Join(root, dotDir, "build-host.json") }
 func AgentsMdPath(root string) string        { return filepath.Join(root, dotDir, "AGENTS.md") }
 

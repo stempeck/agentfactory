@@ -28,6 +28,12 @@ type Payload struct {
 		ID          string `json:"id"`
 		DisplayName string `json:"display_name"`
 	} `json:"model"`
+	// Effort is the level the host reports for the session, which is not necessarily the level
+	// configured for it. The host omits it for a model that takes no effort setting (observed on
+	// 2.1.281 for Haiku 4.5), so empty is the normal absent signal.
+	Effort struct {
+		Level string `json:"level"`
+	} `json:"effort"`
 	Workspace struct {
 		CurrentDir string `json:"current_dir"`
 		ProjectDir string `json:"project_dir"`

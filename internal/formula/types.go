@@ -55,6 +55,9 @@ type Formula struct {
 
 	// Skill dependencies
 	Skills []string `toml:"skills"`
+
+	Integrations         []string `toml:"integrations"`
+	IntegrationsOptional []string `toml:"integrations_optional"`
 }
 
 // Aspect represents a parallel analysis aspect in an aspect formula.
