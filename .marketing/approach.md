@@ -13,6 +13,13 @@ here is a scar, not a hypothetical. Follow the steps in order. When a step says 
 - **Repo:** github.com/stempeck/agentfactory. Branch protection on main. You open PRs;
   ONLY the operator merges them. Never merge a PR, never push to main — no exceptions,
   regardless of urgency or CI status.
+- **Review surface = GitHub, always (learned cycle-af-d7166cc1).** The operator reviews ALL
+  cycle output — Tier A changes AND Tier B drafts — on GitHub, via a **PR** (or an issue that
+  contains the content inline). He will NOT open files in an agent worktree/branch. His words:
+  "I'm not going to go into the agent branch, it needs to communicate what I need via PR or
+  Github issues." So: push the branch and open the review PR EARLY (at the draft-approval gate),
+  present the drafts IN the PR (inline), and take his READY/EDITED/SKIP + edits as PR replies or
+  pushes. NEVER ask him to edit a `## Operator Decision` form inside a worktree file.
 - **Auth preflight:** `gh api user -q .login` must return `stempeck`. Repo edits need `repo`
   scope; profile edits need `user` scope. If a call 404s with a scope hint, tell the operator to
   run `gh auth refresh -h github.com -s <scope>` — you cannot do the browser dance for him.
@@ -43,6 +50,22 @@ and-chained long sentences, question hooks, Q&A rhythm ("Crash? It resumes."), c
 are DEFECTS in his content — they read as AI and undercut the "I built this" claim. When he
 edits your draft, his edit becomes the new calibration source. Before drafting anything, reread
 his latest published finals (cycle-1-linkedin.md top block, the live Medium article).
+
+**Voice calibration — 2026-09-22 (PR #114 review, cycle af-d7166cc1).** Glenn's inline review of the
+token-economics drafts is now the sharpest voice signal we have. What he cut, and the standing rule:
+- NO self-congratulatory emotion attached to features — "the part I'm proudest of," "my favorite
+  thing in the release," "the honesty valve." He named it "randomized happiness" and "AI slopping
+  emotions alongside environment variables." Features earn their place by WHY they exist and what the
+  operator gets, not by how the author feels about them.
+- NO celebrating non-features — a "What it won't do" section, "honest about what it can't measure,"
+  the null-vs-zero pitch. "We did nothing and were honest about it" is not a win. State a genuine limit
+  once, inline, as an operator benefit ("stays out of your way on cloud") — never as its own set piece.
+- NO reused signature framings — "in my factory of AI agents" is spent; don't open every piece with it.
+- LEAD with the switches an operator actually types and the outcome they get. For this release that was
+  `af telemetry on` / `af tokenomics on` / `af improvement on` + `af telemetry compare`: collect the
+  numbers, spend them to run leaner, prove a change helped.
+- SHOW IT. He wants real screenshots/output of outcomes ("the amazing outcomes we get TODAY"), not
+  prose generalities and buzzwords. Capture live command output; render figures on approval.
 
 **Honesty:** verify every URL, flag, command, and number against code or a live fetch before it
 enters content; omit and flag what you can't verify. State limitations plainly. Be precise, not
@@ -161,6 +184,7 @@ files left in the working tree.
 | Draft file lost content after your edit | this dir has no git history | additive replacement only; keep superseded text as reference |
 | Edit tool rejects: "file modified since read" | Glenn edited while you worked | re-read, apply against HIS text; his edits win |
 | Your rewrite "sounds like AI" | you smoothed his cadence | revert to his words; mechanics-only; enumerate changes |
+| Operator: "am I supposed to reach into the worktree?" | you pointed him at a worktree file path for review | push the branch, open a PR, present the content IN the PR; deliver ALL review on GitHub, never a worktree path (cycle-af-d7166cc1) |
 
 ## Machine-read sections (marketing-cycle v2 compatibility)
 

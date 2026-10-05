@@ -3,6 +3,55 @@
 Notable changes to agentfactory. The project began 2026-05-01; snapshot tags `V001`–`V012`
 mark pre-release checkpoints. `v0.1.0` is the first formal release.
 
+## v0.4.0 — 2026-09-17
+
+Token economics. The factory can now **see, bound, and prove** what a run costs its own
+context window — the questions you couldn't answer before: is this run normal, and did my
+change actually help? Off by default. (#111)
+
+### See — generation telemetry
+
+- Every closed step records what it *generated* (output, thinking, peak, sub-agent spend)
+  beside its timing, with unmeasured figures kept as `null`, never `0` (#111)
+- `af telemetry band` judges each closed step against its learned medians and prints the
+  tolerance band it used; `af telemetry rebuild` re-derives that learned data from the records
+  so it survives record rotation (#111)
+
+### Bound — admission control, adaptive effort, context budgets
+
+- Sub-agent admission control: a model profile can declare its shared backend pool
+  (`AF_BACKEND_POOL_TOKENS`), and a child launch that would oversubscribe the pool is refused
+  *before it starts*, with the arithmetic shown — through the permission channel, never a
+  non-zero exit. A child-footprint floor (`AF_BACKEND_CHILD_FLOOR_TOKENS`) guards the first
+  child near the ceiling and `AF_DISABLE_PARALLEL_SUBAGENTS` enforces a hard semaphore of one.
+  Fails open on any resolution error; structurally inert on any profile that declares no pool
+  (every cloud profile) (#111)
+- Adaptive effort: a step that historically over-generates gets a reduced effort level on its
+  next session, chosen from history, never above the profile's ceiling, and bounded so a run
+  can't spend itself relaunching; self-edits from the improvement loop can't buy tokens by
+  deleting a gate (#111)
+- Session-start context budgets: formula context, mail, and memory each get their own budget,
+  so a large step body can no longer evict your mail, and each message reaches a session once
+  (#111)
+
+### Prove — the compare verb
+
+- `af telemetry compare` is the only verb allowed to claim a change worked — it weighs two
+  arms of runs and *voids* the verdict rather than fabricating one when the arms weren't held
+  constant; `af tokenomics status` names every reason the surface is inert (#111)
+
+### Also in this release
+
+- Recurring dispatch: `dispatch.json` accepts a `crons` list (name, agent, cadence, vars);
+  schedules survive restarts, back off with a bound, validate against the target formula at
+  write time, fire without GitHub access, and appear in `af dispatch status` (#111)
+- The fidelity grader is shown every intervention taken during a turn and grades compliance
+  accordingly; grader sub-processes no longer fire the agent's hooks or take its session id;
+  the watchdog no longer recycles an agent told to wait (#111)
+- mergepatrol counts a PR merged only when GitHub says so, not local git (#111)
+- Two new skills (10 → 12): `/improve-solution` and `/perfeval-agent`, both shipped by
+  `af install`; new operator guide `USING_TOKENOMICS.md` (#111)
+
 ## v0.3.0 — 2026-08-23
 
 Self-recovery, durable memory, and honest surfaces. The factory now recovers from context

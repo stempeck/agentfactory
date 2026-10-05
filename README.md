@@ -246,7 +246,7 @@ Twenty-four formulas ship with the factory (see [docs/formulas.md](docs/formulas
 
 ## Included Skills
 
-Ten skills are embedded and written to `.claude/skills/` during `af install`:
+Twelve skills are embedded and written to `.claude/skills/` during `af install`:
 
 | Skill | Purpose |
 |-------|---------|
@@ -260,6 +260,8 @@ Ten skills are embedded and written to `.claude/skills/` during `af install`:
 | `/six-sigma-challenge` | Stress-test a completed review for what would reach six-sigma quality |
 | `/agentic-skill-eval` | Evaluate a skill library to find which SKILL.md files would make valuable agents |
 | `/improve-agent` | Improve an agent's formula TOML from post-execution learnings |
+| `/improve-solution` | Propagate a design conversation's decisions into the derived design docs, then peer-review the result |
+| `/perfeval-agent` | Find an agent's single highest-impact performance cost from its telemetry and transcripts |
 
 ## Web Console (optional)
 
@@ -334,11 +336,24 @@ af telemetry status                 # gate state, config, and export posture
 af telemetry report                 # per-step latency table for every agent
 af telemetry report --agent NAME    # or scope to one agent / --instance ID
 af telemetry usage                  # token usage and session metrics from the backend
+af telemetry band                   # judge each closed step against its learned medians (--json for the band used)
+af telemetry compare                # did a change help? a verdict over two arms of runs
+af telemetry rebuild                # rebuild the learned-data cache from the records it derives from
+af tokenomics status                # token-economics policy surface: names every reason it is inert
 ```
 
 `report` reads local records; `usage` queries the backend (it always exits 0 — branch on
 `.state`). Both accept `--json` for machine-readable output. Nothing is recorded unless you
 turn telemetry on.
+
+Beyond measuring cost, agentfactory can **bound and prove** it. Sub-agent admission control
+refuses a child launch that would oversubscribe a declared backend pool *before it starts*;
+adaptive effort trims the effort level of a step that historically over-generates; and
+`af telemetry compare` is the only verb allowed to claim a change worked — it *voids* rather
+than fabricates a verdict when the two arms of runs weren't held constant. The whole surface
+is **off by default** and **structurally inert on any profile that declares no backend pool**
+(so it can never refuse a launch on a cloud profile). See
+[USING_TOKENOMICS.md](USING_TOKENOMICS.md) for the full model.
 
 The optional [web console](#web-console-optional) surfaces the same data in a **Telemetry** view:
 per-step timing (Duration), per-run token usage, and session metrics — with a banner that reports
@@ -398,6 +413,10 @@ af done                                                   # complete and advance
 af telemetry on|off|status                    # toggle/inspect run measurement (off by default)
 af telemetry report [--agent N|--instance I]  # per-step latency table (local records)
 af telemetry usage [--json]                   # token usage + session metrics (backend)
+af telemetry band [--json]                    # judge each closed step against its learned medians
+af telemetry compare [--json]                 # did a change help? verdict over two arms (only verb that claims a win)
+af telemetry rebuild                          # rebuild the learned-data cache from its records
+af tokenomics on|off|status                   # token-economics policy surface (off by default; status says why it is inert)
 af improvement on|off [--agent <name>]        # continuous-improvement hook (AND-gated, off by default)
 af config models show                         # model registry for multi-provider agents (secrets redacted)
 af config fingerprint --json                  # digest of the config schema this binary speaks (detect skew)
@@ -416,8 +435,6 @@ af fidelity on|off|status [--agent <name>]    # per-agent or factory-wide qualit
 
 - **Prebuilt release binaries** (GoReleaser) so `af` installs without a Go toolchain
 - **Richer shipped formula library** — more turnkey specialist agents out of the box
-- **Gate quality improvements** — reduce fidelity-gate false positives on passive steps ([#75](https://github.com/stempeck/agentfactory/issues/75))
-- **Default dispatch workflow** included with the factory ([#73](https://github.com/stempeck/agentfactory/issues/73))
 - **Web console growth** — deeper agent detail and richer per-screen views
 
 Have a use case these don't cover? [Open an issue](https://github.com/stempeck/agentfactory/issues/new/choose).
