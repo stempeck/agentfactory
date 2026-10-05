@@ -125,10 +125,9 @@ Learn it, Live it, Share it!
 
 ## Feedback / Operator Decision
 Tier B - YOU publish this by pasting it into Medium; I never post. This decision approves the COPY.
-- Decision: ______
-  (READY to approve for publishing; EDITED — I changed the text, re-check mechanics only;
-   SKIP to drop this piece this cycle.)
-- Notes: ______
-  (Open calls left to you: title choice (primary + 2 alts above); whether to keep FIGURE 3, the
-   models-check excerpt, given it shows gateway internals even with model pins redacted; and the
-   S6 release question — a version tag would give this piece a "vX.Y.Z is out" anchor.)
+- Decision: READY — operator `stempeck`, verified on issue #120 (2026-10-05T23:47:30Z).
+  Approved as written; no edits.
+- Notes: Bare READY = approve-as-written, so the open calls resolve to defaults: primary title
+  kept ("Three things my agent factory couldn't do last month."), FIGURE 3 (models-check) kept.
+  The S6 release-tag question is a merge/release decision — carried to step 17 (deliver), not a
+  copy change.

@@ -24,9 +24,7 @@ Read more: <MEDIUM ARTICLE URL — paste after publishing the Medium piece> | Ge
 
 ## Feedback / Operator Decision
 Tier B - YOU publish this by pasting it into LinkedIn; I never post. This decision approves the COPY.
-- Decision: ______
-  (READY to approve for publishing; EDITED — I changed the text, re-check mechanics only;
-   SKIP to drop this piece this cycle.)
-- Notes: ______
-  (~150 words as drafted. Footer's Medium URL gets filled after the Medium piece is live - Phase 5
-   sequences Medium first.)
+- Decision: READY — operator `stempeck`, verified on issue #120 (2026-10-05T23:47:30Z).
+  Approved as written; no edits.
+- Notes: ~150 words as drafted. Footer's Medium URL gets filled after the Medium piece is live -
+  Phase 5 sequences Medium first.
