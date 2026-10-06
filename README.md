@@ -114,6 +114,7 @@ the **Web Console (optional)** section below and [`web/README.md`](web/README.md
 ```bash
 cd ~/projects/agentfactory/
 ./quickstart.sh           # full setup — installs af, Claude Code, configures workspace
+./quickstart.sh --litellm --litellm-auth=codex-subscription   # also stand up the model gateway on your ChatGPT subscription (installs the Codex CLI and runs its device login)
 ```
 
 ### Authenticate Claude Code
@@ -233,20 +234,20 @@ See `USING_AGENTFACTORY.md` for preconditions, data-safety, and `--no-build` not
 
 ## Included Formulas
 
-Twenty-four formulas ship with the factory (see [docs/formulas.md](docs/formulas.md) for the format):
+Twenty-six formulas ship with the factory (see [docs/formulas.md](docs/formulas.md) for the format):
 
 | Family | Formulas | Purpose |
 |---------|----------|---------|
 | Implementation | `rapid-implement`, `rapid-increment`, `fable-implement`, `fable-increment` | Structured feature implementation with quality gates |
-| Design | `design`, `design-v3`, `design-v7`, `design-plan-impl`, `rapid-soldesign-plan`, `web-design`, `multi-agent` | Design exploration with constraint verification; `multi-agent` coordinates persistent analysts for deep architecture questions |
+| Design | `design`, `design-v3`, `design-v7`, `design-plan-impl`, `rapid-soldesign`, `rapid-soldesign-plan`, `web-design`, `multi-agent` | Design exploration with constraint verification; `rapid-soldesign` delivers a solution design that ends at the design PR (no implementation plan); `multi-agent` coordinates persistent analysts for deep architecture questions |
 | Review | `mergepatrol`, `ultra-review`, `fable-review`, `fable-secure` | PR review, merge workflow, deep multi-pass review, and security-program review |
 | Root cause | `rootcause-all`, `investigate` | Failure investigation and verified root-cause analysis |
 | Multi-provider | `gpt-fable-review`, `gpt-rootcause-all` | Review and root-cause variants that run on OpenAI models via the gateway (see `af config models`) |
-| Utility | `factoryworker`, `minimalworker`, `gherkin-breakdown`, `github-issue`, `marketing-cycle` | General workers, scenario breakdown, issue authoring, and a self-marketing cycle for the repo the factory serves |
+| Utility | `factoryworker`, `minimalworker`, `gherkin-breakdown`, `github-issue`, `marketing-cycle`, `lineage` | General workers, scenario breakdown, issue authoring, a self-marketing cycle for the repo the factory serves, and `lineage` — an inheritance audit that tests the memory-vault notes an agent inherited before it acts on them, keeping or expiring each |
 
 ## Included Skills
 
-Twelve skills are embedded and written to `.claude/skills/` during `af install`:
+Thirteen skills are embedded and written to `.claude/skills/` during `af install`:
 
 | Skill | Purpose |
 |-------|---------|
@@ -255,6 +256,7 @@ Twelve skills are embedded and written to `.claude/skills/` during `af install`:
 | `/documentation-update` | Audit and update a documentation file (.md) against the codebase, citing source lines |
 | `/architecture-docs` | Generate or refresh the `/docs/architecture/` corpus, grounded in code and git history |
 | `/architecture-elevation` | Validate the architectural altitude of a root cause or proposed fix before review |
+| `/architecture-diagram` | Turn a design doc into C4 and Mermaid diagrams in which every element cites a line of the document |
 | `/rapid-implement` | Lean, complexity-scaled implementation using sub-agents and checkpoints |
 | `/rootcause-review` | Scientific peer review of a root-cause analysis, verifying every claim independently |
 | `/six-sigma-challenge` | Stress-test a completed review for what would reach six-sigma quality |
@@ -430,6 +432,26 @@ af memory add|list|show|status                # durable learning vault; survives
 af statusline on|off|status|render            # session statusline: model, branch, context-fill bar, spend
 af fidelity on|off|status [--agent <name>]    # per-agent or factory-wide quality-gate toggle (every write logged)
 ```
+
+### Plugins & the model gateway
+
+```bash
+af plugin list                                # enumerate acquired plugins + per-formula install status (read-only)
+af plugin install <name>...                   # validate, stage, record, rebuild, and verify acquired plugin(s)
+af plugin verify [--all]                      # check plugin agents are registered, embedded, and hash-clean
+af plugin check                               # run installed integrations' health checks
+af plugin remove <name>                       # uninstall an integration: drop its record + snapshots (operator-only)
+af gateway auth import [--from <path>]        # import an authenticated Codex CLI session (ChatGPT subscription)
+af gateway auth status [--json]               # report the gateway credential handle's state (never prints a token)
+```
+
+Add a third-party agent or tool from a git repository with consent and recorded provenance
+(source, commit, content hashes); install is the consent step, and `af plugin verify` tells
+you later whether anything drifted. A name that would shadow a shipped agent, `manager` or
+`supervisor` is refused, and an agent whose role template is not built into the binary is
+refused at launch. See [USING_PLUGINS.md](USING_PLUGINS.md). To run the model gateway on a
+ChatGPT subscription instead of an API key, install with `--litellm-auth=codex-subscription`
+(see Installation) and manage the credential with `af gateway auth`.
 
 ## Roadmap
 

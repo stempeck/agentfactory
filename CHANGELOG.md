@@ -3,6 +3,84 @@
 Notable changes to agentfactory. The project began 2026-05-01; snapshot tags `V001`–`V012`
 mark pre-release checkpoints. `v0.1.0` is the first formal release.
 
+## Unreleased
+
+Plugins, a ChatGPT-subscription gateway, and relaunches that run on exactly the config you
+set. Extend the factory with third-party agents and tools behind a trust boundary, bill the
+model gateway to a ChatGPT subscription, and get every relaunch to honor the configuration
+you declared instead of whatever an earlier launch left behind. (#117)
+
+### Extend — plugins and integrations
+
+- Add a third-party agent from a git repository: `af plugin install <name>` validates,
+  stages, records and verifies it; `af plugin list` reviews what's acquired; `af plugin
+  verify` reports drift against recorded provenance (source, commit, content hashes).
+  Install is the consent step, installed agents survive redeploys, and a name that would
+  shadow a shipped / `manager` / `supervisor` agent — or a role template not built into the
+  binary — is refused. New operator guide `USING_PLUGINS.md`. (#117)
+- Give agents tools: an integration installs from a pinned upstream commit as a read-only
+  snapshot; literal credentials, reserved env keys and toolchain names are refused; formulas
+  declare required/optional integrations and reference a plugin's skills as `plugin:skill`;
+  a formula whose required tool is missing, drifted, unhealthy or down is refused before any
+  bead or worktree exists; `af plugin check` runs health checks; `af up` and the watchdog
+  supervise integration services without ever killing a session. (#117)
+- Unattended agents stop hanging on prompts: in a session bound to an integration,
+  permission prompts and MCP input requests are answered "no" at once and the manager is
+  mailed what was refused. (#117)
+
+### Bill the model gateway to a ChatGPT subscription
+
+- `quickstart.sh --litellm --litellm-auth=codex-subscription` (or `af install --agents
+  --litellm --litellm-auth=codex-subscription`) installs the Codex CLI with consent, runs
+  the device login before any agent is taken down, then routes every lane through the
+  subscription; a compatibility callback fixes the "System messages are not allowed"
+  rejection that otherwise breaks every Claude Code turn on that route. (#117)
+- `af gateway auth import` / `af gateway auth status` manage and audit the credential,
+  stored readable by its owner only; neither command ever prints a token. (#117)
+- `af config models check --live` now sends the same kind of request a real session sends
+  (streamed, block-array system prompt), reports a timeout separately, and quotes the
+  gateway's own error text instead of a bare 500; `--first` gives one quick verdict line.
+  Bootstrap restarts the gateway whenever its config, auth mode, credential, litellm version
+  or port has changed; a port held by a process af did not start is refused; `af up` and the
+  watchdog bring back a gateway that has gone missing. (#117)
+
+### Every relaunch runs on exactly the config you set
+
+- Handoffs, watchdog and recovery respawns, `af sling` and the dispatcher now build the
+  launch the same way `af up` does. Removing a build host or setting a git identity takes
+  effect on the next recycle; build delegation reaches agents started by `af sling` and the
+  dispatcher; no auth token sits in the tmux environment; a window opened by hand no longer
+  inherits an agent's endpoint or model; a malformed `build-host.json` warns instead of
+  aborting every agent. (#117)
+- Effort levels mean what they say: turning tokenomics off no longer wipes the effort level
+  declared in `models.json`; a reduced-effort launch is recorded on the session, survives
+  formula completion, never leaks into a later session and cannot be forged by a profile;
+  the grader is told of a reduction only when the session it is grading actually ran reduced;
+  `af fidelity status` gains `interventions` and `effort` columns, and the statusline shows
+  effort next to the model. (#117)
+
+### Also in this change
+
+- `af up` leaves a running agent alone — it prints `already running` and changes nothing
+  (with `--model` it tells you the model was not applied); a zombie session (tmux alive,
+  claude dead) is still relaunched. (#117)
+- The dispatcher records a refused dispatch with its reason, backs off before any retry, and
+  shows it in `af dispatch status` as `refused (<class>, Nx)` without counting toward the
+  attempts ceiling. (#117)
+- Shipped formulas no longer run their own prose as shell: a test reads the shell embedded
+  in every shipped formula and fails on constructs that would execute or break when the
+  orchestrator runs them; rapid-soldesign-plan, design-plan-impl, design-v7, fable-increment
+  and fable-review fix their measured failures. (#117)
+- New formulas `rapid-soldesign` (a rapid solution design that ends at the design PR, with no
+  implementation plan) and `lineage` (an inheritance audit that tests the memory-vault notes
+  an agent inherited before it acts on them, keeping or expiring each), and a new
+  `architecture-diagram` skill (a design doc → C4 and Mermaid diagrams in which every element
+  cites a line of the document). Shipped formulas 24 → 26; skills 12 → 13. (#117)
+- New ADR-024 (gateway protocol shims and the LiteLLM pin gate) and ADR-025 (the plugin
+  repository trust boundary); updates to `USING_LITELLM.md`, `USING_MODELS.md`,
+  `USING_TOKENOMICS.md`, `USING_AGENTFACTORY.md`, `USING_RECOVERY.md`, `USING_TELEMETRY.md`
+  and `CLAUDE.md`. (#117)
+
 ## v0.4.0 — 2026-09-17
 
 Token economics. The factory can now **see, bound, and prove** what a run costs its own
