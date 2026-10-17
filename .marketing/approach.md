@@ -249,12 +249,22 @@ gate fails any undeclared file):
 - cycle-af-c967c569-screen-settings.png (committed — cycle-3 console-tour screenshot)
 - cycle-af-c967c569-screen-sling.png (committed — cycle-3 console-tour screenshot)
 - cycle-af-c967c569-screen-telemetry.png (committed — cycle-3 console-tour screenshot)
+- cycle-af-91fe0795-screen-plugin-verify.png (committed — cycle af-91fe0795 Medium figure, live-embedded)
+- cycle-af-91fe0795-screen-gateway-auth.png (committed — cycle af-91fe0795 Medium figure, live-embedded)
+- cycle-af-91fe0795-screen-models-check.png (committed — cycle af-91fe0795 Medium figure, live-embedded)
+- cycle-af-d7166cc1-telemetry-report.png (committed — cycle af-d7166cc1 Medium figure source; retro-declared)
+- cycle-af-d7166cc1-tokenomics-status.png (committed — cycle af-d7166cc1 Medium figure source; retro-declared)
   <!-- The 8 cycle-3 screenshots are real Playwright captures produced by Phase 4/6 (operator
        directed actual screens, #105) and embedded in the live Medium article; they're declared
        here only because the cleanup manifest gate's cycle-image pattern recognizes
        `cycle-*-diagram.png` but not the `-screen-*.png` naming this cycle used. Formula-improvement
        filed: teach the gate a `cycle-*-screen-*.png` (or general `cycle-*.png`) pattern so future
-       console-tour cycles don't accrete per-cycle screenshot lines here. -->
+       console-tour cycles don't accrete per-cycle screenshot lines here.
+       Same gap hit cycle af-91fe0795 (3 `-screen-*.png` Medium figures) and surfaced two
+       pre-existing undeclared figure PNGs from cycle af-d7166cc1 (telemetry-report, tokenomics-status),
+       now retro-declared. The regenerable paste vehicle cycle-af-d7166cc1-paste.html — a prior-cycle
+       straggler that escaped its own Phase-6 cleanup — was deleted here, not declared. cycle-*-paste.html
+       files are NEVER declared here: they are regenerable paste vehicles, deleted at Phase 6 / cleanup. -->
 
 
 ## Sign-off

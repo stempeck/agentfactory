@@ -232,3 +232,74 @@ Point by point, each with evidence:
   `.marketing/` cycle artifacts alongside README/CHANGELOG — matches committed mode.
 
 SELF-VERIFY VERDICT: PASS
+
+## PHASE-6 — Verify every published page (2026-10-06)
+
+Recorded URLs (from `cycle-af-91fe0795-publish-checklist.md`): Medium = published;
+LinkedIn = SKIP (operator chose "Medium only", verified on #121). LinkedIn carries no page,
+so nothing to verify there — recorded SKIP below; the cycle is not all-SKIP, so this step runs.
+
+**Verification Capability (runbook): "Screenshots available (Playwright)." Degraded this run —
+noted, compensated per step directive.** Live-page screenshot could NOT be captured:
+- Playwright MCP has no Chrome binary here (`/opt/google/chrome/chrome` not found).
+- The prior session's scripted chromium reached a Cloudflare interlock ("Sorry, you have
+  been blocked — You are unable to access medium.com"; captured in `.phase6-medium.png`,
+  now deleted) — the live article page refuses automated browsers.
+- `WebFetch` on the live URL returns **HTTP 403 Forbidden** (server-side fetch also blocked).
+Compensation (per step: "note the degraded mode and compensate with full-content fetch"):
+Medium RSS `content:encoded` (`https://medium.com/feed/@glennstempeck`), re-fetched FRESH
+this session — **HTTP 200, 45586 bytes**, article present — which returns the COMPLETE
+published article HTML (more complete than a logged-out metered live view), plus direct
+HTTP probes that every content image resource resolves.
+
+### URL 1 — Medium (long-form)
+`https://medium.com/@glennstempeck/three-things-my-agent-factory-couldnt-do-last-month-4c98d4a7c1b4`
+Full-content source: feed `content:encoded`, title matched = "Three things my agent factory
+couldn't do last month" (curly apostrophe rendered, not literal). HTML_LEN 7402.
+
+1. **Literal `##`, `**`, backtick fences, or raw `[text](url)` visible? — none.**
+   Scanned both the raw `content:encoded` HTML and the tag-stripped visible text:
+   `**` = 0, `## … #{2,6}` heading markers = 0, ` ``` ` fences = 0, raw `[text](url)` = 0
+   (all four, both views). The 3 command listings render as proper `<pre>` code blocks, the
+   section headers as proper `<h3>` ("1. af plugin install …", "2. af gateway auth import …",
+   "3. Relaunches that run on exactly the config you set", "Get it"), and the repo/doc links
+   render as auto-linked plain URLs ("github.com/stempeck/agentfactory", "USING_PLUGINS.md",
+   "USING_LITELLM.md") — not raw markdown link syntax. `&quot;`/`&#39;` in the raw feed are
+   HTML entities that render as ordinary quotes/apostrophes, not visible markup.
+2. **Missing, duplicated, or placeholder images? Stray alt-text paragraphs? — none.**
+   Exactly 3 content `<figure>` images, all distinct Medium CDN assets, each probed live:
+   - `1*w-EfxrBWJ7UDAsqnMtPAdg.png` → HTTP 200, image/png, 96954 bytes (plugin verify)
+   - `1*PCTJhYh1Jtd2cekojqviOA.png` → HTTP 200, image/png, 87152 bytes (gateway auth)
+   - `1*Lex0jvkOgYKT9CdIRBpu8g.png` → HTTP 200, image/png, 203324 bytes (models check)
+   None broken/placeholder; no duplicate CDN IDs. `alt=""` on all three (empty — no stray
+   alt-text paragraph rode along). The only other `<img>` is Medium's 1×1 `stat?event=…`
+   tracking pixel, not content.
+3. **Subtitle sitting as a body paragraph, or a stray leading `# `? — none.**
+   The subtitle ("Install a third-party agent behind a trust boundary … the multi-agent
+   orchestration CLI for Claude Code.") is the leading `<p><em>` italic — Medium's RSS
+   standard export of the small-T subtitle field. Its distinctive phrase "behind a trust
+   boundary" occurs EXACTLY ONCE in the whole content (so it is not also duplicated as a body
+   paragraph). Content begins with the subtitle word ("Install…"), no literal leading `# `.
+4. **Repo surface checks — all green.**
+   - `gh repo view --json homepageUrl` = the Medium article URL above (exact match).
+   - `gh api repos/stempeck/agentfactory --jq .topics` contains every Positioning discovery
+     topic: `claude-code`, `ai-agents`, `multi-agent-systems`, `agentic-ai` (18 topics total).
+   - `gh api "/search/repositories?q=topic:claude-code+agentfactory"` lists
+     `stempeck/agentfactory` (indexed under the primary topic).
+
+Findings this URL: NONE → no "search for / replace with" pairs to post on the publish issue
+(#121); no post-publish edit required.
+
+### URL 2 — LinkedIn (short-form)
+Recorded **SKIP** (operator: "Medium only" this cycle, verified #121). No published page
+exists, so no fetch/screenshot/markdown audit applies — nothing to verify. Recorded as
+skipped (carried to the ledger/report as skipped, not published).
+
+### Diagnostics removed before close
+Deleted from the working tree (regenerable; stale copies fail the manifest gate):
+`.phase6-verify.js`, `.phase6-feed-audit.js`, `.phase6-feed.xml`, `.phase6-medium.png`
+(all untracked diagnostics), and the paste vehicle `.marketing/cycle-af-91fe0795-paste.html`
+(regenerable from `cycle-af-91fe0795-medium.md`). Scratch fetch dump kept only under the
+session scratchpad, outside the tree.
+
+PHASE-6 VERDICT: PASS
