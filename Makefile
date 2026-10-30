@@ -1,4 +1,4 @@
-.PHONY: build build-webui install clean clean-venv test test-web conformance generate test-integration check-formulas sync-formulas install-hooks check-skills sync-skills check-formula-skills check-regen
+.PHONY: build build-webui install clean clean-venv test test-web conformance generate test-integration lock check-formulas sync-formulas install-hooks check-skills sync-skills check-formula-skills check-regen
 
 BINARY := af
 BUILD_DIR := .
@@ -12,6 +12,8 @@ PYTHON ?= python3.12
 VENV := .venv
 VENV_MARKER := $(VENV)/.installed
 PY_REQS := py/requirements.txt
+LOCK_VENV ?= $(HOME)/.cache/af-lock-venv
+LOCK_CACHE ?= $(HOME)/.cache/af-lock-cache
 
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -91,7 +93,7 @@ $(VENV_MARKER): $(PY_REQS)
 	@command -v $(PYTHON) >/dev/null 2>&1 || { echo "ERROR: $(PYTHON) not found on PATH (required for integration tests; the Python MCP server needs Python 3.12.x)"; exit 1; }
 	@rm -rf $(VENV)
 	$(PYTHON) -m venv $(VENV)
-	$(VENV)/bin/pip install --quiet --require-hashes -r $(PY_REQS)
+	$(VENV)/bin/pip install --quiet --require-hashes --only-binary :all: --disable-pip-version-check -r $(PY_REQS)
 	@touch $(VENV_MARKER)
 
 test-integration: $(VENV_MARKER)
@@ -103,6 +105,38 @@ test-integration: $(VENV_MARKER)
 	@# (web/internal/server/bridge_integration_test.go) and t.Skips when docker is absent, so CI
 	@# (which runs `make test-integration` without a guaranteed docker host) stays green.
 	cd web && TMPDIR=$(AF_TEST_TMPDIR) GOTMPDIR=$(AF_TEST_TMPDIR) CGO_ENABLED=0 go test -tags=integration -timeout=4m ./...
+
+# Recompiles both Python hash locks from their tracked .in inputs. The issue-store lock is compiled
+# first and is its own seed, so no pin moves unless an input forces it; the LiteLLM lock is then
+# constrained to it. --no-reuse-hashes keeps the seeded lock from carrying over sdist hashes the
+# fresh, wheel-only LiteLLM compile never sees, which would split one pin into two hash sets.
+# The venv is throwaway, but both wheel caches live in LOCK_CACHE: hashing every published wheel
+# downloads gigabytes that a re-run should not fetch again. LOCK_VENV is overridable and removed
+# with rm -rf, so the recipe refuses any path whose last component is not af-lock-venv.
+LOCK_COMPILE = CUSTOM_COMPILE_COMMAND="make lock" PIP_CACHE_DIR=$(LOCK_CACHE)/pip $(LOCK_VENV)/bin/pip-compile --quiet \
+	--generate-hashes --allow-unsafe --strip-extras --no-reuse-hashes --cache-dir $(LOCK_CACHE)/pip-tools \
+	--pip-args "--only-binary=:all:"
+
+lock:
+	@case "$(notdir $(LOCK_VENV))" in af-lock-venv) ;; *) echo "make lock: refusing LOCK_VENV=$(LOCK_VENV); its last path component must be af-lock-venv"; exit 1 ;; esac
+	@command -v $(PYTHON) >/dev/null 2>&1 || { echo "make lock needs Python 3.12 (PYTHON=$(PYTHON) not found)"; exit 1; }
+	@$(PYTHON) -c 'import sys; sys.exit(sys.version_info[:2] != (3, 12))' || { echo "make lock needs Python 3.12 (PYTHON=$(PYTHON) is not 3.12)"; exit 1; }
+	rm -rf $(LOCK_VENV)
+	$(PYTHON) -m venv $(LOCK_VENV)
+	$(LOCK_VENV)/bin/pip install --quiet --require-hashes --only-binary :all: --disable-pip-version-check -r py/lock-tools.txt
+	$(LOCK_COMPILE) --output-file=py/requirements.txt py/requirements.in
+	$(LOCK_COMPILE) --output-file=py/litellm-requirements.txt py/litellm-requirements.in
+	@# The lock hash lines carry no filename, so the sidecar is what lets a test prove offline that
+	@# every pin has a wheel for both architectures. make's /bin/sh has no pipefail: a failed PyPI
+	@# read shows up only as a hash missing from the sidecar, which the last check refuses.
+	grep -ho 'sha256:[0-9a-f]\{64\}' py/requirements.txt py/litellm-requirements.txt | cut -d: -f2 | LC_ALL=C sort -u > $(LOCK_VENV)/lock-hashes
+	sed -n 's/^\([A-Za-z0-9][A-Za-z0-9._-]*\)\(\[[^]]*\]\)\{0,1\}==\([^ ;\\]*\).*/\1 \3/p' py/requirements.txt py/litellm-requirements.txt \
+		| LC_ALL=C sort -u | while read -r name version; do \
+			curl -fsS --max-time 60 "https://pypi.org/pypi/$$name/$$version/json" | jq -r '.urls[] | .digests.sha256 + " " + .filename'; \
+		done | grep -F -f $(LOCK_VENV)/lock-hashes | LC_ALL=C sort -u -k2,2 > py/lock-wheels.txt
+	@missing=$$(cut -d' ' -f1 py/lock-wheels.txt | LC_ALL=C sort -u | comm -23 $(LOCK_VENV)/lock-hashes -); \
+		if [ -n "$$missing" ]; then echo "$$missing"; echo "py/lock-wheels.txt has no filename for the lock hashes above"; exit 1; fi
+	rm -rf $(LOCK_VENV)
 
 check-formulas:
 	@fail=0; for f in internal/cmd/install_formulas/*.formula.toml; do \

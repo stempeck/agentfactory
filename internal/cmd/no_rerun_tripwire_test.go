@@ -55,7 +55,9 @@ var rerunInstructionPattern = regexp.MustCompile(`(?i)then\s+(re-?run|run)`)
 
 // rerunTripwireBashTargets/rerunTripwireGoTargets is the scan-target list settled in
 // todos/fable-implement/decisions.md D3: the codex-subscription bootstrap functions this issue
-// introduced or rewrote, per the GATE-2-approved consumers.md sweep.
+// introduced or rewrote, per the GATE-2-approved consumers.md sweep — plus the convergence
+// paths (_converge's failure lines, the present-component pass and the END report), which are
+// the bootstrap's last word on every failed install.
 var rerunTripwireBashTargets = []string{
 	"setup_litellm",
 	"_ensure_codex_cli",
@@ -63,6 +65,9 @@ var rerunTripwireBashTargets = []string{
 	"_ensure_codex_session",
 	"_litellm_auth_mode_read",
 	"_litellm_auth_mode_write",
+	"_converge",
+	"converge_present_components",
+	"_converge_report",
 }
 
 var rerunTripwireGoTargets = []string{
@@ -93,7 +98,8 @@ func TestNoRerunInstructionsInBootstrapPaths(t *testing.T) {
 	for _, name := range rerunTripwireBashTargets {
 		body := extractShellFunction(string(qs), name)
 		if body == "" {
-			t.Fatalf("could not extract %s() from quickstart.sh — has it been renamed? update rerunTripwireBashTargets", name)
+			t.Errorf("could not extract %s() from quickstart.sh — has it been renamed? update rerunTripwireBashTargets", name)
+			continue
 		}
 		if m := rerunInstructionPattern.FindString(body); m != "" {
 			t.Errorf("%s() contains a rerun-instruction phrase (%q) — AC-12 forbids a bootstrap path ending by telling the operator to re-run", name, m)

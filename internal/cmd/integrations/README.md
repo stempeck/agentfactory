@@ -9,4 +9,9 @@ The directory is embedded with `//go:embed all:integrations` (`integrations_embe
 are included. `TestEmbeddedIntegrationManifests` pins the embedded file set to `git ls-files` of
 this directory: commit every file you add here, and leave nothing untracked in it.
 
-This README keeps the embed non-empty; no reference integration ships in it yet.
+The references:
+
+- `aws-agents/`: the AWS Agent Toolkit plugin from its upstream repository, with a check that the AWS
+  Knowledge MCP endpoint answers. Formula scope; no install step.
+- `playwright/`: the Playwright MCP server, on the integration's own locked CLI and chromium build.
+  Formula scope.

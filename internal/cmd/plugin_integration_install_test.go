@@ -1014,6 +1014,37 @@ func intBRefusalRows() []intBRefusalRow {
 			want: []string{`plugin name "acme-int-plugin" is already provided by a user-scope plugin; rename it`},
 		},
 		{
+			name: "user_scope_official_playwright_collision",
+			setup: func(t *testing.T, e *intBEnv) ([]string, map[string]string) {
+				settings := `{"enabledPlugins":{"playwright@claude-plugins-official":true}}` + "\n"
+				if err := os.WriteFile(filepath.Join(e.claudeDir, "settings.json"), []byte(settings), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				intBAcquire(t, e, intBName, intBMutate(e, intBManifestOpts{}, func(f map[string]intBFile) {
+					f[pluginJSON] = intBFile{`{"name":"playwright","version":"0.1.0"}` + "\n", 0o644}
+				}))
+				return []string{intBName}, nil
+			},
+			want: []string{`plugin name "playwright" is already provided by a user-scope plugin; rename it; or remove it: claude plugin uninstall playwright@claude-plugins-official --scope user`},
+		},
+		{
+			name: "user_scope_collision_from_two_marketplaces",
+			setup: func(t *testing.T, e *intBEnv) ([]string, map[string]string) {
+				settings := `{"enabledPlugins":{"playwright@claude-plugins-official":true,"playwright@acme-market":true}}` + "\n"
+				if err := os.WriteFile(filepath.Join(e.claudeDir, "settings.json"), []byte(settings), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				intBAcquire(t, e, intBName, intBMutate(e, intBManifestOpts{}, func(f map[string]intBFile) {
+					f[pluginJSON] = intBFile{`{"name":"playwright","version":"0.1.0"}` + "\n", 0o644}
+				}))
+				return []string{intBName}, nil
+			},
+			want: []string{
+				"claude plugin uninstall playwright@claude-plugins-official --scope user",
+				"claude plugin uninstall playwright@acme-market --scope user",
+			},
+		},
+		{
 			name: "claude_md_in_claude_dir",
 			setup: one(func(f map[string]intBFile) {
 				f["claude-plugin/CLAUDE.md"] = intBFile{"# injected instructions\n", 0o644}
@@ -1069,6 +1100,7 @@ func TestPluginInstall_IntegrationRefusals(t *testing.T) {
 			storeBefore := snapshotTree(t, config.StoreDir(e.root))
 			manifestBefore, hadManifest := intBReadOptional(t, config.PluginsConfigPath(e.root))
 			agentsBefore, _ := os.ReadFile(config.AgentsConfigPath(e.root))
+			userScopeBefore := snapshotTree(t, e.claudeDir)
 
 			out, err := runPlugin(t, "install", flags, args...)
 
@@ -1089,6 +1121,9 @@ func TestPluginInstall_IntegrationRefusals(t *testing.T) {
 			}
 			if agentsAfter, _ := os.ReadFile(config.AgentsConfigPath(e.root)); string(agentsAfter) != string(agentsBefore) {
 				t.Error("agents.json changed on a refused install")
+			}
+			if after := snapshotTree(t, e.claudeDir); !reflect.DeepEqual(userScopeBefore, after) {
+				t.Errorf("Claude Code user scope changed on a refused install; af deletes nothing:\n before=%v\n after=%v", userScopeBefore, after)
 			}
 			if intBExists(e.ext) {
 				t.Errorf("[install] run executed before the refusal (external write dir %s exists)", e.ext)

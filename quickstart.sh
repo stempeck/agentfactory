@@ -14,7 +14,7 @@ set -euo pipefail
 #
 # Usage:
 #   ./quickstart.sh           # Full setup (always auto mode, no prompts)
-#   ./quickstart.sh --check   # Check prerequisites only
+#   ./quickstart.sh --check   # Read-only drift report against the pins (changes nothing)
 #   ./quickstart.sh --litellm # Full setup, then stand up the LiteLLM gateway
 #                             # (the one opt-in step that may prompt: OpenAI key)
 #   ./quickstart.sh --help    # Show this help
@@ -51,9 +51,19 @@ GO_MIN_VERSION="1.24"
 GIT_MIN_VERSION="2.20"
 TMUX_MIN_VERSION="3.0"
 CHECK_ONLY=false
+# Convergence state (K1/K16): the ledger of required failures (newline-delimited names), the row
+# store the END block writes as convergence.json (one TAB-separated row per component), and the
+# change flags that decide the closing `af down && af up` line.
+CONVERGE_FAILURES=""
+CONVERGE_ROWS=""
+APT_CHANGED=0
+PYTHON_CHANGED=0
+WEBUI_REBUILT=0
+NODE_APT_ERROR=""
+RUN_AT=""
 WITH_LITELLM=false
 LITELLM_AUTH_MODE=""
-LITELLM_VERSION="1.93.0"
+LITELLM_VERSION="1.93.2"
 LITELLM_PORT=4000
 CODEX_LOGIN_TIMEOUT=900
 
@@ -63,9 +73,44 @@ CODEX_LOGIN_TIMEOUT=900
 # story, design-doc.md:380). Recompute both digests when bumping OPENOBSERVE_VERSION:
 #   curl -fsSL <url>/openobserve-<ver>-linux-<arch>.tar.gz | sha256sum
 WITH_TELEMETRY=true
-OPENOBSERVE_VERSION="v0.91.3"
-OPENOBSERVE_SHA256_AMD64="d45cf6d0d249930f62d0627f4e2188390afaa4460d2dde6d7167029c3f2699fb"
-OPENOBSERVE_SHA256_ARM64="49b22e69f04f026baddd8f23b9b588756e48a1127ac923121aaec1881769901b"
+OPENOBSERVE_VERSION="v1.1.2"
+OPENOBSERVE_SHA256_AMD64="225883447a9e3c75cb52d5a64ece8618cf0d8f3d2eb0b424eebb2e51b0126faa"
+OPENOBSERVE_SHA256_ARM64="4d00e03155594dba473202fdca4f2b8c3b549138f9bab4ff0f6894feda4b7354"
+# Hoisted (D-67): --check and the converge-if-present pass probe the backend outside setup_telemetry.
+OPENOBSERVE_BIN="$HOME/.local/bin/openobserve"
+
+# K6 pin block (issue #743). Every value is a literal, never a ${X:-…} default: the image exports
+# GO_VERSION/GO_SHA256_* for its own go1.24.2. Each digest's evidence is a row of
+# .designs/743/implementation-plan/pin-data.md; a bump is a reviewed edit here and in
+# internal/cmd/quickstart_pins_test.go, never a runtime input.
+NODE_MAJOR="22"
+NODE_APT_VERSION="22.23.4-1nodesource1"
+GH_VERSION="2.103.2"
+GH_SHA256_ARM64="4c3e99a50bd8b181a3fe9d69b25dd978bac768148d88f01507c6b4d1ef61a443"
+GH_SHA256_AMD64="62ccf747115ddc61237efffdde66a3c8f70ba249433dc64f70801089b59c59c8"
+GO_TOOLCHAIN_VERSION="go1.26.10"
+GO_SHA256_ARM64="3f4227ce7b206a513e794f1393adb473a07b46e94d18bd15d1c684bbb7319797"
+GO_SHA256_AMD64="ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5"
+PLAYWRIGHT_VERSION="1.64.1"
+PLAYWRIGHT_SHA512="1c2ad5847af9410bb0628b301141936fb806a79db6c9f95bbff493f27178b05586b8b8d00add7b43f12e6e918648d2989f5b6c4c23d9c6a1e11c27d5511bbb50"
+PLAYWRIGHT_CORE_SHA512="042e2cf32e9211503a435ad2c594eda3c848d4a508df15e51c6660bc6a8fe08a8f748fdae855fd1f6f480cdcfbbcaa3d976d5be8b7d8a2c49c3cbe8cdf1c720d"
+PLAYWRIGHT_CHROMIUM_TREE_SHA256_ARM64="ba6d2c17e743830e728e04eddbbd329ffaa69560d62621546086a221ca23ea21"
+PLAYWRIGHT_CHROMIUM_TREE_SHA256_AMD64="221c5699c30db0c6eebe41ea883632001e2fb113a6dcdedabfce1dd5aa35d3dd"
+PLAYWRIGHT_HEADLESS_SHELL_TREE_SHA256_ARM64="875c4b701f9d9d2f667385654ffd9d4dfa67c46d9542121eba80a9a556b1cc39"
+PLAYWRIGHT_HEADLESS_SHELL_TREE_SHA256_AMD64="a292efc9ef3eb31933f20151cc39e619ba5b8d8caccd4e62c0dbfc6c1e41e4f3"
+CODEX_VERSION="0.164.0"
+CODEX_SHA512="4d68fb506c8f45edcf8ff03775d340c6cd6d7b76bf5bfc4077e2742c7aeb1539ac49f6a118c38b17fbe7f3c0f7402220013dc1d6b9b5cbf677358134af1e9c65"
+CODEX_LINUX_ARM64_SHA512="2cbe624d08f20cbe18457e38116aa121f110e6e1a79a0c64401252c63652789f0bd4e83cde9765cd4256fcf449efaa1a570395821e875f0b8f12204d10753896"
+CODEX_LINUX_AMD64_SHA512="5cb028696b06393da487397e3f81580cf4e4cc0afd5b45455c569592a945764334b286b5807ff84b4c120f9ec49371c7c248ab0041b3dbf3307a1b1e87e97932"
+CLAUDE_CODE_VERSION="2.1.308"
+CLAUDE_CODE_SHA256_ARM64="fdd22e6cbb734d580f5664c48df4294eeec850218ff07f186f9af30426396ee1"
+CLAUDE_CODE_SHA256_AMD64="356733f185fa988e6bf3aa9a555269fdd167982a2e2a80d3c8a78037bb92ad58"
+CLAUDE_CODE_NPM_SHA512="6f61e7b3383237bdf045314ff8860f0c9367f400d79c6ea3af6ea26cbfb0d371d22aa7dbe86a84f099dfaf89b3dfb66fe004ff34ff81e7fddcd45f3d59375648"
+CLAUDE_CODE_LINUX_ARM64_SHA512="c6d4f609dee7fb264df4f8966d61da65ff70db961f955fbb54e5f92013c1fc8584aca64586cb2ddbf032d6d4a0abf333a75be9e7ac70151a8f6ba50023d05923"
+CLAUDE_CODE_LINUX_AMD64_SHA512="7df52bc9ebe91fb3ce4ad3c9ff1a54239475a3361b1fda3f0db87fc4f4a6c9525e8442e744c6664677a37509aad137a3396fd26cd9c9161086320c08b0ea854d"
+# 46 characters from inside the emSign ECC Root CA - G3 certificate body: 2.1.224 embeds that root
+# as an unlabeled PEM, so the DER label alone misses it (H-2).
+EMSIGN_G3_BODY_PROBE="FBVIcUqEqy6HyC5ltqtdyzdc6LBtCGI79G1Y4PPwT01xyS"
 TELEMETRY_PORT=5080
 # Seconds to wait for OpenObserve to answer /healthz on first launch. Its FIRST
 # start initializes a metadata store on an empty data dir and regularly runs past
@@ -118,6 +163,690 @@ command_exists() {
 }
 
 #------------------------------------------------------------------------------
+# Convergence Helpers (issue #743)
+#------------------------------------------------------------------------------
+# Every vendor channel converges through _converge: probe -> compare with the pin -> install ->
+# re-probe -> required/optional policy. A re-run therefore upgrades (or downgrades) a running
+# container to the exact pins instead of skipping whatever is already present.
+
+_arch() {
+    case "$(uname -m)" in
+        aarch64|arm64) echo arm64 ;;
+        x86_64|amd64) echo amd64 ;;
+        *) return 1 ;;
+    esac
+}
+
+# _record_row NAME PIN INSTALLED RESULT: one TAB-separated row per component in CONVERGE_ROWS.
+# A component can converge twice in one run (the converge-if-present pass, then its setup phase),
+# so a later row replaces an earlier one by name — except that `kept` never masks the earlier
+# outcome it is the consequence of. A `converged` row also takes its name off the ledger, so the END
+# verdict agrees with the table; names ledgered without a row of their own keep failing the run.
+_record_row() {
+    local name="$1" pin="$2" installed="$3" result="$4" integrity at row line rest="" tab
+    tab="$(printf '\t')"
+    case "$name" in
+        claude|gh|go|openobserve) integrity="sha256" ;;
+        codex) integrity="sha512" ;;
+        playwright) integrity="sha512+tree-sha256" ;;
+        nodejs) integrity="apt-signed (nodesource)" ;;
+        ubuntu-security) integrity="apt-signed (security pocket)" ;;
+        python-lock|litellm-lock) integrity="pip --require-hashes" ;;
+        *) integrity="n/a" ;;
+    esac
+    installed="$(printf '%s' "$installed" | tr '\t\n' '  ')"
+    at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    row="$name$tab$pin$tab$installed$tab$integrity$tab$result$tab$at"
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        case "$line" in
+            "$name$tab"*)
+                if [ "$result" = kept ] && [ "$(printf '%s' "$line" | cut -f5)" != kept ]; then
+                    row="$line"
+                fi
+                ;;
+            *) rest="$rest$line"$'\n' ;;
+        esac
+    done <<EOF
+$CONVERGE_ROWS
+EOF
+    CONVERGE_ROWS="$rest$row"$'\n'
+    if [ "$result" = converged ]; then
+        rest=""
+        while IFS= read -r line; do
+            if [ -n "$line" ] && [ "$line" != "$name" ]; then
+                rest="$rest$line"$'\n'
+            fi
+        done <<EOF
+$CONVERGE_FAILURES
+EOF
+        CONVERGE_FAILURES="$rest"
+    fi
+}
+
+# _quarantine_stale NAME: after a failed optional install, rename the stale Chromium builds so the
+# render probe fails honestly instead of passing on an old browser. Revision 1243 is the reference
+# integration's linked build and stays. A rename, never a delete (ADR-017).
+_quarantine_stale() {
+    [ "$1" = playwright ] || return 0
+    local cache="$HOME/.cache/ms-playwright" d base ts
+    ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    for d in "$cache"/chromium-* "$cache"/chromium_headless_shell-*; do
+        [ -d "$d" ] || continue
+        base="${d##*/}"
+        case "$base" in
+            *.stale-*|*-1243) continue ;;
+        esac
+        if mv "$d" "$d.stale-$ts"; then
+            log_warn "quarantined $base as $base.stale-$ts"
+        fi
+    done
+    return 0
+}
+
+# _converge NAME PIN PROBE_FN INSTALL_FN CLASS (design-doc.md Interface): PROBE_FN prints one line in
+# PIN's syntax (nothing when absent); INSTALL_FN prints its own reason when it fails. Returns 1 for a
+# drifted row under --check and for a failed required install, so every call site is `|| true`:
+# the row and the CONVERGE_FAILURES ledger carry the outcome to the END report.
+_converge() {
+    local name="$1" pin="$2" probe="$3" install="$4" class="$5" have old msg
+    have="$("$probe" 2>/dev/null)" || true
+    if [ "$have" = "$pin" ]; then
+        log_success "$name: $pin (kept)"
+        _record_row "$name" "$pin" "$have" kept
+        return 0
+    fi
+    old="${have:-absent}"
+    if [ "$CHECK_ONLY" = true ]; then
+        log_warn "$name: $old != pinned $pin (would converge)"
+        _record_row "$name" "$pin" "$old" drift
+        return 1
+    fi
+    if "$install"; then
+        # A new binary earlier on PATH (gh, go) is invisible to the re-probe until bash forgets the
+        # location it hashed for the old one.
+        hash -r
+        have="$("$probe" 2>/dev/null)" || true
+        if [ "$have" = "$pin" ]; then
+            log_success "$name: $pin (converged from $old)"
+            _record_row "$name" "$pin" "$have" converged
+            return 0
+        fi
+        msg="$name: ${have:-absent} != pinned $pin after install — the installer put a different build on PATH ($(command -v "$name" || echo none))"
+    else
+        hash -r
+        have="$("$probe" 2>/dev/null)" || true
+        msg="$name: ${have:-absent} != pinned $pin — install failed (reason above)"
+    fi
+    if [ "$class" = optional ]; then
+        _quarantine_stale "$name"
+        log_warn "$msg — visual checks will escalate to the human gate"
+        _record_row "$name" "$pin" "${have:-absent}" skipped-optional
+        return 0
+    fi
+    log_error "$msg"
+    CONVERGE_FAILURES="$CONVERGE_FAILURES$name"$'\n'
+    _record_row "$name" "$pin" "${have:-absent}" FAILED
+    return 1
+}
+
+# _pip_install_locked LOCK [--system | --report FILE]: the one hash-locked install line (K2).
+# --system installs the same lock into the root-owned system site, which the image's Dockerfile pip
+# line populated; --report has pip write what the full-lock install actually changed to FILE.
+# Debian ships that site's pip and wheel without a RECORD, so pip cannot replace them: those two go
+# first with --ignore-installed, then the full lock upgrades every other package in place. A blanket
+# --ignore-installed would leave each superseded version's dist-info behind, still reporting it.
+_pip_install_locked() {
+    local lock="$1" rc=0 subset report=()
+    if [ "${2-}" = --report ]; then
+        report=(--report "$3")
+    fi
+    if { [ "${2-}" = --system ] || [ "$(id -u)" = 0 ]; } && grep -Eq '^(pip|wheel)==' "$lock"; then
+        subset="$(mktemp)" || { log_error "python lock $lock: mktemp failed"; return 1; }
+        awk '/^[A-Za-z0-9]/ { keep = ($0 ~ /^(pip|wheel)==/) } keep && !/^[[:space:]]*#/' "$lock" >"$subset"
+        if [ "${2-}" = --system ] && [ "$(id -u)" != 0 ]; then
+            sudo -n pip3 install --ignore-installed --no-deps --break-system-packages --require-hashes --only-binary :all: --disable-pip-version-check -r "$subset" || rc=$?
+        else
+            pip3 install --ignore-installed --no-deps --break-system-packages --require-hashes --only-binary :all: --disable-pip-version-check -r "$subset" || rc=$?
+        fi
+        rm -f "$subset"
+    fi
+    if [ "$rc" -eq 0 ]; then
+        if [ "${2-}" = --system ] && [ "$(id -u)" != 0 ]; then
+            sudo -n pip3 install --break-system-packages --require-hashes --only-binary :all: --disable-pip-version-check -r "$lock" || rc=$?
+        else
+            pip3 install --break-system-packages --require-hashes --only-binary :all: --disable-pip-version-check ${report[@]+"${report[@]}"} -r "$lock" || rc=$?
+        fi
+    fi
+    if [ "$rc" -ne 0 ]; then
+        log_error "python lock $lock failed — --only-binary :all: refuses source distributions; a missing wheel for $(uname -m) is a lock defect, not a network error"
+        return 1
+    fi
+    return 0
+}
+
+# _pip_would_change LOCK (K3): 0 = the lock would change the user site (the count is printed),
+# 1 = no change, 2 = pip could not tell. The report goes to a file because pip skips its PEP 668
+# refusal for a dry run only when --report is given, and pip's exit status is kept apart from the
+# report's parse so an error never reads as "no change".
+_pip_would_change() {
+    local lock="$1" report rc=0 n
+    report="$(mktemp)" || return 2
+    pip3 install --dry-run --quiet --report "$report" --break-system-packages --require-hashes --only-binary :all: --disable-pip-version-check -r "$lock" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        rm -f "$report"
+        return 2
+    fi
+    n="$(jq '.install | length' "$report" 2>/dev/null)" || n=""
+    rm -f "$report"
+    case "$n" in
+        ''|*[!0-9]*) return 2 ;;
+        0) return 1 ;;
+    esac
+    printf '%s\n' "$n"
+    return 0
+}
+
+# _npm_install_pinned NAME VERSION SHA512 [PLATFORM_NAME PLATFORM_SHA512] (K4): npm pack -> sha512
+# -> install the verified local tarball with --ignore-scripts -> overlay the platform package (the
+# bytes that actually execute) from its own verified tarball. The global prefix stays where the
+# image put it (root-owned /usr), so the sudo route is decided once, before anything is packed.
+# Returns 3 when neither route exists, so callers print their own refusal.
+_npm_install_pinned() {
+    local name="$1" version="$2" sha="$3" pname="${4-}" psha="${5-}"
+    local npm_root as_root="" work tgz pspec ptgz dest postinstall
+    npm_root="$(npm root -g 2>/dev/null || true)"
+    if [ -n "$npm_root" ] && [ -w "$npm_root" ]; then
+        as_root=""
+    elif command_exists sudo && sudo -n true 2>/dev/null; then
+        as_root="sudo -n"
+    else
+        return 3
+    fi
+
+    # Never /tmp: it is noexec in agentfactory containers, and an unpacked package may run there.
+    mkdir -p "$HOME/.cache/agentfactory" || return 1
+    work="$(mktemp -d "$HOME/.cache/agentfactory/npm.XXXXXX")" || return 1
+    CLEANUP_DIRS+=("$work")
+
+    tgz="$(npm pack "$name@$version" --pack-destination "$work" --silent 2>/dev/null | tail -1)" || tgz=""
+    if [ -z "$tgz" ] || [ ! -f "$work/$tgz" ]; then
+        log_error "$name@$version: npm pack failed"
+        return 1
+    fi
+    if ! printf '%s  %s\n' "$sha" "$work/$tgz" | sha512sum --check --strict >/dev/null 2>&1; then
+        log_error "$name@$version: tarball sha512 does not match the pinned value — NOT installing (supply-chain signal; see Appendix A of issue #743)"
+        return 1
+    fi
+    mkdir -p "$work/meta" || return 1
+    tar -xzf "$work/$tgz" -C "$work/meta" package/package.json || return 1
+
+    if [ -n "$pname" ]; then
+        # The version comes from the verified tarball's own manifest; an `npm:` alias (codex's
+        # platform packages) names the real package to pack.
+        pspec="$(jq -r --arg p "$pname" '.optionalDependencies[$p] // .dependencies[$p] // empty' "$work/meta/package/package.json" 2>/dev/null)" || pspec=""
+        case "$pspec" in
+            '') log_error "$name@$version: its package.json names no $pname dependency"; return 1 ;;
+            npm:*) pspec="${pspec#npm:}" ;;
+            *) pspec="$pname@$pspec" ;;
+        esac
+        ptgz="$(npm pack "$pspec" --pack-destination "$work" --silent 2>/dev/null | tail -1)" || ptgz=""
+        if [ -z "$ptgz" ] || [ ! -f "$work/$ptgz" ]; then
+            log_error "$pspec: npm pack failed"
+            return 1
+        fi
+        if ! printf '%s  %s\n' "$psha" "$work/$ptgz" | sha512sum --check --strict >/dev/null 2>&1; then
+            log_error "$pspec: tarball sha512 does not match the pinned value — NOT installing (supply-chain signal; see Appendix A of issue #743)"
+            return 1
+        fi
+    fi
+
+    if [ -n "$as_root" ]; then
+        sudo -n npm install -g --ignore-scripts "$work/$tgz" || return 1
+    else
+        npm install -g --ignore-scripts "$work/$tgz" || return 1
+    fi
+    npm_root="$(npm root -g 2>/dev/null)" || return 1
+    if [ -n "$pname" ]; then
+        dest="$npm_root/$name/node_modules/$pname"
+        $as_root rm -rf "$dest" || return 1
+        $as_root mkdir -p "$dest" || return 1
+        $as_root tar -xzf "$work/$ptgz" -C "$dest" --strip-components=1 || return 1
+    fi
+    # Install scripts were skipped above so that nothing ran before the overlay; a package whose
+    # postinstall wires up the platform binary (claude-code) runs it now, over verified bytes.
+    postinstall="$(jq -r '.scripts.postinstall // empty' "$work/meta/package/package.json" 2>/dev/null)" || postinstall=""
+    if [ -n "$postinstall" ]; then
+        (cd "$npm_root/$name" && $as_root npm run --silent postinstall) || return 1
+    fi
+    return 0
+}
+
+#------------------------------------------------------------------------------
+# Root layer (K5): the Ubuntu security pocket and the Node.js pin
+#------------------------------------------------------------------------------
+
+# _apt_get: the only two literal apt-get lines. sudo's env_reset drops an exported
+# DEBIAN_FRONTEND, so the variable is passed through `env` (H-5); --check simulates as the user.
+_apt_get() {
+    if [ "$CHECK_ONLY" = true ] || [ "$(id -u)" = 0 ]; then
+        env DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
+    else
+        sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
+    fi
+}
+
+# Read, never sourced: /etc/os-release assigns names (VERSION, ID, …) this script would inherit.
+_os_codename() {
+    local c
+    c="$(sed -n 's/^VERSION_CODENAME=//p' /etc/os-release 2>/dev/null | tr -d "\"'")"
+    if [ -z "$c" ]; then
+        c="$(sed -n 's/^UBUNTU_CODENAME=//p' /etc/os-release 2>/dev/null | tr -d "\"'")"
+    fi
+    printf '%s\n' "$c"
+}
+
+# _pending_security CODENAME: every installed package with ANY version above the installed one
+# that a CODENAME-security source carries. The candidate's own pocket is not enough: a newer
+# -updates build shadows the security fix, so `apt-get upgrade -s` never lists it (H-6). nodejs is
+# pinned on its own line. apt-cache lists versions newest first, so "above the *** line" is "newer".
+_pending_security() {
+    local codename="$1" pkgs
+    pkgs="$(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 2>/dev/null | awk '$1 == "ii" {print $2}')" || pkgs=""
+    [ -n "$pkgs" ] || return 0
+    # shellcheck disable=SC2086 # one argument per package name
+    apt-cache policy $pkgs 2>/dev/null | awk -v pocket=" $codename-security/" '
+        /^[^ ]/ { pkg = $1; sub(/:$/, "", pkg); table = 0; above = 0; next }
+        /^  Version table:/ { table = 1; above = 1; next }
+        table && /^ \*\*\* / { above = 0; next }
+        table && above && index($0, pocket) { print pkg }
+    ' | grep -v -x nodejs | sort -u || true
+}
+
+# _ensure_nodesource_list NODE_MAJOR: points the image's signed NodeSource source at NODE_MAJOR.
+# An absent list or keyring is reported, never bootstrapped: a customer image without them gets the
+# C-7 message when the Node pin cannot resolve.
+_ensure_nodesource_list() {
+    local major="$1" list="/etc/apt/sources.list.d/nodesource.list" key="/usr/share/keyrings/nodesource.gpg" line
+    if [ ! -f "$list" ] || [ ! -f "$key" ]; then
+        log_warn "no NodeSource apt source ($list or $key is absent); nodejs=$NODE_APT_VERSION can resolve only from another configured source"
+        return 0
+    fi
+    if grep -q "node_${major}.x" "$list"; then
+        return 0
+    fi
+    line="deb [arch=$(dpkg --print-architecture) signed-by=$key] https://deb.nodesource.com/node_${major}.x nodistro main"
+    if [ "$(id -u)" = 0 ]; then
+        printf '%s\n' "$line" >"$list" || return 0
+    else
+        printf '%s\n' "$line" | sudo -n tee "$list" >/dev/null || return 0
+    fi
+    log_info "NodeSource apt source now tracks node_${major}.x"
+}
+
+# _retire_gh_apt_source SOURCES_DIR: gh converges from its release tarball (D8), so the image's
+# cli.github.com source is a dead index that Error-Mode=any turns into a required failure whenever
+# that host is down. Found by the URIs its source lines name, renamed to .disabled (apt ignores it),
+# never deleted. A file that also lists another repository stays enabled: renaming it would drop that
+# repository too.
+_retire_gh_apt_source() {
+    local dir="$1" f uris
+    [ "$CHECK_ONLY" = true ] && return 0
+    for f in "$dir"/*.list "$dir"/*.sources; do
+        [ -f "$f" ] || continue
+        uris="$(grep -Ei '^[[:space:]]*(deb(-src)?[[:space:]]|URIs:)' "$f" 2>/dev/null \
+            | grep -oE '[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]]+')" || uris=""
+        printf '%s\n' "$uris" | grep -qE '://cli\.github\.com(/|$)' || continue
+        if printf '%s\n' "$uris" | grep -vE '://cli\.github\.com(/|$)' | grep -q .; then
+            log_warn "$f lists cli.github.com beside other repositories; left enabled, so its github-cli entry still fails the update when that host is down"
+            continue
+        fi
+        if [ "$(id -u)" = 0 ]; then
+            mv "$f" "$f.disabled" || { log_warn "could not disable the apt source $f"; continue; }
+        elif command_exists sudo && sudo -n true 2>/dev/null; then
+            sudo -n mv "$f" "$f.disabled" || { log_warn "could not disable the apt source $f"; continue; }
+        else
+            return 0
+        fi
+        log_info "disabled the github-cli apt source $f"
+    done
+    return 0
+}
+
+# _apt_lists_date LISTS_DIR CODENAME: the date apt stamped on the security pocket's newest index (the
+# mirror's Last-Modified, UTC), or "never refreshed". --check must not refresh the lists (K16), so its
+# verdict states how old they are: lists fetched N days ago carry a date at least N days back.
+_apt_lists_date() {
+    local newest
+    newest="$(ls -t "$1"/*_dists_"$2"-security_*Release 2>/dev/null | head -1)" || newest=""
+    if [ -n "$newest" ]; then
+        date -u -r "$newest" +%Y-%m-%dT%H:%M:%SZ
+    else
+        echo "never refreshed"
+    fi
+}
+
+# _pin_managed_autoupdater SETTINGS_DIR: K9's third DISABLE_AUTOUPDATER site, the managed scope that
+# outranks every user and project setting, so no session can auto-update Claude Code off its pin.
+# A drop-in of our own, so an operator's managed-settings.json is never rewritten. A failure only
+# warns: the agent settings templates and the shell export still hold the pin.
+_pin_managed_autoupdater() {
+    local dir="$1" target stage tmp as_root=""
+    [ "$CHECK_ONLY" = true ] && return 0
+    [ "$(uname -s)" = Linux ] || return 0
+    if [ "$(id -u)" != 0 ]; then
+        { command_exists sudo && sudo -n true 2>/dev/null; } || return 0
+        as_root="sudo -n"
+    fi
+    target="$dir/agentfactory.json"
+    stage="$HOME/.cache/agentfactory"
+    if ! { mkdir -p "$stage" && tmp="$(mktemp "$stage/managed-settings.XXXXXX")"; }; then
+        log_warn "could not stage the managed DISABLE_AUTOUPDATER setting under $stage"
+        return 0
+    fi
+    printf '%s\n' '{"env":{"DISABLE_AUTOUPDATER":"1"}}' >"$tmp"
+    if cmp -s "$tmp" "$target"; then
+        rm -f "$tmp"
+        return 0
+    fi
+    if $as_root mkdir -p "$dir" && $as_root install -o root -g root -m 0644 "$tmp" "$target"; then
+        log_info "Claude Code auto-updates disabled machine-wide ($target)"
+    else
+        log_warn "could not write $target; the agent settings and the shell export still set DISABLE_AUTOUPDATER"
+    fi
+    rm -f "$tmp"
+    return 0
+}
+
+_security_source_present() {
+    grep -qs -- "$1-security" /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources
+}
+
+# _apt_converge: root layer pass 1. Rows ubuntu-security and nodejs; always returns 0 (the rows and
+# the ledger carry the outcome). Without root the layer is ONE ledgered failure, `root-layer`, whose
+# C-6 message the END report prints after the table.
+_apt_converge() {
+    if [ "$(uname -s)" != Linux ]; then
+        log_info "root layer skipped: not Linux"
+        return 0
+    fi
+    log_info "Converging the root layer (Ubuntu security pocket, Node.js pin)"
+    local codename sel n=0 have out before after pin_label lists
+    codename="$(_os_codename)"
+    pin_label="${codename}-security"
+    if ! command_exists apt-get; then
+        log_error "security updates cannot be applied: no apt-get on PATH. The bootstrap converges Ubuntu packages only against that pocket."
+        CONVERGE_FAILURES="${CONVERGE_FAILURES}ubuntu-security"$'\n'"nodejs"$'\n'
+        _record_row ubuntu-security "$pin_label" "no apt-get" FAILED
+        _record_row nodejs "$NODE_APT_VERSION" "no apt-get" FAILED
+        return 0
+    fi
+
+    if [ "$CHECK_ONLY" = true ]; then
+        lists="$(_apt_lists_date /var/lib/apt/lists "$codename")"
+        case "$lists" in
+            "never refreshed") lists=" (apt lists never refreshed)" ;;
+            *) lists=" (apt lists from $lists)" ;;
+        esac
+        sel="$(_pending_security "$codename")"
+        if [ -n "$sel" ]; then
+            n="$(printf '%s\n' "$sel" | wc -l | tr -d ' ')"
+            # shellcheck disable=SC2086 # one argument per package name
+            if ! out="$(_apt_get -s install -y --only-upgrade $sel 2>&1)"; then
+                log_warn "ubuntu-security: apt-get -s could not resolve the selection: $(printf '%s\n' "$out" | tail -1)"
+            fi
+            log_warn "ubuntu-security: $n pending != pinned $pin_label (would converge)$lists"
+            _record_row ubuntu-security "$pin_label" "$n pending$lists" drift
+        elif _security_source_present "$codename"; then
+            log_success "ubuntu-security: $pin_label (kept)$lists"
+            _record_row ubuntu-security "$pin_label" "$pin_label$lists" kept
+        else
+            log_warn "ubuntu-security: no apt source for the $pin_label pocket (would fail)$lists"
+            _record_row ubuntu-security "$pin_label" "no source$lists" FAILED
+        fi
+        have="$(dpkg-query -W -f='${Version}' nodejs 2>/dev/null)" || have=""
+        if [ "$have" = "$NODE_APT_VERSION" ]; then
+            log_success "nodejs: $NODE_APT_VERSION (kept)"
+            _record_row nodejs "$NODE_APT_VERSION" "$have" kept
+        else
+            if ! out="$(_apt_get -s install -y --allow-downgrades nodejs="$NODE_APT_VERSION" 2>&1)"; then
+                log_warn "nodejs: apt-get -s could not resolve nodejs=$NODE_APT_VERSION: $(printf '%s\n' "$out" | tail -1)"
+            fi
+            log_warn "nodejs: ${have:-absent} != pinned $NODE_APT_VERSION (would converge)"
+            _record_row nodejs "$NODE_APT_VERSION" "${have:-absent}" drift
+        fi
+        return 0
+    fi
+
+    if [ "$(id -u)" = 0 ]; then
+        :
+    elif command_exists sudo && sudo -n true 2>/dev/null; then
+        :
+    else
+        log_error "root layer: no root (id -u = $(id -u); sudo -n true failed) — the Ubuntu security pocket and the Node.js pin cannot converge; reported at the end"
+        CONVERGE_FAILURES="${CONVERGE_FAILURES}root-layer"$'\n'
+        _record_row ubuntu-security "$pin_label" "no root" FAILED
+        _record_row nodejs "$NODE_APT_VERSION" "no root" FAILED
+        return 0
+    fi
+
+    before="$(dpkg-query -W -f='${Package} ${Version}\n' 2>/dev/null | sha256sum)" || before=""
+    _ensure_nodesource_list "$NODE_MAJOR"
+    _retire_gh_apt_source /etc/apt/sources.list.d
+    if ! out="$(_apt_get update -o APT::Update::Error-Mode=any 2>&1)"; then
+        printf '%s\n' "$out" | tail -20
+        NODE_APT_ERROR="$(printf '%s\n' "$out" | tail -1)"
+        log_error "apt-get update failed: $NODE_APT_ERROR"
+        CONVERGE_FAILURES="${CONVERGE_FAILURES}ubuntu-security"$'\n'"nodejs"$'\n'
+        _record_row ubuntu-security "$pin_label" "update failed" FAILED
+        have="$(dpkg-query -W -f='${Version}' nodejs 2>/dev/null)" || have=""
+        _record_row nodejs "$NODE_APT_VERSION" "${have:-absent}" FAILED
+        return 0
+    fi
+
+    sel="$(_pending_security "$codename")"
+    if [ -n "$sel" ]; then
+        n="$(printf '%s\n' "$sel" | wc -l | tr -d ' ')"
+        log_info "Installing $n pending $pin_label update(s)"
+        # shellcheck disable=SC2086 # one argument per package name
+        if out="$(_apt_get install -y --only-upgrade $sel 2>&1)"; then
+            log_success "ubuntu-security: $pin_label (converged from $n pending)"
+            _record_row ubuntu-security "$pin_label" "$pin_label" converged
+        else
+            printf '%s\n' "$out" | tail -20
+            log_error "ubuntu-security: the $pin_label upgrade failed: $(printf '%s\n' "$out" | tail -1)"
+            CONVERGE_FAILURES="${CONVERGE_FAILURES}ubuntu-security"$'\n'
+            _record_row ubuntu-security "$pin_label" "$n pending" FAILED
+        fi
+    elif _security_source_present "$codename"; then
+        log_success "ubuntu-security: $pin_label (kept)"
+        _record_row ubuntu-security "$pin_label" "$pin_label" kept
+    else
+        log_error "security updates cannot be applied: no apt source for the $pin_label pocket (checked /etc/apt/sources.list.d/*.list, *.sources — present: $(ls /etc/apt/sources.list.d 2>/dev/null | tr '\n' ' ')). The bootstrap converges Ubuntu packages only against that pocket."
+        CONVERGE_FAILURES="${CONVERGE_FAILURES}ubuntu-security"$'\n'
+        _record_row ubuntu-security "$pin_label" "no source" FAILED
+    fi
+
+    have="$(dpkg-query -W -f='${Version}' nodejs 2>/dev/null)" || have=""
+    if out="$(_apt_get install -y --allow-downgrades nodejs="$NODE_APT_VERSION" 2>&1)"; then
+        if [ "$have" = "$NODE_APT_VERSION" ]; then
+            log_success "nodejs: $NODE_APT_VERSION (kept)"
+            _record_row nodejs "$NODE_APT_VERSION" "$have" kept
+        else
+            log_success "nodejs: $NODE_APT_VERSION (converged from ${have:-absent})"
+            _record_row nodejs "$NODE_APT_VERSION" "$NODE_APT_VERSION" converged
+        fi
+    else
+        printf '%s\n' "$out" | tail -20
+        NODE_APT_ERROR="$(printf '%s\n' "$out" | tail -1)"
+        log_error "nodejs: ${have:-absent} != pinned $NODE_APT_VERSION — install failed (reason above)"
+        CONVERGE_FAILURES="${CONVERGE_FAILURES}nodejs"$'\n'
+        _record_row nodejs "$NODE_APT_VERSION" "${have:-absent}" FAILED
+    fi
+
+    after="$(dpkg-query -W -f='${Package} ${Version}\n' 2>/dev/null | sha256sum)" || after=""
+    if [ "$before" != "$after" ]; then
+        APT_CHANGED=1
+    fi
+    return 0
+}
+
+# _apt_security_upgrade: root layer pass 2, after install_playwright, whose --with-deps can pull in
+# packages that have pending security versions of their own (Gap 18). No update, no Node line, no
+# new row: the pass-1 row is replaced only when this pass fails.
+_apt_security_upgrade() {
+    [ "$CHECK_ONLY" = true ] && return 0
+    [ "$(uname -s)" = Linux ] || return 0
+    command_exists apt-get || return 0
+    if [ "$(id -u)" != 0 ] && ! { command_exists sudo && sudo -n true 2>/dev/null; }; then
+        return 0
+    fi
+    local codename sel out before after
+    codename="$(_os_codename)"
+    sel="$(_pending_security "$codename")"
+    [ -n "$sel" ] || return 0
+    before="$(dpkg-query -W -f='${Package} ${Version}\n' 2>/dev/null | sha256sum)" || before=""
+    # shellcheck disable=SC2086 # one argument per package name
+    if ! out="$(_apt_get install -y --only-upgrade $sel 2>&1)"; then
+        printf '%s\n' "$out" | tail -20
+        log_error "ubuntu-security: the post-Playwright ${codename}-security upgrade failed: $(printf '%s\n' "$out" | tail -1)"
+        CONVERGE_FAILURES="${CONVERGE_FAILURES}ubuntu-security"$'\n'
+        _record_row ubuntu-security "${codename}-security" "$(printf '%s\n' "$sel" | wc -l | tr -d ' ') pending" FAILED
+    fi
+    after="$(dpkg-query -W -f='${Package} ${Version}\n' 2>/dev/null | sha256sum)" || after=""
+    if [ "$before" != "$after" ]; then
+        APT_CHANGED=1
+    fi
+    return 0
+}
+
+#------------------------------------------------------------------------------
+# Hoisted gateway and telemetry helpers (reachable from --check and the converge-if-present pass)
+#------------------------------------------------------------------------------
+
+# _gateway_stop (K12, issue #693 Phase 4): the ONLY kill site for the litellm tmux session.
+# Hoisted from setup_litellm (D-23) so the converge-if-present pass can stop the gateway before
+# the Python locks change the packages it runs on.
+_gateway_stop() {
+    mkdir -p .runtime/gateway
+    printf '{"pid":%s,"since":%s}' "$$" "$(date +%s)" > .runtime/gateway/reconciling
+    tmux kill-session -t =litellm 2>/dev/null || true
+    rm -f .runtime/gateway/launch.json
+    local waited=0
+    while _port_in_use "$LITELLM_PORT" && [ "$waited" -lt 10 ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+}
+
+_litellm_session_running() {
+    tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -qx litellm
+}
+
+_probe_openobserve() {
+    "$OPENOBSERVE_BIN" --version 2>/dev/null | awk 'NR==1{print $2}'
+}
+
+# _telemetry_stop: OpenObserve drains on SIGTERM but not on the SIGHUP that closing its tmux
+# session delivers (H-7), so it gets SIGTERM and a bounded drain first. The process belongs to the
+# tmux server, not to this shell, so only a kill -0 poll can wait for it.
+_telemetry_stop() {
+    local pane target owner walk stat waited=0
+    pane="$(tmux list-panes -t telemetry -F '#{pane_pid}' 2>/dev/null | head -1)" || pane=""
+    [ -n "$pane" ] || return 0
+    target="$pane"
+    # The pane runs a shell around openobserve; the port owner is the backend itself when it is a
+    # descendant of that pane (the same parent walk setup_litellm uses).
+    owner="$(_port_owner_pid "$TELEMETRY_PORT")"
+    if [ -n "$owner" ]; then
+        walk="$owner"
+        while [ -n "$walk" ] && [ "$walk" != "0" ] && [ "$walk" != "1" ] && [ "$walk" != "$pane" ]; do
+            stat="$(cat "/proc/$walk/stat" 2>/dev/null)" || stat=""
+            walk="$(printf '%s' "${stat##*) }" | awk '{print $2}')"
+        done
+        if [ "$walk" = "$pane" ]; then
+            target="$owner"
+        fi
+    fi
+    kill -TERM "$target" 2>/dev/null || true
+    while kill -0 "$target" 2>/dev/null && [ "$waited" -lt 30 ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$target" 2>/dev/null; then
+        log_warn "OpenObserve (pid $target) did not exit within 30s of SIGTERM; closing its tmux session"
+    fi
+    if [ "$(tmux list-panes -t telemetry -F '#{pane_pid}' 2>/dev/null | head -1)" = "$pane" ]; then
+        tmux kill-session -t telemetry 2>/dev/null || true
+    fi
+    return 0
+}
+
+# A failed download leaves any older binary in place; say so, because it is still serving.
+_openobserve_install_failed() {
+    log_error "$1"
+    if [ -x "$OPENOBSERVE_BIN" ]; then
+        log_error "openobserve $(_probe_openobserve) != pinned $OPENOBSERVE_VERSION and the verified download failed: $1. The old binary is still running (127.0.0.1:$TELEMETRY_PORT, with the advisories issue #743 row 12 lists); re-run after fixing the download. (--no-telemetry does not skip this: an installed backend converges on every run.)"
+    fi
+}
+
+# _install_openobserve: download -> sha256 -> unpack -> atomic swap -> stop the old process ->
+# record the version that will open the data dir. The swap comes before the stop, so a watchdog
+# relaunch in between starts the NEW binary (D-58). cwd is the factory root in both callers.
+_install_openobserve() {
+    local arch expected tarball url tmpdir
+    arch=""
+    if [ "$(uname -s)" = Linux ]; then
+        arch="$(_arch)" || arch=""
+    fi
+    case "$arch" in
+        amd64) expected="$OPENOBSERVE_SHA256_AMD64" ;;
+        arm64) expected="$OPENOBSERVE_SHA256_ARM64" ;;
+        *) log_error "Unsupported arch '$(uname -s)/$(uname -m)' for OpenObserve (Linux arm64/amd64 builds only)"
+           return 1 ;;
+    esac
+    tarball="openobserve-${OPENOBSERVE_VERSION}-linux-${arch}.tar.gz"
+    url="https://downloads.openobserve.ai/releases/openobserve/${OPENOBSERVE_VERSION}/${tarball}"
+    tmpdir="$(mktemp -d)" || return 1
+    CLEANUP_DIRS+=("$tmpdir")
+    log_info "Downloading OpenObserve ${OPENOBSERVE_VERSION} (${arch})"
+    if ! curl -fsSL "$url" -o "$tmpdir/$tarball"; then
+        _openobserve_install_failed "OpenObserve download failed ($url)"
+        return 1
+    fi
+    # A mismatch is a supply-chain signal (security.md T8): refuse to unpack or run the binary.
+    if ! printf '%s  %s\n' "$expected" "$tmpdir/$tarball" | sha256sum --check --strict; then
+        _openobserve_install_failed "OpenObserve checksum verification FAILED (expected $expected) — not installing"
+        return 1
+    fi
+    if ! { tar -C "$tmpdir" -xzf "$tmpdir/$tarball" && mkdir -p "$(dirname "$OPENOBSERVE_BIN")" \
+            && install -m 0755 "$tmpdir/openobserve" "$OPENOBSERVE_BIN.new" \
+            && mv -f "$OPENOBSERVE_BIN.new" "$OPENOBSERVE_BIN"; }; then
+        _openobserve_install_failed "OpenObserve unpack/install failed"
+        return 1
+    fi
+    _telemetry_stop
+    mkdir -p .agentfactory/telemetry || return 1
+    printf '%s\n' "$OPENOBSERVE_VERSION" > .agentfactory/telemetry/openobserve.version || return 1
+    log_success "Installed OpenObserve ${OPENOBSERVE_VERSION} to $OPENOBSERVE_BIN"
+    return 0
+}
+
+# The data dir is migrated forward by each release that opens it; a binary older than the one
+# recorded in openobserve.version is never launched on it.
+_openobserve_not_older_than_marker() {
+    local marker=".agentfactory/telemetry/openobserve.version" want have
+    [ -s "$marker" ] || return 0
+    want="$(head -1 "$marker")"
+    have="$(_probe_openobserve)" || have=""
+    if version_gte "$have" "$want"; then
+        return 0
+    fi
+    log_error "openobserve ${have:-unknown} is older than $want, the build that last opened the telemetry data dir — refusing to launch it"
+    return 1
+}
+
+#------------------------------------------------------------------------------
 # Phase 1: Check Prerequisites
 #------------------------------------------------------------------------------
 
@@ -129,7 +858,9 @@ check_go() {
         return 1
     fi
 
-    GO_VERSION=$(go version | sed -n 's/.*go\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
+    # GOTOOLCHAIN=local: inside the source tree, go.mod's toolchain line would otherwise make the
+    # image's go1.24.2 fetch and verify the newer toolchain itself (H-3).
+    GO_VERSION=$(GOTOOLCHAIN=local go version | sed -n 's/.*go\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
     if version_gte "$GO_VERSION" "$GO_MIN_VERSION"; then
         log_success "Go $GO_VERSION installed (>= $GO_MIN_VERSION required)"
         return 0
@@ -227,15 +958,8 @@ check_python() {
     PY_VERSION=$(python3.12 --version 2>/dev/null)
     log_success "Python installed: $PY_VERSION"
 
-    # Verify MCP server dependencies are importable
-    if ! python3 -c "import aiohttp, sqlalchemy" 2>/dev/null; then
-        log_warn "Python MCP dependencies missing; installing from $SCRIPT_DIR/py/requirements.txt"
-        pip3 install --break-system-packages --require-hashes -r "$SCRIPT_DIR/py/requirements.txt" || {
-            log_error "Failed to install Python MCP dependencies"
-            return 1
-        }
-    fi
-
+    # The MCP dependencies are not checked here: --check runs this function and must change
+    # nothing, and the hash-locked install is converge_present_components' job.
     return 0
 }
 
@@ -317,6 +1041,53 @@ run_all_checks() {
 install_af() {
     log_step "Installing af (agentfactory CLI)"
 
+    # The Go toolchain (K8): the image's go1.24.2 cmd/go is inside GO-2026-6602 and GO-2026-4984,
+    # so it must never fetch and verify the go.mod toolchain switch itself (H-3). The pinned
+    # toolchain comes from a sha256-verified go.dev tarball in an af-owned prefix instead, and the
+    # probe reads that prefix binary under GOTOOLCHAIN=local, because `go version` otherwise
+    # reports the toolchain it would switch to.
+    _probe_go() {
+        GOTOOLCHAIN=local "$HOME/.local/share/agentfactory/go/bin/go" version 2>/dev/null | awk '{print $3}'
+    }
+    _install_go() {
+        local arch expected tarball parent stage prefix="$HOME/.local/share/agentfactory/go"
+        arch="$(_arch)" || { log_error "go: unsupported architecture $(uname -m)"; return 1; }
+        case "$arch" in
+            arm64) expected="$GO_SHA256_ARM64" ;;
+            amd64) expected="$GO_SHA256_AMD64" ;;
+        esac
+        tarball="go${GO_TOOLCHAIN_VERSION#go}.linux-${arch}.tar.gz"
+        parent="$(dirname "$prefix")"
+        mkdir -p "$parent" "$HOME/.local/bin" || return 1
+        # Unpacked beside the prefix and swapped in whole: never over an older tree, never in /tmp.
+        stage="$(mktemp -d "$parent/go-stage.XXXXXX")" || return 1
+        CLEANUP_DIRS+=("$stage")
+        log_info "Downloading Go toolchain $GO_TOOLCHAIN_VERSION ($arch)"
+        curl -fsSL "https://go.dev/dl/$tarball" -o "$stage/$tarball" || return 1
+        printf '%s  %s\n' "$expected" "$stage/$tarball" | sha256sum --check --strict >/dev/null || { log_error "go toolchain $GO_TOOLCHAIN_VERSION: $tarball does not match its pinned sha256 — NOT installing"; return 1; }
+        tar -C "$stage" -xzf "$stage/$tarball" || return 1
+        rm -rf "$prefix.old"
+        if [ -d "$prefix" ]; then
+            mv "$prefix" "$prefix.old" || return 1
+        fi
+        mv "$stage/go" "$prefix" || return 1
+        rm -rf "$prefix.old"
+        ln -sfn "$prefix/bin/go" "$HOME/.local/bin/go" || return 1
+    }
+    # _ledger_go INSTALLED: the run exits 1 over go, so its row must read FAILED like every other
+    # ledgered row (K16). A failed `_converge go` has already recorded that row, with the install's
+    # own reason, and ledgered go; the END report lists each component once.
+    _ledger_go() {
+        case "$(printf '%s' "$CONVERGE_ROWS" | awk -F'\t' '$1 == "go" {print $5}')" in
+            FAILED) ;;
+            *) _record_row go "$GO_TOOLCHAIN_VERSION" "$1" FAILED ;;
+        esac
+        case "$CONVERGE_FAILURES" in
+            go$'\n'*|*$'\n'go$'\n'*) ;;
+            *) CONVERGE_FAILURES="${CONVERGE_FAILURES}go"$'\n' ;;
+        esac
+    }
+
     if ! command_exists go; then
         log_error "Go is required to install af"
         return 1
@@ -327,6 +1098,46 @@ install_af() {
         log_error "quickstart.sh must be run from the agentfactory source tree"
         log_error "Clone the repo first, then run ./quickstart.sh from within it"
         return 1
+    fi
+
+    if [ "$(uname -s)" = Linux ]; then
+        _converge go "$GO_TOOLCHAIN_VERSION" _probe_go _install_go required || true
+    else
+        log_info "go: not Linux; building with the Go on PATH"
+    fi
+    if [ "$CHECK_ONLY" = true ]; then
+        return 0
+    fi
+    if [ "$(uname -s)" = Linux ]; then
+        hash -r
+        local go_bin go_reported goenv stale removed=""
+        go_bin="$(readlink -f "$(command -v go)" 2>/dev/null)" || go_bin=""
+        case "$go_bin" in
+            "$HOME/.local/share/agentfactory/go/"*)
+                if ! GOTOOLCHAIN=local go env -w GOTOOLCHAIN="${GO_TOOLCHAIN_VERSION}+auto" 2>/dev/null; then
+                    log_warn "go env -w GOTOOLCHAIN=${GO_TOOLCHAIN_VERSION}+auto failed (an exported GOTOOLCHAIN still overrides it)"
+                fi
+                go_reported="$(go version 2>/dev/null | awk '{print $3}')" || go_reported=""
+                if [ "$go_reported" != "$GO_TOOLCHAIN_VERSION" ]; then
+                    log_error "go version reports ${go_reported:-nothing}, not $GO_TOOLCHAIN_VERSION — an exported GOTOOLCHAIN overrides go env -w"
+                    log_info "go: building af with GOTOOLCHAIN=local (the pinned $GO_TOOLCHAIN_VERSION prefix toolchain)"
+                    _ledger_go "go version reports ${go_reported:-nothing}"
+                    export GOTOOLCHAIN=local
+                fi
+                ;;
+            *)
+                # A +auto line an earlier converging run persisted would let this base go fetch the
+                # pinned toolchain itself (H-3); only that af-written value is removed.
+                goenv="$(GOTOOLCHAIN=local go env GOENV 2>/dev/null)" || goenv=""
+                stale="$(grep -E '^GOTOOLCHAIN=go[0-9.]+[+]auto$' "$goenv" 2>/dev/null | head -1)" || stale=""
+                if [ -n "$stale" ] && GOTOOLCHAIN=local go env -u GOTOOLCHAIN 2>/dev/null; then
+                    removed="; removed the af-written $stale from $goenv"
+                fi
+                log_error "go toolchain $GO_TOOLCHAIN_VERSION: the go on PATH resolves to ${go_bin:-nothing}, not $HOME/.local/share/agentfactory/go; building with GOTOOLCHAIN=local so it never switches toolchains itself$removed"
+                _ledger_go "PATH go is ${go_bin:-absent}"
+                export GOTOOLCHAIN=local
+                ;;
+        esac
     fi
 
     log_info "Building af from local source: $SCRIPT_DIR"
@@ -340,13 +1151,23 @@ install_af() {
     # Build + install the optional web console (separate web/ module: web/go.mod) so the phase-5
     # launch guard's [ -x "$HOME/.local/bin/webui" ] test is true and the console actually starts.
     # Done here (not the Dockerfile) because this site already has the cloned repo + Go toolchain on
-    # hand. Best-effort: a failed web build must NEVER abort the factory bootstrap (mirrors the
-    # install_claude warn-don't-abort posture). `make build-webui` builds ./webui into the repo root
-    # but does NOT install it, so build fresh (avoids installing a stale copy left by a prior branch)
-    # THEN install. CWD is still "$SCRIPT_DIR" here (set above), where build-webui's -o ../webui lands;
-    # `install -m 0755` is a deliberate deviation from the adjacent `cp af` — it sets the exec bit the
-    # guard gates on in a single step.
-    if make build-webui 2>/dev/null && [ -f webui ]; then
+    # hand. A first install stays best-effort (a factory without the console is fully functional),
+    # but an INSTALLED console that cannot be rebuilt would keep serving its old build against the
+    # new af, so that failure is ledgered (D-46). `make build-webui` builds ./webui into the repo
+    # root but does NOT install it, so build fresh (avoids installing a stale copy left by a prior
+    # branch) THEN install. CWD is still "$SCRIPT_DIR" here (set above), where build-webui's -o
+    # ../webui lands; `install -m 0755` is a deliberate deviation from the adjacent `cp af` — it sets
+    # the exec bit the guard gates on in a single step.
+    if [ -x "$HOME/.local/bin/webui" ]; then
+        if make build-webui && [ -f webui ]; then
+            install -m 0755 webui "$HOME/.local/bin/webui"
+            WEBUI_REBUILT=1
+            log_info "Rebuilt webui at ~/.local/bin/webui"
+        else
+            log_error "build-webui failed; the installed web console keeps its old build"
+            CONVERGE_FAILURES="${CONVERGE_FAILURES}webui"$'\n'
+        fi
+    elif make build-webui 2>/dev/null && [ -f webui ]; then
         install -m 0755 webui "$HOME/.local/bin/webui"
         log_info "Installed webui to ~/.local/bin/webui"
     else
@@ -363,131 +1184,342 @@ install_af() {
     fi
 }
 
+# install_gh (D-1, D-5): gh converges from its release tarball into ~/.local/bin (cli.github.com's
+# apt index keeps one version per architecture, so an apt pin would be a scheduled outage). Once the
+# pinned gh is in place, the image's apt build at /usr/bin/gh is retired (_retire_apt_gh).
+install_gh() {
+    log_step "Converging the GitHub CLI (gh)"
+
+    _probe_gh() {
+        gh --version 2>/dev/null | awk 'NR==1{print $3}'
+    }
+    _install_gh() {
+        local arch expected tarball stage key value
+        if [ "$(uname -s)" != Linux ]; then
+            log_error "gh: the pinned release tarball is a Linux build; not installing it on $(uname -s)"
+            return 1
+        fi
+        arch="$(_arch)" || { log_error "gh: unsupported architecture $(uname -m)"; return 1; }
+        case "$arch" in
+            arm64) expected="$GH_SHA256_ARM64" ;;
+            amd64) expected="$GH_SHA256_AMD64" ;;
+        esac
+        tarball="gh_${GH_VERSION}_linux_${arch}.tar.gz"
+        mkdir -p "$HOME/.local/bin" "$HOME/.cache/agentfactory" || return 1
+        stage="$(mktemp -d "$HOME/.cache/agentfactory/gh.XXXXXX")" || return 1
+        CLEANUP_DIRS+=("$stage")
+        log_info "Downloading gh $GH_VERSION ($arch)"
+        if ! curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${tarball}" -o "$stage/$tarball"; then
+            log_error "gh $GH_VERSION: download failed"
+            return 1
+        fi
+        if ! printf '%s  %s\n' "$expected" "$stage/$tarball" | sha256sum --check --strict >/dev/null; then
+            log_error "gh $GH_VERSION: $tarball does not match its pinned sha256 — NOT installing"
+            return 1
+        fi
+        tar -C "$stage" -xzf "$stage/$tarball" || return 1
+        install -m 0755 "$stage/gh_${GH_VERSION}_linux_${arch}/bin/gh" "$HOME/.local/bin/gh.new" || return 1
+        mv -f "$HOME/.local/bin/gh.new" "$HOME/.local/bin/gh" || return 1
+        # quickdocker.sh's `gh auth setup-git` pointed git's credential helper at the apt binary by
+        # absolute path; re-point exactly those values, keeping each key's empty reset entry.
+        git config --global --get-regexp '^credential\..*\.helper$' 2>/dev/null | while read -r key value; do
+            case "$value" in
+                *"/usr/bin/gh auth git-credential"*)
+                    git config --global --replace-all "$key" "!$HOME/.local/bin/gh auth git-credential" '/usr/bin/gh auth git-credential' || true
+                    ;;
+            esac
+        done || true
+        return 0
+    }
+
+    _converge gh "$GH_VERSION" _probe_gh _install_gh required || true
+    _retire_apt_gh /usr/local/bin
+    return 0
+}
+
+# _retire_apt_gh LINK_DIR: the image's apt gh (2.90.0) carries advisories and stays executable on
+# every PATH without ~/.local/bin (B2), so once the pinned gh answers it is removed. git's credential
+# helpers are re-pointed first, and LINK_DIR/gh points at the pinned build so callers that use the
+# image PATH (non-login `docker exec`, af's own gh calls) keep a gh. An operator file there is never
+# replaced. A failed removal fails the gh row: a vulnerable gh stays reachable.
+_retire_apt_gh() {
+    local dir="$1" have state key value as_root=""
+    [ "$CHECK_ONLY" = true ] && return 0
+    have="$("$HOME/.local/bin/gh" --version 2>/dev/null | awk 'NR==1{print $3}')" || have=""
+    [ "$have" = "$GH_VERSION" ] || return 0
+    state="$(dpkg-query -W -f='${Status}' gh 2>/dev/null)" || state=""
+    [ "$state" = "install ok installed" ] || return 0
+    if [ "$(id -u)" != 0 ]; then
+        if command_exists sudo && sudo -n true 2>/dev/null; then
+            as_root="sudo -n"
+        else
+            log_warn "gh: the apt gh stays installed at /usr/bin/gh — no root (id -u = $(id -u); sudo -n true failed)"
+            return 0
+        fi
+    else
+        log_warn "gh: retiring the apt gh as root; another user's git helper or script that runs /usr/bin/gh must switch to $dir/gh, which points into $HOME"
+    fi
+    git config --global --get-regexp '^credential\..*\.helper$' 2>/dev/null | while read -r key value; do
+        case "$value" in
+            *"/usr/bin/gh auth git-credential"*)
+                git config --global --replace-all "$key" "!$HOME/.local/bin/gh auth git-credential" '/usr/bin/gh auth git-credential' || true
+                ;;
+        esac
+    done || true
+    if { [ ! -e "$dir/gh" ] && [ ! -L "$dir/gh" ]; } || [ "$(readlink "$dir/gh" 2>/dev/null)" = "$HOME/.local/bin/gh" ]; then
+        $as_root ln -sfn "$HOME/.local/bin/gh" "$dir/gh" || log_warn "gh: could not link $dir/gh to the pinned gh"
+    fi
+    if ! _apt_get remove -y gh >/dev/null 2>&1; then
+        log_error "gh: apt-get remove gh failed; the apt gh stays reachable at /usr/bin/gh"
+        CONVERGE_FAILURES="${CONVERGE_FAILURES}gh"$'\n'
+        _record_row gh "$GH_VERSION" "apt gh $(dpkg-query -W -f='${Version}' gh 2>/dev/null) still installed" FAILED
+        return 0
+    fi
+    hash -r
+    return 0
+}
+
 install_claude() {
-    log_step "Installing Claude Code CLI"
+    log_step "Converging Claude Code CLI"
 
-    # Check if already installed and working
-    if command_exists claude; then
-        if claude --version >/dev/null 2>&1; then
-            log_success "Claude Code already installed: $(claude --version 2>/dev/null | head -1)"
-            return 0
-        fi
-        log_warn "Claude Code found but not working, reinstalling..."
-    fi
-
-    # Try stable channel installer first
-    log_info "Installing Claude Code via stable channel..."
-    if curl -fsSL https://claude.ai/install.sh | bash -s -- stable; then
-        export PATH="$HOME/.local/bin:$PATH"
+    _probe_claude() {
         if command_exists claude; then
-            log_success "Claude Code installed: $(claude --version 2>/dev/null | head -1)"
+            claude --version 2>/dev/null | head -1 | awk '{print $1}'
+        fi
+    }
+    # 2.1.224 embeds the emSign ECC Root CA - G3 as an unlabeled PEM, so both the DER label and a
+    # run of the certificate body are counted (H-2).
+    _claude_emsign_clean() {
+        local label body
+        [ -f "$1" ] || return 1
+        label="$(LC_ALL=C grep -a -c 'emSign ECC Root CA - G3' "$1" 2>/dev/null)" || true
+        body="$(LC_ALL=C grep -a -c "$EMSIGN_G3_BODY_PROBE" "$1" 2>/dev/null)" || true
+        if [ "${label:-0}" = 0 ] && [ "${body:-0}" = 0 ]; then
             return 0
         fi
-    fi
+        log_error "claude $CLAUDE_CODE_VERSION embeds 'emSign ECC Root CA - G3' ($((${label:-0} + ${body:-0})) matches) — refusing to accept this build; bump CLAUDE_CODE_VERSION"
+        return 1
+    }
+    # The official installer re-points ~/.local/bin/claude before its build is verified, so a
+    # rejected build would leave the link dangling and every agent session unlaunchable. Put back
+    # the link the run started with ($prev, one hop, as written), or drop a dangling one. A relative
+    # $prev resolves against the link's own directory, not the cwd quickstart runs in.
+    _claude_relink_prev() {
+        local resolved="$prev"
+        case "$prev" in
+            ""|/*) ;;
+            *) resolved="$HOME/.local/bin/$prev" ;;
+        esac
+        if [ -n "$prev" ] && [ -x "$resolved" ]; then
+            ln -sfn "$prev" "$HOME/.local/bin/claude"
+        elif [ -L "$HOME/.local/bin/claude" ] && [ ! -e "$HOME/.local/bin/claude" ]; then
+            rm -f "$HOME/.local/bin/claude"
+        fi
+    }
+    # Three channels, each verified before anything it fetched runs. ~/.local/bin/claude is a
+    # symlink into versions/ (the official installer's layout), so it is only ever re-pointed with
+    # `ln -sfn`: copying onto it would overwrite the OLD version's bytes.
+    _install_claude() {
+        local arch platform expected suffix versions bin target prev rc=0
+        if [ "$(uname -s)" != Linux ]; then
+            log_error "claude: the pinned release binary is a Linux build; not installing it on $(uname -s)"
+            return 1
+        fi
+        arch="$(_arch)" || arch=""
+        case "$arch" in
+            arm64) platform="linux-arm64"; suffix="ARM64"; expected="$CLAUDE_CODE_SHA256_ARM64" ;;
+            amd64) platform="linux-x64"; suffix="AMD64"; expected="$CLAUDE_CODE_SHA256_AMD64" ;;
+            *) log_error "claude: unsupported architecture $(uname -m)"; return 1 ;;
+        esac
+        versions="$HOME/.local/share/claude/versions"
+        bin="$versions/$CLAUDE_CODE_VERSION"
+        mkdir -p "$versions" "$HOME/.local/bin" || return 1
 
-    # Fallback: npm global install
-    log_info "Stable channel failed, trying npm install..."
-    if command_exists npm; then
-        npm install -g @anthropic-ai/claude-code 2>&1 || {
-            # Try with sudo if npm global fails
-            if command_exists sudo; then
-                sudo -n npm install -g @anthropic-ai/claude-code 2>&1 || {
-                    log_error "Failed to install Claude Code via npm"
-                    return 1
-                }
-            else
-                log_error "Failed to install Claude Code via npm"
+        log_info "Downloading Claude Code $CLAUDE_CODE_VERSION ($platform)"
+        rm -f "$bin.partial"
+        if curl -fsSL -o "$bin.partial" "https://downloads.claude.ai/claude-code-releases/$CLAUDE_CODE_VERSION/$platform/claude" \
+            && printf '%s  %s\n' "$expected" "$bin.partial" | sha256sum --check --strict >/dev/null; then
+            if ! _claude_emsign_clean "$bin.partial"; then
+                rm -f "$bin.partial"
                 return 1
             fi
-        }
-        if command_exists claude; then
-            log_success "Claude Code installed: $(claude --version 2>/dev/null | head -1)"
+            mv -f "$bin.partial" "$bin" || return 1
+            chmod 0755 "$bin" || return 1
+            ln -sfn "$bin" "$HOME/.local/bin/claude" || return 1
             return 0
         fi
-    fi
+        rm -f "$bin.partial"
+        log_warn "claude $CLAUDE_CODE_VERSION: the release download failed or did not match CLAUDE_CODE_SHA256_$suffix; trying the official installer"
 
-    log_error "Failed to install Claude Code via both methods"
-    return 1
+        prev="$(readlink "$HOME/.local/bin/claude" 2>/dev/null)" || prev=""
+        if curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_CODE_VERSION"; then
+            target="$(readlink -f "$HOME/.local/bin/claude" 2>/dev/null)" || target=""
+            if [ -n "$target" ] && printf '%s  %s\n' "$expected" "$target" | sha256sum --check --strict >/dev/null; then
+                if ! _claude_emsign_clean "$target"; then
+                    rm -f "$target"
+                    _claude_relink_prev
+                    return 1
+                fi
+                return 0
+            fi
+            if [ "$target" = "$bin" ]; then
+                rm -f "$bin"
+                log_error "claude $CLAUDE_CODE_VERSION: installed binary sha256 does not match CLAUDE_CODE_SHA256_$suffix — removed"
+            else
+                log_error "claude $CLAUDE_CODE_VERSION: the official installer did not lay down versions/$CLAUDE_CODE_VERSION (~/.local/bin/claude -> ${target:-nothing})"
+            fi
+        fi
+        _claude_relink_prev
+
+        log_info "Trying the npm package for Claude Code $CLAUDE_CODE_VERSION"
+        _npm_install_pinned @anthropic-ai/claude-code "$CLAUDE_CODE_VERSION" "$CLAUDE_CODE_NPM_SHA512" "@anthropic-ai/claude-code-$platform" "$(if [ "$arch" = arm64 ]; then echo "$CLAUDE_CODE_LINUX_ARM64_SHA512"; else echo "$CLAUDE_CODE_LINUX_AMD64_SHA512"; fi)" || rc=$?
+        if [ "$rc" -eq 3 ]; then
+            log_error "cannot install Claude Code from npm: the npm global prefix is root-owned and passwordless sudo is unavailable in this container"
+        fi
+        [ "$rc" -eq 0 ] || return 1
+        # npm's bin link sits behind ~/.local/bin on PATH; point ~/.local/bin/claude at it, or a
+        # stale build there would keep answering the probe.
+        target="$(npm prefix -g 2>/dev/null)/bin/claude"
+        if [ ! -e "$target" ]; then
+            log_error "claude: the npm package installed no binary at $target"
+            return 1
+        fi
+        if ! _claude_emsign_clean "$(readlink -f "$target" 2>/dev/null)"; then
+            return 1
+        fi
+        ln -sfn "$target" "$HOME/.local/bin/claude" || return 1
+        return 0
+    }
+
+    _converge claude "$CLAUDE_CODE_VERSION" _probe_claude _install_claude required || true
+    return 0
 }
 
 install_playwright() {
-    log_step "Installing Playwright browser tooling (headless visual verification)"
+    log_step "Converging Playwright browser tooling (headless visual verification)"
 
     # Optional tier: agents use `playwright screenshot` for visual triage of
     # transplanted UIs. Every failure path degrades to log_warn + return 0 —
     # a factory without a browser stays fully functional; agents' visual
     # checks escalate to the human demo gate instead.
 
-    # Idempotent: CLI answers and a chromium build is already in the cache.
-    if command_exists playwright && playwright --version >/dev/null 2>&1 \
-        && compgen -G "$HOME/.cache/ms-playwright/chromium-*" >/dev/null 2>&1; then
-        log_success "Playwright already installed: $(playwright --version 2>/dev/null | head -1)"
-        return 0
-    fi
+    # The version, suffixed +no-chromium when any browser directory the pinned CLI would use is
+    # missing, so a CLI without its browser never reads as converged.
+    _probe_playwright() {
+        local v loc
+        v="$(playwright --version 2>/dev/null | awk '{print $2}')" || true
+        [ -n "$v" ] || return 0
+        while IFS= read -r loc; do
+            if [ -z "$loc" ] || [ ! -d "$loc" ]; then
+                v="$v+no-chromium"
+                break
+            fi
+        done <<EOF
+$(playwright install --dry-run chromium 2>/dev/null | sed -n 's/^ *Install location: *//p')
+EOF
+        printf '%s\n' "$v"
+    }
+    # .designs/743/implementation-plan/pin-data.md § Tree digest algorithm: one `F <sha256> <path>`
+    # or `L <target> <path>` line per entry under the build's single top-level directory, sorted
+    # under LC_ALL=C, hashed as a whole.
+    _playwright_tree_digest() {
+        (cd "$1" && find . -mindepth 1 \( -type f -o -type l \) -printf '%P\n' | LC_ALL=C sort | while IFS= read -r p; do
+            if [ -L "$p" ]; then
+                printf 'L %s %s\n' "$(readlink "$p")" "$p"
+            else
+                printf 'F %s %s\n' "$(sha256sum < "$p" | cut -d' ' -f1)" "$p"
+            fi
+        done | sha256sum | cut -d' ' -f1)
+    }
+    _install_playwright() {
+        if ! command_exists npm; then
+            log_warn "npm not found; cannot install Playwright"
+            return 1
+        fi
 
-    if ! command_exists npm; then
-        log_warn "npm not found; skipping Playwright — visual checks will escalate to the human gate"
-        return 0
-    fi
+        # Every command below writes to the install log; the terminal sees only
+        # clean status lines. The log is surfaced (tail) only on real failure —
+        # this runs once per factory across the whole fleet, so first-run noise
+        # multiplies by the number of factories.
+        local pw_log="/tmp/af-playwright-install.log"
+        : >"$pw_log"
 
-    # Every command below writes to the install log; the terminal sees only
-    # clean status lines. The log is surfaced (tail) only on real failure —
-    # this runs once per factory across the whole fleet, so first-run noise
-    # multiplies by the number of factories.
-    local pw_log="/tmp/af-playwright-install.log"
-    : >"$pw_log"
+        local rc=0 arch want_chromium want_shell loc want root got checked=0
+        log_info "Installing playwright $PLAYWRIGHT_VERSION via npm (log: $pw_log)..."
+        _npm_install_pinned playwright "$PLAYWRIGHT_VERSION" "$PLAYWRIGHT_SHA512" playwright-core "$PLAYWRIGHT_CORE_SHA512" >>"$pw_log" 2>&1 || rc=$?
+        case "$rc" in
+            0) ;;
+            3) log_warn "npm global prefix not writable and no passwordless sudo; cannot install playwright"; return 1 ;;
+            *) tail -20 "$pw_log"; log_warn "npm install of the pinned playwright failed"; return 1 ;;
+        esac
+        hash -r
+        if ! command_exists playwright; then
+            log_warn "playwright not on PATH after install"
+            return 1
+        fi
 
-    if ! command_exists playwright; then
-        # The base image installs Node via the nodesource apt repo, so the npm
-        # global prefix is /usr and root-owned — an unprivileged `npm -g` is a
-        # guaranteed EACCES there. Probe prefix writability and pick the right
-        # path once, instead of failing loudly first.
-        local npm_root
-        npm_root="$(npm root -g 2>/dev/null || true)"
-        log_info "Installing playwright via npm (log: $pw_log)..."
-        if [ -n "$npm_root" ] && [ -w "$npm_root" ]; then
-            npm install -g playwright >>"$pw_log" 2>&1 || {
+        # Ubuntu's apt chromium is a snap transition stub (snaps don't run in standard
+        # containers), so playwright's bundled chromium is the reliable path. --with-deps
+        # apt-installs the browser's shared libraries and needs passwordless sudo (the
+        # container 'dev' user has it).
+        # The apt run inside --with-deps prints a benign "debconf: delaying package
+        # configuration" warning (the slim base image lacks apt-utils) — it goes to
+        # the log with everything else.
+        log_info "Downloading chromium (first run only, ~250MB; log: $pw_log)..."
+        if command_exists sudo && sudo -n true 2>/dev/null; then
+            playwright install --with-deps chromium >>"$pw_log" 2>&1 || {
                 tail -20 "$pw_log"
-                log_warn "npm install playwright failed; skipping — visual checks will escalate to the human gate"
-                return 0
-            }
-        elif command_exists sudo && sudo -n true 2>/dev/null; then
-            sudo -n npm install -g playwright >>"$pw_log" 2>&1 || {
-                tail -20 "$pw_log"
-                log_warn "npm install playwright failed; skipping — visual checks will escalate to the human gate"
-                return 0
+                log_warn "chromium download or system deps failed"
+                return 1
             }
         else
-            log_warn "npm global prefix not writable and no passwordless sudo; skipping playwright — visual checks will escalate to the human gate"
-            return 0
+            playwright install chromium >>"$pw_log" 2>&1 || {
+                tail -20 "$pw_log"
+                log_warn "chromium download failed"
+                return 1
+            }
         fi
-    fi
 
-    if ! command_exists playwright; then
-        log_warn "playwright not on PATH after install; skipping — visual checks will escalate to the human gate"
+        # The browser builds are fetched by the CLI, outside npm's integrity check, so each tree is
+        # held to its pinned digest (L-8).
+        arch="$(_arch)" || arch=""
+        case "$arch" in
+            arm64) want_chromium="$PLAYWRIGHT_CHROMIUM_TREE_SHA256_ARM64"; want_shell="$PLAYWRIGHT_HEADLESS_SHELL_TREE_SHA256_ARM64" ;;
+            amd64) want_chromium="$PLAYWRIGHT_CHROMIUM_TREE_SHA256_AMD64"; want_shell="$PLAYWRIGHT_HEADLESS_SHELL_TREE_SHA256_AMD64" ;;
+            *) log_warn "playwright: no pinned chromium digest for $(uname -m)"; return 1 ;;
+        esac
+        for loc in $(playwright install --dry-run chromium 2>/dev/null | sed -n 's/^ *Install location: *//p'); do
+            case "${loc##*/}" in
+                chromium-*) want="$want_chromium" ;;
+                chromium_headless_shell-*) want="$want_shell" ;;
+                *) continue ;;
+            esac
+            root="$(find "$loc" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)"
+            if [ -z "$root" ] || [ "$(printf '%s\n' "$root" | wc -l | tr -d ' ')" != 1 ]; then
+                log_warn "playwright: ${loc##*/} does not hold exactly one build directory"
+                return 1
+            fi
+            got="$(_playwright_tree_digest "$root")"
+            if [ "$got" != "$want" ]; then
+                log_warn "playwright: ${loc##*/} tree digest $got does not match the pinned $want"
+                return 1
+            fi
+            checked=$((checked + 1))
+        done
+        if [ "$checked" -ne 2 ]; then
+            log_warn "playwright: found $checked of the 2 pinned browser trees (chromium, headless shell)"
+            return 1
+        fi
         return 0
-    fi
+    }
 
-    # Ubuntu's apt chromium is a snap transition stub (snaps don't run in standard
-    # containers), so playwright's bundled chromium is the reliable path. --with-deps
-    # apt-installs the browser's shared libraries and needs passwordless sudo (the
-    # container 'dev' user has it).
-    # The apt run inside --with-deps prints a benign "debconf: delaying package
-    # configuration" warning (the slim base image lacks apt-utils) — it goes to
-    # the log with everything else.
-    log_info "Downloading chromium (first run only, ~250MB; log: $pw_log)..."
-    if command_exists sudo && sudo -n true 2>/dev/null; then
-        playwright install --with-deps chromium >>"$pw_log" 2>&1 || {
-            tail -20 "$pw_log"
-            log_warn "chromium download or system deps failed; visual checks will escalate to the human gate"
-            return 0
-        }
+    if [ "$(uname -s)" = Linux ]; then
+        _converge playwright "$PLAYWRIGHT_VERSION" _probe_playwright _install_playwright optional || true
     else
-        playwright install chromium >>"$pw_log" 2>&1 || {
-            tail -20 "$pw_log"
-            log_warn "chromium download failed; visual checks will escalate to the human gate"
-            return 0
-        }
+        log_info "playwright: not Linux; the pinned browser builds and their tree digests are Linux-only"
+    fi
+    if [ "$CHECK_ONLY" = true ] || ! command_exists playwright; then
+        return 0
     fi
 
     # Calibrate by rendering, not by version string: an installed-but-unrenderable
@@ -504,60 +1536,65 @@ install_playwright() {
 }
 
 _ensure_codex_cli() {
-    if command_exists codex; then
-        log_success "codex CLI present: $(codex --version 2>/dev/null || echo codex-cli)"
-        return 0
-    fi
-
-    local consent="${AF_CODEX_INSTALL_CONSENT:-}"
-    case "$consent" in
-        yes)
-            ;;
-        "")
-            if [ -t 0 ]; then
-                local _consent_ans=""
-                read -r -p "This will INSTALL the codex cli, are you sure? y/N " _consent_ans
-                if [ "$_consent_ans" != "y" ] && [ "$_consent_ans" != "Y" ]; then
-                    log_error "codex CLI install declined — subscription mode cannot run without the Codex CLI; nothing was installed" >&2
+    # Consent is asked only for a FIRST install, and never under --check: a present codex converges
+    # to the pin like every other component.
+    if ! command_exists codex && [ "$CHECK_ONLY" != true ]; then
+        local consent="${AF_CODEX_INSTALL_CONSENT:-}"
+        case "$consent" in
+            yes)
+                ;;
+            "")
+                if [ -t 0 ]; then
+                    local _consent_ans=""
+                    read -r -p "This will INSTALL the codex cli, are you sure? y/N " _consent_ans
+                    if [ "$_consent_ans" != "y" ] && [ "$_consent_ans" != "Y" ]; then
+                        log_error "codex CLI install declined — subscription mode cannot run without the Codex CLI; nothing was installed" >&2
+                        exit 1
+                    fi
+                else
+                    log_error "codex CLI install declined (no terminal to ask, and AF_CODEX_INSTALL_CONSENT is not \"yes\") — subscription mode cannot run without the Codex CLI; nothing was installed" >&2
                     exit 1
                 fi
-            else
-                log_error "codex CLI install declined (no terminal to ask, and AF_CODEX_INSTALL_CONSENT is not \"yes\") — subscription mode cannot run without the Codex CLI; nothing was installed" >&2
+                ;;
+            *)
+                log_error "invalid AF_CODEX_INSTALL_CONSENT value \"$consent\": must be unset or exactly \"yes\"" >&2
                 exit 1
-            fi
-            ;;
-        *)
-            log_error "invalid AF_CODEX_INSTALL_CONSENT value \"$consent\": must be unset or exactly \"yes\"" >&2
-            exit 1
-            ;;
-    esac
+                ;;
+        esac
+    fi
 
-    local codex_log="/tmp/af-codex-install.log"
-    : >"$codex_log"
-    log_info "Installing codex CLI (log: $codex_log)"
+    _probe_codex() {
+        codex --version 2>/dev/null | awk '{print $2}'
+    }
     # Same probe -> sudo -n shape as install_playwright's npm-global-root writability check
     # (intake DO-NOT-CHANGE: reuse its probe -> sudo -n shape); unlike playwright's optional
     # tooling, the codex CLI is load-bearing for subscription mode, so every declined/infeasible
-    # path here is `exit 1`, never install_playwright's degrade-safe `return 0`.
-    local npm_root
-    npm_root="$(npm root -g 2>/dev/null || true)"
-    if [ -n "$npm_root" ] && [ -w "$npm_root" ]; then
-        npm install -g @openai/codex >>"$codex_log" 2>&1 || {
-            tail -20 "$codex_log"
-            log_error "codex CLI install failed (see $codex_log, last 20 lines above)"
-            exit 1
-        }
-    elif command_exists sudo && sudo -n true 2>/dev/null; then
-        sudo -n npm install -g @openai/codex >>"$codex_log" 2>&1 || {
-            tail -20 "$codex_log"
-            log_error "codex CLI install failed (see $codex_log, last 20 lines above)"
-            exit 1
-        }
-    else
-        log_error "cannot install the Codex CLI: the npm global prefix (/usr) is root-owned and passwordless sudo is unavailable in this container"
-        exit 1
-    fi
-    log_success "codex CLI installed: $(codex --version 2>/dev/null || echo codex-cli)"
+    # path here fails the run (decline: `exit 1`; install: `return 1` to a caller that exits), never install_playwright's degrade-safe `return 0`.
+    _install_codex() {
+        local codex_log="/tmp/af-codex-install.log" platform sha rc=0
+        : >"$codex_log"
+        case "$(_arch)" in
+            arm64) platform="@openai/codex-linux-arm64"; sha="$CODEX_LINUX_ARM64_SHA512" ;;
+            amd64) platform="@openai/codex-linux-x64"; sha="$CODEX_LINUX_AMD64_SHA512" ;;
+            *) log_error "codex: unsupported architecture $(uname -m)"; return 1 ;;
+        esac
+        log_info "Installing codex CLI $CODEX_VERSION (log: $codex_log)"
+        _npm_install_pinned @openai/codex "$CODEX_VERSION" "$CODEX_SHA512" "$platform" "$sha" >>"$codex_log" 2>&1 || rc=$?
+        case "$rc" in
+            0) return 0 ;;
+            3)
+                log_error "cannot install the Codex CLI: the npm global prefix (/usr) is root-owned and passwordless sudo is unavailable in this container"
+                return 1
+                ;;
+            *)
+                tail -20 "$codex_log"
+                log_error "codex CLI install failed (see $codex_log, last 20 lines above)"
+                return 1
+                ;;
+        esac
+    }
+
+    _converge codex "$CODEX_VERSION" _probe_codex _install_codex required
 }
 
 _codex_session_valid() {
@@ -643,40 +1680,6 @@ _ensure_codex_session() {
     log_success "Codex session verified"
 }
 
-install_playwright_plugin() {
-    log_step "Installing Playwright Claude Code plugin (browser tools for all agents)"
-
-    # User-scope plugin: containers run every agent as this user, so one install
-    # surfaces the plugin's browser tools in every agent session. The plugin is
-    # the interface; install_playwright above provides the chromium it drives.
-    # Fail-soft throughout — quickstart re-runs (af install --agents) retry it.
-
-    if ! command_exists claude; then
-        log_warn "claude not installed; skipping playwright plugin (retried on next quickstart run)"
-        return 0
-    fi
-
-    if claude plugin list 2>/dev/null | grep -q "playwright@"; then
-        log_success "Playwright plugin already installed"
-        return 0
-    fi
-
-    if claude plugin install playwright@claude-plugins-official --scope user 2>&1; then
-        log_success "Playwright plugin installed (user scope — all agents)"
-        return 0
-    fi
-
-    # The official marketplace may not be configured yet on a fresh install.
-    log_info "Install failed; adding official marketplace and retrying..."
-    claude plugin marketplace add anthropics/claude-plugins-official 2>&1 || true
-    if claude plugin install playwright@claude-plugins-official --scope user 2>&1; then
-        log_success "Playwright plugin installed (user scope — all agents)"
-    else
-        log_warn "Playwright plugin install failed (may need claude auth or network) — retried on next quickstart run; agents fall back to the playwright CLI"
-    fi
-    return 0
-}
-
 #------------------------------------------------------------------------------
 # Phase 3: Configure
 #------------------------------------------------------------------------------
@@ -716,6 +1719,7 @@ configure_shell() {
         echo 'export ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-5}"'
         echo 'export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL:-xhigh}"'
         echo 'export CLAUDE_CODE_DISABLE_AUTO_MEMORY="${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-1}"'
+        echo 'export DISABLE_AUTOUPDATER="${DISABLE_AUTOUPDATER:-1}"'
         echo "$end_marker"
     } >> "$shell_config"
     log_info "Updated model config in $shell_config"
@@ -825,8 +1829,15 @@ Agentfactory Quickstart
 =======================
 
 Usage:
-  ./quickstart.sh           Full setup (always auto mode, no prompts)
-  ./quickstart.sh --check   Check prerequisites only
+  ./quickstart.sh           Full setup (always auto mode, no prompts). Every run converges
+                            the container to the pinned versions: Claude Code, gh, Go,
+                            Playwright, the Codex CLI and OpenObserve when present, both
+                            Python locks, nodejs and the Ubuntu security pocket. A required
+                            component that cannot converge makes the run exit 1 at the end,
+                            after every other component has been attempted
+  ./quickstart.sh --check   Read-only drift report: prints each component that differs from
+                            its pin, refreshes .runtime/bootstrap/convergence.json and exits
+                            1 on any drift; installs and changes nothing
   ./quickstart.sh --litellm Full setup, then stand up the LiteLLM gateway for
                             OpenAI-model profiles (see USING_LITELLM.md)
   ./quickstart.sh --litellm-auth=<api-key|codex-subscription>
@@ -846,7 +1857,7 @@ Environment:
                             CLI must be installed for --litellm-auth=codex-subscription.
 
 This script runs inside a container created by quickdocker.sh.
-It installs bd, af, and Claude Code, then configures the factory workspace.
+It builds af, converges the pinned tools, then configures the factory workspace.
 
 After running this script:
   af up                     Start agent sessions
@@ -1179,23 +2190,8 @@ setup_litellm() {
         exit 1
     fi
 
-    # _gateway_stop / _reconcile_gateway (K12, issue #693 Phase 4): the ONLY kill site for the
-    # litellm tmux session. Nested here (decisions.md D1) so their text lands inside
-    # setup_litellm's own extracted body for the shape-test harness, and defined before the pip
-    # build pre-check below so that call site can reach them (nested function defs become
-    # callable only once the defining line executes).
-    _gateway_stop() {
-        mkdir -p .runtime/gateway
-        printf '{"pid":%s,"since":%s}' "$$" "$(date +%s)" > .runtime/gateway/reconciling
-        tmux kill-session -t =litellm 2>/dev/null || true
-        rm -f .runtime/gateway/launch.json
-        local waited=0
-        while _port_in_use "$LITELLM_PORT" && [ "$waited" -lt 10 ]; do
-            sleep 1
-            waited=$((waited + 1))
-        done
-    }
-
+    # _reconcile_gateway (K12, issue #693 Phase 4) stops through the top-level _gateway_stop, the
+    # only kill site for the litellm tmux session.
     # _reconcile_gateway <relaunch_script>: desired identity (from the script's own --identity
     # mode) vs. recorded identity (launch.json minus launched_at/pane_pid) decide whether the
     # running session is kept, restarted, or a fresh one launched. A foreign listener on the
@@ -1235,17 +2231,24 @@ setup_litellm() {
         fi
     }
 
-    if ! command_exists litellm || [[ "$(litellm --version 2>/dev/null | grep -m1 .)" != *"$LITELLM_VERSION"* ]]; then
-        if tmux has-session -t =litellm 2>/dev/null; then
-            log_warn "a running litellm session's version differs from the pinned $LITELLM_VERSION; stopping it before reinstalling (a mismatched live process is worse than a stopped one)"
-            _gateway_stop
-        fi
-        log_info "Installing litellm[proxy]==$LITELLM_VERSION"
-        pip3 install --break-system-packages "litellm[proxy]==$LITELLM_VERSION" || {
-            log_error "litellm install failed"
-            exit 1
-        }
+    # K3 -> stop -> K2 (D-9): pip's dry run decides whether the lock changes the installed build; a
+    # live gateway is stopped first because a mixed-version live process is worse than a stopped one.
+    # The locked install itself always runs, and pip decides what it changes.
+    local lite_rc=0 lite_report=""
+    _pip_would_change "$SCRIPT_DIR/py/litellm-requirements.txt" >/dev/null || lite_rc=$?
+    if [ "$lite_rc" -ne 1 ] && _litellm_session_running; then
+        _gateway_stop
     fi
+    log_info "Installing the LiteLLM lock (py/litellm-requirements.txt)"
+    if [ "$lite_rc" -eq 2 ]; then
+        lite_report="$(mktemp)" || lite_report=""
+    fi
+    if ! _pip_install_locked "$SCRIPT_DIR/py/litellm-requirements.txt" ${lite_report:+--report "$lite_report"}; then
+        log_error "litellm install failed"
+        exit 1
+    fi
+    _lock_result litellm-lock py/litellm-requirements.txt "$lite_rc" 0 "$lite_report"
+    rm -f "$lite_report"
     log_success "litellm present: $(litellm --version 2>/dev/null | grep -m1 . || echo 'version unknown')"
     if ! python3 -c 'import litellm.proxy' 2>/dev/null; then
         log_error "litellm.proxy failed to import after install — the build appears corrupt"
@@ -1316,7 +2319,7 @@ setup_litellm() {
         # Subscription mode: the ChatGPT-subscription handle comes from `af gateway auth import`
         # (E2), never an OpenAI key — the frame-lift invariant keeps this branch and the api-key
         # branch above fully disjoint; neither ever falls back to the other.
-        _ensure_codex_cli
+        _ensure_codex_cli || exit 1
         _ensure_codex_session
         if ! af gateway auth import; then
             exit 1
@@ -1874,15 +2877,16 @@ _generate_telemetry_password() {
     printf '%s' "$pw"
 }
 
-# setup_telemetry (default; --no-telemetry to skip): provisions the OpenObserve observability
+# setup_telemetry (default; --no-telemetry skips it): provisions the OpenObserve observability
 # backend the SAME way setup_litellm provisions the gateway — pinned, checksummed, loopback-bound,
-# secrets-protected, restart-documented. Runs LAST, so omitting it (or --no-telemetry) leaves a
-# fully functional factory. Because it is default-on (not an explicit opt-in like --litellm),
-# provisioning hiccups degrade to warnings and return cleanly — a backend that fails to come up
-# must never fail the whole bootstrap. Installing the backend is NOT enabling collection: the
-# .telemetry-gate is a separate operator lever (af telemetry on) and this function never touches it.
-# No interactive prompt (ADR-014); idempotent (guard clauses + write-if-absent), so a re-run is the
-# upgrade path.
+# secrets-protected, restart-documented. The binary converge is REQUIRED: a failed install is
+# ledgered and the END report exits 1. Launch, readiness, smoke and dashboard hiccups still warn
+# and return 0, because an installed backend that is slow to come up leaves the factory working.
+# --no-telemetry skips this function and leaves an ABSENT backend uninstalled, but an installed
+# backend converges in converge_present_components regardless (D-47). Installing the backend is NOT
+# enabling collection: the .telemetry-gate is a separate operator lever (af telemetry on) and this
+# function never touches it. No interactive prompt (ADR-014); idempotent (guard clauses +
+# write-if-absent), so a re-run is the upgrade path.
 setup_telemetry() {
     log_step "Setting up OpenObserve telemetry backend (default; --no-telemetry to skip)"
 
@@ -1893,8 +2897,7 @@ setup_telemetry() {
     local auth_file="$secrets_dir/telemetry.auth"
     local root_pass_file="$secrets_dir/telemetry.root"
     local root_email="root@agentfactory.local"
-    local bin_dir="$HOME/.local/bin"
-    local oo_bin="$bin_dir/openobserve"
+    local oo_bin="$OPENOBSERVE_BIN"
     local oo_data="$factory_root/.agentfactory/telemetry/openobserve"
 
     # Port-occupancy probe: _port_in_use is now a top-level function (K11, issue #693 Phase 1,
@@ -1927,6 +2930,16 @@ setup_telemetry() {
 if ! command -v openobserve >/dev/null 2>&1 || [ ! -s "$factory_root/.agentfactory/secrets/telemetry.auth" ]; then
     exit 0
 fi
+# The data dir is migrated forward by each release that opens it: never start an older binary on it.
+oo_marker="$factory_root/.agentfactory/telemetry/openobserve.version"
+if [ -s "\$oo_marker" ]; then
+    oo_want="\$(head -1 "\$oo_marker")"
+    oo_have="\$(openobserve --version 2>/dev/null | awk 'NR==1{print \$2}')"
+    if ! printf '%s\n%s\n' "\$oo_want" "\$oo_have" | sort -V -C; then
+        echo "warning: openobserve \${oo_have:-unknown} is older than \$oo_want, the build that last opened the telemetry data dir — refusing to relaunch (factory unaffected)" >&2
+        exit 0
+    fi
+fi
 if tmux has-session -t telemetry 2>/dev/null; then
     exit 0
 fi
@@ -1945,7 +2958,7 @@ fi
 # fails claiming the view files are copied too late — a message about view seeding that
 # points nowhere near the edit that caused it.
 tmux new-session -s telemetry -d -c "$factory_root" \\
-    'ZO_ROOT_USER_EMAIL="$root_email" ZO_ROOT_USER_PASSWORD="\$(cat .agentfactory/secrets/telemetry.root)" ZO_HTTP_ADDR="127.0.0.1" ZO_HTTP_PORT="$TELEMETRY_PORT" ZO_DATA_DIR="$oo_data" openobserve'
+    'ZO_ROOT_USER_EMAIL="$root_email" ZO_ROOT_USER_PASSWORD="\$(cat .agentfactory/secrets/telemetry.root)" ZO_HTTP_ADDR="127.0.0.1" ZO_GRPC_ADDR="127.0.0.1" ZO_HTTP_PORT="$TELEMETRY_PORT" ZO_DATA_DIR="$oo_data" openobserve'
 EOF
     chmod 0755 "$factory_root/.agentfactory/telemetry/relaunch.sh"
 
@@ -1960,40 +2973,11 @@ $tbegin
 $tend
 EOF
 
-    # Pinned single-binary install with REAL sha256 verification (Dockerfile:28 idiom — the first
-    # checksummed download in this script; setup_litellm's pip pin has no checksum). Idempotent:
-    # skip when the pinned binary is already installed.
-    if [ ! -x "$oo_bin" ]; then
-        local arch expected tarball url tmpdir
-        arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
-        case "$arch" in
-            amd64) expected="$OPENOBSERVE_SHA256_AMD64" ;;
-            arm64) expected="$OPENOBSERVE_SHA256_ARM64" ;;
-            *) log_warn "Unsupported arch '$arch' for OpenObserve; skipping telemetry backend (factory unaffected)"; return 0 ;;
-        esac
-        tarball="openobserve-${OPENOBSERVE_VERSION}-linux-${arch}.tar.gz"
-        url="https://downloads.openobserve.ai/releases/openobserve/${OPENOBSERVE_VERSION}/${tarball}"
-        tmpdir="$(mktemp -d)"
-        CLEANUP_DIRS+=("$tmpdir")
-        log_info "Downloading OpenObserve ${OPENOBSERVE_VERSION} (${arch})"
-        if ! curl -fsSL "$url" -o "$tmpdir/$tarball"; then
-            log_warn "OpenObserve download failed ($url); skipping telemetry backend (factory unaffected)"
-            return 0
-        fi
-        # A mismatch is a supply-chain signal (security.md T8): refuse to unpack or run the binary.
-        if ! echo "${expected}  $tmpdir/$tarball" | sha256sum --check --strict; then
-            log_error "OpenObserve checksum verification FAILED (expected $expected) — not installing"
-            return 0
-        fi
-        # Post-checksum unpack/install is guarded too: this component is default-on, so an I/O
-        # failure here must degrade to a warning, never abort the (already-complete) bootstrap.
-        if ! { tar -C "$tmpdir" -xzf "$tmpdir/$tarball" && mkdir -p "$bin_dir" \
-                && install -m 0755 "$tmpdir/openobserve" "$oo_bin"; }; then
-            log_warn "OpenObserve unpack/install failed; skipping telemetry backend (factory unaffected)"
-            return 0
-        fi
-        log_success "Installed OpenObserve ${OPENOBSERVE_VERSION} to $oo_bin"
-    fi
+    # The install is _install_openobserve (hoisted, D-22), shared with --check and the
+    # converge-if-present pass. A failed FRESH install is already reported and ledgered by
+    # _converge, and a binary older than the data dir's marker must never start on it.
+    _converge openobserve "$OPENOBSERVE_VERSION" _probe_openobserve _install_openobserve required || true
+    { [ -x "$oo_bin" ] && _openobserve_not_older_than_marker; } || return 0
     log_success "OpenObserve present: $("$oo_bin" --version 2>/dev/null | head -1 || echo "pinned $OPENOBSERVE_VERSION")"
 
     mkdir -p "$secrets_dir"
@@ -2058,10 +3042,11 @@ EOF
 
     # FIRST half of operator decision O-4 (view delivery), recorded rather than self-adjudicated —
     # the full record is internal/cmd/install_telemetry_views/README.md. Delivery is hybrid because
-    # neither half stands alone: OpenObserve v0.91.3 has no file-based dashboard provisioning, so
-    # files alone are never consumed; but this function returns early by design on six paths
-    # (unsupported arch, download, checksum, occupied port, launch, readiness) and a push-only seed
-    # would leave nothing behind on any of them. So the copy runs HERE, before any of those exits,
+    # neither half stands alone: OpenObserve has no file-based dashboard provisioning (v0.91.3, and
+    # v1.1.2, the pinned release, where the dashboards HTTP API is the only create path), so files alone
+    # are never consumed; but this function returns early by design on its failure paths (a failed
+    # install, occupied port, launch, exit during startup, readiness) and a push-only seed would
+    # leave nothing behind on any of them. So the copy runs HERE, before any of those exits,
     # and the push runs later only if the backend actually came up.
     local views_src="$SCRIPT_DIR/internal/cmd/install_telemetry_views"
     local views_dst="$factory_root/.agentfactory/telemetry/views"
@@ -2094,7 +3079,7 @@ EOF
     else
         mkdir -p "$oo_data"
         tmux new-session -d -s telemetry -c "$factory_root" \
-            'ZO_ROOT_USER_EMAIL="'"$root_email"'" ZO_ROOT_USER_PASSWORD="$(cat .agentfactory/secrets/telemetry.root)" ZO_HTTP_ADDR="127.0.0.1" ZO_HTTP_PORT="'"$TELEMETRY_PORT"'" ZO_DATA_DIR="'"$oo_data"'" openobserve' \
+            'ZO_ROOT_USER_EMAIL="'"$root_email"'" ZO_ROOT_USER_PASSWORD="$(cat .agentfactory/secrets/telemetry.root)" ZO_HTTP_ADDR="127.0.0.1" ZO_GRPC_ADDR="127.0.0.1" ZO_HTTP_PORT="'"$TELEMETRY_PORT"'" ZO_DATA_DIR="'"$oo_data"'" openobserve' \
             || { log_warn "Failed to launch OpenObserve tmux session; skipping telemetry backend (factory unaffected)"; return 0; }
         log_info "Launched OpenObserve in tmux session 'telemetry' (127.0.0.1:$TELEMETRY_PORT)"
     fi
@@ -2195,7 +3180,7 @@ EOF
     # Login-shell relaunch guard, THIRD of three (webui, litellm, telemetry): written
     # earlier in this function now, not here — fable-implement Step 2 (issue #584,
     # E-6/R5a interlock) moved the relaunch.sh write and this guard's ~/.bash_profile
-    # append ahead of all eight early returns above, so an install that fails on
+    # append ahead of the install and every early return above, so an install that fails on
     # first start still receives the recovery mechanism. See the writes near the
     # top of this function, immediately after the local variable declarations.
 
@@ -2203,6 +3188,285 @@ EOF
     # ENABLED. Runtime export stays off until the operator flips the gate.
     log_success "OpenObserve installed at http://127.0.0.1:$TELEMETRY_PORT (tmux session: telemetry)"
     log_info "Telemetry installed is not enabled — run 'af telemetry on' to start exporting; 'af telemetry off' (or --no-telemetry next run) to keep it off"
+}
+
+#------------------------------------------------------------------------------
+# Convergence passes: converge-if-present (K17), --check, and the END report (K16)
+#------------------------------------------------------------------------------
+
+# _lock_result NAME LOCK K3_RC INSTALL_RC [REPORT]: the row for a hash-locked install that has run.
+# When the dry run could not tell (K3_RC 2), REPORT — the real install's pip report — decides it.
+_lock_result() {
+    local name="$1" label="$2" k3="$3" rc="$4" n
+    if [ "$rc" -ne 0 ]; then
+        CONVERGE_FAILURES="$CONVERGE_FAILURES$name"$'\n'
+        _record_row "$name" "$label" "install failed" FAILED
+    elif [ "$k3" -eq 1 ]; then
+        log_success "$name: $label (kept)"
+        _record_row "$name" "$label" "$label" kept
+    elif [ "$k3" -eq 2 ]; then
+        n="$(jq '.install | length' "${5-}" 2>/dev/null)" || n=""
+        case "$n" in
+            0)
+                log_success "$name: $label (kept)"
+                _record_row "$name" "$label" "$label" kept
+                ;;
+            ''|*[!0-9]*)
+                PYTHON_CHANGED=1
+                log_warn "$name: $label installed, but pip's install report is unreadable — counted as changed"
+                _record_row "$name" "$label" "unknown (no install report)" converged
+                ;;
+            *)
+                PYTHON_CHANGED=1
+                log_success "$name: $label (converged)"
+                _record_row "$name" "$label" "$label" converged
+                ;;
+        esac
+    else
+        PYTHON_CHANGED=1
+        log_success "$name: $label (converged)"
+        _record_row "$name" "$label" "$label" converged
+    fi
+}
+
+# _lock_drift NAME LOCK K3_RC COUNT: the --check row for a lock, read from pip's dry run alone.
+_lock_drift() {
+    local name="$1" label="$2" k3="$3" n="$4"
+    case "$k3" in
+        1)
+            log_success "$name: $label (kept)"
+            _record_row "$name" "$label" "$label" kept
+            ;;
+        0)
+            log_warn "$name: $n would change != pinned $label (would converge)"
+            _record_row "$name" "$label" "$n would change" drift
+            ;;
+        *)
+            log_warn "$name: unknown (pip dry-run failed) != pinned $label (would converge)"
+            _record_row "$name" "$label" "unknown (pip dry-run failed)" drift
+            ;;
+    esac
+}
+
+# converge_present_components (K17): components that exist converge on every run whatever the
+# mode flags say — the flags decide only whether an ABSENT component is installed. cwd is the
+# factory root (configure_factory). Every outcome goes to a row and the ledger; this returns 0.
+converge_present_components() {
+    log_step "Converging installed components (Python locks, Codex CLI, OpenObserve)"
+    local py_rc=0 lite_rc=1 stopped=0 tele_up=0 rc report
+
+    _pip_would_change "$SCRIPT_DIR/py/requirements.txt" >/dev/null || py_rc=$?
+    if command_exists litellm; then
+        lite_rc=0
+        _pip_would_change "$SCRIPT_DIR/py/litellm-requirements.txt" >/dev/null || lite_rc=$?
+    fi
+    # The gateway runs on these packages and on the system libraries the root layer may have just
+    # replaced: it is restarted on what changed, never on every run (D20).
+    if { [ "$py_rc" -ne 1 ] || [ "$lite_rc" -ne 1 ] || [ "$APT_CHANGED" = 1 ]; } && _litellm_session_running; then
+        _gateway_stop
+        stopped=1
+    fi
+
+    # A dry run that could not tell (2) takes its row from what the user-site install changed; the
+    # system-site install never decides it.
+    rc=0
+    report=""
+    if [ "$py_rc" -eq 2 ]; then
+        report="$(mktemp)" || report=""
+    fi
+    _pip_install_locked "$SCRIPT_DIR/py/requirements.txt" ${report:+--report "$report"} || rc=1
+    if [ "$(id -u)" = 0 ] || { command_exists sudo && sudo -n true 2>/dev/null; }; then
+        _pip_install_locked "$SCRIPT_DIR/py/requirements.txt" --system || rc=1
+    else
+        log_warn "python-lock: no root, so the system-site copy of py/requirements.txt cannot converge (the root layer reports why)"
+    fi
+    _lock_result python-lock py/requirements.txt "$py_rc" "$rc" "$report"
+    rm -f "$report"
+
+    if command_exists litellm; then
+        rc=0
+        report=""
+        if [ "$lite_rc" -eq 2 ]; then
+            report="$(mktemp)" || report=""
+        fi
+        _pip_install_locked "$SCRIPT_DIR/py/litellm-requirements.txt" ${report:+--report "$report"} || rc=1
+        _lock_result litellm-lock py/litellm-requirements.txt "$lite_rc" "$rc" "$report"
+        rm -f "$report"
+    fi
+
+    # Under --litellm, setup_litellm reconciles the gateway itself later in this run.
+    if [ "$stopped" = 1 ] && [ "$WITH_LITELLM" != true ] && [ -x .agentfactory/gateway-relaunch.sh ]; then
+        log_info "Relaunching the LiteLLM gateway on the converged packages"
+        .agentfactory/gateway-relaunch.sh || log_warn "gateway-relaunch.sh did not restart the gateway; see USING_LITELLM.md"
+    fi
+
+    if command_exists codex; then
+        _ensure_codex_cli || true
+    fi
+
+    if [ -x "$OPENOBSERVE_BIN" ]; then
+        if tmux list-panes -t telemetry >/dev/null 2>&1; then
+            tele_up=1
+        fi
+        _converge openobserve "$OPENOBSERVE_VERSION" _probe_openobserve _install_openobserve required || true
+        if [ "$tele_up" = 1 ] && [ "$APT_CHANGED" = 1 ] && tmux list-panes -t telemetry >/dev/null 2>&1; then
+            _telemetry_stop
+        fi
+        # --no-telemetry never leaves a backend stopped that was running before this pass (D-47);
+        # with telemetry on, setup_telemetry relaunches it.
+        if [ "$tele_up" = 1 ] && [ "$WITH_TELEMETRY" != true ] && [ -x .agentfactory/telemetry/relaunch.sh ] \
+            && ! tmux list-panes -t telemetry >/dev/null 2>&1; then
+            .agentfactory/telemetry/relaunch.sh || log_warn "telemetry relaunch.sh did not restart OpenObserve"
+        fi
+    fi
+    return 0
+}
+
+# _restart_rebuilt_webui: a running console keeps its old build until it is restarted; the phase-5
+# launch guard below then starts the rebuilt binary.
+_restart_rebuilt_webui() {
+    [ "$WEBUI_REBUILT" = 1 ] || return 0
+    # Under AF_SRC the web console itself is running this bootstrap (Generate All); stopping it
+    # would kill the job mid-run.
+    [ -z "${AF_SRC:-}" ] || return 0
+    local rendezvous="${AF_ROOT:-$PWD}/.runtime/webui_server.json" pid exe waited=0
+    [ -f "$rendezvous" ] || return 0
+    pid="$(jq -r '.pid // empty' "$rendezvous" 2>/dev/null)" || pid=""
+    [ -n "$pid" ] || return 0
+    exe="$(readlink "/proc/$pid/exe" 2>/dev/null)" || exe=""
+    case "$exe" in
+        "$HOME/.local/bin/webui"|"$HOME/.local/bin/webui (deleted)") ;;
+        *) return 0 ;;
+    esac
+    log_info "Restarting the web console (pid $pid) on the rebuilt binary"
+    kill -TERM "$pid" 2>/dev/null || return 0
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 10 ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    rm -f "$rendezvous"
+    return 0
+}
+
+# _factory_repo_dir: the factory root configure_factory selects (the first git repo under the
+# workspace), for a --check run that never reaches configure_factory.
+_factory_repo_dir() {
+    local d
+    for d in "$WORKSPACE_DIR"/*/; do
+        if [ -d "$d/.git" ]; then
+            printf '%s\n' "${d%/}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# _converge_check (--check): the same wrappers and probes a real run uses, each returning right after
+# its _converge line, so the report is about the real probes and nothing mutating is reachable.
+_converge_check() {
+    local checks_rc=0 rc n
+    run_all_checks || checks_rc=$?
+    if [ "$checks_rc" -ne 0 ]; then
+        CONVERGE_FAILURES="${CONVERGE_FAILURES}prerequisites"$'\n'
+    fi
+    _apt_converge
+    # errexit is off inside this group on purpose: one wrapper's refusal (no go, not the source
+    # tree) must not stop the rows the others report.
+    {
+        install_af
+        install_gh
+        install_claude
+        install_playwright
+        if command_exists codex; then
+            _ensure_codex_cli
+        fi
+    } || true
+    if [ -x "$OPENOBSERVE_BIN" ]; then
+        _converge openobserve "$OPENOBSERVE_VERSION" _probe_openobserve _install_openobserve required || true
+    fi
+    rc=0
+    n="$(_pip_would_change "$SCRIPT_DIR/py/requirements.txt")" || rc=$?
+    _lock_drift python-lock py/requirements.txt "$rc" "$n"
+    if command_exists litellm; then
+        rc=0
+        n="$(_pip_would_change "$SCRIPT_DIR/py/litellm-requirements.txt")" || rc=$?
+        _lock_drift litellm-lock py/litellm-requirements.txt "$rc" "$n"
+    fi
+    _converge_report
+}
+
+# _converge_report (END, D-26): the summary table, the convergence record, the root-layer message,
+# then the run's exit status. It is the only place a failed component turns into a non-zero exit.
+_converge_report() {
+    local tab name pin installed integrity result at drift=0 failed=0 root record
+    tab="$(printf '\t')"
+    echo ""
+    log_step "Convergence summary"
+    printf '  %-16s %-30s %-28s %-30s %s\n' component installed pinned integrity action
+    while IFS="$tab" read -r name pin installed integrity result at; do
+        [ -n "$name" ] || continue
+        printf '  %-16s %-30s %-28s %-30s %s\n' "$name" "$installed" "$pin" "$integrity" "$result"
+        case "$result" in
+            drift) drift=1 ;;
+            FAILED) failed=1 ;;
+        esac
+    done <<EOF
+$CONVERGE_ROWS
+EOF
+
+    root="${AF_ROOT:-}"
+    if [ -z "$root" ]; then
+        root="$(_factory_repo_dir)" || root=""
+    fi
+    if [ -z "$root" ]; then
+        log_warn "no factory root (AF_ROOT is unset and no git repository is under $WORKSPACE_DIR); convergence.json not written"
+    else
+        record="$root/.runtime/bootstrap/convergence.json"
+        if mkdir -p "$root/.runtime/bootstrap" \
+            && jq -n --arg run_at "${RUN_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" \
+                --argjson litellm "$(if [ "$WITH_LITELLM" = true ]; then echo true; else echo false; fi)" \
+                --argjson check_only "$(if [ "$CHECK_ONLY" = true ]; then echo true; else echo false; fi)" \
+                --argjson apt_changed "$(if [ "$APT_CHANGED" = 1 ]; then echo true; else echo false; fi)" \
+                --argjson python_changed "$(if [ "$PYTHON_CHANGED" = 1 ]; then echo true; else echo false; fi)" \
+                --arg rows "$CONVERGE_ROWS" \
+                '{run_at: $run_at, mode: {litellm: $litellm, check_only: $check_only},
+                  components: [$rows | split("\n")[] | select(length > 0) | split("\t")
+                    | {name: .[0], pin: .[1], installed: .[2], integrity: .[3], result: .[4], at: .[5]}],
+                  apt_changed: $apt_changed, python_changed: $python_changed}' >"$record.tmp" \
+            && mv -f "$record.tmp" "$record"; then
+            log_info "Convergence record: $record"
+        else
+            log_warn "could not write $record"
+        fi
+    fi
+
+    if [ "$CHECK_ONLY" = true ]; then
+        if [ "$drift" = 1 ] || [ "$failed" = 1 ] || [ -n "$CONVERGE_FAILURES" ]; then
+            log_warn "drift found: the next ./quickstart.sh or af install --agents converges the rows above"
+            exit 1
+        fi
+        log_success "every component matches its pin"
+        return 0
+    fi
+
+    case "$CONVERGE_FAILURES" in
+        *root-layer*)
+            log_error "security updates cannot be applied: no root in this container (id -u = $(id -u); sudo -n true failed). Ubuntu $(_os_codename)-security updates and the Node.js pin did not converge; everything else did (see the table above). agentfactory containers give dev passwordless sudo (Dockerfile:55-57); this container lacks it."
+            ;;
+        *)
+            if [ -n "$NODE_APT_ERROR" ]; then
+                log_error "cannot pin nodejs=$NODE_APT_VERSION: apt said \"$NODE_APT_ERROR\". A customer image may lack /etc/apt/sources.list.d/nodesource.list (Dockerfile:47-52 show the signed form); a pin that no longer resolves needs NODE_APT_VERSION bumped — a stale pin also fails B2."
+            fi
+            ;;
+    esac
+    if [ "$APT_CHANGED" = 1 ] || [ "$PYTHON_CHANGED" = 1 ]; then
+        log_warn "python packages or system libraries changed: run 'af down && af up' so sessions pick them up"
+    fi
+    if [ -n "$CONVERGE_FAILURES" ]; then
+        log_error "convergence failed for: $(printf '%s' "$CONVERGE_FAILURES" | tr '\n' ' ')(see the table above)"
+        exit 1
+    fi
+    return 0
 }
 
 main() {
@@ -2222,14 +3486,20 @@ main() {
     # Ensure PATH includes common tool locations
     export PATH="$HOME/.local/bin:$HOME/go/bin:/usr/local/go/bin:$PATH"
 
-    # Check-only mode
+    RUN_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    # Check-only mode: a read-only drift report over the same probes a real run uses (D-68).
     if [ "$CHECK_ONLY" = true ]; then
-        run_all_checks
-        exit $?
+        _converge_check
+        exit 0
     fi
 
     # Phase 1: Check prerequisites (base image tools)
     log_step "Phase 1: Checking prerequisites"
+
+    # The root layer first: the Ubuntu security pocket and the Node.js pin (K5).
+    _apt_converge
+    _pin_managed_autoupdater /etc/claude-code/managed-settings.d
 
     check_go || {
         log_error "Go is required and should be in the base image"
@@ -2265,13 +3535,10 @@ main() {
 
     # Always rebuild af from source to pick up latest changes
     install_af
-
-    if ! check_claude; then
-        install_claude || log_warn "Claude Code install failed (can be installed later)"
-    fi
-
+    install_gh
+    install_claude
     install_playwright
-    install_playwright_plugin
+    _apt_security_upgrade
 
     # Phase 3: Configure
     log_step "Phase 3: Configuring workspace"
@@ -2279,6 +3546,8 @@ main() {
     configure_git_defaults
     configure_shell
     configure_factory
+    converge_present_components
+    _restart_rebuilt_webui
     configure_login_init
 
     # Phase 5 (C0): best-effort, IFF-available web console launch — driven from the container
@@ -2327,9 +3596,18 @@ main() {
         setup_litellm
     fi
 
-    # Done! Printed here (K15/D25, issue #693 Phase 4), after setup_litellm and before
-    # setup_telemetry — a run that dies inside setup_litellm's login/verification steps must
-    # never announce completion first.
+    # Telemetry backend, default-on (O-1 opt-out via --no-telemetry). Its binary converge is a
+    # required row, so it runs before the report that judges the run.
+    if [ "$WITH_TELEMETRY" = true ]; then
+        setup_telemetry
+    fi
+
+    # The END (D-26): the convergence summary, the record and the exit status, after every setup
+    # step so none can print below them. A failed required row exits 1 here.
+    _converge_report
+
+    # Done! Printed only once the report passed (K16; K15/D25, issue #693 Phase 4): a run that dies
+    # inside setup_litellm, or ends with a failed required row, never announces completion.
     echo ""
     echo "=========================================="
     echo "  Setup Complete!"
@@ -2343,12 +3621,6 @@ main() {
     echo "  af up       # Start agent sessions"
     echo "  af down     # Stop agent sessions"
     echo ""
-
-    # Telemetry backend — the NEW last statement. Default-on (O-1 opt-out via --no-telemetry);
-    # runs after everything else so a hiccup here never touches the already-complete factory.
-    if [ "$WITH_TELEMETRY" = true ]; then
-        setup_telemetry
-    fi
 }
 
 main "$@"

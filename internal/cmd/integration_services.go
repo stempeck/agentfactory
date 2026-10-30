@@ -391,7 +391,7 @@ func detectUnaccountedUserScope(root string) []string {
 // quickstartUserScopePlugins are installed at user scope by quickstart.sh itself, before any integration can
 // account for them, so warning about them on every af up names nothing the operator chose. A test holds this
 // set equal to quickstart's user-scope installs: it empties together with that installer.
-var quickstartUserScopePlugins = map[string]bool{"playwright@claude-plugins-official": true}
+var quickstartUserScopePlugins = map[string]bool{}
 
 // withoutQuickstartUserScope drops quickstart's own user-scope plugins from the detector's rows for the af up
 // warning only; af plugin check still lists them.

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,14 +22,29 @@ import (
 
 // --- AC #1 -----------------------------------------------------------------------------------
 
-// TestQuickstartExactlyOneKillSessionSite pins AC #1 (design-doc.md:126): _gateway_stop is the
-// ONLY kill site in the whole script, even though it is called from two places (the reconcile
-// decision and the build-time version-mismatch precheck).
+// TestQuickstartExactlyOneKillSessionSite pins AC #1 (design-doc.md:126) as extended by K10:
+// each tmux session has exactly one kill site — _gateway_stop for litellm (even though it is
+// called from several places) and _telemetry_stop for the OpenObserve backend.
 func TestQuickstartExactlyOneKillSessionSite(t *testing.T) {
 	content := quickstartScriptContent(t)
-	got := strings.Count(content, "kill-session")
-	if got != 1 {
-		t.Errorf("kill-session count = %d, want exactly 1 (AC #1: _gateway_stop is the only kill site)", got)
+	if got := strings.Count(content, "kill-session"); got != 2 {
+		t.Errorf("kill-session count = %d, want exactly 2 (one in _gateway_stop, one in _telemetry_stop)", got)
+	}
+	for _, site := range []struct{ fn, kill string }{
+		{"_gateway_stop", "kill-session -t =litellm"},
+		{"_telemetry_stop", "kill-session -t telemetry"},
+	} {
+		if got := strings.Count(content, site.kill); got != 1 {
+			t.Errorf("%q occurs %d times, want exactly 1", site.kill, got)
+		}
+		body := topLevelShellFunction(content, site.fn)
+		if body == "" {
+			t.Errorf("%s() is not defined at top level", site.fn)
+			continue
+		}
+		if !strings.Contains(body, site.kill) {
+			t.Errorf("%s() does not hold the %q kill site", site.fn, site.kill)
+		}
 	}
 }
 
@@ -59,48 +75,102 @@ func TestQuickstartReconcileMarkerPrecedesKillWithinGatewayStop(t *testing.T) {
 }
 
 // TestQuickstartImportProbeFollowsPipInstall pins AC #2/design-doc.md:126 K12-e: an
-// `import litellm.proxy` probe must exist in setup_litellm(), textually after the pinned
-// `pip3 install` line, and run unconditionally (not only inside the fresh-install branch).
+// `import litellm.proxy` probe must exist in setup_litellm(), textually after the hash-locked
+// LiteLLM install, and run unconditionally.
 func TestQuickstartImportProbeFollowsPipInstall(t *testing.T) {
 	root := findModuleRoot(t)
 	setup := setupLitellmSource(t, root)
 
-	pipIdx := strings.Index(setup, "pip3 install")
+	pipIdx := strings.Index(setup, `_pip_install_locked "$SCRIPT_DIR/py/litellm-requirements.txt"`)
 	if pipIdx < 0 {
-		t.Fatal("setup_litellm() no longer contains the pinned `pip3 install` line")
+		t.Fatal(`setup_litellm() does not install the LiteLLM lock (_pip_install_locked "$SCRIPT_DIR/py/litellm-requirements.txt")`)
 	}
 	probeIdx := strings.Index(setup, "import litellm.proxy")
 	if probeIdx < 0 {
 		t.Fatal("setup_litellm() does not contain the `import litellm.proxy` build pre-check probe (K12-e)")
 	}
 	if probeIdx < pipIdx {
-		t.Errorf("the import-probe (at %d) appears before the pip3 install line (at %d); "+
-			"K12-e requires the probe to run after the install guard closes", probeIdx, pipIdx)
+		t.Errorf("the import-probe (at %d) appears before the LiteLLM lock install (at %d); "+
+			"K12-e requires the probe to run after the install", probeIdx, pipIdx)
 	}
 }
 
-// TestQuickstartGatewayStopCalledBeforePipInstall pins the K12-d build-ordering clause
-// (design-doc.md:126): before the pip step, if a `litellm` session exists and its version
-// differs from the pin, _gateway_stop runs first — a mixed-version live process is worse than a
-// stopped one. This is an ordering-only shape check (no execution harness): a runtime harness for
-// the full precheck branch is deferred to Phase 6 once the implementer's chosen factoring (inline
-// vs. a separate top-level unit, per concern_tests.md §1 bullet 3) is known.
+// TestQuickstartGatewayStopCalledBeforePipInstall pins K3 -> stop -> K2 in setup_litellm: pip's
+// dry run decides whether the lock would change the build, the live gateway is stopped on that
+// verdict (a mixed-version live process is worse than a stopped one), and only then does the
+// locked install run. It anchors on the _gateway_stop that follows the dry run, never on the first
+// _gateway_stop in the function (D-30): with _gateway_stop hoisted, the first occurrences are a
+// comment and _reconcile_gateway's call, both above the K3 site.
 func TestQuickstartGatewayStopCalledBeforePipInstall(t *testing.T) {
 	root := findModuleRoot(t)
 	setup := setupLitellmSource(t, root)
 
-	pipIdx := strings.Index(setup, "pip3 install")
-	if pipIdx < 0 {
-		t.Fatal("setup_litellm() no longer contains the pinned `pip3 install` line")
+	const wouldChange = `_pip_would_change "$SCRIPT_DIR/py/litellm-requirements.txt"`
+	w := strings.Index(setup, wouldChange)
+	if w < 0 {
+		t.Fatalf("setup_litellm() has no K3 dry run (%s)", wouldChange)
 	}
-	stopIdx := strings.Index(setup, "_gateway_stop")
-	if stopIdx < 0 {
-		t.Fatal("setup_litellm() never calls _gateway_stop — K12-d's build-time version-mismatch precheck is not implemented")
+	sRel := strings.Index(setup[w:], "_gateway_stop")
+	if sRel < 0 {
+		t.Fatal("no _gateway_stop follows the K3 dry run in setup_litellm()")
 	}
-	if stopIdx > pipIdx {
-		t.Errorf("the first _gateway_stop reference (at %d) appears after the pip3 install line (at %d); "+
-			"K12-d requires stopping a mismatched live session before reinstalling", stopIdx, pipIdx)
+	stop := w + sRel
+	if n := strings.Count(setup[w:stop], "\n"); n > 5 {
+		t.Errorf("the _gateway_stop after the K3 dry run is %d lines away; it must be the dry run's own verdict (within 5 lines)", n)
 	}
+	const install = `_pip_install_locked "$SCRIPT_DIR/py/litellm-requirements.txt"`
+	pRel := strings.Index(setup[stop:], install)
+	if pRel < 0 {
+		t.Fatalf("no %s follows the K3 stop in setup_litellm()", install)
+	}
+
+	t.Run("_pip_would_change distinguishes change, no change and error", func(t *testing.T) {
+		harness := convergeHarness(t, t.TempDir(), "command_exists", "log_info", "log_success", "log_warn", "log_error", "_pip_would_change")
+		lock := filepath.Join(t.TempDir(), "litellm-requirements.txt")
+		if err := os.WriteFile(lock, []byte("litellm==0 --hash=sha256:00\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cases := []struct {
+			name, installs, pipRC, wantRC, wantOut string
+		}{
+			{"would change", `[{"metadata":{"name":"a"}},{"metadata":{"name":"b"}}]`, "0", "0", "2"},
+			{"no change", `[]`, "0", "1", ""},
+			{"pip error never reads as no change", `[]`, "1", "2", ""},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				bin := hermeticConvergeBinDir(t)
+				pipLog := filepath.Join(t.TempDir(), "pip.log")
+				writeConvergeStub(t, bin, "pip3", `printf '%s\n' "$*" >> "$PIP_LOG"
+report=""
+while [ $# -gt 0 ]; do
+  case "$1" in --report) report="$2"; shift 2 ;; --report=*) report="${1#*=}"; shift ;; *) shift ;; esac
+done
+[ "$STUB_PIP_RC" = 0 ] && [ -n "$report" ] && printf '{"install":%s}\n' "$STUB_PIP_INSTALLS" > "$report"
+exit "$STUB_PIP_RC"
+`)
+				env := hermeticConvergeEnv(bin, t.TempDir(), t.TempDir(), "PIP_LOG="+pipLog,
+					"STUB_PIP_RC="+tc.pipRC, "STUB_PIP_INSTALLS="+tc.installs)
+				call := `n="$(_pip_would_change "` + lock + `")" || rc=$?` + "\nprintf 'n=%s\\n' \"$n\""
+				out, rc := runConvergeHarness(t, harness, call, env)
+				if strconv.Itoa(rc) != tc.wantRC {
+					t.Errorf("rc = %d, want %s\n%s", rc, tc.wantRC, out)
+				}
+				if tc.wantOut != "" && !strings.Contains(out, "n="+tc.wantOut+"\n") {
+					t.Errorf("_pip_would_change printed no would-change count %q:\n%s", tc.wantOut, out)
+				}
+				pip, _ := os.ReadFile(pipLog)
+				for _, flag := range []string{"install", "--dry-run", "--report", "--require-hashes", "--only-binary :all:", "-r " + lock} {
+					if !strings.Contains(string(pip), flag) {
+						t.Errorf("the dry run lacks %q: %s", flag, pip)
+					}
+				}
+				if strings.Contains(string(pip), "--ignore-installed") {
+					t.Errorf("the dry run passes --ignore-installed, so it would report every package as a change: %s", pip)
+				}
+			})
+		}
+	})
 }
 
 // --- AC #5 bullet 2: write ordering -------------------------------------------------------------
@@ -159,28 +229,41 @@ func TestQuickstartLoginGuardWrittenBeforeReadinessPoll(t *testing.T) {
 	}
 }
 
-// TestQuickstartBannerBetweenLitellmAndTelemetry pins K15-c/D25: the "Setup Complete!" banner
-// must move to between the setup_litellm call and the setup_telemetry call in main(), so a run
-// that dies inside setup_litellm's login/verification steps never announces completion first.
-func TestQuickstartBannerBetweenLitellmAndTelemetry(t *testing.T) {
+// TestQuickstartBannerAfterLitellmTelemetryAndConvergeReport pins K15-c/D25 (issue #693) as tightened by
+// K16 (PR #747 BODY-4): the "Setup Complete!" banner follows the setup_litellm call, the
+// setup_telemetry call and the bare _converge_report call in main(). _converge_report exits 1 on
+// any ledgered failure, so neither a run that dies inside setup_litellm's login/verification steps
+// nor one with a failed component ever announces completion.
+func TestQuickstartBannerAfterLitellmTelemetryAndConvergeReport(t *testing.T) {
 	content := quickstartScriptContent(t)
 
 	litellmIdx := strings.Index(content, "\n        setup_litellm\n")
 	if litellmIdx < 0 {
 		t.Fatal("could not find the setup_litellm call site in main()")
 	}
-	bannerIdx := strings.Index(content, "Setup Complete!")
-	if bannerIdx < 0 {
-		t.Fatal("could not find the \"Setup Complete!\" banner")
-	}
 	telemetryIdx := strings.Index(content, "\n        setup_telemetry\n")
 	if telemetryIdx < 0 {
 		t.Fatal("could not find the setup_telemetry call site in main()")
 	}
+	reportIdx := -1
+	for _, r := range regexp.MustCompile(`(?m)^[[:space:]]*_converge_report[[:space:]]*$`).FindAllStringIndex(content, -1) {
+		if r[0] > telemetryIdx {
+			reportIdx = r[0]
+			break
+		}
+	}
+	if reportIdx < 0 {
+		t.Fatal("no _converge_report call follows setup_telemetry in main(); the convergence summary and exit status must come last (D-26)")
+	}
+	bannerIdx := strings.Index(content, "Setup Complete!")
+	if bannerIdx < 0 {
+		t.Fatal("could not find the \"Setup Complete!\" banner")
+	}
 
-	if !(litellmIdx < bannerIdx && bannerIdx < telemetryIdx) {
-		t.Errorf("expected order setup_litellm(%d) < banner(%d) < setup_telemetry(%d); K15-c/D25 requires "+
-			"the banner to print between the two calls, not before both", litellmIdx, bannerIdx, telemetryIdx)
+	if !(litellmIdx < telemetryIdx && telemetryIdx < reportIdx && reportIdx < bannerIdx) {
+		t.Errorf("expected order setup_litellm(%d) < setup_telemetry(%d) < _converge_report(%d) < banner(%d); K16 prints "+
+			"the banner only once the report has returned 0, and K15-c/D25 never before setup_litellm's verification",
+			litellmIdx, telemetryIdx, reportIdx, bannerIdx)
 	}
 }
 

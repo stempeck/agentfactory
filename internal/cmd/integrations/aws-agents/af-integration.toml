@@ -1,0 +1,14 @@
+name = "aws-agents"
+description = "AWS Agent Toolkit: skills for building, deploying and operating AI agents on AWS, plus the AWS Knowledge MCP server"
+scope = "formula"
+
+[upstream]
+repo = "https://github.com/aws/agent-toolkit-for-aws"
+commit = "d00d03ae6e4872b9f35a2b2ca86d0cbdbaa81684"
+
+[check]
+run = "af/check.sh"
+timeout = "30s"
+
+[claude]
+plugins = [".upstream/plugins/aws-agents"]

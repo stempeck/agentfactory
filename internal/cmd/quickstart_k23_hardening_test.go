@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -22,38 +23,68 @@ func quickstartScriptContent(t *testing.T) string {
 	return string(data)
 }
 
-// AC #2: grep -c 'has-session -t =litellm' quickstart.sh == 4 — the four K23 sites. A fifth,
-// _write_codex_compat_module's changed-hook restart guard (ADR-024), joined later in the same
-// exact-match form; the pin moves to 5 so a sixth site is still a deliberate, reviewed change.
+// has-session -t =litellm sites: _write_codex_compat_module's restart guard, _reconcile_gateway's
+// two probes, and the gateway-relaunch.sh heredoc. The pre-pip version guard's fifth site went
+// with the guard itself (the lock install is unconditional; K3 decides the stop). Pinned exactly so
+// a new site is a deliberate, reviewed change.
 func TestQuickstartLitellmHasSessionUsesExactMatchCount(t *testing.T) {
 	content := quickstartScriptContent(t)
 	got := strings.Count(content, "has-session -t =litellm")
-	if got != 5 {
-		t.Errorf("has-session -t =litellm count = %d, want 5 (AC #2's four sites plus the hook writer's restart guard)", got)
+	if got != 4 {
+		t.Errorf("has-session -t =litellm count = %d, want 4 (the compat-module restart guard, _reconcile_gateway's two probes, the relaunch heredoc)", got)
 	}
 }
 
-// AC #3: grep -cE 'sudo -n +npm install' quickstart.sh >= 2
+// Every privileged npm global install goes through _npm_install_pinned, which installs only a
+// digest-verified local tarball and uses `sudo -n` (never a password prompt) for a root-owned
+// prefix.
 func TestQuickstartSudoNpmInstallHardened(t *testing.T) {
 	content := quickstartScriptContent(t)
-	got := strings.Count(content, "sudo -n npm install")
-	if got < 2 {
-		t.Errorf("sudo -n npm install count = %d, want >= 2 (AC #3)", got)
+	pinned := topLevelShellFunction(content, "_npm_install_pinned")
+	if pinned == "" {
+		t.Fatal("_npm_install_pinned() is not defined at top level")
+	}
+	if got := strings.Count(pinned, "sudo -n npm install"); got < 1 {
+		t.Errorf("_npm_install_pinned() has %d `sudo -n npm install` lines, want >= 1", got)
+	}
+	if got, inside := strings.Count(content, "sudo -n npm install"), strings.Count(pinned, "sudo -n npm install"); got != inside {
+		t.Errorf("%d `sudo -n npm install` occurrence(s) sit outside _npm_install_pinned()", got-inside)
+	}
+	if m := regexp.MustCompile(`sudo\s+npm\b`).FindAllString(content, -1); len(m) != 0 {
+		t.Errorf("quickstart.sh has %d bare `sudo npm` call(s); sudo must always be `sudo -n`", len(m))
+	}
+	outside := strings.Replace(content, pinned, "", 1)
+	for _, line := range strings.Split(outside, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if regexp.MustCompile(`(^|[\s;&|(])npm\s+install\s+-g\b`).MatchString(line) {
+			t.Errorf("an `npm install -g` invocation sits outside _npm_install_pinned(): %s", strings.TrimSpace(line))
+		}
 	}
 }
 
-// Protective DO-NOT-CHANGE (superseded): pre-K7 this asserted the codex-install sudo call stayed
-// *unhardened* (`sudo npm install`, no `-n`), because K23 Phase 1 explicitly excluded it ("Phase
-// 2b's K7 replaces it wholesale" — this test's own prior comment predicted its own supersession).
-// K7 (issue af-6a25a83c, Phase 2b) has now landed and hardened it inside _ensure_codex_cli; this
-// test is retargeted to pin THAT invariant instead of the one K7 was chartered to remove.
+// The codex CLI is installed through _npm_install_pinned, never by a registry-spec `npm install -g
+// @openai/codex` (sudo'd or not). _npm_install_pinned decides the sudo route with `sudo -n true`
+// BEFORE it reaches `sudo -n npm install -g`, so an infeasible route never prompts.
 func TestQuickstartCodexInstallSudoIsHardened(t *testing.T) {
 	content := quickstartScriptContent(t)
-	if !strings.Contains(content, "sudo -n npm install -g @openai/codex") {
-		t.Error("_ensure_codex_cli's codex-install line is not `sudo -n npm install -g @openai/codex`")
+	for _, banned := range []string{"sudo -n npm install -g @openai/codex", "sudo npm install -g @openai/codex"} {
+		if strings.Contains(content, banned) {
+			t.Errorf("quickstart.sh still installs codex from the registry by name: %q", banned)
+		}
 	}
-	if strings.Contains(content, "sudo npm install -g @openai/codex") {
-		t.Error("an unhardened bare `sudo npm install -g @openai/codex` line still exists — K7 was to replace it wholesale")
+	install := extractShellFunction(content, "_install_codex")
+	if install == "" {
+		t.Fatal("could not extract the nested _install_codex() from quickstart.sh")
+	}
+	if !strings.Contains(install, "_npm_install_pinned @openai/codex") {
+		t.Errorf("_install_codex() does not call `_npm_install_pinned @openai/codex`; body:\n%s", install)
+	}
+	pinned := topLevelShellFunction(content, "_npm_install_pinned")
+	probe, sudoInstall := strings.Index(pinned, "sudo -n true"), strings.Index(pinned, "sudo -n npm install -g")
+	if probe < 0 || sudoInstall < 0 || probe > sudoInstall {
+		t.Errorf("_npm_install_pinned() must probe `sudo -n true` before its `sudo -n npm install -g` (probe at %d, install at %d)", probe, sudoInstall)
 	}
 }
 

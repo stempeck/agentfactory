@@ -4,8 +4,10 @@ Sub-agent-based design orchestration that captures verbatim source in the main
 context, then spawns three parallel sub-agents (Design Dimensions Analyst,
 Architecture Elevation Analyst, Six-Sigma Gap Analyst) using Claude Code's
 native Agent tool. Each sub-agent runs in its own context window with an
-independent analytical lens. A fourth sub-agent (Fidelity Verifier) runs
-sequentially after the first three to verify all codebase claims. The main
+independent analytical lens. Two Fidelity Verifier sub-agents then check every
+codebase claim, each as soon as the analyses it checks are written: one for the
+elevation and six-sigma analyses while the Dimensions analyst is still working,
+one for the dimension analyses when they are done. The main
 context synthesizes all outputs into a unified design-doc with AC traceability,
 elevation verdict integration, six-sigma caveats, dependency graph, and risk
 registry.
@@ -65,8 +67,8 @@ that cannot see each other's output.
 | Anti-pattern | Prevention |
 |--------------|------------|
 | Paraphrasing requirements then validating against the paraphrase | Verbatim `source.md` + re-grounding gates that require re-pasting from source |
-| Serializing sub-agents (launch one, wait, launch next) | ALL THREE Phase 2 sub-agents MUST launch in a SINGLE Agent tool message |
-| Letting sub-agents see each other's output | Each sub-agent reads ONLY source.md, verification.md, and codebase-snapshot.md |
+| Serializing sub-agents (launch one, wait, launch next) | ALL THREE Phase 2 analysts MUST launch in a SINGLE Agent tool message; each fidelity verifier launches when the analyses it checks are written |
+| Letting sub-agents see each other's output | Each analyst reads ONLY source.md, verification.md, and codebase-snapshot.md; only the verifiers read analysis files, to check them |
 | Skipping the synthesis gate (concatenating sub-agent outputs) | Phase 3 synthesizes, not concatenates — conflicts resolved, gaps addressed |
 | Paraphrasing source in sub-agent prompts | Sub-agents read source.md directly; prompts say WHERE to read, not WHAT it says |
 | Proceeding after Frame-lift required without redesigning | Honor the elevation verdict fully |
@@ -193,8 +195,7 @@ git checkout -- .
 ```
 **Shared-worktree guard for the dirty-state case:** in a shared pipeline worktree the modified
 files are usually live sibling agents' identity renders (`.agentfactory/agents/<sibling>/CLAUDE.md`,
-rewritten by provisioning while their sessions run) — a 2026-09-10 run found three of them plus 133
-foreign stash entries. NEVER `git checkout -- .` or touch the stash there: `git checkout -- .` overwrites
+rewritten by provisioning while their sessions run), and the stash holds other sessions' entries. NEVER `git checkout -- .` or touch the stash there: `git checkout -- .` overwrites
 a running agent's identity file. Leave sibling-owned modifications in place and commit only your own paths.
 
 **4. Sync with main:**
@@ -331,7 +332,8 @@ description = """
 Before ANY paraphrase, interpretation, or "understanding in own words," capture
 the raw source verbatim and investigate the codebase. This step produces three
 files: `source.md` (verbatim requirements), investigation notes, and
-`codebase-snapshot.md` (verified ground truth for sub-agents).
+`codebase-snapshot.md` (verified ground truth for sub-agents, written as an index:
+signatures and `file:line` pointers, not code bodies; Gate 1.3b fails it above 100 KB).
 
 **Entry criteria:** Requirements extracted from bead (inline / proposal file / GitHub issue URL).
 
@@ -397,9 +399,16 @@ For bug fixes, enhancements, or refactors, read the affected code areas:
 Before launching sub-agents, capture verified ground truth so they work from
 facts, not imagination. Include ALL applicable sections:
 
+**The snapshot is an index, not a copy of the code. Keep it under 60 KB; Gate 1.3b fails it above
+100 KB.** Every Phase 2 sub-agent and the fidelity verifier read it completely, so its size is paid
+again by every later agent on every turn. Give each symbol its signature line and `file:line`, and
+each affected subsystem its entry points and call path as `file:line` pointers. Paste a code region
+only where a later agent cannot work without the exact text: at most ~15 lines per region and at
+most five regions. Never paste a whole function body, file or test; the sub-agents Read the regions
+they need from the real files.
+
 **Generate every pasted section with shell redirection, never by re-typing it through the model.**
-The snapshot runs to thousands of lines; the measured cost of this step on a 2026-09-08 run was
-~58K output tokens, almost all of it pasted text. Build the file with `sed -n 'A,Bp' <file> >> "$OUTPUT_DIR/codebase-snapshot.md"`,
+Re-typed pastes are paid as output tokens. Build the file with `sed -n 'A,Bp' <file> >> "$OUTPUT_DIR/codebase-snapshot.md"`,
 `<tool> --help >> ...`, `find ... >> ...` and heredocs, and label each pasted code block with its
 TRUE `file:Lstart-Lend` in a header line above it (the snapshot's own line numbers are not the source's).
 Runtime data that lives only at the factory root (`.agentfactory/telemetry/`, `models.json`,
@@ -407,8 +416,7 @@ Runtime data that lives only at the factory root (`.agentfactory/telemetry/`, `m
 
 **Paste first, read once.** Do not view a code region in one tool call and then paste the same region
 in another: that carries every region through your context twice, once as a view and once as the
-snapshot the sub-agents will read. A 2026-09-10 run did exactly that and grew its window from 63K to
-240K tokens in this step, leaving every later step above the factory's 200K bound. Append each
+snapshot the sub-agents will read, and that context carries into every later step. Append each
 region to the snapshot with `sed -n`/`awk` FIRST, then read the snapshot section once when you need
 to understand it; grep for the symbol to find the range, do not print the range to find the symbol.
 
@@ -422,12 +430,18 @@ to understand it; grep for the symbol to find the range, do not print the range 
 
 5. **Referenced file verification**: For every file path mentioned in the problem or existing documentation, verify it exists with `ls -la <path>`. Record EXISTS or DOES NOT EXIST.
 
-6. **Referenced types and functions**: For every struct, interface, or function named in the problem statement, grep for its definition and paste the actual signature with file:line.
+6. **Referenced types and functions**: For every struct, interface, or function named in the problem statement, grep for its definition and paste the actual signature with file:line — the signature line (a struct's field list), not the body, and not its call sites' code (list call sites as `file:line` pointers).
 
 7. **Dynamic values**: For any runtime values captured, mark them with ⚡ and note: "Dynamic — value as of snapshot time, will change."
-   Capture two classes of dynamic value explicitly, because a source that hands over a prior design inherits that design's premises and they go stale: (a) the live state of every issue and PR number the source or any document it references cites (`gh issue view <n> --json state,closedAt`, `gh pr view <n> --json state,mergedAt`), and (b) the installed version of every external tool it names (`claude --version`, plus any other CLI the source relies on). When a captured value contradicts a premise in a referenced document (a "pending" phase already merged, a version threshold already met), write a **Facts that supersede the source's premises** note at the top of `codebase-snapshot.md`, above section 1, so all three analysts read it before the code sections. (Why: on 2026-09-28 the predesign's "Phase 2 — land #538" was already merged and Claude Code was two minor versions past the gate it worked around; the analysts designed correctly only because that note was there.)
+   Capture two classes of dynamic value explicitly, because a source that hands over a prior design inherits that design's premises and they go stale: (a) the live state of every issue and PR number the source or any document it references cites (`gh issue view <n> --json state,closedAt`, `gh pr view <n> --json state,mergedAt`), and (b) the installed version of every external tool it names (`claude --version`, plus any other CLI the source relies on). When a captured value contradicts a premise in a referenced document (a "pending" phase already merged, a version threshold already met), write a **Facts that supersede the source's premises** note at the top of `codebase-snapshot.md`, above section 1, so all three analysts read it before the code sections.
 
-**Gate 1.3b:** `codebase-snapshot.md` must exist and contain at least sections 1 and 2. If the problem references formulas, section 3 is required. If it references CLI commands, section 4 is required. If the source or a document it references cites an issue or PR number or names an external tool, section 7 must record that issue/PR's live state and that tool's installed version (item 7 above); a snapshot that omits them fails this gate.
+**Gate 1.3b:** `codebase-snapshot.md` must exist and contain at least sections 1 and 2. If the problem references formulas, section 3 is required. If it references CLI commands, section 4 is required. If the source or a document it references cites an issue or PR number or names an external tool, section 7 must record that issue/PR's live state and that tool's installed version (item 7 above); a snapshot that omits them fails this gate. Run the size check after Step 1.3c has appended Decision History, and again before closing this step; above 100 KB, replace pasted bodies and regions with signatures and `file:line` pointers until it passes:
+```bash
+OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
+SNAP_BYTES=$(wc -c < "$OUTPUT_DIR/codebase-snapshot.md" | tr -d ' ')
+echo "codebase-snapshot.md: $SNAP_BYTES bytes (target under 60000)"
+[ "$SNAP_BYTES" -le 100000 ] || { echo "FAIL: codebase-snapshot.md is over 100 KB; it is an index, not a copy of the code"; exit 1; }
+```
 
 **Step 1.3c: Decision History Check → `codebase-snapshot.md` § Decision History**
 
@@ -439,12 +453,13 @@ violate ADRs or reverse recent deliberate changes.
    and read any ADRs whose title or content relates to the problem domain keywords.
    For each relevant ADR, paste its title, status, and the key decision verbatim — locate the
    `## Decision` heading (and an amendment's `### Decision`) programmatically and quote that span with
-   its true line numbers; guessed line ranges land on Context text (observed 6 of 8 wrong on 2026-09-08).
+   its true line numbers; guessed line ranges land on Context text.
 
 2. **Prior design search**: Run `ls .designs/` and identify any prior designs on the same
    or related issues. For each relevant prior design, read its `design-doc.md` and paste:
    - The problem it addressed
-   - Key decisions made (from the Decisions Made table)
+   - Key decisions made (from the Decisions Made table): one line per decision, at most ten per
+     design, each with the `design-doc.md:line` it comes from. Do not paste the table itself.
    - Whether it was implemented (check git log for related commits)
 
 3. **Recent git history**: Run `git log --oneline -30 -- <affected-files>` for each file
@@ -552,52 +567,37 @@ from `source.md` is in the verification tables with an assigned dimension owner.
 
 [[steps]]
 id = "phase-2-parallel-analysis"
-title = "Phase 2: Parallel Multi-Perspective Analysis (3 Sub-Agents)"
+title = "Phase 2: Parallel Multi-Perspective Analysis (3 Analysts) and Pipelined Fidelity Verification"
 needs = ["gate-a-verification"]
 description = """
 
-**CRITICAL INSTRUCTION: Spawn ALL THREE sub-agents in a SINGLE message.**
+**This step's contract, turn by turn.** The step opens with ONE launch turn. Every later turn waits
+for sub-agent completion notifications and acts on each one. A turn with no Agent call (waiting,
+listing `$OUTPUT_DIR`, committing finished sub-agent files, deleting mail, or reading the Phase 2
+outputs while a verifier runs) is the normal case and is in contract.
 
-Use Claude Code's Agent tool three times in the SAME response. Each sub-agent
-runs in its own context window. They cannot see each other's output. This
-independence is the entire point — three analysts with the same source material
-but different analytical lenses produce genuinely independent findings.
-
-All three sub-agents use `subagent_type: "general-purpose"` and run in the
-background. Set `run_in_background: true` where the harness's Agent tool exposes
-that parameter; on harnesses where background execution is the Agent tool's
-default and no such parameter exists, launching normally satisfies this directive
-— the observable that matters (for you AND for any per-turn reviewer) is three
-async launch results ("working in the background") in ONE message, then output
-files on disk. Do not treat a missing parameter as a missing launch.
-
-**Waiting is in-contract:** turns spent waiting for background sub-agent completion
-notifications — with no tool calls, or only mail hygiene — are part of executing this step.
-The spawn directive is satisfied by the SINGLE earlier message containing three Agent tool
-calls; the durable evidence is the output files appearing on disk. A per-turn reviewer (e.g.
-the fidelity gate) must not expect the spawn to recur in later turns, and you must NOT
-re-launch sub-agents in response to per-turn gate mail — re-launching would duplicate running
-work AND violate the single-message rule. The redesign procedure below (after a Frame-lift
-required or Frame artificial verdict: stop the first-pass Dimensions analyst, then re-spawn it
-ALONE) is also in contract. If gate mail flags a waiting turn, reply once with
-the artifact evidence (files on disk + the earlier launch turn) and continue waiting.
-Mail-hygiene note: gate mail arrives FROM your own agent identity, so `af mail reply`
-lands back in YOUR OWN inbox as new unread mail — after replying, delete both the gate
-mail and your echoed reply. Later gate mails on further waiting turns get the same
-single-reply-plus-delete treatment; the answer is never a re-launch.
-After three flagged turns the gate sends a FIDELITY_ESCALATION threatening `af down`. Do not
-re-launch. Reply to the escalation with the same evidence (the launch turn, each output file's
-mtime from `ls -la --time-style=+%H:%M:%S "$OUTPUT_DIR"`), mail the supervisor a copy
-(`af mail send supervisor -s "design-v7: fidelity gate flagging in-contract waiting turns" -m "..."`),
-run `af prime` as the escalation asks (the step text you re-read is the justification), and make a
-durability commit of the sub-agent files already on disk (`git add "$OUTPUT_DIR"/*.md && { git diff --cached --quiet || git commit -m "design({{issue}}): Phase 2 durability commit"; }`)
-so a kill cannot lose them. Then continue waiting.
-(This paragraph sits at the top of the step on purpose: the fidelity gate grades each turn against
-only the first 4096 bytes of the step text, and at its former place after the three prompts it was cut
-off — the gate flagged 37 of 53 Phase 2 evaluations across seven runs.)
+1. **The launch turn: spawn ALL THREE analysts in a SINGLE message** — three Agent tool calls in one
+   response, each `subagent_type: "general-purpose"` and in the background (`run_in_background: true`
+   where the Agent tool exposes it; where background is its default, launching normally is the same
+   thing). Each analyst runs in its own context and cannot see the others' output; that independence
+   is the point. Never re-launch an analyst that is running.
+2. **Later single Agent calls are in contract and are not re-launches:** the redesign re-spawn of the
+   Dimensions analyst after a Frame-lift required or Frame artificial verdict (procedure below),
+   Verifier A once elevation_assessment.md and six_sigma_gaps.md are complete, and Verifier B once the
+   final Dimensions pass is complete.
+3. **Gate mail.** A STEP_FIDELITY mail about a waiting turn is answered by this paragraph: delete it
+   (`af mail delete <id>`) and respond in one line naming the sub-agent you are still waiting for. No
+   `af mail reply` is needed: gate mail comes from your own identity, so a reply reaches only your own
+   inbox. A FIDELITY_ESCALATION gets the same deletion plus
+   one mail to the supervisor naming the launch turn and each output file's mtime
+   (`af mail send supervisor -s "design-v7: fidelity gate flagging in-contract waiting turns" -m "..."`,
+   mtimes from `ls -la --time-style=+%H:%M:%S "$OUTPUT_DIR"`), then `af prime`, then a durability commit
+   of the sub-agent files on disk (`git add "$OUTPUT_DIR"/*.md && { git diff --cached --quiet || git commit -m "design({{issue}}): Phase 2 durability commit"; }`)
+   so a kill cannot lose them. Never re-launch in response to gate mail.
 
 **Entry:** `source.md` and `verification.md` exist with all ACs and constraints captured.
-**Exit:** All three sub-agent output files exist in `$OUTPUT_DIR/`.
+**Exit:** All three sub-agents' output files and the merged `$OUTPUT_DIR/verification-report.md` exist,
+and no sub-agent is still running.
 
 Set the output directory variable for sub-agent prompts:
 ```bash
@@ -741,6 +741,7 @@ Write ALL output files to $OUTPUT_DIR/:
 - Do NOT produce design-doc.md — that is the main context's job.
 - Read actual code if the source references existing code.
 - Every claim must trace to source.md.
+- Write what a later reader needs, at the length the content needs: do not restate source.md, the snapshot or another file, summarize your own sections, or repeat a table in prose.
 
 ## Codebase Fidelity Rule (MANDATORY)
 
@@ -904,6 +905,7 @@ Use this structure:
 - Concrete or nothing: every verdict must name a specific file, type, interface, schema, or language-spec section.
 - Read actual code. Build the Ownership Map from source, not from summaries.
 - Every existing mechanism cited MUST include a file:line reference.
+- Write what a later reader needs, at the length the content needs: do not restate source.md, the snapshot or another file, summarize your own sections, or repeat a table in prose.
 
 ## Codebase Fidelity Rule (MANDATORY)
 
@@ -1044,6 +1046,7 @@ scope gap | unstated assumption | failure mode gap | dependency fragility | obse
 - Do NOT produce design-doc.md.
 - Every gap must have a feasibility classification with specific rationale.
 - Read actual code where the source references existing systems.
+- Write what a later reader needs, at the length the content needs: do not restate source.md, the snapshot or another file, summarize your own sections, or repeat a table in prose.
 
 ## Codebase Fidelity Rule (MANDATORY)
 
@@ -1077,8 +1080,8 @@ change over time. Do not state them as fixed facts.
 
 ---
 
-**After launching all three sub-agents**, wait for all to complete. Then verify
-their output files exist:
+**After launching all three sub-agents**, act on each completion notification as it arrives.
+Verify the output files exist before launching the verifier that reads them:
 
 ```bash
 OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
@@ -1105,8 +1108,6 @@ assessment as soon as its completion notification arrives (do not wait for Sub-a
    dependencies.md` exist — into `$OUTPUT_DIR/pre-elevation/` (`mv`, then `git add -A "$OUTPUT_DIR"`: a stopped
    pass can leave files untracked), add a `pre-elevation/README.md` naming the verdict, and commit (a
    durability commit; nothing is lost).
-   (Why: in the 2026-09-23 and 2026-09-27 redesign runs the first pass kept writing for 11–15 minutes after
-   the verdict was on disk, and the re-spawn could not start until it finished.)
 3. Re-spawn Sub-agent 1 ALONE with its Phase 2 prompt plus three additions: `$OUTPUT_DIR/elevation_assessment.md`
    is a fourth, binding input (an option that keeps the shape the verdict lifts away from is marked
    REJECTED citing the assessment section); its own `pre-elevation/` files (a partial set when the pass was
@@ -1118,70 +1119,46 @@ This single re-spawn is ONE Agent call and is in contract: it is the failure tab
 only" case, not a second three-agent launch, and a per-turn reviewer that flags it as a missing three-agent
 spawn is answered with this paragraph. For Frame artificial, additionally return to Phase 1 and reframe
 `source.md` around the abstraction removal before the re-spawn, as the failure table requires.
-(Why: 2026-09-23 issue 709 and 2026-09-28 issue 695 both received Frame-lift required and both had to derive
-this sequence from memory notes; the second run's re-spawn cost 540K sub-agent tokens and its ten revised
-files replaced a first pass that would have routed every new env kind through two emitters.)
 
-**Context management:** Launching three sub-agents and waiting for them is
-context-heavy. If context is filling up after sub-agents complete:
-```bash
-af handoff -s "Phase 2 sub-agents complete" -m "Issue: {{issue}}
-Output dir: $OUTPUT_DIR
-Completed: 3 parallel sub-agents (dimensions, elevation, six-sigma)
-Ready for: phase-2-5-fidelity-verification step"
-```
+**Fidelity verification, pipelined.** Every codebase claim in the Phase 2 outputs is verified by a
+Fidelity Verifier sub-agent before synthesis, as before. The work is split by when its files become
+final, so the elevation and six-sigma files are verified while the Dimensions analyst is still writing.
+1. **Verifier A.** When `elevation_assessment.md` and `six_sigma_gaps.md` both exist and both of their
+   sub-agents have completed (after the redesign handling above, when the verdict triggers it), launch
+   ONE background Agent call (`subagent_type` `"general-purpose"`, `description` `"Fidelity Verifier A"`)
+   with the prompt below and FILES = `elevation_assessment.md six_sigma_gaps.md`,
+   REPORT = `verification-elevation-gaps.md`, CROSS = `none`.
+2. **Verifier B.** When the final Dimensions pass has completed and the `ls` check above passes, launch
+   ONE background Agent call (`description` `"Fidelity Verifier B"`) with the same prompt and
+   FILES = the dimension files that exist plus `audit.md conflicts.md dependencies.md`,
+   REPORT = `verification-dimensions.md`, CROSS = `elevation_assessment.md six_sigma_gaps.md`.
+3. **While Verifier B runs**, read the Phase 2 outputs that Step 3.1 will need — audit.md, conflicts.md,
+   dependencies.md, the six dimension files, elevation_assessment.md and six_sigma_gaps.md — each
+   completely (line-range chunks for files above ~30 KB). A file read completely during this wait counts
+   for Step 3.1 and is not read again in Phase 3; the wait is otherwise idle context time.
+4. **When both reports exist**, run the merge block below. Do not close this step while any sub-agent is
+   still running: a step close can hand the session off, and a handoff ends running sub-agents.
 
-**Exit criteria:** All three sub-agent output files exist. Dimension files,
-audit.md, conflicts.md, dependencies.md, elevation_assessment.md, and
-six_sigma_gaps.md all present in `$OUTPUT_DIR/`."""
-
-[[steps]]
-id = "phase-2-5-fidelity-verification"
-title = "Phase 2.5: Fidelity Verification (Sequential Sub-Agent)"
-needs = ["phase-2-parallel-analysis"]
-description = """
-
-This sub-agent reads the outputs of all three Phase 2 sub-agents and verifies
-every codebase claim against the actual codebase. It MUST run AFTER Phase 2
-completes (not in parallel with it).
-
-**Entry:** All three Phase 2 sub-agent output files exist in `$OUTPUT_DIR/`.
-**Exit:** `$OUTPUT_DIR/verification-report.md` exists with every codebase claim classified.
-
-Spawn a SINGLE sub-agent (NOT in background — must complete before Phase 3):
-
-**Agent tool parameters:**
-- `subagent_type`: `"general-purpose"`
-- `run_in_background`: `false` (if the harness exposes it; on background-by-default harnesses launch normally and enforce sequencing yourself: WAIT for the completion notification and do not proceed until verification-report.md exists)
-- `description`: `"Fidelity Verifier"`
-
-**While waiting for the verifier**, read the Phase 2 outputs that Step 3.1 will need — audit.md,
-conflicts.md, dependencies.md, the six dimension files, elevation_assessment.md and six_sigma_gaps.md — each
-completely (line-range chunks for files above ~30 KB). A file read completely during this wait counts for
-Step 3.1 and is not read again in Phase 3; the wait is otherwise idle context time. (Why: the 2026-09-28 run
-read all nine while waiting and Phase 3 started with them already in context. It sits above the prompt so
-the fidelity gate, which reads only the first 4096 bytes of the step text, sees that these reads are in contract.)
-
-**Prompt** (fill in $OUTPUT_DIR before passing):
+**Fidelity Verifier prompt** (fill in $OUTPUT_DIR, $FILES, $REPORT and $CROSS before passing):
 
 ```
-You are the FIDELITY VERIFIER. Your job is to verify that every codebase claim made by
-three analytical sub-agents is factually accurate. You have full codebase access.
+You are the FIDELITY VERIFIER. Your job is to verify that every codebase claim made in the
+analysis files named below is factually accurate. Another verifier covers the remaining Phase 2
+files. You have full codebase access.
 
 ## Source Material
 
 Read ALL of these files from $OUTPUT_DIR/:
 - codebase-snapshot.md (ground truth from Phase 1)
-- Every dimension file: api.md, data.md, ux.md, scale.md, security.md, integration.md
-- audit.md, conflicts.md, dependencies.md
-- elevation_assessment.md
-- six_sigma_gaps.md
+- $FILES (the analysis files whose claims you verify)
+- $CROSS (unless "none": read these for the Cross-analysis contradictions section only; another
+  verifier checks their claims)
 
 ## Your Process
 
 ### Step 1: Extract Codebase Claims
 
-From all sub-agent output files, extract every claim about the EXISTING codebase:
+From the $FILES files, extract every claim about the EXISTING codebase:
 - File paths
 - Line number references
 - Function/method names and signatures
@@ -1193,7 +1170,7 @@ From all sub-agent output files, extract every claim about the EXISTING codebase
 - Timing/interval assertions (find the actual config value or code)
 - Behavioral assertions about existing code
 - ADR citations (verify the ADR exists and the quote is accurate)
-- NEGATIVE inferences ("X does not do Y", "no test covers Z", "nothing guards W"): these are claims too — run the grep/ls/read that would find the counterexample and classify them; a prior run missed false negatives
+- NEGATIVE inferences ("X does not do Y", "no test covers Z", "nothing guards W"): these are claims too — run the grep/ls/read that would find the counterexample and classify them
 - Claims that cite documentation OUTSIDE this repository (harness hook output caps, hook ordering, compaction behaviour): not verifiable here — classify UNVERIFIABLE-EXTERNAL and list them in their own table so the synthesis knows which facts rest on external documentation
 
 PAY SPECIAL ATTENTION to:
@@ -1215,9 +1192,9 @@ For each claim:
    - UNVERIFIABLE: about proposed new code (exclude)
    - UNVERIFIABLE-EXTERNAL: rests on documentation outside this repository (list separately; never counted as VERIFIED)
 
-### Step 3: Write verification-report.md
+### Step 3: Write $REPORT
 
-Write to $OUTPUT_DIR/verification-report.md:
+Write to $OUTPUT_DIR/$REPORT:
 
 # Fidelity Verification Report
 
@@ -1241,8 +1218,9 @@ information that should be used instead.
 
 ## Cross-analysis contradictions
 
-Where two sub-agent files make incompatible factual claims about the SAME existing code (not
-proposals), list both and state which one the code supports, with the command you ran.
+Where two analysis files — two of $FILES, or one of $FILES and one of $CROSS — make
+incompatible factual claims about the SAME existing code (not proposals), list both and state
+which one the code supports, with the command you ran.
 
 ## Rules
 
@@ -1252,17 +1230,88 @@ proposals), list both and state which one the code supports, with the command yo
 - Every classification must include what you did to verify
 - ABSENCE CLAIMS are claims: for every "nothing reads X" / "no site does Y", run the grep that would find the counterexample, record the command, and classify it
 - LINE NUMBERS: codebase-snapshot.md's own line numbers are NOT the source's; check every cited line against the real file
-- Read factory-root runtime data (telemetry, models.json) only by absolute path; never `cd` outside the worktree; write ONLY verification-report.md
+- Read factory-root runtime data (telemetry, models.json) only by absolute path; never `cd` outside the worktree; write ONLY $REPORT
 ```
 
-After the fidelity verifier completes, verify the report exists:
+**Merge block** (both reports must exist; it writes `verification-report.md`, which GATE B reads):
 ```bash
 OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
-ls -la "$OUTPUT_DIR/verification-report.md"
+A="$OUTPUT_DIR/verification-elevation-gaps.md"; B="$OUTPUT_DIR/verification-dimensions.md"
+ls -la "$A" "$B" || { echo "FAIL: a fidelity verifier report is missing; launch that verifier and wait"; exit 1; }
+count() { awk -v k="$1" 'index($0, k) == 1 { sub(/^[^:]*:[ ]*/, ""); n += $0 + 0 } END { print n + 0 }' "$A" "$B"; }
+ROWS=$(awk -F'|' '{ for (i = 2; i < NF; i++) { c = $i; gsub(/[ *]/, "", c); if (c == "INACCURATE") { n++; break } } } END { print n + 0 }' "$A" "$B")
+demote() { awk '!h && /^# / { h = 1; next } { if ($0 ~ /^## /) sub(/^## /, "### "); print }' "$1"; }
+{
+  echo "# Fidelity Verification Report"
+  echo
+  echo "## Summary"
+  echo "- Total claims checked: $(count '- Total claims checked:')"
+  echo "- Verified: $(count '- Verified:')"
+  echo "- Inaccurate: $(count '- Inaccurate:') (with corrections; INACCURATE table rows: $ROWS)"
+  echo "- Unverifiable: $(count '- Unverifiable:') (excluded)"
+  echo "- Unverifiable-external (documentation outside the repo): $(count '- Unverifiable-external') (listed below)"
+  echo "- Merged from the two verifier reports below; each keeps its own claim table, external-documentation claims and cross-analysis contradictions."
+  echo
+  echo "## Elevation and six-sigma analyses ($(basename "$A"))"
+  demote "$A"
+  echo
+  echo "## Dimension analyses ($(basename "$B"))"
+  demote "$B"
+} > "$OUTPUT_DIR/verification-report.md"
+[ "$ROWS" = "$(count '- Inaccurate:')" ] || echo "WARN: the summaries' Inaccurate count differs from the $ROWS INACCURATE table rows; GATE B acts on every INACCURATE row, not on the count"
+grep -n '^## ' "$OUTPUT_DIR/verification-report.md"
 ```
 
-**Exit criteria:** `$OUTPUT_DIR/verification-report.md` exists with every codebase
-claim classified as VERIFIED, INACCURATE, or UNVERIFIABLE."""
+**Context management:** Launching sub-agents and waiting for them is context-heavy. If context is
+filling up once the merged report exists (never while a sub-agent is still running — a handoff ends it):
+```bash
+af handoff -s "Phase 2 sub-agents complete" -m "Issue: {{issue}}
+Output dir: $OUTPUT_DIR
+Completed: 3 parallel sub-agents (dimensions, elevation, six-sigma) and both fidelity verifiers; verification-report.md merged
+Ready for: phase-2-5-fidelity-verification step"
+```
+
+**Exit criteria:** All three sub-agent output files exist. Dimension files,
+audit.md, conflicts.md, dependencies.md, elevation_assessment.md, and
+six_sigma_gaps.md all present in `$OUTPUT_DIR/`. Both verifier reports
+(`verification-elevation-gaps.md`, `verification-dimensions.md`) exist and the merge block has written
+`verification-report.md`. No sub-agent is still running."""
+
+[[steps]]
+id = "phase-2-5-fidelity-verification"
+title = "Phase 2.5: Fidelity Verification Report Check"
+needs = ["phase-2-parallel-analysis"]
+description = """
+
+The fidelity verifiers run inside `phase-2-parallel-analysis`, each as soon as the analyses it
+checks are final, and that step merges their two reports into `verification-report.md`. This step confirms the merged report before GATE B reads it. It launches nothing unless a
+verifier report is missing; when it does launch one, the turns that wait for it are in contract; delete
+gate mail about them and respond in one line naming the verifier you are waiting for.
+
+**Entry:** `phase-2-parallel-analysis` closed with no sub-agent running.
+**Exit:** `$OUTPUT_DIR/verification-report.md` exists, merged from both verifier reports, with every
+codebase claim classified.
+
+```bash
+OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
+ls -la "$OUTPUT_DIR/verification-elevation-gaps.md" "$OUTPUT_DIR/verification-dimensions.md" "$OUTPUT_DIR/verification-report.md"
+grep -n '^## ' "$OUTPUT_DIR/verification-report.md"
+```
+The headings must include `## Summary`, `## Elevation and six-sigma analyses` and `## Dimension analyses`.
+
+**If a verifier report is missing** (for example, the session handed off before that verifier
+finished): launch that verifier now as ONE background Agent call and wait for its completion
+notification. Its prompt is the Fidelity Verifier prompt in `phase-2-parallel-analysis`; print it from
+the formula with
+```bash
+sed -n '/^You are the FIDELITY VERIFIER/,/^- Read factory-root runtime data/p' "${AF_WORKTREE:-$AF_ROOT}/.agentfactory/store/formulas/design-v7.formula.toml"
+```
+and fill in FILES, REPORT and CROSS as that step's Verifier A or Verifier B line gives them. Then run
+that step's merge block again. Verifying fewer claims is never the fix.
+
+**Exit criteria:** `$OUTPUT_DIR/verification-report.md` exists, merged from
+`verification-elevation-gaps.md` and `verification-dimensions.md`, with every codebase claim classified
+as VERIFIED, INACCURATE, or UNVERIFIABLE."""
 
 [[steps]]
 id = "gate-b-synthesis-regrounding"
@@ -1360,7 +1409,7 @@ fidelity corrections available.
 
 Read each file completely (files above ~30 KB must be read in line-range chunks with `sed -n`, or the
 harness persists them to disk instead of showing them and nothing enters your context). A file you read
-completely during the Phase 2.5 wait counts here — do not read it again:
+completely in Phase 2 while Verifier B ran counts here — do not read it again:
 1. `$OUTPUT_DIR/audit.md` — dimension analysis audit
 2. `$OUTPUT_DIR/conflicts.md` — cross-dimension conflict matrix
 3. `$OUTPUT_DIR/dependencies.md` — dependency graph
@@ -1370,8 +1419,7 @@ completely during the Phase 2.5 wait counts here — do not read it again:
 7. `$OUTPUT_DIR/synthesis-checklist.md` — Gate B's addenda: the fidelity corrections (Addendum A), the
    additional load-bearing facts, the external-documentation register and the contradiction rulings. Do NOT
    re-read `verification-report.md` here: Gate B read it completely and the addenda are its distillation; open
-   the report only for a specific claim the addenda do not cover. (Why: the report is ~60 KB and Gate B has
-   already carried every INACCURATE row into the checklist.)
+   the report only for a specific claim the addenda do not cover.
 
 **If any file is missing:** That sub-agent failed. Re-spawn it (single sub-agent,
 not all three). Do not proceed with partial analysis.
@@ -1584,6 +1632,7 @@ Verify all required files exist:
 OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
 for f in source.md verification.md codebase-snapshot.md audit.md conflicts.md \
   dependencies.md elevation_assessment.md six_sigma_gaps.md verification-report.md \
+  verification-elevation-gaps.md verification-dimensions.md \
   design-doc.md; do
   [ -f "$OUTPUT_DIR/$f" ] || { echo "MISSING: $OUTPUT_DIR/$f"; exit 1; }
 done
@@ -1663,7 +1712,7 @@ Any missing row or unmapped clause: STOP, return to `gate-b-synthesis-regroundin
 **Step 4.6: Risk Verification**
 
 - Every risk in the Risk Registry has a mitigation.
-- Every risk is assigned to an implementation phase (the `Phase` column; a row without one fails — a 2026-09-10 run had to patch the table after the fact because the template lacked the column).
+- Every risk is assigned to an implementation phase (the `Phase` column; a row without one fails).
 - Risks from all three sources (dimensions, elevation, gap analysis) are represented.
 
 ---
@@ -1848,8 +1897,9 @@ work product, committed in `phase-4-finalize`.
 
 **No scratch artifacts to remove.** All output files (source.md, verification.md,
 codebase-snapshot.md, dimension files, audit.md, conflicts.md, dependencies.md,
-elevation_assessment.md, six_sigma_gaps.md, verification-report.md,
-synthesis-checklist.md, design-doc.md) are committed deliverables.
+elevation_assessment.md, six_sigma_gaps.md, verification-elevation-gaps.md,
+verification-dimensions.md, verification-report.md, synthesis-checklist.md, design-doc.md) are
+committed deliverables.
 
 **1. Check for uncommitted changes:**
 ```bash
@@ -1861,7 +1911,7 @@ Must show "working tree clean" in a worktree you alone occupy. If not:
 
 **Shared-worktree guard:** in a shared pipeline worktree, `git status` also shows live sibling
 agents' identity renders as modified (`.agentfactory/agents/<sibling>/CLAUDE.md`, rewritten by
-provisioning while their sessions run; a 2026-09-10 run had three). They are not your cruft and
+provisioning while their sessions run). They are not your cruft and
 `git checkout -- .` would overwrite a running agent's identity file — NEVER run it there. The
 exit criterion in a shared worktree is: no untracked files of yours and every `.designs/{{issue}}/`
 artifact committed; sibling-owned modifications stay untouched.
@@ -1880,7 +1930,7 @@ Should be empty. If not:
 git stash list
 ```
 Should be empty of YOUR entries. The stash stack is shared with the main checkout and every
-worktree (a 2026-09-10 run saw 133 entries from other sessions); an entry you did not tag is another
+worktree; an entry you did not tag is another
 session's work — NEVER pop or drop it. For entries carrying your own tag (`design-v7-{{issue}}-…`),
 locate by tag first, then apply and drop that entry only:
 ```bash

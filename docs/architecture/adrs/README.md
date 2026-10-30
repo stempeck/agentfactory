@@ -39,6 +39,8 @@ anchored to file:line or commit SHA.
 | [023](ADR-023-sessionstart-context-surface.md) | SessionStart context is three independent writers, one hook entry each; identity is delivered by every carrier except that hook | Accepted | `internal/claude/config/settings-autonomous.json:49-67`; `internal/cmd/prime.go:287`; `internal/cmd/identity_parity_test.go:49`; `.designs/675/design-doc.md:126,172` |
 | [024](ADR-024-gateway-shims-and-litellm-pin-gate.md) | Gateway protocol shims are af-owned LiteLLM callbacks; the LiteLLM pin moves only on a session-shaped probe | Proposed | `quickstart.sh:994,1062,1389`; `internal/cmd/config_models.go:937`; pre-decision state `4eb42139` |
 | [025](ADR-025-plugin-repositories-trust-boundary.md) | Plugin repositories are acquired inert outside the consumed store; plugins.json is a load-bearing provenance manifest whose readers fail closed | Proposed | `internal/config/plugins.go`; `internal/cmd/plugin.go`; `agent-gen-all.sh`; `.designs/538/design-doc.md`; PR #539 |
+| [026](ADR-026-most-secure-way-to-run-an-agent.md) | agentfactory will be the de facto standard for running agents securely; its security is improved continuously and never weakened | Accepted | `internal/cmd/authority.go:101`; `internal/cmd/install_formulas/fable-secure.formula.toml:69` at `5dbd77f` |
+| [027](ADR-027-bootstrap-convergence-contract.md) | Every bootstrap run converges each installed component to its pin, and a required component that does not converge fails the run | Proposed | `quickstart.sh:251` (`_converge`), `:57` (`CONVERGE_FAILURES`), `:3400` (`_converge_report`); `.github/advisory-audit.sh:343`; `.github/workflows/test.yml:260` |
 
 ---
 

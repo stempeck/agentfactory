@@ -1137,8 +1137,10 @@ func TestWatchdog_PollAgentsFunctionBodyNeverReferencesTelemetryGuard(t *testing
 // telemetry single-flight's scope comment cited up.go:398 / :423 and quickstart.sh:1105-1107,
 // anchors that predate Phase 1. Every up.go:<N> watchdog.go cites must name a line that holds
 // the call it describes (the telemetry cold-start guard and launchWatchdog must both be cited,
-// as they stand after the integration ensure is inserted), and relaunch.sh's check-then-act is
-// cited at quickstart.sh:1930.
+// as they stand after the integration ensure is inserted), and every quickstart.sh:<N> it cites
+// must hold relaunch.sh's `has-session -t telemetry` check-then-act. The quickstart.sh line is
+// resolved from the citation, like the up.go ones, so an insertion above it is caught here
+// instead of leaving a silently stale comment.
 func TestWatchdog_StaleAnchorCommentsCiteLiveLines(t *testing.T) {
 	read := func(name string) string {
 		t.Helper()
@@ -1185,10 +1187,18 @@ func TestWatchdog_StaleAnchorCommentsCiteLiveLines(t *testing.T) {
 		}
 	}
 
-	if !strings.Contains(wd, "quickstart.sh:1930") {
-		t.Errorf("watchdog.go must cite relaunch.sh's check-then-act at quickstart.sh:1930 (spec L843)")
+	qsCites := regexp.MustCompile(`quickstart\.sh:(\d+)`).FindAllStringSubmatch(wd, -1)
+	if len(qsCites) == 0 {
+		t.Error("watchdog.go must cite relaunch.sh's check-then-act as quickstart.sh:<N> (spec L843)")
 	}
-	if len(qsLines) < 1930 || !strings.Contains(qsLines[1929], "has-session -t telemetry") {
-		t.Errorf("the spec's anchor quickstart.sh:1930 no longer holds the telemetry has-session check; re-anchor the citation")
+	for _, m := range qsCites {
+		n, _ := strconv.Atoi(m[1])
+		if n < 1 || n > len(qsLines) || !strings.Contains(qsLines[n-1], "has-session -t telemetry") {
+			line := ""
+			if n >= 1 && n <= len(qsLines) {
+				line = strings.TrimSpace(qsLines[n-1])
+			}
+			t.Errorf("watchdog.go cites quickstart.sh:%d, which holds %q, not relaunch.sh's `has-session -t telemetry` check; re-anchor the citation", n, line)
+		}
 	}
 }

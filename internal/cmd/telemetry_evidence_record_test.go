@@ -111,29 +111,33 @@ func TestTokensViewRecordsWhichObservationGoverns(t *testing.T) {
 // states that the shipped view's SQL fails on that backend; without a link back, the two records
 // remain two islands and a reader arriving at either one still leaves misinformed.
 func TestCaptureAndTokensViewPointAtEachOther(t *testing.T) {
-	capturePath := filepath.Join(findModuleRoot(t), "internal", "telemetry", "testdata",
-		"openobserve-v0.91.3", "README.md")
-	raw, err := os.ReadFile(capturePath)
-	if err != nil {
-		t.Fatalf("read %s: %v", capturePath, err)
-	}
-	capture := string(raw)
+	for _, captureDir := range openobserveCaptureDirs {
+		t.Run(captureDir, func(t *testing.T) {
+			capturePath := filepath.Join(findModuleRoot(t), "internal", "telemetry", "testdata",
+				captureDir, "README.md")
+			raw, err := os.ReadFile(capturePath)
+			if err != nil {
+				t.Fatalf("read %s: %v", capturePath, err)
+			}
+			capture := string(raw)
 
-	if !strings.Contains(capture, "#567") && !strings.Contains(capture, "af_assumptions") {
-		t.Error("the capture README records that the shipped view's SQL fails here, but never " +
-			"mentions the view's own contradicting record (its af_assumptions block, and the PR #567 " +
-			"run it cites). A reader who starts at the capture concludes the query is simply broken; " +
-			"a reader who starts at the view concludes it is verified. Both are reading half the " +
-			"evidence")
-	}
+			if !strings.Contains(capture, "#567") && !strings.Contains(capture, "af_assumptions") {
+				t.Error("the capture README records that the shipped view's SQL fails here, but never " +
+					"mentions the view's own contradicting record (its af_assumptions block, and the PR #567 " +
+					"run it cites). A reader who starts at the capture concludes the query is simply broken; " +
+					"a reader who starts at the view concludes it is verified. Both are reading half the " +
+					"evidence")
+			}
 
-	// The two records disagree about the logs schema itself: this README enumerates six fields
-	// while the 20004 captured the same day enumerates four and adds one the README omits. That
-	// discrepancy is part of what a reader has to weigh, so it must not be left silent.
-	if !strings.Contains(capture, "service_name") {
-		t.Error("the capture README's logs-schema list omits service_name, which the captured 20004 " +
-			"response — taken the same day, against the same backend — reports as a valid field. " +
-			"Two records of one schema disagree; the README must carry the discrepancy rather than " +
-			"present its own list as complete")
+			// The two records disagree about the logs schema itself: this README enumerates six fields
+			// while the 20004 captured the same day enumerates four and adds one the README omits. That
+			// discrepancy is part of what a reader has to weigh, so it must not be left silent.
+			if !strings.Contains(capture, "service_name") {
+				t.Error("the capture README's logs-schema list omits service_name, which the captured 20004 " +
+					"response — taken the same day, against the same backend — reports as a valid field. " +
+					"Two records of one schema disagree; the README must carry the discrepancy rather than " +
+					"present its own list as complete")
+			}
+		})
 	}
 }

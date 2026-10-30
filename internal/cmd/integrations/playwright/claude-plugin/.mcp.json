@@ -1,0 +1,6 @@
+{
+  "playwright": {
+    "command": "bash",
+    "args": ["-c", "exec \"$HOME/.local/share/agentfactory/playwright/1.63.0/node_modules/.bin/playwright-mcp\" --browser chromium --headless --isolated"]
+  }
+}

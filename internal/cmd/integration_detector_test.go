@@ -175,15 +175,16 @@ func p724d2BareUpWarnings(t *testing.T, settings string, setup func(t *testing.T
 	return root, lines
 }
 
-// TestPR724_T12_BlanketUpOmitsQuickstartPlaywright: bare af up leaves out the one plugin quickstart installs
-// at user scope, by its exact key: the same plugin from another marketplace and another plugin from the same
-// marketplace still warn. The detector itself, which af plugin check reads, still reports all three.
-func TestPR724_T12_BlanketUpOmitsQuickstartPlaywright(t *testing.T) {
+// TestPR724_T12_BlanketUpNamesEveryUserScopePlugin: quickstart no longer installs a user-scope plugin, so
+// bare af up exempts none. The Playwright an older quickstart left behind is warned like any other channel,
+// beside the same plugin from another marketplace and another plugin from the same marketplace.
+func TestPR724_T12_BlanketUpNamesEveryUserScopePlugin(t *testing.T) {
 	settings := `{"enabledPlugins":{"` + p724d2QuickstartKey + `":true,"playwright@x":true,"frontend-design@claude-plugins-official":true}}`
 	root, lines := p724d2BareUpWarnings(t, settings, nil)
 
+	keys := []string{p724d2QuickstartKey, "playwright@x", "frontend-design@claude-plugins-official"}
 	rows := detectUnaccountedUserScope(root)
-	for _, key := range []string{p724d2QuickstartKey, "playwright@x", "frontend-design@claude-plugins-official"} {
+	for _, key := range keys {
 		if !slices.Contains(rows, key) {
 			t.Errorf("the detector feeds af plugin check and must still report %s; rows=%q", key, rows)
 		}
@@ -192,22 +193,19 @@ func TestPR724_T12_BlanketUpOmitsQuickstartPlaywright(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("bare af up must print exactly one user-scope warning line; got %d: %q", len(lines), lines)
 	}
-	for _, key := range []string{"playwright@x", "frontend-design@claude-plugins-official"} {
+	for _, key := range keys {
 		if !strings.Contains(lines[0], key) {
-			t.Errorf("the warning must still name %s, a channel quickstart did not install: %q", key, lines[0])
+			t.Errorf("the warning must name %s: %q", key, lines[0])
 		}
-	}
-	if strings.Contains(lines[0], p724d2QuickstartKey) {
-		t.Errorf("the warning must leave out %s while quickstart installs it: %q", p724d2QuickstartKey, lines[0])
 	}
 }
 
-// TestPR724_T12_BlanketUpQuietOnQuickstartDefault: a default quickstart factory, whose only user-scope
-// plugin is the Playwright quickstart installed, gets no user-scope warning from bare af up.
-func TestPR724_T12_BlanketUpQuietOnQuickstartDefault(t *testing.T) {
+// TestPR724_T12_BlanketUpWarnsOnLeftoverQuickstartPlaywright: a container whose only user-scope plugin is
+// the Playwright an older quickstart installed is told about it by bare af up, until it migrates.
+func TestPR724_T12_BlanketUpWarnsOnLeftoverQuickstartPlaywright(t *testing.T) {
 	_, lines := p724d2BareUpWarnings(t, `{"enabledPlugins":{"`+p724d2QuickstartKey+`":true}}`, nil)
-	if len(lines) != 0 {
-		t.Errorf("bare af up on a default quickstart factory must print no user-scope warning; got %q", lines)
+	if len(lines) != 1 || !strings.Contains(lines[0], p724d2QuickstartKey) {
+		t.Errorf("bare af up must warn once naming %s; got %q", p724d2QuickstartKey, lines)
 	}
 }
 

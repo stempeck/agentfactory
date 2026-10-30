@@ -374,8 +374,17 @@ description = """
 **This is the critical step.** The design doc describes the TARGET state. The
 codebase IS the CURRENT state. The gap between them defines the actual work.
 
+**This step's turns:** one launch turn, then waiting. Findings live in files, not in this
+conversation, so a recycle or handoff loses none:
+- Each sub-agent writes `.jidoka-scratch/investigation/phase-{N}.md` (the audit: `deployment.md`)
+  at the worktree root, ending with the line `DONE`, and returns one line.
+- On entering or resuming this step, run `mkdir -p .jidoka-scratch/investigation; ls
+  .jidoka-scratch/investigation; grep -L '^DONE$' .jidoka-scratch/investigation/*.md 2>/dev/null` and launch
+  only the investigators whose file is missing or lacks `DONE`.
+- Do not read the findings here; Phase 3 reads them.
+
 **1. Launch one sub-agent per phase** using the Agent tool with
-`subagent_type=Explore`. Each agent investigates:
+`subagent_type=general-purpose`. Each agent investigates:
 
 1. What files does this phase modify or create? (from design-doc deliverables + dimension docs)
 2. What is the ACTUAL current state of those files? (read them, check line numbers, verify assumptions)
@@ -384,13 +393,10 @@ codebase IS the CURRENT state. The gap between them defines the actual work.
 5. Are there hidden issues? (latent bugs, undocumented types, patterns the design missed)
 6. What are the exact file paths and line numbers for everything this phase touches?
 
-Sub-agent prompt template:
+Sub-agent prompt template (it names what to read; never paste design or dimension text into it):
 ```
-Investigate Phase {N} "{phase_name}" from this design doc. The phase specifies:
-{phase_deliverables_and_acceptance_criteria}
-
-The relevant dimension docs say:
-{relevant_dimension_excerpts}
+Investigate Phase {N} "{phase_name}" of the design at {design_dir}/design-doc.md: read that
+phase's section in full, and these dimension docs: {relevant_dimension_doc_paths}.
 
 Search the codebase to answer:
 1. Do the target files exist? What's in them? (read with exact line numbers)
@@ -399,7 +405,9 @@ Search the codebase to answer:
 4. Are there hidden issues (latent bugs, undocumented types, edge cases)?
 5. What are the exact import paths, class names, and function signatures?
 
-Report findings with file paths and line numbers for everything.
+Write your findings, with file paths and line numbers for everything, to
+.jidoka-scratch/investigation/phase-{N}.md at the worktree root; end it with the line DONE.
+Your final message is one line: that path and your number of findings.
 ```
 
 **2. Additionally, launch one "Deployment & Environment Audit" sub-agent**
@@ -417,26 +425,28 @@ Search the codebase to answer:
 4. Check which environments/targets the design doc addresses vs. ignores
 5. Identify parity gaps
 6. For each deploy script, check if it handles what the design introduces
-Report all findings with file paths.
+Write all findings, with file paths, to .jidoka-scratch/investigation/deployment.md at the
+worktree root; end it with the line DONE. Your final message is one line: that path.
 ```
 
 **3. Run all phase agents + the deployment audit agent in parallel**
-(single message, multiple Agent tool calls).
+(single message, multiple Agent tool calls, each with `run_in_background: false`).
 
 **Anti-pattern:** Do NOT investigate sequentially. Parallel sub-agents are the
 single biggest efficiency gain.
 
 **Context management:** Parallel investigation is the heaviest phase. If context
-is filling after collecting all sub-agent results:
+is filling after every findings file is complete:
 ```bash
 af handoff -s "Codebase investigation complete" -m "Issue: {{issue}}
 Completed: parallel investigation for all phases + deployment audit
-All sub-agent findings captured in conversation
+Findings: .jidoka-scratch/investigation/
 Ready for: phase-3-cross-reference step"
 ```
 
-**Exit criteria:** Ground-truth codebase state for every phase's target area AND
-a complete picture of the deployment pipeline."""
+**Exit criteria:** Every phase has a findings file ending `DONE`, and so does `deployment.md`:
+ground-truth codebase state for every phase's target area AND a complete picture of the
+deployment pipeline."""
 
 [[steps]]
 id = "phase-3-cross-reference"
@@ -446,7 +456,9 @@ description = """
 
 Merge the design spec with the investigation findings.
 
-**Entry:** All phase investigations and deployment audit complete.
+**Entry:** All phase investigations and deployment audit complete. Read every findings file in
+`.jidoka-scratch/investigation/` (one per phase plus `deployment.md`): they are the investigation
+results this step merges, whether or not this session launched the investigators.
 
 **For each phase, perform these synthesis operations:**
 
@@ -516,6 +528,11 @@ description = """
 Write the implementation plan outline document.
 
 **Entry:** Cross-reference synthesis complete for all phases.
+
+**If you delegate sections to sub-agents,** launch them in one message; each writes its section
+to `.jidoka-scratch/outline/phase-{N}.md` at the worktree root, ends it with the line `DONE`, and
+returns one line. A session that resumes this step relaunches only the sections whose file is
+missing or lacks `DONE`, then assembles the outline from those files.
 
 **1. Create the output directory:**
 ```bash
@@ -660,11 +677,13 @@ commands" — shape was checked, decidability was not.
 
 ```bash
 OUTLINE="{design_dir}/implementation-plan/implementation_plan_outline.md"
-sed -n '/^```bash$/,/^```$/p' "$OUTLINE" > /tmp/ac-lines.txt
+# Scratch stays inside the worktree: /tmp is outside it and trips WORKTREE_CONTAINMENT.
+SCRATCH="$(git rev-parse --show-toplevel)/.jidoka-scratch"; mkdir -p "$SCRATCH"
+sed -n '/^```bash$/,/^```$/p' "$OUTLINE" > "$SCRATCH/ac-lines.txt"
 
 # 2a. BAN factory-mutating commands inside acceptance criteria. Run this FIRST,
 #     because 2b executes the blocks.
-grep -nE '(af (sling|up|down|install|handoff)|make (install|check-regen)|gh pr (close|edit|merge))' /tmp/ac-lines.txt
+grep -nE '(af (sling|up|down|install|handoff)|make (install|check-regen)|gh pr (close|edit|merge))' "$SCRATCH/ac-lines.txt"
 # Expected: NO OUTPUT (exit 1).
 #   `af sling --agent <agent>` deletes that agent's formula_caller /
 #   hooked_formula / dispatch_owner; `af sling --formula ... --reset` closes its
@@ -695,7 +714,7 @@ grep -nE '(af (sling|up|down|install|handoff)|make (install|check-regen)|gh pr (
 # 2d. COMMANDS AND FLAGS EXIST. Every `af`/`make`/shell verb an AC invokes must
 #     be real — flags are the common miss (a `--root` flag on `af install`, a
 #     `--dry-run` on `af up`, a `--json` on `af config models show`: none exist).
-# For each distinct command in /tmp/ac-lines.txt: run `<cmd> --help` (or grep the
+# For each distinct command in "$SCRATCH/ac-lines.txt": run `<cmd> --help` (or grep the
 # cobra registration) and confirm every flag used is registered.
 # Expected: no unknown flag / unknown command.
 
@@ -714,7 +733,7 @@ grep -nE '(af (sling|up|down|install|handoff)|make (install|check-regen)|gh pr (
 #     and re-running it: still 0. That phase could never have been signed off.
 
 # 2e-i. Any grep whose PATTERN contains shell-expansion syntax MUST use -F.
-grep -n 'grep' /tmp/ac-lines.txt | grep -F '${' | grep -vE 'grep -[a-z]*F'
+grep -n 'grep' "$SCRATCH/ac-lines.txt" | grep -F '${' | grep -vE 'grep -[a-z]*F'
 # Expected: NO OUTPUT. Every hit is a pattern the regex engine cannot match as
 # written. Rewrite as `grep -cF 'literal'` and re-run 2b.
 
@@ -722,15 +741,15 @@ grep -n 'grep' /tmp/ac-lines.txt | grep -F '${' | grep -vE 'grep -[a-z]*F'
 #        literal the phase INTRODUCES (`-eq 1` / `-ge 1` on a post-change string).
 #        Write the exact line the phase's Required Changes says will exist, then
 #        re-run that AC's own grep against it:
-#   echo '<the exact line Required Changes says will exist after this phase>' > /tmp/ac-probe
-#   <the AC's grep, retargeted at /tmp/ac-probe>
+#   echo '<the exact line Required Changes says will exist after this phase>' > "$SCRATCH/ac-probe"
+#   <the AC's grep, retargeted at "$SCRATCH/ac-probe">
 # Expected: the count the AC demands (usually 1). A 0 means the criterion can
 # never go green no matter how correct the implementation is. Fix the pattern,
 # then re-run 2b to confirm it still fails against the REAL tree — a pattern that
 # now matches the probe must still not match the un-implemented tree.
 
 # 2e-iii. Every "Today: N" baseline annotation must be TRUE right now.
-grep -n 'Today:' /tmp/ac-lines.txt
+grep -n 'Today:' "$SCRATCH/ac-lines.txt"
 # For each hit, run the adjacent command against the tree and compare to N.
 # Expected: every N matches. Three of 21 were wrong on the run that produced this
 # check, and a wrong baseline sends the implementer hunting a pre-state that does
@@ -756,6 +775,32 @@ echo "N(design)=$N  M(outline)=$M  extras_listed=$EXTRAS"
 # Expected: if M > N then EXTRAS >= (M - N), each carrying a reason from
 # {cross-service|cross-repo|merge-gate|deferrable-ticket}. Any same-service,
 # same-PR phase that is really another phase's deliverable MUST be merged, not listed.
+
+# 2g. CROSS-SECTION SATISFIABILITY. 2e-ii probes an AC grep against the line
+#     Required Changes promises; it never asks whether the TESTS a phase specifies
+#     can pass against what the SAME outline specifies elsewhere.
+#     Why this exists: on the run that added this check, GATE 0, self-review and
+#     the jidoka gate all passed while the peer review found four Phase-2 tests that
+#     could never go green, each at a seam between two sections: a "registry holds
+#     no spiffe://" assertion vs a registry contract carrying "spiffe_id"; a config
+#     path written as /home/<user>/... vs a harness running under a fake HOME; a
+#     non-SKIPOSS test scanning a file the OSS manifest does not ship; a test env
+#     copied from a helper that sets GIT_CONFIG_GLOBAL=/dev/null for code that runs
+#     `git config --global`. For EVERY phase, walk all four seams:
+#   2g-i.   Each "no X" / "contains no X" / "never X" assertion: grep the outline's
+#           contracts (json/text fences, field lists, config lines) for X.
+#   2g-ii.  Each test that reuses an existing helper's env or "shape": read that
+#           helper and list every variable it sets; none may disable what the
+#           phase's code under test needs.
+#   2g-iii. Each absolute path the phase's code writes (/home/<user>/..., a fixed
+#           root) that a harness test runs under a substituted HOME or root: it
+#           must resolve from $HOME or the harness root instead.
+#   2g-iv.  Where the repo publishes a subset (a publish manifest plus an
+#           exclusion marker, e.g. todos/public_repo_files.md and SKIPOSS here):
+#           each new test file WITHOUT the marker reads only files the manifest
+#           ships or the same phase adds with a manifest row.
+# Expected: no contradiction on any seam. A hit is a criterion that can never go
+# green: fix the outline, then re-run 2b.
 ```
 
 Then verify each item:
@@ -771,6 +816,7 @@ Then verify each item:
 - [ ] No grep pattern containing `${` is missing `-F` (check 2e-i) — such a pattern matches nothing, forever
 - [ ] Every assertion expecting a post-change literal was probed against that literal and returned the demanded count (check 2e-ii) — red today is only half the proof; it must also be able to go green
 - [ ] Every `Today: N` baseline annotation was executed and is accurate (check 2e-iii)
+- [ ] No test a phase specifies contradicts a contract, helper env, absolute path or publish boundary stated elsewhere in the outline (check 2g, all four seams, every phase)
 - [ ] Each `# Expected:` line states a machine-comparable value (a count, `no output`, `exit=0`, an exact list) — a prose description of what the output should look like is a judgement call, not a criterion
 - [ ] Gotchas section is non-empty for every phase that modifies existing code
 - [ ] Phase dependency chain is a valid DAG (no cycles)
@@ -919,8 +965,9 @@ OUTLINE="{design_dir}/implementation-plan/implementation_plan_outline.md"
 DESIGN="{design_dir}/design-doc.md"
 
 # A. VERIFICATION COVERAGE — every test the design names must be owned by a phase.
-grep -ohE 'Test[A-Za-z0-9_]+' "$DESIGN" | sort -u > /tmp/design-tests.txt
-while read -r t; do grep -q "$t" "$OUTLINE" || echo "UNOWNED: $t"; done < /tmp/design-tests.txt
+SCRATCH="$(git rev-parse --show-toplevel)/.jidoka-scratch"; mkdir -p "$SCRATCH"
+grep -ohE 'Test[A-Za-z0-9_]+' "$DESIGN" | sort -u > "$SCRATCH/design-tests.txt"
+while read -r t; do grep -q "$t" "$OUTLINE" || echo "UNOWNED: $t"; done < "$SCRATCH/design-tests.txt"
 # Expected: no output. Any UNOWNED line is an acceptance criterion the design
 # specified and the plan silently dropped.
 
@@ -932,6 +979,11 @@ grep -n 'Frame-lift required' "$DESIGN" {design_dir}/elevation_assessment.md
 # Expected: at least one phase states the invariant AND names the test that
 # enforces it. A lift adopted by the design but absent from every phase is
 # unenforced: an implementer can violate it and no acceptance criterion notices.
+# Presence is half of it: for each lift phrased "no X" / "only in Y", also grep
+# the whole outline (contracts and field lists included) for X outside Y.
+# Expected: no hit. A contract that carries what a lift forbids is a
+# contradiction, not coverage (a "one stored copy of the ID" lift once passed
+# this check while the outline's own registry contract stored the ID).
 
 # C. DEPENDENCY GRAPH IS SELF-CONSISTENT. Every edge drawn in the phase-chain
 #    diagram must appear in the child phase's own Prerequisites, and every
@@ -959,6 +1011,9 @@ that authored and self-verified the outline. Independent context is the whole po
 of the peer review; a reviewer who just wrote the document cannot see its blind spots.
 
 ```bash
+# Shell variables do not survive `af handoff` or a recycle: re-derive them from the bead.
+INPUT_PR=$(af bead show {{issue}} | sed '/^Notes:/,$d' | grep -oE 'https://github.com/[^ ]+/pull/[0-9]+' | head -1)
+if [ -n "$INPUT_PR" ]; then MODE=pr; PR_NUM=${INPUT_PR##*/}; SRC_BRANCH=$(gh pr view "$PR_NUM" --json headRefName --jq .headRefName); else MODE=issue; fi
 af done && af handoff -s "Outline self-verified, ready for peer review" -m "Issue: {{issue}}
 Outline: {design_dir}/implementation-plan/implementation_plan_outline.md
 MODE/branch: MODE=<pr|issue>; SRC_BRANCH=$SRC_BRANCH; PR_NUM=$PR_NUM (if MODE=pr)
@@ -985,6 +1040,13 @@ Skill(skill: "rootcause-review", args: "{design_dir}/implementation-plan/impleme
 Do NOT read the SKILL.md and follow it manually, and do NOT impose your own review
 criteria — invoke it via the Skill tool and faithfully execute whatever it instructs.
 The target is an implementation plan outline rather than a rootcause analysis; the skill adapts.
+
+**A long outline can recycle this step mid-review — make the work resumable.** Persist each
+verifier's findings to `.jidoka-scratch/peer-review/review-tracking.md` (worktree root) as they
+arrive. A session that resumes this step re-invokes the skill, then treats what is already on disk
+as done. An appended `# Architecture Elevation Assessment` is the skill's intake gate, so it is not
+re-run. The tracking file's findings are not re-verified: confirm only the ones marked unconfirmed,
+then append the review. Re-launching verifiers whose output is on disk pays for the same review twice.
 
 The skill appends a "# Peer Review" section to the outline (it never modifies existing
 content). Then close with `af done` — no handoff; the next step (cleanup-workspace)
@@ -1029,6 +1091,9 @@ Remove it (`rm -f .agent-checkpoint.json`) — `af` rewrites it at the next
 checkpoint, and the durable record of where you were lives in your agent-dir
 notes, which are git-ignored by design and are not meant to be committed.
 
+`.jidoka-scratch/` at the worktree root (investigation, outline-section, GATE 0, jidoka and peer-review scratch) is
+temporary too, and its findings now live in the outline: `rm -rf .jidoka-scratch`.
+
 **3. Check stash — YOURS ONLY.**
 ```bash
 git stash list
@@ -1051,6 +1116,12 @@ git stash list | grep -nE "<this-formula>.*<issue-or-worktree-id>"
 - Entries from other branches/worktrees: leave them alone and say so.
 
 **4. Push your branch (mode-aware):**
+Shell variables do not survive `af handoff` or a recycle, so re-derive MODE, PR_NUM and SRC_BRANCH
+from the bead before pushing:
+```bash
+INPUT_PR=$(af bead show {{issue}} | sed '/^Notes:/,$d' | grep -oE 'https://github.com/[^ ]+/pull/[0-9]+' | head -1)
+if [ -n "$INPUT_PR" ]; then MODE=pr; PR_NUM=${INPUT_PR##*/}; SRC_BRANCH=$(gh pr view "$PR_NUM" --json headRefName --jq .headRefName); else MODE=issue; fi
+```
 - **MODE=pr** — push to the PR's branch with an explicit refspec (your local
   name differs from the remote branch):
 ```bash
@@ -1116,6 +1187,12 @@ Once you submit, you're done. The Supervisor will:
 4. Create conflict-resolution tasks if needed (fresh agent handles those)
 
 **1. Deliver (mode-aware):**
+
+Re-derive MODE, PR_NUM and SRC_BRANCH from the bead (shell variables do not survive a recycle):
+```bash
+INPUT_PR=$(af bead show {{issue}} | sed '/^Notes:/,$d' | grep -oE 'https://github.com/[^ ]+/pull/[0-9]+' | head -1)
+if [ -n "$INPUT_PR" ]; then MODE=pr; PR_NUM=${INPUT_PR##*/}; SRC_BRANCH=$(gh pr view "$PR_NUM" --json headRefName --jq .headRefName); else MODE=issue; fi
+```
 
 **MODE=pr** — do NOT create a PR. Your work is already on the input PR's branch
 (pushed in cleanup-workspace). Post the summary AS A COMMENT on that PR:

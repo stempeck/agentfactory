@@ -389,9 +389,9 @@ func checkIntegrationCollisions(plans []*integrationPlan, record *config.Plugins
 			pluginOwners[cp] = append(pluginOwners[cp], name)
 		}
 	}
-	userPlugins := map[string]bool{}
+	userPluginKeys := map[string][]string{}
 	for _, up := range userScope.Plugins {
-		userPlugins[up.Name] = true
+		userPluginKeys[up.Name] = append(userPluginKeys[up.Name], up.Key)
 	}
 
 	for _, p := range plans {
@@ -411,8 +411,13 @@ func checkIntegrationCollisions(plans []*integrationPlan, record *config.Plugins
 			sessionOwners[svc.Session] = append(sessionOwners[svc.Session], name)
 		}
 		for _, cp := range p.claudePlugins {
-			if userPlugins[cp] {
-				return fmt.Errorf("plugin %q: plugin name %q is already provided by a user-scope plugin; rename it", name, cp)
+			if keys := userPluginKeys[cp]; len(keys) > 0 {
+				uninstalls := make([]string, len(keys))
+				for i, k := range keys {
+					uninstalls[i] = "claude plugin uninstall " + k + " --scope user"
+				}
+				return fmt.Errorf("plugin %q: plugin name %q is already provided by a user-scope plugin; rename it; or remove it: %s",
+					name, cp, strings.Join(uninstalls, " and "))
 			}
 			if owners := pluginOwners[cp]; len(owners) > 0 {
 				slices.Sort(owners)

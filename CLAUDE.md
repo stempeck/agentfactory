@@ -10,6 +10,7 @@ Agentfactory — standalone multi-agent orchestration CLI.
 - `make test` — run unit tests (root module only — `go test ./...`)
 - `make install` — build and install to `~/.local/bin/af`
 - `make test-integration` — run integration tests (should only run in CI)
+- `make lock` — recompile both Python hash locks (`py/requirements.txt`, `py/litellm-requirements.txt`) from their `.in` inputs; needs Python 3.12 and PyPI
 - `make clean` — remove build artifacts
 
 The web console is a **separate Go module** (`web/go.mod`), so root `make test` does NOT run its

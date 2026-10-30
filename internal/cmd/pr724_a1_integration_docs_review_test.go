@@ -125,6 +125,7 @@ func TestPR724_T4_PublishedDocsNoIntegrationIssueReferences(t *testing.T) {
 	unpublished := regexp.MustCompile(`#695|design 695|\.designs/695/|\.analysis/695/`)
 	for _, rel := range []string{
 		"USING_PLUGINS.md",
+		"USING_INTEGRATIONS.md",
 		"docs/architecture/adrs/ADR-025-plugin-repositories-trust-boundary.md",
 		"docs/architecture/subsystems/embedded-assets.md",
 		"internal/cmd/integrations/README.md",

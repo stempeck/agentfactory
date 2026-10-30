@@ -309,8 +309,8 @@ func TestCheckPythonMCPDeps(t *testing.T) {
 		if !strings.Contains(err.Error(), "Missing Python dependencies") {
 			t.Errorf("error should mention 'Missing Python dependencies', got: %v", err)
 		}
-		if !strings.Contains(err.Error(), "pip install -r py/requirements.txt") {
-			t.Errorf("error should mention 'pip install -r py/requirements.txt', got: %v", err)
+		if !strings.Contains(err.Error(), "pip install --require-hashes --only-binary :all: -r py/requirements.txt") {
+			t.Errorf("error should name the hashed, binary-only install 'pip install --require-hashes --only-binary :all: -r py/requirements.txt', got: %v", err)
 		}
 	})
 

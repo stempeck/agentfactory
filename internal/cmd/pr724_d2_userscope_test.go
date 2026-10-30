@@ -30,17 +30,21 @@ func TestPR724_T12_KeepInstallRefusesQuickstartPlaywrightName(t *testing.T) {
 	}
 }
 
-// TestPR724_T12_UsingPluginsDocStatesBareUpExemption: the operator guide says the warning comes from a bare
-// af up, that it leaves out quickstart's own Playwright, and that af plugin check still lists it.
-func TestPR724_T12_UsingPluginsDocStatesBareUpExemption(t *testing.T) {
+// TestPR724_T12_UsingPluginsDocStatesBareUpWarning: the operator guide says the warning comes from a bare
+// af up and names every unaccounted user-scope plugin, a leftover quickstart Playwright included, and that
+// af plugin check lists them too. Quickstart no longer installs that plugin, so no exemption is described.
+func TestPR724_T12_UsingPluginsDocStatesBareUpWarning(t *testing.T) {
 	doc := g4ReadRepoDoc(t, "USING_PLUGINS.md")
 	for _, want := range []string{
 		"A bare `af up` also prints one warning line naming the unaccounted user-scope Claude Code plugins.",
-		"It leaves out `playwright@claude-plugins-official` while quickstart installs that plugin itself; `af plugin check` still lists it.",
+		"It names every one of them, including a `playwright@claude-plugins-official` left behind by an older quickstart; `af plugin check` lists them too.",
 	} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("USING_PLUGINS.md must say: %s", want)
 		}
+	}
+	if strings.Contains(doc, "while quickstart installs that plugin itself") {
+		t.Error("USING_PLUGINS.md must not say quickstart installs the user-scope Playwright plugin: it no longer does")
 	}
 }
 

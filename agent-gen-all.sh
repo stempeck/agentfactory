@@ -265,7 +265,7 @@ done
 if [ "$DO_BUILD" = true ]; then
     echo ""
     echo "rebuilding af..."
-    make -C "$AF_SRC" install
+    GOTOOLCHAIN=local make -C "$AF_SRC" install
     echo ""
     echo "af installed: $(af version 2>/dev/null | head -1 || echo '(unknown version)')"
 fi

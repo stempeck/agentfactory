@@ -800,7 +800,8 @@ expected observable result **by hand from the spec** (show the arithmetic or exp
 behavior); run the real system on a realistic input; record observed vs. derived. End
 with `Verdict: MATCH`, `Verdict: MISMATCH`, or `Verdict: INFEASIBLE — [why]` on its own
 line. A MISMATCH does not stop the review — it becomes a **[Verified] Blocker ledger
-finding** (the strongest kind this process produces) and the checklist continues.
+finding** (the strongest kind this process produces — append its findings.md line now; the
+verdict in sideways.md alone is not the ledger) and the checklist continues.
 INFEASIBLE goes in the coverage statement, never silent.
 
 Throwaway factories, fixtures and scratch JSON for the run live under
@@ -907,7 +908,11 @@ Switch sides: audit the reviewer. In `todos/fable-review/self_audit.md`:
   mail while the sub-agent runs trips the STEP_FIDELITY gate.
   Its output lands in self_audit.md under a MANDATORY `## Gap-Hunter` heading ending
   with `Result: FINDING | REFUTATION | NOTHING-FOUND | UNAVAILABLE | ESCALATED-TO-SIX-SIGMA` — a hit
-  becomes a ledger entry, a refutation kills or demotes one. On a deep review, escalate
+  is appended to `findings.md` as its own line whose text contains `gap-hunter` (the file the
+  sub-agent was handed and Phase 10 grades — not a side file and not self_audit.md alone: one
+  run posted a gap-hunter Blocker that findings.md never carried, and the self-review had to
+  back-fill it after posting), a refutation kills or demotes that finding's findings.md line.
+  On a deep review, escalate
   instead to `Skill(skill: "six-sigma-challenge", args: "<draft> <PR>")` — do NOT read
   its SKILL.md and follow it manually; use the Skill tool — and record
   `Result: ESCALATED-TO-SIX-SIGMA` with its outcome. The section is required even then —
@@ -934,9 +939,11 @@ Run this command:
 ```bash
 F=todos/fable-review/self_audit.md
 grep -q "## Not Reviewed" $F && grep -qiE "strongest" $F && grep -q "## Gap-Hunter" $F && grep -qE "Result: (FINDING|REFUTATION|NOTHING-FOUND|UNAVAILABLE|ESCALATED-TO-SIX-SIGMA)" $F && echo "GATE 9 PASS" || echo "GATE 9 FAIL: coverage statement, strongest-wrong, or Gap-Hunter result missing"
+# A FINDING must already be a findings.md line — Phase 10 grades findings.md, not self_audit.md:
+sed -n '/^## Gap-Hunter/,$p' $F | grep -q "Result: FINDING" && { grep -qi "gap-hunter" todos/fable-review/findings.md && echo "GATE 9 PASS: gap-hunter finding is a findings.md line" || echo "GATE 9 FAIL: Result is FINDING but no findings.md line contains gap-hunter — append it"; } || true
 ```
 
-**If FAIL**: Go back to phase-9-self-audit. The adversary must leave evidence. Do NOT proceed.
+**If FAIL**: Go back to phase-9-self-audit. The adversary must leave evidence, and its finding must be a findings.md line. Do NOT proceed.
 **If PASS**: Close this step and continue."""
 
 [[steps]]
@@ -986,12 +993,19 @@ description = """
   nature) in the review body with full-40-char-sha permalinks using the head sha from
   target.md:
 ```bash
-gh api repos/<owner>/<repo>/pulls/<number>/reviews --input todos/fable-review/review-payload.json
+gh api repos/<owner>/<repo>/pulls/<number>/reviews --input todos/fable-review/review-payload.json \\
+  | jq -r 'select(.html_url != null) | "Review URL: \\(.html_url) (review id \\(.id), submitted \\(.submitted_at), commit \\(.commit_id))"' \\
+  >> todos/fable-review/review.md && tail -1 todos/fable-review/review.md
 ```
   The payload: `commit_id` = full head sha, `event` = "COMMENT", `body` = the verdict +
   coverage statement + body-fallback findings, `comments` = the inline anchors. HTTP 422
   means a bad anchor: fix that comment's path/line or move it to the body — do NOT retry
-  blindly. Record the review URL in review.md.
+  blindly. The pipe writes the `Review URL:` line (with the review id) into review.md in the
+  same command as the post, never as a later edit, and writes nothing on an error body: one
+  run posted, closed the step at a context-boundary handoff before recording the URL, and
+  the fresh session had to re-derive from the reviews API whether a submission existed
+  before GATE 10 could be trusted. Never write a placeholder URL line — GATE 10 greps for
+  the real one.
 - If {{post_review}} is "false": the review lands in bead notes and the completion mail
   instead; record "NOT POSTED (by dispatch)" in review.md.
 
@@ -1009,10 +1023,12 @@ Run this command:
 ```bash
 F=todos/fable-review/review.md
 grep -qE "Verdict: (Approve|Request changes|Needs discussion)" $F && grep -q "Coverage" $F && grep -qE "\\[Verified\\]|\\[Inferred\\]|\\[Assumed\\]" $F && echo "GATE 10 PASS" || echo "GATE 10 FAIL: verdict, coverage statement, or evidence bins missing"
+# The outcome must be on record as an artifact, not a memory — a post without its URL line is how a fresh session re-posts:
+grep -qiE "^Review URL: https://github\\.com/.+#pullrequestreview-[0-9]+|NOT POSTED \\(by dispatch\\)|PR closed/merged" $F && echo "GATE 10 OUTCOME RECORDED" || echo "GATE 10 FAIL: review.md has no Review URL line, no NOT POSTED (by dispatch) and no PR closed/merged — if a post happened, find THIS run's submission in the PR's reviews and record it; never post again"
 ```
 
-Then confirm every findings.md entry is accounted for in review.md (kept, merged, or
-dropped-with-reason), and — if posted — the review URL is recorded.
+Both lines must print PASS / OUTCOME RECORDED. Then confirm every findings.md entry is
+accounted for in review.md (kept, merged, or dropped-with-reason).
 
 **If FAIL**: Go back to phase-10-deliver. Do NOT proceed.
 **If PASS**: Close this step and continue to the post-work invariant steps."""
@@ -1032,6 +1048,7 @@ Review your own work product before finalizing.
 - Every posted finding exists in findings.md with its grade decision
 - Each inline comment landed on the intended path and line:
 ```bash
+# <review-id> = the "review id N" in review.md's Review URL line, written by the Phase 10 post command
 gh api repos/<owner>/<repo>/pulls/<number>/comments --paginate --jq '.[] | select(.pull_request_review_id==<review-id>) | {path, line, side, commit_id, body}'
 # Diff that list against review-payload.json. NOT repos/<owner>/<repo>/pulls/<number>/reviews/<review-id>/comments:
 # that endpoint returns the legacy shape (position only; line and side null) and reads like broken anchors.
@@ -1097,7 +1114,9 @@ description = """
 Architecture gate (Jidoka): verify the work product matches the protocol.
 
 **Verify against the protocol checklist:**
-- [ ] prediction.md was Written BEFORE any diff fetch (check your own transcript order)
+- [ ] prediction.md was Written BEFORE any diff fetch (check your own transcript order; after a
+      handoff the transcript is gone — compare birth times: `stat -c %w todos/fable-review/prediction.md`
+      must precede the diff file's under todos/fable-review/scratch/)
 - [ ] All 11 domain gates passed — each artifact exists and its gate grep passes
 - [ ] mutation_log.txt opens with `Reverted:` (or the evidenced NO-TESTS record)
 - [ ] The Gap-Hunter left evidence (`## Gap-Hunter` + Result in self_audit.md)

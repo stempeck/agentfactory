@@ -635,3 +635,43 @@ func TestEnsureSettings_PostToolUseSubagentObserver(t *testing.T) {
 		})
 	}
 }
+
+// TestSettingsTemplatesDisableAutoupdater pins the template belt of the claude pin (DD K9): an agent
+// session must never self-update off CLAUDE_CODE_VERSION. Claude Code reads env values as strings,
+// so the value is the JSON string "1", and both templates carry the same env block.
+func TestSettingsTemplatesDisableAutoupdater(t *testing.T) {
+	load := func(name string) map[string]interface{} {
+		data, err := settingsFS.ReadFile(name)
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("%s is not valid JSON: %v", name, err)
+		}
+		return m
+	}
+
+	envs := map[string]interface{}{}
+	for _, name := range []string{"config/settings-autonomous.json", "config/settings-interactive.json"} {
+		m := load(name)
+		for _, key := range []string{"hooks", "permissions", "statusLine"} {
+			if _, ok := m[key]; !ok {
+				t.Errorf("%s lost its top-level %q key; the env block is an addition, not a restructure", name, key)
+			}
+		}
+		env, ok := m["env"].(map[string]interface{})
+		if !ok {
+			t.Errorf("%s has no top-level env object (got %T)", name, m["env"])
+			continue
+		}
+		envs[name] = env
+		if got, ok := env["DISABLE_AUTOUPDATER"].(string); !ok || got != "1" {
+			t.Errorf("%s env.DISABLE_AUTOUPDATER = %#v, want the string \"1\"", name, env["DISABLE_AUTOUPDATER"])
+		}
+	}
+	if len(envs) == 2 && !reflect.DeepEqual(envs["config/settings-autonomous.json"], envs["config/settings-interactive.json"]) {
+		t.Errorf("the env blocks diverge across templates:\n autonomous=%#v\n interactive=%#v",
+			envs["config/settings-autonomous.json"], envs["config/settings-interactive.json"])
+	}
+}

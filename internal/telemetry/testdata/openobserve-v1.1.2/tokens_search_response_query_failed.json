@@ -1,0 +1,6 @@
+{
+  "code": 20004,
+  "message": "unknown field 'af_overhead'",
+  "trace_id": "00000000000000000000000000000000",
+  "hint": "no similar field found; use the stream schema endpoint to list fields"
+}

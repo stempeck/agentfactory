@@ -156,3 +156,8 @@ test_results.txt
 /internal/cmd/testdata/af-test-stepshell*
 /internal/cmd/testdata/af-test-publish*
 /internal/cmd/testdata/af-test-integration*
+
+# In-worktree scratch for #743's pin-data gathering and acceptance checks; an AC that fails
+# exits before its cleanup, so these must never be committable.
+/.scratch-p1/
+/.scratch-p2/

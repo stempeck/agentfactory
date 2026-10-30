@@ -62,7 +62,7 @@ func ensureGatewayBackend(ctx context.Context, cmd *cobra.Command, root string) 
 	switch trimmed := strings.TrimSpace(out); {
 	case trimmed != "":
 		// decisions.md D2: the script's own captured output already carries its
-		// "warning: ..." convention (quickstart.sh:1355-1373) — relay it as-is,
+		// "warning: ..." convention (setup_litellm's gateway-relaunch.sh heredoc) — relay it as-is,
 		// unconditionally, regardless of exit code, rather than gating on relaunchErr
 		// the way telemetry's template does (a literal mirror would silently drop
 		// exactly the warning AC1 requires).
@@ -75,7 +75,7 @@ func ensureGatewayBackend(ctx context.Context, cmd *cobra.Command, root string) 
 	}
 	// T18/decisions.md D6: the script can exit 0 without ever starting a session (a missing handle or
 	// key makes it warn-and-return 0), so gate the success line on a post-relaunch HasSession re-check
-	// — exactly as quickstart.sh's own caller does (quickstart.sh:1079). The relayed script warning
+	// — exactly as quickstart.sh's own caller does (setup_litellm's _reconcile_gateway). The relayed script warning
 	// above already tells the operator nothing came up, so a false-negative HasSession prints nothing
 	// extra rather than a second, contradictory "did not start" line.
 	if present, err := newCmdTmux().HasSession("litellm"); err != nil || !present {
@@ -91,7 +91,7 @@ func ensureGatewayBackend(ctx context.Context, cmd *cobra.Command, root string) 
 var ensureGatewayBackendFn = ensureGatewayBackend
 
 // gatewayReconcileMarker is the Go-side decode target for the bash-owned
-// .runtime/gateway/reconciling marker (quickstart.sh:1029-1039, DO-NOT-CHANGE: K19
+// .runtime/gateway/reconciling marker (quickstart.sh's _gateway_stop, DO-NOT-CHANGE: K19
 // only reads/parses it). Field names/types must match the writer's shape exactly —
 // pinned by TestGatewayReconcileMarker_FieldNamesMatchWriterShape.
 type gatewayReconcileMarker struct {
@@ -105,13 +105,13 @@ const gatewayReconcileMarkerStaleAfter = 900 * time.Second
 
 // gatewayReconcilingMarkerPath resolves the bash-owned marker path. Deliberately NOT
 // config.ConfigDir-relative — that resolves .agentfactory, a different root; the
-// marker lives under .runtime (quickstart.sh:1029, concern_locus.md §4).
+// marker lives under .runtime (quickstart.sh's _gateway_stop).
 func gatewayReconcilingMarkerPath(root string) string {
 	return filepath.Join(root, ".runtime", "gateway", "reconciling")
 }
 
 // gatewayRelaunchScriptPath resolves the install-authored relaunch script path
-// quickstart.sh's setup_litellm() writes (quickstart.sh:1306-1407).
+// quickstart.sh's setup_litellm() writes.
 func gatewayRelaunchScriptPath(root string) string {
 	return filepath.Join(root, ".agentfactory", "gateway-relaunch.sh")
 }

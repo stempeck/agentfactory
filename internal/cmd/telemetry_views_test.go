@@ -323,12 +323,12 @@ func TestQuickstartSeedsTelemetryViews(t *testing.T) {
 	})
 
 	// fable-implement Step 2 (Root Cause A, E-6/R5a): the relaunch.sh write and the
-	// bash_profile guard append must precede ALL EIGHT setup_telemetry() early
-	// returns, not just be present somewhere in the function — an install whose
-	// backend fails on first start must still receive the one recovery mechanism
-	// the design relies on. Phase 5 (RED): quickstart.sh has NOT been modified
-	// yet, so neither marker exists and this subtest fails predictably.
-	t.Run("the relaunch script and login guard precede all eight early returns", func(t *testing.T) {
+	// bash_profile guard append must precede every setup_telemetry() early return AND the
+	// OpenObserve install, not just be present somewhere in the function — an install whose
+	// backend fails on first start must still receive the one recovery mechanism the design
+	// relies on. The four install-path exits moved with the hoisted _install_openobserve (D-22),
+	// where they must fail the INSTALL_FN (`return 1`) so _converge reports and ledgers them.
+	t.Run("the relaunch script and login guard precede the install and every early return", func(t *testing.T) {
 		relaunchWrite := strings.Index(body, ".agentfactory/telemetry/relaunch.sh")
 		if relaunchWrite < 0 {
 			t.Fatal("setup_telemetry() does not yet write .agentfactory/telemetry/relaunch.sh — " +
@@ -339,19 +339,22 @@ func TestQuickstartSeedsTelemetryViews(t *testing.T) {
 			t.Fatal("could not locate the bash_profile login-guard append marker")
 		}
 
-		// Anchored by each branch's own unique log line, one per known return-0 site
-		// (E-1's corrected count of eight, not six).
-		returns := []struct{ name, anchor string }{
-			{"unsupported arch (:1088)", "Unsupported arch"},
-			{"download failed (:1097)", "OpenObserve download failed"},
-			{"checksum verification failed (:1102)", "OpenObserve checksum verification FAILED"},
-			{"unpack/install failed (:1109)", "OpenObserve unpack/install failed"},
-			{"port already in use (:1209)", "already in use by another process"},
-			{"tmux launch failed (:1214)", "Failed to launch OpenObserve tmux session"},
-			{"exited during startup (:1240)", "OpenObserve exited during startup"},
-			{"not ready in time (:1244)", "OpenObserve not ready on 127.0.0.1"},
+		converge := strings.Index(body, "_converge openobserve")
+		if converge < 0 {
+			t.Fatal("setup_telemetry() does not converge OpenObserve (`_converge openobserve …`)")
 		}
-		for _, r := range returns {
+		if converge < relaunchWrite || converge < guardAppend {
+			t.Error("`_converge openobserve` runs before the relaunch script / login guard are written; " +
+				"a failed install would leave no recovery mechanism on disk")
+		}
+
+		runtime := []struct{ name, anchor string }{
+			{"port already in use", "already in use by another process"},
+			{"tmux launch failed", "Failed to launch OpenObserve tmux session"},
+			{"exited during startup", "OpenObserve exited during startup"},
+			{"not ready in time", "OpenObserve not ready on 127.0.0.1"},
+		}
+		for _, r := range runtime {
 			idx := strings.Index(body, r.anchor)
 			if idx < 0 {
 				t.Fatalf("could not locate the %s return-0 anchor %q", r.name, r.anchor)
@@ -363,6 +366,35 @@ func TestQuickstartSeedsTelemetryViews(t *testing.T) {
 			if guardAppend > idx {
 				t.Errorf("the login guard is appended AFTER the %s early return — an install that "+
 					"hits this path leaves no recovery mechanism on disk at all", r.name)
+			}
+		}
+
+		install := topLevelShellFunction(content, "_install_openobserve")
+		if install == "" {
+			t.Fatal("_install_openobserve() is not defined at top level")
+		}
+		lines := strings.Split(install, "\n")
+		for _, r := range []struct{ name, anchor string }{
+			{"unsupported arch", "Unsupported arch"},
+			{"download failed", "OpenObserve download failed"},
+			{"checksum verification failed", "OpenObserve checksum verification FAILED"},
+			{"unpack/install failed", "OpenObserve unpack/install failed"},
+		} {
+			at := -1
+			for i, l := range lines {
+				if strings.Contains(l, r.anchor) {
+					at = i
+					break
+				}
+			}
+			if at < 0 {
+				t.Errorf("_install_openobserve() lost the %s anchor %q", r.name, r.anchor)
+				continue
+			}
+			tail := strings.Join(lines[at:min(at+3, len(lines))], "\n")
+			if !strings.Contains(tail, "return 1") || strings.Contains(tail, "return 0") {
+				t.Errorf("the %s path in _install_openobserve() must `return 1` (an INSTALL_FN that returns 0 "+
+					"makes _converge misdiagnose the failure); got:\n%s", r.name, tail)
 			}
 		}
 	})

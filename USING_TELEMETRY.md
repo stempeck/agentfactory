@@ -15,8 +15,10 @@ last two are honesty views — they show you when the numbers do not reconcile r
 quietly rounding the gap away.
 
 **Two levers, and installing one is not pulling the other.** `quickstart.sh` installs the
-dashboard by default; `./quickstart.sh --no-telemetry` skips that install entirely and leaves
-you a factory that works exactly the same, minus the timing and cost views. **Recording stays
+dashboard by default; `./quickstart.sh --no-telemetry` does not install it on a factory that
+lacks it, and leaves you a factory that works exactly the same, minus the timing and cost views.
+A backend that is already installed is still kept at the pinned `OPENOBSERVE_VERSION` on every
+run, `--no-telemetry` or not, so a factory never keeps an outdated backend. **Recording stays
 off until you turn it on**, whether or not the dashboard is installed. Nothing about how
 agents work changes either way — no new prompts, no new gates, no change to any formula.
 
@@ -131,7 +133,7 @@ above it, and the panel says so on screen.
 **The per-step token breakdown is not available on this backend, and the pane checks before it
 asks.** It would join the step windows `af` records against the per-request records Claude Code
 sends, but every real capture taken against the pinned backend — kept in
-`internal/telemetry/testdata/openobserve-v0.91.3/` and `internal/telemetry/testdata/recorded-real/`
+`internal/telemetry/testdata/openobserve-v1.1.2/` and `internal/telemetry/testdata/recorded-real/`
 — shows the columns that join needs are not carried under any name the schema has. Rather than send
 a query the schema pre-flight already knows will fail, the pane checks the backend's own schema
 first and reports `query_failed` with the gap named in its own words — never the backend's raw
@@ -251,6 +253,10 @@ command, so a script branches on the answer instead of on the exit code. Because
 in the backend and not on disk, this is the one telemetry verb that needs the dashboard reachable;
 `af telemetry status` will tell you whether it is. Recording being switched off does not hide
 anything here — data already collected stays readable, exactly as the local table does.
+
+Each `--json` metric row carries an allowlisted `labels` map, and one of its keys is `start_time`:
+Claude Code exports each interval as its own series, so one run can answer with two rows that
+differ only in `start_time`.
 
 **The decision loop.** Open **Tokens per agent, model and step** and **Cost per agent and
 model**, find the agent-and-model pairing that spends a lot for what it produces, then change

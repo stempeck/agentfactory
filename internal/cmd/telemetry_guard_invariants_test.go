@@ -7,40 +7,23 @@ import (
 	"testing"
 )
 
-// TestSupplyChainDigestsArePinned protects two literals that nothing else in the repository
-// guards. A repo-wide search finds no other reference to either digest, and the
-// supply-chain-lint CI job checks only pip --require-hashes, so the OpenObserve checksums are
-// unguarded by construction.
-//
-// That matters here specifically: the credential fix edits quickstart.sh three lines below
-// these constants. Both digests were independently verified against the real downloaded
-// artifacts during review ("Digests self-computed from the real artifacts" was confirmed
-// accurate for arm64 and amd64), so any change to them by this delivery is a supply-chain
-// regression, not an improvement.
+// TestSupplyChainDigestsArePinned keeps the verification half of the OpenObserve pin: the
+// downloaded release must be checked against the pinned digest before it is unpacked. The digest
+// and version VALUES are TestQuickstartPinValues' alone (D-61: one owner per datum), so none is
+// repeated here; a pinned digest that is never checked is decoration.
 func TestSupplyChainDigestsArePinned(t *testing.T) {
 	root := findModuleRoot(t)
 	data, err := os.ReadFile(filepath.Join(root, "quickstart.sh"))
 	if err != nil {
 		t.Fatalf("reading quickstart.sh: %v", err)
 	}
-	content := string(data)
-
-	for _, want := range []struct{ name, line string }{
-		{"version", `OPENOBSERVE_VERSION="v0.91.3"`},
-		{"amd64", `OPENOBSERVE_SHA256_AMD64="d45cf6d0d249930f62d0627f4e2188390afaa4460d2dde6d7167029c3f2699fb"`},
-		{"arm64", `OPENOBSERVE_SHA256_ARM64="49b22e69f04f026baddd8f23b9b588756e48a1127ac923121aaec1881769901b"`},
-	} {
-		if !strings.Contains(content, want.line) {
-			t.Errorf("the pinned %s line is no longer present verbatim in quickstart.sh:\n  %s\n"+
-				"These digests were verified against the real artifacts and are guarded by "+
-				"nothing else in this repository", want.name, want.line)
-		}
+	install := topLevelShellFunction(string(data), "_install_openobserve")
+	if install == "" {
+		t.Fatal("_install_openobserve() is not defined at top level; the OpenObserve download and its verification live there")
 	}
-
-	// The verification step itself must survive: a pinned digest that is never checked is
-	// decoration.
-	if !strings.Contains(content, "sha256sum --check") {
-		t.Error("quickstart.sh no longer verifies the downloaded artifact with sha256sum --check")
+	if !strings.Contains(install, "sha256sum --check --strict") {
+		t.Error("_install_openobserve() no longer verifies the downloaded artifact with `sha256sum --check --strict`; " +
+			"the pinned OPENOBSERVE_SHA256_* values (owned by TestQuickstartPinValues) would be checked by nothing")
 	}
 }
 

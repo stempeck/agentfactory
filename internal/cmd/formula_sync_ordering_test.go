@@ -27,6 +27,56 @@ func TestQuickstartSyncsBeforeBuild(t *testing.T) {
 	if syncIdx >= buildIdx {
 		t.Errorf("quickstart.sh: 'make sync-formulas' (offset %d) must appear before 'make build' (offset %d)", syncIdx, buildIdx)
 	}
+
+	// The first-index comparison above is only meaningful if no other "make build" text (a log
+	// line or comment in a helper hoisted above install_af) can come first.
+	t.Run("no make build text above install_af", func(t *testing.T) {
+		at := strings.Index(body, "\ninstall_af() {")
+		if at < 0 {
+			t.Fatal("quickstart.sh has no top-level install_af()")
+		}
+		if strings.Contains(body[:at], "make build") {
+			t.Error("quickstart.sh has \"make build\" text above install_af(); the sync-before-build ordering must be decided inside install_af")
+		}
+	})
+
+	t.Run("install_af syncs before it builds", func(t *testing.T) {
+		fn := topLevelShellFunction(body, "install_af")
+		if fn == "" {
+			t.Fatal("could not extract install_af()")
+		}
+		sync, build := strings.Index(fn, "make sync-formulas"), strings.Index(fn, "make build")
+		if sync < 0 || build < 0 || sync > build {
+			t.Errorf("install_af(): 'make sync-formulas' (offset %d) must precede 'make build' (offset %d)", sync, build)
+		}
+	})
+
+	// K8/D-46: an installed web console that cannot be rebuilt would keep serving the old build
+	// against a new af, so the rebuild is required once the console exists; restarting it is
+	// skipped under AF_SRC, where webui itself runs the bootstrap (Generate All) and would be
+	// killed mid-job.
+	t.Run("an installed webui is rebuilt as a required step and restarted only outside AF_SRC", func(t *testing.T) {
+		fn := topLevelShellFunction(body, "install_af")
+		if !regexp.MustCompile(`\[ -[efx] "\$HOME/\.local/bin/webui" \]`).MatchString(fn) {
+			t.Error(`install_af() does not test for an installed "$HOME/.local/bin/webui" before building the console`)
+		}
+		if !regexp.MustCompile(`CONVERGE_FAILURES[^\n]*webui`).MatchString(fn) {
+			t.Error("install_af() does not ledger a failed build-webui as `webui` when the console is installed")
+		}
+		if !strings.Contains(fn, "WEBUI_REBUILT=1") {
+			t.Error("install_af() does not record a successful rebuild (WEBUI_REBUILT=1)")
+		}
+		restart := topLevelShellFunction(body, "_restart_rebuilt_webui")
+		if restart == "" {
+			t.Fatal("_restart_rebuilt_webui() is not defined at top level")
+		}
+		if !regexp.MustCompile(`\[ -[zn] "\$\{AF_SRC:-\}" \]`).MatchString(restart) {
+			t.Error(`_restart_rebuilt_webui() is not gated on AF_SRC ([ -z "${AF_SRC:-}" ])`)
+		}
+		if !strings.Contains(restart, "WEBUI_REBUILT") {
+			t.Error("_restart_rebuilt_webui() does not check WEBUI_REBUILT; it would restart a console that was never rebuilt")
+		}
+	})
 }
 
 func TestAgentGenAllSyncsBeforeLoop(t *testing.T) {

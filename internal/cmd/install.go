@@ -65,8 +65,8 @@ non-interactively. Add --no-build
 to skip agent-gen-all.sh's duplicate rebuild (quickstart.sh always rebuilds the
 binary). Add --litellm to also set up the gateway for running agents on OpenAI
 models; it asks for your OpenAI API key the first time and reuses the stored
-key on later runs. Add --no-telemetry to skip the telemetry backend and turn
-recording off — without it, a successful redeploy turns recording on, resetting
+key on later runs. Add --no-telemetry to not install an absent telemetry backend and turn
+recording off (an installed backend still converges to its pinned version) — without it, a successful redeploy turns recording on, resetting
 any manual af telemetry toggle from before. It stops all agents (the wrapped 'af down --all' never restarts them),
 so run 'af up' afterward. It requires an already-initialized factory:
 agent-gen-all.sh runs first and aborts if .agentfactory/store/formulas/ is
@@ -92,7 +92,7 @@ func init() {
 	installCmd.Flags().BoolVar(&installLitellmFlag, "litellm", false,
 		"With --agents: also set up the gateway for running agents on OpenAI models (asks for your OpenAI API key the first time; see USING_LITELLM.md)")
 	installCmd.Flags().BoolVar(&installNoTelemetryFlag, "no-telemetry", false,
-		"With --agents: skip the telemetry backend and turn recording off (without it, a successful redeploy turns recording on)")
+		"With --agents: do not install an absent telemetry backend, and turn recording off (an installed backend still converges; without the flag, a successful redeploy turns recording on)")
 	// Default is "" (unset), NOT "api-key": an empty sentinel distinguishes "no
 	// flag passed" from an explicit "--litellm-auth=api-key" without depending on
 	// cmd.Flags().Changed(), whose underlying pflag.Flag.Changed bit is never
@@ -1533,7 +1533,7 @@ func checkPythonMCPDeps(factoryRoot string, out io.Writer) error {
 	}
 
 	if depsOut, err := exec.Command("python3", "-c", "import aiohttp, sqlalchemy").CombinedOutput(); err != nil {
-		return fmt.Errorf("Missing Python dependencies: %s. Run: pip install -r py/requirements.txt", strings.TrimSpace(string(depsOut)))
+		return fmt.Errorf("Missing Python dependencies: %s. Run: pip install --require-hashes --only-binary :all: -r py/requirements.txt", strings.TrimSpace(string(depsOut)))
 	}
 
 	fmt.Fprintln(out, "Python MCP dependencies verified")
