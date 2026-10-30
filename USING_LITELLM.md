@@ -38,8 +38,12 @@ Codex CLI session is already authenticated.
 The normal bootstrap runs first; the gateway setup runs last, is idempotent, and
 can be rerun anytime. It:
 
-- installs `litellm[proxy]==1.93.0` (a recreated container loses pip installs —
-  rerun the flag after recreating). Rerunning `--litellm` reconciles the running
+- installs `litellm[proxy]==1.93.2` and its whole dependency closure from the
+  hash lock `py/litellm-requirements.txt` (`--require-hashes --only-binary :all:`,
+  so a tampered or source-only package fails the install instead of building).
+  A recreated container loses pip installs — rerun the flag after recreating.
+  When the lock would change anything, the running gateway is stopped first
+  and relaunched on the new build. Rerunning `--litellm` reconciles the running
   gateway against what this run would launch: an in-place version upgrade or a
   `litellm.yaml`/mode edit changes the recorded launch identity, and a mismatch
   automatically restarts the `litellm` tmux session with the new build/config —
@@ -80,14 +84,18 @@ in-container — `./quickstart.sh --litellm --litellm-auth=codex-subscription`
 already-initialized factory) is the operator's entire burden, aside from
 completing the login interaction it presents:
 
-1. **Codex CLI presence.** If `codex` is already on `PATH`, this step is a
-   no-op. Otherwise bootstrap asks for consent — *"This will INSTALL the codex
-   cli, are you sure? y/N"* — and installs only on `y`/`Y`; declining exits
-   loudly and installs nothing. The install itself respects the container's
-   npm-global lockdown the same way `install_playwright` does: a plain
-   `npm install -g @openai/codex` first, a `sudo -n npm install -g
-   @openai/codex` retry only if the global prefix isn't writable, and a loud
-   failure (never a silent fallback) if neither succeeds. Through
+1. **Codex CLI at the pinned version.** A `codex` already on `PATH` is
+   converged to the pinned `CODEX_VERSION` like every other component: kept
+   when it reports that version, reinstalled when it does not. Only a first
+   install asks for consent —
+   *"This will INSTALL the codex cli, are you sure? y/N"* — and installs
+   only on `y`/`Y`; declining exits loudly and installs nothing. The install packs `@openai/codex@0.164.0` and its
+   platform package with `npm pack`, checks each tarball against its pinned
+   sha512, and installs the verified local tarball with `--ignore-scripts`;
+   a digest mismatch installs nothing. It respects the container's
+   npm-global lockdown: no sudo when the global prefix is writable,
+   `sudo -n` when it is not, and a loud failure (never a silent fallback)
+   when neither is possible. Through
    `af install --agents`, quickstart has no stdin at all, but `af` itself asks
    the same consent question on its own stdin/stderr when that's a terminal;
    on a non-interactive run (or any run where you'd rather not be prompted),

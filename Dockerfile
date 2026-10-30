@@ -40,7 +40,7 @@ RUN apt-get update && apt-get install -y \
     python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 COPY py/requirements.txt /tmp/requirements.txt
-RUN pip3 install --break-system-packages --require-hashes -r /tmp/requirements.txt && rm /tmp/requirements.txt
+RUN pip3 install --ignore-installed --break-system-packages --require-hashes --only-binary :all: --disable-pip-version-check -r /tmp/requirements.txt && rm /tmp/requirements.txt
 
 # Node.js LTS via GPG-signed apt repo (dearmor required — key is ASCII-armored unlike GitHub CLI's binary key)
 # To update Node.js major version: change NODE_MAJOR below.

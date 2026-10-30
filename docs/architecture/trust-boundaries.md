@@ -3,6 +3,12 @@
 What is trusted where, how identity/authority flows across boundaries,
 and what is NOT trusted (even though it may look authoritative).
 
+Governed by [ADR-026](adrs/ADR-026-most-secure-way-to-run-an-agent.md): every change keeps or
+strengthens the boundaries documented here, and agentfactory's security is improved continuously,
+never weakened. The bootstrap convergence controls (`_converge`, the `CONVERGE_FAILURES` ledger,
+`convergence.json`, the advisory exception register and its daily decay job) are named in
+[ADR-027](adrs/ADR-027-bootstrap-convergence-contract.md) and protected the same way.
+
 ---
 
 ## Trust direction summary

@@ -123,7 +123,7 @@ do, and you refuse to mark a gap closed until its control has been attacked and 
 
 | Situation | Action |
 |-----------|--------|
-| A scanner or `gh` is unavailable | Record "tool absent" in the stage artifact, fall back to the generic path named in the stage, and proceed — never silently skip the stage |
+| A scanner or `gh` is unavailable | Record "tool absent" in the stage artifact, fall back to the generic path named in the stage, and proceed — never silently skip the stage. `defenseclaw-scan-gate` absent (DefenseClaw not installed or not bound) → record `scan-gate: tool absent (defenseclaw not bound)` |
 | The github-issue agent is not present in the factory | PRIVATE repo: fall back to `gh issue create` (collaborator-only), else write drafts into .security/05-issues.md. PUBLIC repo: NEVER `gh issue create` — that breaks the embargo; write findings to .security/05-issues.md only and notify the decision-maker |
 | A baseline exploit cannot be reproduced | Downgrade the finding from "confirmed" to "theoretical" IN WRITING and lower its priority — do not drop it, and do not overclaim it |
 | A control cannot be adversarially verified | Record it as "unverified — attack not yet constructed"; it is NOT eligible to be marked verified-closed |
@@ -340,7 +340,7 @@ do, and you refuse to mark a gap closed until its control has been attacked and 
 
 | Situation | Action |
 |-----------|--------|
-| A scanner or `gh` is unavailable | Record "tool absent" in the stage artifact, fall back to the generic path named in the stage, and proceed — never silently skip the stage |
+| A scanner or `gh` is unavailable | Record "tool absent" in the stage artifact, fall back to the generic path named in the stage, and proceed — never silently skip the stage. `defenseclaw-scan-gate` absent (DefenseClaw not installed or not bound) → record `scan-gate: tool absent (defenseclaw not bound)` |
 | The github-issue agent is not present in the factory | PRIVATE repo: fall back to `gh issue create` (collaborator-only), else write drafts into .security/05-issues.md. PUBLIC repo: NEVER `gh issue create` — that breaks the embargo; write findings to .security/05-issues.md only and notify the decision-maker |
 | A baseline exploit cannot be reproduced | Downgrade the finding from "confirmed" to "theoretical" IN WRITING and lower its priority — do not drop it, and do not overclaim it |
 | A control cannot be adversarially verified | Record it as "unverified — attack not yet constructed"; it is NOT eligible to be marked verified-closed |

@@ -1,0 +1,15 @@
+name = "playwright"
+description = "Playwright: the headless chromium CLI and the Playwright MCP server's browser tools"
+scope = "formula"
+
+[install]
+run = "af/install.sh"
+timeout = "20m"
+external_writes = ["~/.local/share/agentfactory/playwright/1.63.0/", "~/.cache/ms-playwright/"]
+
+[check]
+run = "af/check.sh"
+timeout = "3m"
+
+[claude]
+plugins = ["claude-plugin"]

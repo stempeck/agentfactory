@@ -7,8 +7,10 @@ Sub-agent-based design orchestration that captures verbatim source in the main
 context, then spawns three parallel sub-agents (Design Dimensions Analyst,
 Architecture Elevation Analyst, Six-Sigma Gap Analyst) using Claude Code's
 native Agent tool. Each sub-agent runs in its own context window with an
-independent analytical lens. A fourth sub-agent (Fidelity Verifier) runs
-sequentially after the first three to verify all codebase claims. The main
+independent analytical lens. Two Fidelity Verifier sub-agents then check every
+codebase claim, each as soon as the analyses it checks are written: one for the
+elevation and six-sigma analyses while the Dimensions analyst is still working,
+one for the dimension analyses when they are done. The main
 context synthesizes all outputs into a unified design-doc with AC traceability,
 elevation verdict integration, six-sigma caveats, dependency graph, and risk
 registry.
@@ -68,8 +70,8 @@ that cannot see each other's output.
 | Anti-pattern | Prevention |
 |--------------|------------|
 | Paraphrasing requirements then validating against the paraphrase | Verbatim `source.md` + re-grounding gates that require re-pasting from source |
-| Serializing sub-agents (launch one, wait, launch next) | ALL THREE Phase 2 sub-agents MUST launch in a SINGLE Agent tool message |
-| Letting sub-agents see each other's output | Each sub-agent reads ONLY source.md, verification.md, and codebase-snapshot.md |
+| Serializing sub-agents (launch one, wait, launch next) | ALL THREE Phase 2 analysts MUST launch in a SINGLE Agent tool message; each fidelity verifier launches when the analyses it checks are written |
+| Letting sub-agents see each other's output | Each analyst reads ONLY source.md, verification.md, and codebase-snapshot.md; only the verifiers read analysis files, to check them |
 | Skipping the synthesis gate (concatenating sub-agent outputs) | Phase 3 synthesizes, not concatenates — conflicts resolved, gaps addressed |
 | Paraphrasing source in sub-agent prompts | Sub-agents read source.md directly; prompts say WHERE to read, not WHAT it says |
 | Proceeding after Frame-lift required without redesigning | Honor the elevation verdict fully |
@@ -136,8 +138,8 @@ that cannot be closed until an external condition is met. When you reach a gate 
 | 4 | Verify tests pass on main |  |
 | 5 | Phase 1: Source Capture, Codebase Investigation, and Snapshot |  |
 | 6 | GATE A (Phase 1.4): Forced-Enumeration Constraint + AC Verification Table | GATE* |
-| 7 | Phase 2: Parallel Multi-Perspective Analysis (3 Sub-Agents) |  |
-| 8 | Phase 2.5: Fidelity Verification (Sequential Sub-Agent) |  |
+| 7 | Phase 2: Parallel Multi-Perspective Analysis (3 Analysts) and Pipelined Fidelity Verification |  |
+| 8 | Phase 2.5: Fidelity Verification Report Check |  |
 | 9 | GATE B: Pre-Synthesis Source Re-grounding + Fidelity Gate | GATE* |
 | 10 | Phase 3: Synthesis — Cross-Perspective Conflicts, Elevation, Gaps, Design Doc |  |
 | 11 | Phase 4: Final Verification and Commit |  |
@@ -176,8 +178,10 @@ Sub-agent-based design orchestration that captures verbatim source in the main
 context, then spawns three parallel sub-agents (Design Dimensions Analyst,
 Architecture Elevation Analyst, Six-Sigma Gap Analyst) using Claude Code's
 native Agent tool. Each sub-agent runs in its own context window with an
-independent analytical lens. A fourth sub-agent (Fidelity Verifier) runs
-sequentially after the first three to verify all codebase claims. The main
+independent analytical lens. Two Fidelity Verifier sub-agents then check every
+codebase claim, each as soon as the analyses it checks are written: one for the
+elevation and six-sigma analyses while the Dimensions analyst is still working,
+one for the dimension analyses when they are done. The main
 context synthesizes all outputs into a unified design-doc with AC traceability,
 elevation verdict integration, six-sigma caveats, dependency graph, and risk
 registry.
@@ -237,8 +241,8 @@ that cannot see each other's output.
 | Anti-pattern | Prevention |
 |--------------|------------|
 | Paraphrasing requirements then validating against the paraphrase | Verbatim `source.md` + re-grounding gates that require re-pasting from source |
-| Serializing sub-agents (launch one, wait, launch next) | ALL THREE Phase 2 sub-agents MUST launch in a SINGLE Agent tool message |
-| Letting sub-agents see each other's output | Each sub-agent reads ONLY source.md, verification.md, and codebase-snapshot.md |
+| Serializing sub-agents (launch one, wait, launch next) | ALL THREE Phase 2 analysts MUST launch in a SINGLE Agent tool message; each fidelity verifier launches when the analyses it checks are written |
+| Letting sub-agents see each other's output | Each analyst reads ONLY source.md, verification.md, and codebase-snapshot.md; only the verifiers read analysis files, to check them |
 | Skipping the synthesis gate (concatenating sub-agent outputs) | Phase 3 synthesizes, not concatenates — conflicts resolved, gaps addressed |
 | Paraphrasing source in sub-agent prompts | Sub-agents read source.md directly; prompts say WHERE to read, not WHAT it says |
 | Proceeding after Frame-lift required without redesigning | Honor the elevation verdict fully |

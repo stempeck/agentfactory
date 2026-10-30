@@ -397,8 +397,10 @@ func TestQuickstartSmokeIsCheckLive(t *testing.T) {
 	}
 }
 
-// TestQuickstartEnforcesLitellmPin pins the CHANGE item: litellm is reinstalled when
-// `litellm --version` differs from $LITELLM_VERSION, not only when the binary is absent.
+// TestQuickstartEnforcesLitellmPin pins E0/D2: the hash-locked LiteLLM lock is installed
+// unconditionally and pip decides whether anything changes. A bash version guard in front of it
+// is exactly the presence/version gate the lock replaces (it skipped a same-version build with
+// unlocked dependencies).
 func TestQuickstartEnforcesLitellmPin(t *testing.T) {
 	root := findModuleRoot(t)
 	data, err := os.ReadFile(filepath.Join(root, "quickstart.sh"))
@@ -409,23 +411,37 @@ func TestQuickstartEnforcesLitellmPin(t *testing.T) {
 	if setup == "" {
 		t.Fatal("could not extract setup_litellm()")
 	}
-	// Today's guard only fires on absence: `if ! command_exists litellm; then`. The pin-enforcement
-	// requirement is that the SAME guard also fires on a version mismatch, e.g.
-	// `if ! command_exists litellm || [[ "$(litellm --version ...)" != *"$LITELLM_VERSION"* ]]; then`.
-	// Asserting only "litellm --version" appears somewhere is too weak — that substring already
-	// exists today in an unrelated log_success message and would make this test a false pass.
-	installGuard := `if ! command_exists litellm`
-	i := strings.Index(setup, installGuard)
-	if i < 0 {
-		t.Fatal("could not locate the litellm install guard in setup_litellm()")
+
+	const install = `_pip_install_locked "$SCRIPT_DIR/py/litellm-requirements.txt"`
+	lines := strings.Split(setup, "\n")
+	at := -1
+	for i, l := range lines {
+		if strings.Contains(l, install) {
+			at = i
+			break
+		}
 	}
-	guardLine := setup[i:]
-	if nl := strings.Index(guardLine, "\n"); nl >= 0 {
-		guardLine = guardLine[:nl]
+	if at < 0 {
+		t.Fatalf("setup_litellm() does not install the hash-locked LiteLLM lock (%s)", install)
 	}
-	if !strings.Contains(guardLine, "LITELLM_VERSION") || !strings.Contains(guardLine, "litellm --version") {
-		t.Errorf("the litellm install guard condition still only checks absence, not version mismatch "+
-			"against $LITELLM_VERSION; guard line: %q", guardLine)
+	if !regexp.MustCompile(`^    (if ! )?_pip_install_locked "\$SCRIPT_DIR/py/litellm-requirements\.txt"`).MatchString(lines[at]) {
+		t.Errorf("the LiteLLM lock install is not at setup_litellm()'s top level, so a guard decides whether it runs: %q", lines[at])
+	}
+	for i := at - 3; i < at; i++ {
+		if i < 0 {
+			continue
+		}
+		for _, guard := range []string{"command_exists litellm", "litellm --version", "LITELLM_VERSION"} {
+			if strings.Contains(lines[i], guard) {
+				t.Errorf("a version/presence guard (%q) sits in front of the LiteLLM lock install: %q", guard, strings.TrimSpace(lines[i]))
+			}
+		}
+	}
+	if m := regexp.MustCompile(`\[\[[^\n]*litellm --version[^\n]*\]\]`).FindString(setup); m != "" {
+		t.Errorf("setup_litellm() still gates the install on a `litellm --version` comparison: %s", m)
+	}
+	if strings.Contains(setup, "litellm[proxy]==") {
+		t.Error("setup_litellm() still installs an unlocked `litellm[proxy]==` spec")
 	}
 }
 
@@ -477,42 +493,124 @@ func TestQuickstartShowHelpMentionsCodexInstallConsent(t *testing.T) {
 	}
 }
 
-// TestQuickstartInstallsCodexCliOnlyWhenAbsent pins the protective CHANGE item, STRENGTHENED for
-// Phase 2b (K7, issue af-6a25a83c, concern_tests.md §3.2): the codex CLI install must live inside
-// a top-level `_ensure_codex_cli` function (not a bare inline guard, since that function's own
-// internal branch structure would make a naive backward "nearest if" scan fragile/wrong post-K7),
-// gated by BOTH an absence check and a consent gate (env var + interactive read), and its install
-// line must be hardened (`sudo -n`, not bare `sudo `). Also pins the DO-NOT-CHANGE placement item:
-// `_ensure_codex_cli` must be top-level, beside `install_playwright`, not nested inside
-// `setup_litellm`.
+// TestQuickstartInstallsCodexCliOnlyWhenAbsent pins _ensure_codex_cli's shape after K7 and the
+// convergence change: a top-level function whose consent gate fires only when codex is absent
+// (and never under --check), followed by the one `_converge codex` site whose installer is the
+// digest-verified `_npm_install_pinned`. The `read -r -p` prompt stays the file's only one.
 func TestQuickstartInstallsCodexCliOnlyWhenAbsent(t *testing.T) {
 	content := quickstartScriptContent(t)
 
-	fn := extractShellFunction(content, "_ensure_codex_cli")
+	fn := topLevelShellFunction(content, "_ensure_codex_cli")
 	if fn == "" {
 		t.Fatal("could not extract _ensure_codex_cli() from quickstart.sh")
 	}
-	if !strings.Contains(fn, "command -v codex") && !strings.Contains(fn, "command_exists codex") {
+	absence := strings.Index(fn, "command_exists codex")
+	if absence < 0 {
+		absence = strings.Index(fn, "command -v codex")
+	}
+	if absence < 0 {
 		t.Errorf("_ensure_codex_cli() does not check absence of the codex binary; body:\n%s", fn)
 	}
-	if !strings.Contains(fn, "AF_CODEX_INSTALL_CONSENT") {
+	consent := strings.Index(fn, "AF_CODEX_INSTALL_CONSENT")
+	if consent < 0 {
 		t.Error("_ensure_codex_cli() does not reference AF_CODEX_INSTALL_CONSENT")
 	}
 	if !strings.Contains(fn, "read -r -p") {
 		t.Error("_ensure_codex_cli() does not have an interactive `read -r -p` consent prompt")
 	}
-	if !strings.Contains(fn, "sudo -n npm install -g @openai/codex") {
-		t.Errorf("_ensure_codex_cli() has no `sudo -n npm install -g @openai/codex` line (the sudo -n branch of the "+
-			"install_playwright-modeled writable-vs-sudo probe); body:\n%s", fn)
+	if n := strings.Count(content, "read -r -p"); n != 1 {
+		t.Errorf("quickstart.sh has %d `read -r -p` prompts, want exactly 1 (the codex consent prompt)", n)
 	}
-	if !strings.Contains(fn, "npm install -g @openai/codex") {
-		t.Fatal("_ensure_codex_cli() does not install the codex CLI (`npm install -g @openai/codex`)")
+
+	const converge = `_converge codex "$CODEX_VERSION" _probe_codex _install_codex required`
+	convergeAt := strings.Index(fn, converge)
+	if convergeAt < 0 {
+		t.Errorf("_ensure_codex_cli() does not converge the codex CLI through %s", converge)
+	}
+	if consent >= 0 && convergeAt >= 0 && consent > convergeAt {
+		t.Error("the consent gate runs after `_converge codex`; nothing may be installed before the operator consents")
+	}
+	if consent >= 0 {
+		gate := fn[:consent]
+		if absence < 0 || absence > consent {
+			t.Error("the consent gate is not under the codex-absence branch; a present codex must never prompt")
+		}
+		if !strings.Contains(gate, "CHECK_ONLY") {
+			t.Error("the consent gate is not conditioned on CHECK_ONLY; --check must never prompt")
+		}
+	}
+	if !strings.Contains(fn, "_npm_install_pinned @openai/codex") {
+		t.Errorf("_ensure_codex_cli()'s installer does not use `_npm_install_pinned @openai/codex`; body:\n%s", fn)
+	}
+	if m := regexp.MustCompile(`npm install -g @openai/codex( |$)`).FindAllString(content, -1); len(m) != 0 {
+		t.Errorf("quickstart.sh still has %d unpinned `npm install -g @openai/codex` line(s)", len(m))
 	}
 
 	setup := extractShellFunction(content, "setup_litellm")
 	if setup != "" && strings.Contains(setup, "_ensure_codex_cli() {") {
 		t.Error("_ensure_codex_cli is defined nested inside setup_litellm(); it must be top-level, beside install_playwright")
 	}
+	if !strings.Contains(setup, "_ensure_codex_cli || exit 1") {
+		t.Error("setup_litellm()'s subscription branch must call `_ensure_codex_cli || exit 1`: a ledgered install failure returns 1 and the gateway cannot run without codex")
+	}
+
+	run := func(t *testing.T, checkOnly bool, presentCodex string) (out string, rc int, npmLog string) {
+		t.Helper()
+		harness := codexFnsHarness(t, content)
+		if checkOnly {
+			harness += "CHECK_ONLY=true\n"
+		}
+		bin := hermeticConvergeBinDir(t)
+		npmLog = filepath.Join(t.TempDir(), "npm.log")
+		writeConvergeStub(t, bin, "npm", `printf 'npm %s\n' "$*" >> "$NPM_LOG"
+exit 1
+`)
+		writeConvergeStub(t, bin, "sudo", `printf 'sudo %s\n' "$*" >> "$NPM_LOG"
+exit 1
+`)
+		writeConvergeStub(t, bin, "uname", `case "$1" in -m) echo aarch64 ;; *) echo Linux ;; esac
+`)
+		if presentCodex != "" {
+			writeConvergeStub(t, bin, "codex", "echo 'codex-cli "+presentCodex+"'\n")
+		}
+		env := hermeticConvergeEnv(bin, t.TempDir(), t.TempDir(), "NPM_LOG="+npmLog)
+		out, rc = runConvergeHarness(t, harness, "_ensure_codex_cli", env)
+		return out, rc, npmLog
+	}
+
+	t.Run("check mode with codex absent reports drift without prompting or installing", func(t *testing.T) {
+		v := quickstartPin(t, "CODEX_VERSION")
+		out, rc, npmLog := run(t, true, "")
+		if rc != 1 {
+			t.Errorf("rc = %d, want 1 (a drifted required row)\n%s", rc, out)
+		}
+		if want := "codex: absent != pinned " + v + " (would converge)"; !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+		if strings.Contains(out, "declined") || strings.Contains(out, "are you sure") {
+			t.Errorf("--check reached the consent gate:\n%s", out)
+		}
+		if data, _ := os.ReadFile(npmLog); len(data) != 0 {
+			t.Errorf("--check called npm/sudo:\n%s", data)
+		}
+	})
+
+	t.Run("present codex at the pin is kept without consent", func(t *testing.T) {
+		v := quickstartPin(t, "CODEX_VERSION")
+		out, rc, npmLog := run(t, false, v)
+		if rc != 0 {
+			t.Errorf("rc = %d, want 0\n%s", rc, out)
+		}
+		if want := "codex: " + v + " (kept)"; !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+		if strings.Contains(out, "declined") {
+			t.Errorf("a present codex reached the consent gate:\n%s", out)
+		}
+		if data, _ := os.ReadFile(npmLog); len(data) != 0 {
+			t.Errorf("a kept codex called npm/sudo:\n%s", data)
+		}
+	})
 }
 
 // TestQuickstartCodexRerunDeadEndRemoved pins AC-2 (concern_tests.md §1): the old subscription-
@@ -774,7 +872,7 @@ func TestQuickstartLitellmPinValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading quickstart.sh: %v", err)
 	}
-	const wantPin = `LITELLM_VERSION="1.93.0"`
+	const wantPin = `LITELLM_VERSION="1.93.2"`
 	if !strings.Contains(string(data), wantPin) {
 		t.Errorf("quickstart.sh must pin %s verbatim; not found — a version change must be a deliberate, "+
 			"reviewed edit", wantPin)
@@ -790,20 +888,24 @@ func TestQuickstartLitellmPinValue(t *testing.T) {
 // todos/fable-implement/red_predictions.md for the predicted failure per test.
 
 // codexFnsHarness extracts _ensure_codex_cli, _ensure_codex_session, _codex_session_valid and
-// their shared dependencies from the real quickstart.sh, plus the CODEX_LOGIN_TIMEOUT global these
-// functions read (seeded here exactly as parse_args's harness seeds CHECK_ONLY/WITH_LITELLM/
-// LITELLM_AUTH_MODE, since extractShellFunction only pulls function bodies, never top-level var
-// assignments).
+// their shared dependencies from the real quickstart.sh — including the convergence helpers
+// _ensure_codex_cli now calls — under quickstart.sh's real Configuration globals
+// (quickstartConfigBlock), so CODEX_VERSION, its digests, CHECK_ONLY and CONVERGE_FAILURES are
+// the script's own and an unseeded name aborts under `set -u` instead of being guessed here.
 func codexFnsHarness(t *testing.T, content string) string {
 	t.Helper()
 	names := []string{"command_exists", "log_info", "log_success", "log_warn", "log_error",
-		"log_step", "_ensure_codex_cli", "_ensure_codex_session", "_run_with_timeout", "_codex_session_valid"}
+		"log_step", "_arch", "_record_row", "_quarantine_stale", "_converge", "_npm_install_pinned",
+		"_ensure_codex_cli", "_ensure_codex_session", "_run_with_timeout", "_codex_session_valid"}
 	var b strings.Builder
 	b.WriteString("set -uo pipefail\n")
 	b.WriteString("RED='' GREEN='' YELLOW='' BLUE='' NC=''\n")
-	b.WriteString("CODEX_LOGIN_TIMEOUT=900\n")
+	b.WriteString(quickstartConfigBlock(t, content))
 	for _, n := range names {
-		fn := extractShellFunction(content, n)
+		fn := topLevelShellFunction(content, n)
+		if fn == "" {
+			fn = extractShellFunction(content, n)
+		}
 		if fn == "" {
 			t.Fatalf("could not extract %s() from quickstart.sh", n)
 		}
@@ -953,103 +1055,242 @@ exit 0
 	})
 }
 
-// TestQuickstartCodexConsentYesInstallsWithSudoN is T-3 (concern_tests.md §1.2): a pre-granted
-// AF_CODEX_INSTALL_CONSENT=yes (which bypasses the TTY prompt entirely — env precedes TTY) must
-// exit 0 and install via `sudo -n npm install -g @openai/codex`.
+// codexInstallFixture is a hermetic npm/sudo/digest world for _ensure_codex_cli's install path.
+// `npm pack` writes a REAL tarball (the installer unpacks package/package.json from it to resolve
+// the platform alias) and records, out of band, the sha512 the registry would have served for
+// it; the sha512sum stub accepts a line only when its hash equals that recorded digest, so a
+// tampered tarball is modelled by recording a different one. `npm root -g` names a directory
+// that does not exist, so the global prefix is unwritable even when the test runs as root.
+type codexInstallFixture struct {
+	bin, home, npmRoot                 string
+	npmLog, sudoLog, shaLog, ledgerOut string
+	version, mainSHA, platformSHA      string
+	env                                []string
+}
+
+func newCodexInstallFixture(t *testing.T, sudoRC string, recordedMainSHA string) *codexInstallFixture {
+	t.Helper()
+	f := &codexInstallFixture{
+		version:     quickstartPin(t, "CODEX_VERSION"),
+		mainSHA:     quickstartPin(t, "CODEX_SHA512"),
+		platformSHA: quickstartPin(t, "CODEX_LINUX_ARM64_SHA512"),
+	}
+	if recordedMainSHA == "" {
+		recordedMainSHA = f.mainSHA
+	}
+	f.bin = hermeticConvergeBinDir(t, "tar", "gzip")
+	f.home = t.TempDir()
+	logs := t.TempDir()
+	state := t.TempDir()
+	f.npmRoot = filepath.Join(f.home, "npm-prefix", "lib", "node_modules")
+	f.npmLog = filepath.Join(logs, "npm.log")
+	f.sudoLog = filepath.Join(logs, "sudo.log")
+	f.shaLog = filepath.Join(logs, "sha512.log")
+	f.ledgerOut = filepath.Join(logs, "ledger")
+	mainSpec := "@openai/codex@" + f.version
+	platformSpec := mainSpec + "-linux-arm64"
+	mainPkg := `{"name":"@openai/codex","version":"` + f.version + `","optionalDependencies":{"@openai/codex-linux-arm64":"npm:` + platformSpec + `"}}`
+	if err := os.WriteFile(filepath.Join(state, "main-package.json"), []byte(mainPkg+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeConvergeStub(t, f.bin, "npm", `printf '%s\n' "$*" >> "$NPM_LOG"
+case "$1" in
+root) [ "$2" = -g ] && { printf '%s\n' "$STUB_NPM_ROOT"; exit 0; }; exit 1 ;;
+prefix) [ "$2" = -g ] && { printf '%s\n' "$(dirname "$(dirname "$STUB_NPM_ROOT")")"; exit 0; }; exit 1 ;;
+pack)
+  shift; spec=""; dest="."
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pack-destination) dest="$2"; shift 2 ;;
+      --pack-destination=*) dest="${1#*=}"; shift ;;
+      -*) shift ;;
+      *) spec="$1"; shift ;;
+    esac
+  done
+  case "$spec" in
+    "$STUB_MAIN_SPEC") sha="$STUB_MAIN_RECORDED_SHA"; pkg="$STUB_STATE/main-package.json" ;;
+    "$STUB_PLATFORM_SPEC") sha="$STUB_PLATFORM_SHA"; pkg="" ;;
+    *) echo "npm stub: no such package $spec" >&2; exit 1 ;;
+  esac
+  tgz="$(printf '%s' "$spec" | sed 's/^@//; s#[/@]#-#g').tgz"
+  stage="$(mktemp -d "$STUB_STATE/stage.XXXXXX")"
+  mkdir -p "$stage/package"
+  if [ -n "$pkg" ]; then cat "$pkg" > "$stage/package/package.json"; else printf '{"name":"%s"}\n' "$spec" > "$stage/package/package.json"; fi
+  printf 'platform binary\n' > "$stage/package/codex.bin"
+  tar -czf "$dest/$tgz" -C "$stage" package || exit 1
+  rm -rf "$stage"
+  printf '%s\n' "$sha" > "$STUB_STATE/$tgz.sha512"
+  printf '%s\n' "$tgz"
+  exit 0 ;;
+install)
+  tgz=""; for a in "$@"; do tgz="$a"; done
+  [ -f "$tgz" ] || { echo "npm stub: refusing to install a non-file spec $tgz" >&2; exit 1; }
+  name="$(tar -xzf "$tgz" -O package/package.json | jq -r .name)" || exit 1
+  mkdir -p "$STUB_NPM_ROOT/$name" && tar -xzf "$tgz" -C "$STUB_NPM_ROOT/$name" --strip-components=1 || exit 1
+  if [ "$name" = @openai/codex ]; then
+    printf '#!/bin/sh\necho "codex-cli %s"\n' "$STUB_CODEX_VERSION" > "$STUB_BIN/codex" && chmod +x "$STUB_BIN/codex"
+  fi
+  exit 0 ;;
+esac
+echo "npm stub: unhandled $*" >&2
+exit 1
+`)
+	writeConvergeStub(t, f.bin, "sudo", `printf '%s\n' "$*" >> "$SUDO_LOG"
+if [ "$1" = -n ] && [ "$2" = true ]; then exit "$STUB_SUDO_RC"; fi
+[ "$1" = -n ] && shift
+case "$1" in
+  npm|tar|rm|mkdir|mv|ln|chmod) exec "$@" ;;
+esac
+echo "sudo stub: refusing $1" >&2
+exit 1
+`)
+	writeConvergeStub(t, f.bin, "sha512sum", `check=0
+for a in "$@"; do case "$a" in --check|-c) check=1 ;; esac; done
+[ "$check" = 1 ] || { echo "sha512sum stub: only --check mode is modelled ($*)" >&2; exit 2; }
+rc=0
+while read -r h file; do
+  printf '%s %s\n' "$h" "$file" >> "$SHA_LOG"
+  want="$(cat "$STUB_STATE/$(basename "$file").sha512" 2>/dev/null)"
+  if [ -n "$want" ] && [ "$h" = "$want" ]; then echo "$file: OK"; else echo "$file: FAILED"; rc=1; fi
+done
+exit "$rc"
+`)
+	writeConvergeStub(t, f.bin, "uname", `case "$1" in -m) echo aarch64 ;; *) echo Linux ;; esac
+`)
+
+	f.env = hermeticConvergeEnv(f.bin, f.home, t.TempDir(),
+		"NPM_LOG="+f.npmLog, "SUDO_LOG="+f.sudoLog, "SHA_LOG="+f.shaLog, "LEDGER_OUT="+f.ledgerOut,
+		"STUB_BIN="+f.bin, "STUB_STATE="+state, "STUB_NPM_ROOT="+f.npmRoot, "STUB_SUDO_RC="+sudoRC,
+		"STUB_MAIN_SPEC="+mainSpec, "STUB_PLATFORM_SPEC="+platformSpec,
+		"STUB_MAIN_RECORDED_SHA="+recordedMainSHA, "STUB_PLATFORM_SHA="+f.platformSHA,
+		"STUB_CODEX_VERSION="+f.version, "AF_CODEX_INSTALL_CONSENT=yes")
+	return f
+}
+
+// run executes _ensure_codex_cli as the script's last statement (so its return status is the
+// script's exit status, as when setup_litellm runs it) and captures the ledger on the way out.
+func (f *codexInstallFixture) run(t *testing.T, harness string) (string, int, string) {
+	t.Helper()
+	script := harness + "trap 'printf \"%s\" \"${CONVERGE_FAILURES-}\" > \"$LEDGER_OUT\"' EXIT\n_ensure_codex_cli\n"
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = f.env
+	out, err := cmd.CombinedOutput()
+	rc := 0
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("running _ensure_codex_cli: %v\n%s", err, out)
+		}
+		rc = ee.ExitCode()
+	}
+	ledger, _ := os.ReadFile(f.ledgerOut)
+	return string(out), rc, string(ledger)
+}
+
+func readLog(path string) string {
+	data, _ := os.ReadFile(path)
+	return string(data)
+}
+
+// TestQuickstartCodexConsentYesInstallsWithSudoN is T-3: a pre-granted AF_CODEX_INSTALL_CONSENT=yes
+// (which bypasses the TTY prompt entirely — env precedes TTY) installs the PINNED codex CLI from a
+// digest-verified tarball, under `sudo -n` because the global prefix is root-owned: both the main
+// package and its arm64 platform alias are packed, checked against CODEX_SHA512 /
+// CODEX_LINUX_ARM64_SHA512, and only the verified local tarball is ever handed to `npm install -g`.
 //
 // A live "y"/"Y" TTY-consent sub-case is NOT exercised here: `exec.Command`'s stdin is always a
 // pipe in this harness (no pty library exists in this module — D8, concern_tests.md §0), so
-// `[ -t 0 ]` is unconditionally false regardless of piped content, and any interactive-TTY
-// sub-case would exercise the SAME no-terminal decline branch as T-2, never the TTY-read branch.
-// The "only y/Y consents" DO-NOT-CHANGE item is instead pinned as a static source assertion below
-// (mirroring T-4's CODEX_LOGIN_TIMEOUT static companion check) — the real-TTY interactive path is
-// exercised by hand at the human demo gate, not by this unit test.
+// `[ -t 0 ]` is unconditionally false regardless of piped content. The "only y/Y consents"
+// DO-NOT-CHANGE item is instead pinned as a static source assertion below.
 func TestQuickstartCodexConsentYesInstallsWithSudoN(t *testing.T) {
 	content := quickstartScriptContent(t)
-	harness := codexFnsHarness(t, content)
 
 	t.Run("env-yes", func(t *testing.T) {
-		bin := hermeticCodexBinDir(t)
-		npmLog := filepath.Join(t.TempDir(), "npm.log")
-		sudoLog := filepath.Join(t.TempDir(), "sudo.log")
-		writeCodexStub(t, bin, "npm", `printf '%s\n' "$*" >> "$NPM_LOG"
-if [ "$1" = root ] && [ "$2" = -g ]; then
-  exit 1
-fi
-exit 0
-`)
-		writeCodexStub(t, bin, "sudo", `printf '%s\n' "$*" >> "$SUDO_LOG"
-exit 0
-`)
-
-		script := harness + "\n_ensure_codex_cli\n"
-		cmd := exec.Command("bash", "-c", script)
-		cmd.Env = hermeticCodexEnv(bin, "NPM_LOG="+npmLog, "SUDO_LOG="+sudoLog, "AF_CODEX_INSTALL_CONSENT=yes")
-		var outBuf, errBuf bytes.Buffer
-		cmd.Stdout = &outBuf
-		cmd.Stderr = &errBuf
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("_ensure_codex_cli failed: %v\nstdout:\n%s\nstderr:\n%s", err, outBuf.String(), errBuf.String())
+		harness := codexFnsHarness(t, content)
+		f := newCodexInstallFixture(t, "0", "")
+		out, rc, ledger := f.run(t, harness)
+		if rc != 0 {
+			t.Fatalf("_ensure_codex_cli rc = %d, want 0\n%s", rc, out)
 		}
-		sudoData, err := os.ReadFile(sudoLog)
-		if err != nil {
-			t.Fatalf("reading sudo log: %v", err)
+		if want := "codex: " + f.version + " (converged from absent)"; !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
 		}
-		if !strings.Contains(string(sudoData), "-n npm install -g @openai/codex") {
-			t.Errorf("sudo log does not contain a `-n npm install -g @openai/codex` call; got: %s", sudoData)
+		if ledger != "" {
+			t.Errorf("ledger = %q, want empty after a converged install", ledger)
+		}
+		npmCalls := readLog(f.npmLog)
+		for _, spec := range []string{"@openai/codex@" + f.version, "@openai/codex@" + f.version + "-linux-arm64"} {
+			if !regexp.MustCompile(`(?m)^pack ` + regexp.QuoteMeta(spec) + `( |$)`).MatchString(npmCalls) {
+				t.Errorf("npm log has no `pack %s` call; got:\n%s", spec, npmCalls)
+			}
+		}
+		shaCalls := readLog(f.shaLog)
+		for _, h := range []string{f.mainSHA, f.platformSHA} {
+			if !strings.Contains(shaCalls, h+" ") {
+				t.Errorf("sha512sum --check never saw the pinned digest %s…; got:\n%s", h[:16], shaCalls)
+			}
+		}
+		sudoCalls := readLog(f.sudoLog)
+		if !regexp.MustCompile(`(?m)^-n npm install -g --ignore-scripts \S+\.tgz$`).MatchString(sudoCalls) {
+			t.Errorf("sudo log has no `-n npm install -g --ignore-scripts <verified>.tgz` call; got:\n%s", sudoCalls)
+		}
+		for _, line := range strings.Split(npmCalls+sudoCalls, "\n") {
+			if strings.Contains(line, "install") && strings.Contains(line, "@openai/codex") {
+				t.Errorf("an install was handed a registry spec instead of the verified tarball: %q", line)
+			}
+		}
+		overlay := filepath.Join(f.npmRoot, "@openai", "codex", "node_modules", "@openai", "codex-linux-arm64", "package.json")
+		if _, err := os.Stat(overlay); err != nil {
+			t.Errorf("the verified platform package was not overlaid at %s: %v", overlay, err)
 		}
 	})
 
-	// No-sudo-n-and-prefix-not-writable is G/G2 (concern_decisions.md, decisions.md D3): before
-	// this phase's fix the refusal here was a paraphrase of ux.md U3 row 4, and the branch had
-	// zero test coverage at all. Pins the verbatim spec text, an exit 1, and that neither npm
-	// install nor a sudo install call ever fires on this branch.
+	// No-sudo-n-and-prefix-not-writable is G/G2 (concern_decisions.md, decisions.md D3): the
+	// refusal is ux.md U3 row 4's verbatim text. Neither an install nor a pack may run once the
+	// route is known to be infeasible, and the failure is ledgered so the END exits 1.
 	t.Run("no-sudo-n-and-prefix-not-writable", func(t *testing.T) {
-		bin := hermeticCodexBinDir(t)
-		npmLog := filepath.Join(t.TempDir(), "npm.log")
-		sudoLog := filepath.Join(t.TempDir(), "sudo.log")
-		writeCodexStub(t, bin, "npm", `printf '%s\n' "$*" >> "$NPM_LOG"
-if [ "$1" = root ] && [ "$2" = -g ]; then
-  exit 1
-fi
-exit 0
-`)
-		writeCodexStub(t, bin, "sudo", `printf '%s\n' "$*" >> "$SUDO_LOG"
-if [ "$1" = -n ] && [ "$2" = true ]; then
-  exit 1
-fi
-exit 0
-`)
-
-		script := harness + "\n_ensure_codex_cli\n"
-		cmd := exec.Command("bash", "-c", script)
-		cmd.Env = hermeticCodexEnv(bin, "NPM_LOG="+npmLog, "SUDO_LOG="+sudoLog, "AF_CODEX_INSTALL_CONSENT=yes")
-		// Unlike the consent-decline log_error calls (:513, :517), this refusal has no `>&2`
-		// redirect — log_error itself always echoes to stdout (:91-93); the decline paths are
-		// the deliberate exception (AC-1 requires "stderr contains 'declined'"), not the rule.
-		// Capture combined output to match that established convention.
-		var outErrBuf bytes.Buffer
-		cmd.Stdout = &outErrBuf
-		cmd.Stderr = &outErrBuf
-		err := cmd.Run()
-		ee, ok := err.(*exec.ExitError)
-		if !ok {
-			t.Fatalf("_ensure_codex_cli did not exit with a non-zero ExitError: %v\noutput:\n%s", err, outErrBuf.String())
-		}
-		if ee.ExitCode() != 1 {
-			t.Errorf("exit code = %d, want 1", ee.ExitCode())
+		harness := codexFnsHarness(t, content)
+		f := newCodexInstallFixture(t, "1", "")
+		out, rc, ledger := f.run(t, harness)
+		if rc != 1 {
+			t.Errorf("exit code = %d, want 1\n%s", rc, out)
 		}
 		const wantMsg = "cannot install the Codex CLI: the npm global prefix (/usr) is root-owned and passwordless sudo is unavailable in this container"
-		if !strings.Contains(outErrBuf.String(), wantMsg) {
-			t.Errorf("output does not contain the ux.md U3 verbatim refusal text %q; got: %s", wantMsg, outErrBuf.String())
+		if !strings.Contains(out, wantMsg) {
+			t.Errorf("output does not contain the ux.md U3 verbatim refusal text %q; got: %s", wantMsg, out)
 		}
-		sudoData, _ := os.ReadFile(sudoLog)
-		if strings.Contains(string(sudoData), "npm install") {
-			t.Errorf("sudo log shows an install call on the no-sudo-n branch; got: %s", sudoData)
+		if strings.Contains(readLog(f.sudoLog), "npm install") {
+			t.Errorf("sudo log shows an install call on the no-sudo-n branch; got: %s", readLog(f.sudoLog))
 		}
-		npmData, _ := os.ReadFile(npmLog)
-		if strings.Contains(string(npmData), "install -g") {
-			t.Errorf("npm log shows an install call on the not-writable branch; got: %s", npmData)
+		for _, line := range strings.Split(strings.TrimSpace(readLog(f.npmLog)), "\n") {
+			if line != "" && line != "root -g" {
+				t.Errorf("npm was called beyond `root -g` on an infeasible route: %q", line)
+			}
+		}
+		if !strings.Contains(ledger, "codex") {
+			t.Errorf("ledger = %q, want it to name codex (a required install that could not run)", ledger)
+		}
+	})
+
+	t.Run("tampered-tarball", func(t *testing.T) {
+		harness := codexFnsHarness(t, content)
+		f := newCodexInstallFixture(t, "0", strings.Repeat("0", 128))
+		out, rc, ledger := f.run(t, harness)
+		if rc != 1 {
+			t.Errorf("exit code = %d, want 1\n%s", rc, out)
+		}
+		if want := "@openai/codex@" + f.version + ": tarball sha512 does not match the pinned value — NOT installing"; !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+		if calls := readLog(f.npmLog) + readLog(f.sudoLog); strings.Contains(calls, "install -g") {
+			t.Errorf("an unverified tarball reached `npm install -g`:\n%s", calls)
+		}
+		if !strings.Contains(ledger, "codex") {
+			t.Errorf("ledger = %q, want it to name codex", ledger)
+		}
+		if _, err := os.Stat(filepath.Join(f.bin, "codex")); err == nil {
+			t.Error("a codex binary appeared although the tarball failed verification")
 		}
 	})
 

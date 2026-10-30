@@ -120,6 +120,14 @@ func TestUsingLitellmDocContract(t *testing.T) {
 		}
 	})
 
+	t.Run("a present codex is not described as a no-op", func(t *testing.T) {
+		// A present codex now converges to CODEX_VERSION; only the consent prompt is absence-only (D-70).
+		if strings.Contains(content, "If `codex` is already on `PATH`, this step is a") {
+			t.Error("USING_LITELLM.md still says a codex already on PATH makes the Codex CLI step a no-op; " +
+				"bootstrap converges a present codex to the pinned CODEX_VERSION (#743 Phase 2, D-70)")
+		}
+	})
+
 	t.Run("the host-relay is not framed as the first-time path", func(t *testing.T) {
 		if strings.Contains(content, "no second login") {
 			t.Error("USING_LITELLM.md still frames the docker-cp/--codex-auth host-relay as " +

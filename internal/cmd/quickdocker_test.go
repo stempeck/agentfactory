@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -940,4 +941,101 @@ func TestQuickdockerMemoryVaultMount(t *testing.T) {
 				"to link, so the mount would stay unused")
 		}
 	})
+}
+
+// quickstart.sh installs Python from the two hash locks by path, so the host's copies must reach the
+// container before Step 8 runs it; a clone of an older revision would pair the new script with stale
+// locks.
+func TestQuickdockerCopiesPythonLocks(t *testing.T) {
+	t.Run("the shipped script", func(t *testing.T) {
+		for _, v := range adLockCopyViolations(readRepoFile(t, "quickdocker.sh")) {
+			t.Error(v)
+		}
+	})
+
+	t.Run("the check accepts a respelling and rejects each loss", func(t *testing.T) {
+		loop := "for lock in py/requirements.txt py/litellm-requirements.txt; do\n" +
+			"    docker cp \"$SCRIPT_DIR/$lock\" \"${CONTAINER_NAME}:${PROJECTS_DIR}/${AF_DIR}/$lock\"\n" +
+			"    docker exec \"$CONTAINER_NAME\" chown dev:dev \"${PROJECTS_DIR}/${AF_DIR}/$lock\"\n" +
+			"done\n"
+		literal := func(lock string) string {
+			return "docker cp \"$SCRIPT_DIR/" + lock + "\" \"${CONTAINER_NAME}:${PROJECTS_DIR}/${AF_DIR}/" + lock + "\"\n"
+		}
+		step8 := "step 8 \"Running quickstart.sh\"\n" +
+			"docker exec -it -u dev -w \"${PROJECTS_DIR}/${AF_DIR}\" \"$CONTAINER_NAME\" \\\n    ./quickstart.sh\n"
+		script := func(copies string) string {
+			return "step 6 \"Copying quickstart.sh\"\n" +
+				"docker cp \"$QUICKSTART_SRC\" \"${CONTAINER_NAME}:${PROJECTS_DIR}/${AF_DIR}/quickstart.sh\"\n" +
+				copies + step8
+		}
+		for name, src := range map[string]string{
+			"the loop":           script(loop),
+			"two literal copies": script(literal("py/litellm-requirements.txt") + literal("py/requirements.txt")),
+		} {
+			if v := adLockCopyViolations(src); len(v) != 0 {
+				t.Errorf("%s was rejected: %v", name, v)
+			}
+		}
+		for name, src := range map[string]string{
+			"the copy deleted":       script(""),
+			"one lock dropped":       script(strings.Replace(loop, " py/litellm-requirements.txt", "", 1)),
+			"copied after Step 8":    script("") + loop,
+			"the copy commented out": script("# " + literal("py/requirements.txt") + "# " + literal("py/litellm-requirements.txt")),
+			"no Step 8 to precede":   strings.Replace(script(loop), "./quickstart.sh", "./setup.sh", 1),
+		} {
+			if len(adLockCopyViolations(src)) == 0 {
+				t.Errorf("%s: accepted", name)
+			}
+		}
+	})
+}
+
+var (
+	adForLoopRe    = regexp.MustCompile(`(?m)^[ \t]*for ([A-Za-z_][A-Za-z0-9_]*) in ([^;\n]*); do[ \t]*$`)
+	adLoopDoneRe   = regexp.MustCompile(`(?m)^[ \t]*done\b`)
+	adStep8QuickRe = regexp.MustCompile(`(?m)^[ \t]*\./quickstart\.sh\b`)
+)
+
+// adLockCopyViolations accepts a literal line per lock as readily as the loop: what matters is that
+// both locks arrive before the container runs quickstart.sh, not how the copy is spelled.
+func adLockCopyViolations(script string) []string {
+	code := cvCode(script)
+	run := adStep8QuickRe.FindStringIndex(code)
+	if run == nil {
+		return []string{"quickdocker.sh no longer runs ./quickstart.sh in the container (Step 8)"}
+	}
+	var out []string
+	for _, lock := range installLocks {
+		at := strings.Index(code, adLockCopyLine(lock))
+		if at < 0 {
+			at = adLoopedLockCopy(code, lock)
+		}
+		switch {
+		case at < 0:
+			out = append(out, lock+" is never copied into the container")
+		case at > run[0]:
+			out = append(out, lock+" is copied only after the container's quickstart.sh has run")
+		}
+	}
+	return out
+}
+
+func adLockCopyLine(path string) string {
+	return `docker cp "$SCRIPT_DIR/` + path + `" "${CONTAINER_NAME}:${PROJECTS_DIR}/${AF_DIR}/` + path + `"`
+}
+
+func adLoopedLockCopy(code, lock string) int {
+	for _, m := range adForLoopRe.FindAllStringSubmatchIndex(code, -1) {
+		if !slices.Contains(strings.Fields(code[m[4]:m[5]]), lock) {
+			continue
+		}
+		body := code[m[1]:]
+		if end := adLoopDoneRe.FindStringIndex(body); end != nil {
+			body = body[:end[0]]
+		}
+		if i := strings.Index(body, adLockCopyLine("$"+code[m[2]:m[3]])); i >= 0 {
+			return m[1] + i
+		}
+	}
+	return -1
 }

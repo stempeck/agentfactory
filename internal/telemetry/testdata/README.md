@@ -20,7 +20,8 @@ acceptance check green.
 | `reject/` | **derived from upstream** | Each file is `otlp-upstream/trace.json` with **exactly one** normative rule violated. Generated mechanically, so the diff against upstream *is* the rule. |
 | `synthetic/` | **hand-authored** | af-side records and stand-in native events. Not upstream artifacts, not evidence of what a backend emits. |
 | `telemetry-dto/` | **hand-authored** | Golden `af telemetry status\|report --json` payloads (issue #580). Not OTLP at all — a different wire contract, shared with the web module. See `telemetry-dto/README.md`. |
-| `openobserve-v0.91.3/` | **captured backend** | Real HTTP answers from the pinned telemetry backend (issue #580, R2), captured read-only and PII-scrubbed. Not OTLP either — this is the *foreign* half of the contract, what OpenObserve replies rather than what `af` sends. Scrubbed, so not byte-provenanced like `otlp-upstream/`. See `openobserve-v0.91.3/README.md`. |
+| `openobserve-v0.91.3/` | **captured backend** | Real HTTP answers from the previously pinned telemetry backend (issue #580, R2), captured read-only and PII-scrubbed. Not OTLP either — this is the *foreign* half of the contract, what OpenObserve replies rather than what `af` sends. Scrubbed, so not byte-provenanced like `otlp-upstream/`. See `openobserve-v0.91.3/README.md`. |
+| `openobserve-v1.1.2/` | **captured backend** | The same requests answered by the pinned telemetry backend, v1.1.2 (issue #743), on a copy of a v0.91.3 data directory it migrated; captured read-only and PII-scrubbed like its sibling, which stays because installs still move from v0.91.3. See `openobserve-v1.1.2/README.md`. |
 | `otlp-schema.json` | **derived (transcribed)** | Per-message key allowlists, enum ranges and field-encoding classes transcribed by hand from the pinned release's `.proto` files. Not upstream bytes. |
 
 `manifest.json` records the class and the expected verdict for every fixture — including the

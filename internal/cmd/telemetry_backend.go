@@ -75,7 +75,7 @@ var ensureTelemetryBackendFn = ensureTelemetryBackend
 // endpoint. It must NOT reuse usageURL's append idiom: cfg.Endpoint already carries
 // the "/api/default" org segment (e.g. "http://127.0.0.1:5080/api/default"), but
 // OpenObserve's liveness route is the bare "http://127.0.0.1:5080/healthz" — no org
-// segment — confirmed live at quickstart.sh:1241's readiness poll. Appending onto
+// segment — confirmed live by setup_telemetry's _await_telemetry_ready poll. Appending onto
 // the full endpoint would build ".../api/default/healthz", which 404s against a
 // perfectly healthy backend and permanently mis-arms the guard. A malformed endpoint
 // falls back to the naive join — the loopback check in ensureTelemetryBackend already
@@ -111,7 +111,7 @@ func telemetryRelaunchScriptPath(root string) string {
 // unreachable the same way — no existing test in this codebase exercises it; this
 // split is new territory, not a copied idiom). It invokes the script as an opaque
 // file — never reconstructing the tmux command inline — so the
-// credential-resolves-inside-the-pane-shell property (quickstart.sh:1198) survives
+// credential-resolves-inside-the-pane-shell property (setup_telemetry's relaunch.sh launch line) survives
 // unbroken (decisions.md D2, concern_blast.md §2.3).
 //
 // WaitDelay matters here and is not decorative. exec.CommandContext kills only the

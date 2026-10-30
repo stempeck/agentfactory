@@ -18,7 +18,8 @@ started, and a best-effort dashboard push runs afterwards if it came up.
 
 Recorded rather than self-adjudicated, because neither half is sufficient alone:
 
-- **File-only does not work.** OpenObserve v0.91.3 has no file-based dashboard provisioning. No
+- **File-only does not work.** OpenObserve v0.91.3 has no file-based dashboard provisioning (not
+  re-verified for v1.1.2, the pinned release; the API push does not depend on it). No
   `ZO_*` setting points at a dashboard directory, nothing in its dashboard service reads from disk,
   and its own `import` subcommand loads stream data rather than dashboards. Dashboards exist only
   as objects created over the API; the UI's Import button is a thin client over that same call. A
@@ -54,7 +55,7 @@ operator-editable file into the SQL a credentialed client executes.
 ## What is not verified
 
 The join and the column spellings have now been executed against a running backend — the review
-of PR #567 stood up the pinned v0.91.3, ingested both planes, and ran the shipped query verbatim,
+of PR #567 stood up the then-pinned v0.91.3, ingested both planes, and ran the shipped query verbatim,
 reproducing the token totals derived by hand from the acceptance criteria, column spelling for
 column spelling. What that run did not cover is stated rather than implied: of the six
 dashboards carrying assumptions, five were not executed, the pricing arithmetic behind derived dollars was not audited, and

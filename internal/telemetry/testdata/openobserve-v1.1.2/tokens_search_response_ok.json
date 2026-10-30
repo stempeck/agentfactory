@@ -1,0 +1,82 @@
+{
+  "took": 108,
+  "took_detail": {
+    "total": 108,
+    "cache_took": 0,
+    "file_list_took": 2,
+    "wait_in_queue": 0,
+    "idx_took": 0,
+    "search_took": 105
+  },
+  "hits": [
+    {
+      "af_agent": "manager",
+      "af_formula_instance": "",
+      "requests": 3017
+    },
+    {
+      "af_agent": "fable-implement",
+      "af_formula_instance": "af-b3df5c75",
+      "requests": 2219
+    },
+    {
+      "af_agent": "fable-increment",
+      "af_formula_instance": "",
+      "requests": 1031
+    },
+    {
+      "af_agent": "rapid-soldesign-engineer",
+      "af_formula_instance": "af-51549965",
+      "requests": 873
+    },
+    {
+      "af_agent": "design-v7",
+      "af_formula_instance": "af-118d0d8e",
+      "requests": 646
+    },
+    {
+      "af_agent": "design-v7",
+      "af_formula_instance": "af-8751553c",
+      "requests": 608
+    },
+    {
+      "af_agent": "fable-increment",
+      "af_formula_instance": "af-13226fc6",
+      "requests": 553
+    },
+    {
+      "af_agent": "fable-increment",
+      "af_formula_instance": "af-e4acc1e8",
+      "requests": 552
+    },
+    {
+      "af_agent": "soldesign-engineer",
+      "af_formula_instance": "af-0017855d",
+      "requests": 544
+    },
+    {
+      "af_agent": "design-v7",
+      "af_formula_instance": "af-aa547518",
+      "requests": 517
+    }
+  ],
+  "total": 10,
+  "from": 0,
+  "size": 10,
+  "cached_ratio": 0,
+  "scan_size": 33,
+  "idx_scan_size": 5,
+  "scan_records": 29980,
+  "trace_id": "00000000000000000000000000000000",
+  "is_partial": false,
+  "result_cache_ratio": 0,
+  "order_by": "desc",
+  "order_by_metadata": [
+    [
+      "requests",
+      "desc"
+    ]
+  ],
+  "is_histogram_eligible": true,
+  "peak_memory_usage": 5.0
+}

@@ -8,7 +8,7 @@ Create an instruction set workflow (formula) with `/formula-create /path/to/your
 **Audience:**
 This guide is the human operator's manual: the `af` commands and configuration needed to set
 up and USE agentfactory. Agents and formulas are one system, so both live here. Deep guides
-for the measurement, model, and token-economics subsystems and plugin repositories are split out — see [Feature Guides](#feature-guides).
+for the measurement, model, and token-economics subsystems, plugin repositories and integrations are split out — see [Feature Guides](#feature-guides).
 
 ## Prerequisites
 
@@ -776,7 +776,13 @@ af up
 
 **About `--no-build`.** It skips only the rebuild inside `agent-gen-all.sh`; `quickstart.sh` always rebuilds and reinstalls the `af` binary, so every successful `af install --agents` lands a fresh binary either way.
 
-**Bootstrap options.** `--litellm` also sets up the gateway for running agents on OpenAI models (see `USING_LITELLM.md`); it asks for your OpenAI API key the first time and reuses the stored key on later runs. `--litellm-auth=<api-key|codex-subscription>` picks the gateway's upstream-auth mode (default `api-key`) and requires `--litellm`. In `codex-subscription` mode the bootstrap authenticates your ChatGPT subscription in one command: after a consent prompt (it will INSTALL the Codex CLI), it installs `codex` and runs `codex login --device-auth` for you; see `USING_LITELLM.md`'s Subscription mode section for details. `--no-telemetry` skips the telemetry backend and turns recording off; without it, a successful redeploy turns recording **on**. Every redeploy resets recording to match the flag — even if you toggled it by hand with `af telemetry` in between, so keep passing `--no-telemetry` on redeploys if you want it to stay off.
+**Bootstrap options.** `--litellm` also sets up the gateway for running agents on OpenAI models (see `USING_LITELLM.md`); it asks for your OpenAI API key the first time and reuses the stored key on later runs. `--litellm-auth=<api-key|codex-subscription>` picks the gateway's upstream-auth mode (default `api-key`) and requires `--litellm`. In `codex-subscription` mode the bootstrap authenticates your ChatGPT subscription in one command: after a consent prompt (it will INSTALL the Codex CLI; asked only when `codex` is absent), it installs `codex` at the pinned `CODEX_VERSION` (a `codex` already present is converged to that version instead) and runs `codex login --device-auth` for you; see `USING_LITELLM.md`'s Subscription mode section for details. `--no-telemetry` skips installing the telemetry backend and turns recording off (a backend that is already installed is still kept at its pinned `OPENOBSERVE_VERSION`); without it, a successful redeploy turns recording **on**. Every redeploy resets recording to match the flag — even if you toggled it by hand with `af telemetry` in between, so keep passing `--no-telemetry` on redeploys if you want it to stay off.
+
+**Every run converges what is installed.** Every run of `./quickstart.sh`, `af install --agents` or `af plugin install` converges each installed component to its pin: the Ubuntu security pocket, Node.js, gh, Go, Claude Code, Playwright, the Codex CLI, OpenObserve and both Python locks (Go and Playwright on Linux only). Each component's row — pin, installed version, result — is written to `.runtime/bootstrap/convergence.json` and printed as a table. A `required` component that did not converge makes the run exit 1 at the end, after every other component was attempted; Playwright is the one optional component, so its failure is a warning. `./quickstart.sh --check` is a read-only drift report: it installs nothing and exits 1 when any component is off its pin. When a run changed Python packages or system libraries it ends with a reminder to run `af down && af up`, because running sessions keep the old code until they restart.
+
+**Changes outside your home directory.** With root or passwordless `sudo`, a converging run also changes three machine-wide things. Once the pinned gh answers, the image's apt gh package is removed and `/usr/local/bin/gh` links the pinned build (an existing file there is left alone), so callers that use the image PATH still find a gh; a run as root takes `/usr/bin/gh` from every user, and the link points into root's home, which other users usually cannot read. The image's github-cli apt source is renamed with a `.disabled` suffix, because gh no longer comes from apt and that dead index would otherwise fail `apt-get update` whenever its host is down; a source file that also lists another repository stays enabled, with a warning. A managed-settings drop-in at `/etc/claude-code/managed-settings.d/agentfactory.json` turns Claude Code auto-update off for every session on the machine, so none moves off the pinned release.
+
+**Egress.** A converging run downloads, so the container needs egress to the Ubuntu mirror configured under `/etc/apt/sources.list.d/`, `deb.nodesource.com`, `go.dev`, `github.com`, `downloads.claude.ai`, `claude.ai`, `downloads.openobserve.ai`, PyPI, the npm registry and the Go module proxy; Playwright's browser download (`cdn.playwright.dev`) is needed only for its optional row. A re-run without egress exits 1 at the end even on a container that has already converged, because the security-pocket check needs a fresh `apt-get update`; restore egress and re-run.
 
 **Not transactional.** A mid-run failure can leave agents down and the factory half-regenerated, so check the exit code and the end state. To confirm a redeploy end-to-end, run `af up`, dispatch work with `af sling`, and confirm an agent produces a PR using its current identity.
 
@@ -786,7 +792,7 @@ Each repository is its own independent factory. Agents in `~/src/myproject/.agen
 
 ## Feature Guides
 
-Deep guides for the factory's measurement, model, and token-economics subsystems and plugin repositories live beside this one:
+Deep guides for the factory's measurement, model, and token-economics subsystems, plugin repositories and integrations live beside this one:
 
 - [USING_TELEMETRY.md](USING_TELEMETRY.md) — run measurement: the telemetry backend, its dashboards, and the session statusline
 - [USING_RECOVERY.md](USING_RECOVERY.md) — the watchdog, context-exhaustion recovery, and the step-context ladder
@@ -795,6 +801,7 @@ Deep guides for the factory's measurement, model, and token-economics subsystems
 - [USING_LITELLM.md](USING_LITELLM.md) — running agents on non-Anthropic models through a gateway
 - [USING_TOKENOMICS.md](USING_TOKENOMICS.md) — the af tokenomics behavior contract: the `capacity` and `efficiency` objectives, guarantees, permitted interventions, per-mechanism records, and how an improvement is proven
 - [USING_PLUGINS.md](USING_PLUGINS.md) — plugin repositories: installing third-party specialist agents and integrations with `af plugin list|install|verify|acquire|check|remove`, and keeping them updated
+- [USING_INTEGRATIONS.md](USING_INTEGRATIONS.md) — third-party tools (hooks, MCP, services) bound per formula or factory-wide
 - [web/README.md](web/README.md) — the optional web console
 
 ## Troubleshooting
@@ -854,6 +861,14 @@ tr '\0' '\n' < /proc/$(ps -o tpgid= -p $(tmux display -p -t af-<agent> '#{pane_p
 
 The process holds `file:` secret references already dereferenced, which is why the last line redacts them.
 `af config models check` answers whether the profile itself works.
+
+### Which integrations is this agent running with?
+
+Run `af prime` in the agent's session: it prints one line per integration its formula instance pinned (`ok`,
+`check failed at <time>`, `not bound …` or `skipped (optional): …`). The pin itself is
+`.runtime/integration_bindings` in the agent dir, and `af plugin list --json` shows each installed integration's
+snapshot and last check. A factory-scope integration is bound to every agent, whatever its
+formula declares. The integrations guide, `USING_INTEGRATIONS.md`, has the full read.
 
 ### Disclaimer
 The contributors to this project take no responsibility for your agent (or their respective LLMs) actions.

@@ -1025,7 +1025,7 @@ func watchdogHeartbeatPath(root string) string {
 // is idempotent and routinely re-run against a factory whose watchdog is already
 // ticking — two processes, one of them holding no knowledge of the other's attempt.
 // What bounds that case is not this flag: it is relaunch.sh's own
-// `tmux has-session -t telemetry || …` check-then-act (quickstart.sh:1930) plus
+// `tmux has-session -t telemetry || …` check-then-act (quickstart.sh:2943) plus
 // tmux's refusal to create a duplicate session name, so the worst outcome is a
 // redundant probe and a refused second launch, never two backends.
 //

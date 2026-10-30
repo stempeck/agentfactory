@@ -696,22 +696,16 @@ func TestTelemetryUsage_HelpListsUsage(t *testing.T) {
 	}
 }
 
+// openobserveCaptureDirs lists every backend version whose captures the parser must keep reading.
+// It is an explicit list rather than a glob so that losing a capture directory fails the readers
+// instead of silently shrinking what they cover.
+var openobserveCaptureDirs = []string{"openobserve-v0.91.3", "openobserve-v1.1.2"}
+
 // TestTelemetryUsage_MatchesCapturedBackendShapes reads the committed captures rather than a
 // hand-authored idea of what the backend returns. Three of these shapes were not what the design
 // assumed, which is exactly why they are captures.
 func TestTelemetryUsage_MatchesCapturedBackendShapes(t *testing.T) {
 	resetReportFlags(t)
-
-	dir := filepath.Join(findRepoRootForUsage(t), "internal", "telemetry", "testdata", "openobserve-v0.91.3")
-
-	read := func(name string) []byte {
-		t.Helper()
-		b, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatalf("reading fixture %s: %v", name, err)
-		}
-		return b
-	}
 
 	cases := []struct {
 		fixture   string
@@ -726,46 +720,73 @@ func TestTelemetryUsage_MatchesCapturedBackendShapes(t *testing.T) {
 		{"metrics_promql_response_error.json", http.StatusBadRequest, true, telemetryUsageStateQueryFailed},
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.fixture, func(t *testing.T) {
-			body := read(tc.fixture)
-			endpoint, _ := fakeBackend(t, func(w http.ResponseWriter, r *http.Request) {
-				if strings.Contains(r.URL.Path, telemetrySchemaPath) {
-					// Pre-flight must pass so the tokens _search call under test actually
-					// fires — a fixture that only shapes the _search/PromQL response must
-					// not accidentally get short-circuited by an unrelated schema failure.
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(okBackendSchema))
-					return
-				}
-				isPromQL := strings.Contains(r.URL.Path, "/prometheus/")
-				if isPromQL != tc.promQL {
-					// The half this fixture is not about answers healthily, so the assertion below
-					// is about the half under test.
-					w.Header().Set("Content-Type", "application/json")
-					if isPromQL {
-						_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
-					} else {
-						_, _ = w.Write([]byte(`{"took":1,"hits":[],"total":0,"from":0,"size":50}`))
+	for _, captureDir := range openobserveCaptureDirs {
+		dir := filepath.Join(findRepoRootForUsage(t), "internal", "telemetry", "testdata", captureDir)
+		read := func(t *testing.T, name string) []byte {
+			t.Helper()
+			b, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				t.Fatalf("reading fixture %s: %v", name, err)
+			}
+			return b
+		}
+
+		t.Run(captureDir, func(t *testing.T) {
+			for _, tc := range cases {
+				t.Run(tc.fixture, func(t *testing.T) {
+					body := read(t, tc.fixture)
+					endpoint, _ := fakeBackend(t, func(w http.ResponseWriter, r *http.Request) {
+						if strings.Contains(r.URL.Path, telemetrySchemaPath) {
+							// Pre-flight must pass so the tokens _search call under test actually
+							// fires — a fixture that only shapes the _search/PromQL response must
+							// not accidentally get short-circuited by an unrelated schema failure.
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = w.Write([]byte(okBackendSchema))
+							return
+						}
+						isPromQL := strings.Contains(r.URL.Path, "/prometheus/")
+						if isPromQL != tc.promQL {
+							// The half this fixture is not about answers healthily, so the assertion below
+							// is about the half under test.
+							w.Header().Set("Content-Type", "application/json")
+							if isPromQL {
+								_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+							} else {
+								_, _ = w.Write([]byte(`{"took":1,"hits":[],"total":0,"from":0,"size":50}`))
+							}
+							return
+						}
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(tc.status)
+						_, _ = w.Write(body)
+					})
+
+					fx := newUsageFixture(t, endpoint)
+					dto := usageDTO(t, fx.root, "", "")
+
+					got := dto.Tokens.State
+					if tc.promQL {
+						got = dto.Metrics.State
 					}
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(tc.status)
-				_, _ = w.Write(body)
-			})
-
-			fx := newUsageFixture(t, endpoint)
-			dto := usageDTO(t, fx.root, "", "")
-
-			got := dto.Tokens.State
-			if tc.promQL {
-				got = dto.Metrics.State
+					if got != tc.wantState {
+						t.Errorf("%s -> state %q, want %q", tc.fixture, got, tc.wantState)
+					}
+					// The tokens state is decided by the HTTP code alone, so only the row count shows
+					// that a new backend's success body still parses.
+					if !tc.promQL && tc.wantState == telemetryUsageStateOK {
+						var capture struct {
+							Hits []json.RawMessage `json:"hits"`
+						}
+						if err := json.Unmarshal(body, &capture); err != nil || len(capture.Hits) == 0 {
+							t.Fatalf("%s carries no hits to project (err %v)", tc.fixture, err)
+						}
+						if len(dto.Tokens.Rows) != len(capture.Hits) {
+							t.Errorf("%s: %d hits projected to %d token rows", tc.fixture, len(capture.Hits), len(dto.Tokens.Rows))
+						}
+					}
+					assertNoSecret(t, dto, fx)
+				})
 			}
-			if got != tc.wantState {
-				t.Errorf("%s -> state %q, want %q", tc.fixture, got, tc.wantState)
-			}
-			assertNoSecret(t, dto, fx)
 		})
 	}
 
@@ -1410,57 +1431,91 @@ func TestTelemetryUsage_NumericColumnsToleratePlausibleEncodings(t *testing.T) {
 func TestTelemetryUsage_MetricRowsCarryTheirDistinguishingLabels(t *testing.T) {
 	resetReportFlags(t)
 
-	fixture, err := os.ReadFile(filepath.Join(findRepoRootForUsage(t),
-		"internal", "telemetry", "testdata", "openobserve-v0.91.3", "metrics_promql_response.json"))
-	if err != nil {
-		t.Fatalf("reading the captured PromQL response: %v", err)
-	}
+	for _, captureDir := range openobserveCaptureDirs {
+		t.Run(captureDir, func(t *testing.T) {
+			fixture, err := os.ReadFile(filepath.Join(findRepoRootForUsage(t),
+				"internal", "telemetry", "testdata", captureDir, "metrics_promql_response.json"))
+			if err != nil {
+				t.Fatalf("reading the captured PromQL response: %v", err)
+			}
 
-	endpoint, _ := fakeBackend(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if strings.Contains(r.URL.Path, "/prometheus/") {
-			_, _ = w.Write(fixture)
-			return
-		}
-		_, _ = w.Write([]byte(`{"took":1,"total":0,"hits":[]}`))
-	})
-	fx := newUsageFixture(t, endpoint)
-	dto := usageDTO(t, fx.root, "", "")
+			endpoint, _ := fakeBackend(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if strings.Contains(r.URL.Path, "/prometheus/") {
+					_, _ = w.Write(fixture)
+					return
+				}
+				_, _ = w.Write([]byte(`{"took":1,"total":0,"hits":[]}`))
+			})
+			fx := newUsageFixture(t, endpoint)
+			dto := usageDTO(t, fx.root, "", "")
 
-	if len(dto.Metrics.Rows) == 0 {
-		t.Fatal("the captured response produced no metric rows")
-	}
+			if len(dto.Metrics.Rows) == 0 {
+				t.Fatal("the captured response produced no metric rows")
+			}
 
-	// Every row must be distinguishable from every other. Without labels the captured fixture
-	// collapses several series onto one key, which is the defect.
-	seen := map[string]int{}
-	for _, r := range dto.Metrics.Rows {
-		key := r.Metric + "|" + r.Agent + "|" + r.Instance
-		for _, name := range telemetryUsageMetricLabels {
-			key += "|" + name + "=" + r.Labels[name]
-		}
-		seen[key]++
-	}
-	for key, n := range seen {
-		if n > 1 {
-			t.Errorf("%d rows share the key %q — series that differ only in value are indistinguishable "+
-				"to a reader and cannot be attributed or summed", n, key)
-		}
-	}
+			// Every row must be distinguishable from every other. Without labels the captured fixture
+			// collapses several series onto one key, which is the defect.
+			seen := map[string]int{}
+			for _, r := range dto.Metrics.Rows {
+				key := r.Metric + "|" + r.Agent + "|" + r.Instance
+				for _, name := range telemetryUsageMetricLabels {
+					key += "|" + name + "=" + r.Labels[name]
+				}
+				seen[key]++
+			}
+			for key, n := range seen {
+				if n > 1 {
+					t.Errorf("%d rows share the key %q — series that differ only in value are indistinguishable "+
+						"to a reader and cannot be attributed or summed", n, key)
+				}
+			}
 
-	// And no identifying label may ride along.
-	blob, err := json.Marshal(dto)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+			// And no identifying label may ride along.
+			blob, err := json.Marshal(dto)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			for _, forbidden := range []string{
+				"user_email", "user_id", "user_account_id", "user_account_uuid",
+				"session_id", "organization_id", "prompt",
+			} {
+				if strings.Contains(string(blob), forbidden) {
+					t.Errorf("the payload carries the identifying label %q; the label set is an allowlist, "+
+						"not a copy of whatever the backend attached", forbidden)
+				}
+			}
+		})
 	}
-	for _, forbidden := range []string{
-		"user_email", "user_id", "user_account_id", "user_account_uuid",
-		"session_id", "organization_id", "prompt",
-	} {
-		if strings.Contains(string(blob), forbidden) {
-			t.Errorf("the payload carries the identifying label %q; the label set is an allowlist, "+
-				"not a copy of whatever the backend attached", forbidden)
-		}
+}
+
+// TestMetricRowLabelAllowlistEachEntryDistinguishes pins every allowlist entry on its own. The
+// captures cannot: their series differ in several labels at once, so dropping one entry is masked
+// whenever another (start_time above all) still tells the rows apart. The list is the test's own so
+// that removing an entry from the shipped allowlist cannot also remove it from the expectation.
+func TestMetricRowLabelAllowlistEachEntryDistinguishes(t *testing.T) {
+	distinguishing := []string{
+		"type", "model", "query_source", "decision", "language", "tool_name",
+		"terminal_type", "af_worktree_id", "af_model_profile", "start_time",
+	}
+	base := map[string]string{"af_agent": "solver", "af_formula_instance": "af-4e894132"}
+	for _, name := range distinguishing {
+		base[name] = "a"
+	}
+	for _, name := range distinguishing {
+		t.Run(name, func(t *testing.T) {
+			twin := map[string]string{}
+			for k, v := range base {
+				twin[k] = v
+			}
+			twin[name] = "b"
+			a := metricRowFromLabels(base, "claude_code_token_usage", "1")
+			b := metricRowFromLabels(twin, "claude_code_token_usage", "1")
+			if a.Labels[name] != "a" || b.Labels[name] != "b" {
+				t.Errorf("series differing only in %q produced rows labelled %v and %v; the row must carry %q "+
+					"or the two series are indistinguishable", name, a.Labels, b.Labels, name)
+			}
+		})
 	}
 }
 

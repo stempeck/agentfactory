@@ -39,7 +39,9 @@ func TestQuickstartSupplyChainInvariants(t *testing.T) {
 	}
 	content := string(data)
 
-	installClaude := extractShellFunction(content, "install_claude")
+	// topLevel, not extractShellFunction: the nested `_install_claude() {` also contains the
+	// substring `install_claude() {`.
+	installClaude := topLevelShellFunction(content, "install_claude")
 	if installClaude == "" {
 		t.Fatal("could not extract install_claude() function body")
 	}
@@ -54,24 +56,50 @@ func TestQuickstartSupplyChainInvariants(t *testing.T) {
 		if !re.MatchString(installClaude) {
 			t.Error("install_claude() must use official curl|bash installer as primary method")
 		}
+		if !regexp.MustCompile(`https://claude\.ai/install\.sh[^\n]*\|[^\n]*bash -s -- "\$CLAUDE_CODE_VERSION"`).MatchString(installClaude) {
+			t.Error(`install_claude()'s official installer must be asked for the pinned build: ` +
+				`bash -s -- "$CLAUDE_CODE_VERSION" (a channel name installs whatever that channel serves today)`)
+		}
 	})
 
 	t.Run("has_npm_fallback", func(t *testing.T) {
-		if !strings.Contains(installClaude, "npm install -g @anthropic-ai/claude-code") {
-			t.Error("install_claude() must have npm global install as fallback")
+		const want = `_npm_install_pinned @anthropic-ai/claude-code "$CLAUDE_CODE_VERSION" "$CLAUDE_CODE_NPM_SHA512"`
+		if !strings.Contains(installClaude, want) {
+			t.Errorf("install_claude() must keep the npm channel as its last resort, pinned and digest-verified: %s", want)
 		}
 	})
 
 	t.Run("has_sudo_npm_sub_fallback", func(t *testing.T) {
-		re := regexp.MustCompile(`sudo\s+(-n\s+)?npm\s+install\s+-g`)
-		if !re.MatchString(installClaude) {
-			t.Error("install_claude() must have sudo npm as sub-fallback")
+		pinned := topLevelShellFunction(content, "_npm_install_pinned")
+		if pinned == "" {
+			t.Fatal("_npm_install_pinned() is not defined at top level; it owns the writable-prefix -> sudo -n ladder")
+		}
+		if !regexp.MustCompile(`sudo\s+-n\s+npm\s+install\s+-g`).MatchString(pinned) {
+			t.Error("_npm_install_pinned() must keep the `sudo -n npm install -g` sub-fallback for a root-owned global prefix")
 		}
 	})
 
-	t.Run("no_version_pinning", func(t *testing.T) {
-		if strings.Contains(installClaude, "claude-code@") {
-			t.Error("install_claude() must not pin claude-code version")
+	t.Run("release_binary_verified_before_it_is_linked", func(t *testing.T) {
+		inner := extractShellFunction(content, "_install_claude")
+		if inner == "" {
+			t.Fatal("could not extract the nested _install_claude() body")
+		}
+		check := strings.Index(inner, "sha256sum --check --strict")
+		if check < 0 {
+			t.Fatal("_install_claude() never verifies the downloaded release binary with `sha256sum --check --strict`")
+		}
+		for _, step := range []string{"chmod", "ln -sfn"} {
+			at := strings.Index(inner, step)
+			if at < 0 {
+				t.Errorf("_install_claude() has no %q step", step)
+				continue
+			}
+			if at < check {
+				t.Errorf("_install_claude() runs %q before the digest check; an unverified binary must never be made executable or linked", step)
+			}
+		}
+		if m := regexp.MustCompile(`(?m)(^|[\s;&|(])(cp|install)\s[^\n]*\.local/bin/claude`).FindString(inner); m != "" {
+			t.Errorf("_install_claude() copies or installs onto ~/.local/bin/claude (%q); it is a symlink into versions/, so only `ln -sfn` may touch it", strings.TrimSpace(m))
 		}
 	})
 
@@ -105,6 +133,13 @@ func TestQuickstartSupplyChainInvariants(t *testing.T) {
 		}
 	})
 
+	t.Run("configure_shell_disables_autoupdater", func(t *testing.T) {
+		const want = `export DISABLE_AUTOUPDATER="${DISABLE_AUTOUPDATER:-1}"`
+		if !strings.Contains(configureShell, want) {
+			t.Errorf("configure_shell() must write %s into the model config block; an auto-updated claude drifts off the pin", want)
+		}
+	})
+
 	t.Run("pip_require_hashes", func(t *testing.T) {
 		if !strings.Contains(content, "--require-hashes") {
 			t.Error("quickstart.sh missing --require-hashes in pip install")
@@ -132,10 +167,14 @@ func TestQuickstartTelemetryProvisioning(t *testing.T) {
 		t.Fatal("could not extract setup_telemetry() function body")
 	}
 
-	// AC #3 — first checksummed download in this file (Dockerfile:28 idiom).
+	// AC #3 — the checksummed download moved out of setup_telemetry with the hoisted installer.
 	t.Run("sha256_checksum_verification", func(t *testing.T) {
-		if !strings.Contains(setupTelemetry, "sha256sum --check") {
-			t.Error("setup_telemetry() must checksum-verify the downloaded binary (sha256sum --check)")
+		install := topLevelShellFunction(content, "_install_openobserve")
+		if install == "" {
+			t.Fatal("_install_openobserve() is not defined at top level; the OpenObserve download lives there")
+		}
+		if !strings.Contains(install, "sha256sum --check --strict") {
+			t.Error("_install_openobserve() must checksum-verify the downloaded binary (sha256sum --check --strict)")
 		}
 	})
 
@@ -158,6 +197,20 @@ func TestQuickstartTelemetryProvisioning(t *testing.T) {
 		}
 		if strings.Contains(content, "0.0.0.0") {
 			t.Error("quickstart.sh must never contain the 0.0.0.0 wildcard bind")
+		}
+		// OpenObserve's gRPC listener defaults to the wildcard address unless told otherwise.
+		launches := 0
+		for _, line := range strings.Split(setupTelemetry, "\n") {
+			if !strings.Contains(line, `ZO_HTTP_ADDR="127.0.0.1"`) {
+				continue
+			}
+			launches++
+			if !strings.Contains(line, `ZO_GRPC_ADDR="127.0.0.1"`) {
+				t.Errorf("an OpenObserve launch line binds HTTP to loopback but leaves gRPC on its wildcard default: %s", strings.TrimSpace(line))
+			}
+		}
+		if launches < 2 {
+			t.Errorf("found %d OpenObserve launch lines in setup_telemetry(), want both (the relaunch.sh heredoc and the direct launch)", launches)
 		}
 	})
 
@@ -225,6 +278,16 @@ func TestQuickstartTelemetryProvisioning(t *testing.T) {
 		}
 		if ll == nil || tl[0] <= ll[0] {
 			t.Error("setup_telemetry must be invoked after setup_litellm (the new last setup call)")
+		}
+		report := regexp.MustCompile(`(?m)^[[:space:]]*_converge_report[[:space:]]*$`).FindAllStringIndex(content, -1)
+		after := false
+		for _, r := range report {
+			if r[0] > tl[0] {
+				after = true
+			}
+		}
+		if !after {
+			t.Error("main() must call _converge_report after setup_telemetry: the convergence summary and exit status come last, so no setup step can print below them")
 		}
 	})
 

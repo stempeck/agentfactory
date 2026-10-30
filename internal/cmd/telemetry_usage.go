@@ -233,6 +233,9 @@ var telemetryUsageMetricLabels = []string{
 	"terminal_type",
 	"af_worktree_id",
 	"af_model_profile",
+	// Claude Code exports DELTA series, and each export interval is its own series. Within the
+	// instant query's lookback one run therefore answers with twins that differ only here.
+	"start_time",
 }
 
 // runTelemetryUsage is the verb; telemetryUsageDTO below is the deref-permitted site.

@@ -1,0 +1,12 @@
+# Inputs of py/litellm-requirements.txt (the LiteLLM gateway lock). Regenerate both locks with `make lock`.
+-r requirements.in  # one interpreter: the issue-store pins hold in the gateway closure too
+-c requirements.txt  # shared packages keep the issue-store lock's exact versions
+litellm[proxy]==1.93.2  # D21: kept by the operator; GHSA-7hp6-4w63-5g45 and GHSA-g5ff-637f-6q2m are register exceptions
+cryptography>=50.0.0  # GHSA-g6cj-pr64-35w5 (litellm caps <51)
+oauthlib>=4.0.0  # GHSA-xpv3-w29h-x7cv, GHSA-hj66-6f7g-4r5v
+filelock==3.20.3  # predates GHSA-v4x8-3wr5-3wq8; the resolver accepted it, so the >=4.2.1 fallback was not needed
+certifi>=2026.10.19  # GHSA-6q48-6c7w-9gw2
+PyJWT>=2.15.0  # GHSA-42vr-xj54-vc7v, GHSA-x33g-cr3x-6449
+urllib3>=2.8.0  # GHSA-vxq7-64xx-v4gw, GHSA-8988-9cw3-xx77, GHSA-gh4c-6fx4-qh6g
+mcp>=1.30.0  # GHSA-84m7-p3x7-pcfv
+huggingface-hub<2  # hub 2.x pulls httpx2/httpcore2, whose fixed releases need idna>=3.18 against idna==3.15: GHSA-7mj9-2mp8-4m2p, GHSA-8xx6-hgc6-gc2m, GHSA-h4x7-gw46-3wm6, GHSA-pf96-p4fj-6566

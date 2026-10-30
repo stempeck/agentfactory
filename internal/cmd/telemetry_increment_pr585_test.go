@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -253,33 +254,40 @@ func TestIncrementPR585_T6_SingleFlightScopeIsStatedHonestly(t *testing.T) {
 // TestIncrementPR585_BODY3_SetupTelemetryEarlyReturnCountTripwire answers the reviewer's
 // third question with a mechanism rather than a promise.
 //
-// The proposed "no `return 0` precedes the write" scan FAILS against today's CORRECT file:
-// setup_telemetry contains eight `return 0`, all early-exit failure paths preceding the
-// recovery writes. (Prior to issue #693 Phase 1's K11 hoist, a ninth `return 0` belonged to
-// _port_in_use, a nested helper's BOOLEAN answer defined inside this function; K11 moved
-// _port_in_use to top-level scope so setup_litellm can reach it too, removing that `return 0`
-// from this function's body — decisions.md D7, telemetry_increment_pr585_test.go's own
-// original comment flagged this exact count as coupled to K11's hoist.)
+// The proposed "no `return 0` precedes the write" scan FAILS against a CORRECT file, because
+// every early exit precedes the recovery writes by design. So the enumerate-and-check contract
+// stays, and this tripwire closes the gap it cannot see: the anchor table in
+// telemetry_views_test.go catches a DELETED branch; this catches an ADDED one.
 //
-// So the enumerate-and-check contract stays, and this tripwire closes the gap it cannot see:
-// the eight-anchor table catches a DELETED branch; this catches an ADDED one. A ninth
-// early-exit path can still be introduced — it just cannot be introduced silently.
+// Inventory once the OpenObserve install was hoisted into _install_openobserve (D-22): the four
+// install-path exits (arch, download, checksum, unpack/install) moved with it and became
+// `return 1` to _converge. setup_telemetry keeps the four runtime exits (occupied port, launch,
+// exited during startup, not ready) plus one silent guard after `_converge openobserve`
+// (D13: `[ -x "$oo_bin" ] || return 0` — a failed fresh install, already reported and ledgered by
+// _converge, must never go on to launch a missing binary).
 func TestIncrementPR585_BODY3_SetupTelemetryEarlyReturnCountTripwire(t *testing.T) {
 	body := extractShellFunction(repoFile(t, "quickstart.sh"), "setup_telemetry")
 	if body == "" {
 		t.Fatal("could not extract setup_telemetry()")
 	}
 
-	// Inventory post issue #693 Phase 1 (K11 hoisted _port_in_use out of this function): 8
-	// early-exit failure paths.
-	const wantReturnZero = 8
+	const wantReturnZero = 5
 	if got := strings.Count(body, "return 0"); got != wantReturnZero {
-		t.Errorf("setup_telemetry has %d `return 0` sites, want %d.\n"+
-			"If a NINTH early-exit path was added: the relaunch.sh write and the login-guard "+
+		t.Errorf("setup_telemetry has %d `return 0` sites, want %d (the four runtime exits plus the "+
+			"D13 binary guard; the four install-path exits now live in _install_openobserve).\n"+
+			"If a new early-exit path was added: the relaunch.sh write and the login-guard "+
 			"append must precede it, and it must be added to the anchor table in "+
-			"telemetry_views_test.go — that table enumerates eight, so a new branch would "+
-			"otherwise ship unguarded (the install-path interlock is Root Cause A's permanent "+
-			"half).\nIf a path was REMOVED: drop its anchor from the table and lower this count.",
+			"telemetry_views_test.go, or it ships unguarded (the install-path interlock is Root "+
+			"Cause A's permanent half).\nIf a path was REMOVED: drop its anchor from the table and lower this count.",
 			got, wantReturnZero)
+	}
+
+	converge := strings.Index(body, `_converge openobserve "$OPENOBSERVE_VERSION" _probe_openobserve _install_openobserve required`)
+	if converge < 0 {
+		t.Fatal("setup_telemetry() does not converge OpenObserve through `_converge openobserve … _install_openobserve required`")
+	}
+	guard := regexp.MustCompile(`\[ -x "\$oo_bin" \][^\n]*\|\| return 0`).FindStringIndex(body)
+	if guard == nil || guard[0] < converge {
+		t.Error("setup_telemetry() has no `[ -x \"$oo_bin\" ] … || return 0` guard after `_converge openobserve` (D13): a failed fresh install would go on to launch a missing binary")
 	}
 }

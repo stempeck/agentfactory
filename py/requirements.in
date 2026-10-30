@@ -1,0 +1,11 @@
+# Inputs of py/requirements.txt (the issue-store lock). Regenerate both locks with `make lock`.
+aiohttp==3.14.4  # GHSA-9xw5-w5jj-pvcg, GHSA-f9xw-jh8m-3mwq, GHSA-gx76-c99x-2c96, GHSA-pqxq-w44r-73xw (lowest fixed)
+idna==3.15  # GHSA-65pc-fj4g-8rjx
+multidict>=6.9.1,<7  # GHSA-54p9-h82j-f925
+pytest==9.0.3  # GHSA-6w46-j5rx-g56g
+sqlalchemy<2.1  # the issue store is written against the 2.0 API
+yarl==1.25.1  # named by AC-3.4, not security-driven
+propcache==0.5.4  # named by AC-3.4, not security-driven
+aiohappyeyeballs==2.7.1  # named by AC-3.4, not security-driven
+pip==26.2.2  # D24: latest secure release, checked 2026-10-27
+wheel==0.48.0  # D24: latest secure release, checked 2026-10-27

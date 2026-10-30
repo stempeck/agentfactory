@@ -660,6 +660,13 @@ docker cp "$QUICKSTART_SRC" "${CONTAINER_NAME}:${PROJECTS_DIR}/${AF_DIR}/quickst
 docker exec "$CONTAINER_NAME" chown dev:dev "${PROJECTS_DIR}/${AF_DIR}/quickstart.sh"
 docker exec "$CONTAINER_NAME" chmod +x "${PROJECTS_DIR}/${AF_DIR}/quickstart.sh"
 
+# quickstart.sh installs Python from these hash locks by path, so they travel with the host copy
+# (a clone of an older revision would pair the new script with stale locks).
+for lock in py/requirements.txt py/litellm-requirements.txt; do
+    docker cp "$SCRIPT_DIR/$lock" "${CONTAINER_NAME}:${PROJECTS_DIR}/${AF_DIR}/$lock"
+    docker exec "$CONTAINER_NAME" chown dev:dev "${PROJECTS_DIR}/${AF_DIR}/$lock"
+done
+
 step_done
 
 # ─── Step 7: Configure shell defaults ─────────────────────────────────────

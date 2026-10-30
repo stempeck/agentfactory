@@ -1,6 +1,9 @@
 # CI workflow for agentfactory.
 #
-# Three jobs run independently on every push and pull request:
+# The jobs below run independently on every push and pull request; every one of them
+# except advisory-decay is gated off the daily schedule by its own `if:` line.
+# The four Go lanes build under the same Go toolchain quickstart.sh pins (GO_TOOLCHAIN_VERSION,
+# the go.mod `toolchain` line; TestToolchainParity keeps the four in step) and print it.
 #
 #   - unit         : `make test` against the unit-test tier. Runs without any
 #                    external backend on PATH (the in-memory `memstore` is the
@@ -10,7 +13,10 @@
 #                    tier. Requires Python 3.12 (the in-tree MCP issue-store
 #                    server at `py/issuestore/` is spawned by mcpstore) and
 #                    tmux (used by internal/cmd/integration_test.go). The
-#                    Makefile builds a venv from py/requirements.txt on demand.
+#                    Makefile builds a venv from py/requirements.txt on demand;
+#                    the job then dry-runs the LiteLLM lock against it (every
+#                    wheel resolves, hashes match) and runs the issue-store's
+#                    own pytest suite.
 #   - regen        : `make check-regen` regenerates the role templates from the
 #                    current formulas (agent-gen-all.sh) and fails if the committed
 #                    internal/templates/roles/ diverge — closing six_sigma_gaps Gap 5
@@ -18,6 +24,11 @@
 #                    Non-hermetic (needs `af` on PATH); runs on a full checkout, not a
 #                    worktree, so it is a dedicated job rather than part of `make test`.
 #   - supply-chain-lint : --require-hashes enforcement for all pip install sites.
+#   - toml-conformance  : the shipped formula-editor engine against tomllib.
+#   - advisory-decay    : .github/advisory-audit.sh — every pinned package against the
+#                    advisory databases and .github/advisory-exceptions.json. It also
+#                    runs daily on the schedule, so a pin that becomes vulnerable (or an
+#                    exception that expires) fails CI without any commit.
 
 name: test
 
@@ -27,6 +38,8 @@ on:
     tags: ['V*']
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: '17 5 * * *'
 
 # Supersession control for superseded PR commits — NOT the dedup mechanism.
 # Dedup is the push trigger filter above (trigger-schema deletion; see
@@ -42,11 +55,13 @@ jobs:
   unit:
     name: unit
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.26.10'
+      - run: go version
       # Issue #435: this lane's header declares "no external backend on PATH", yet
       # TestWebBridgeHostListenerRoundTrip (internal/cmd/quickdocker_test.go) extracts and
       # runs quickdocker.sh's REAL host-listener ladder, which binds a loopback socket via
@@ -88,11 +103,13 @@ jobs:
   web-unit:
     name: web-unit
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.26.10'
+      - run: go version
       # The web console lives in its OWN Go module (web/go.mod, module
       # github.com/stempeck/agentfactory-web) and is INVISIBLE to the root `unit` job's
       # `go build ./...` / `make test` (a nested go.mod is not covered by the root module's ./...).
@@ -114,6 +131,7 @@ jobs:
   integration:
     name: integration
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     # Gap-4 (issue #458): arm mcpstore_test.go's no-silent-skip guard so a missing
     # python3/aiohttp/sqlalchemy HARD-FAILS this gating lane (t.Fatal) instead of
     # silently skipping green — a green skip here would say nothing about the real
@@ -132,7 +150,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.26.10'
+      - run: go version
       - name: install system deps (tmux for internal/cmd/integration_test.go; libsqlite3-0 so the Python issue-store's sqlite3 can load libsqlite3.so.0)
         run: sudo apt-get update && sudo apt-get install -y tmux libsqlite3-0
       # Python 3.12 is required by the in-tree MCP server
@@ -146,15 +165,24 @@ jobs:
           python-version: '3.12'
       - name: make test-integration
         run: make test-integration
+      # The venv exists from here on (make test-integration's $(VENV_MARKER) rule built it).
+      - name: dry-run the LiteLLM lock (every pinned wheel resolves with its hash)
+        run: |
+          .venv/bin/pip install --dry-run --ignore-installed --require-hashes --only-binary :all: --disable-pip-version-check -r py/litellm-requirements.txt
+      # The module form: the bare pytest console script hits collection errors from this cwd.
+      - name: issue-store pytest
+        run: .venv/bin/python -m pytest py/issuestore/tests -q -p no:cacheprovider
 
   regen:
     name: regen
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.26.10'
+      - run: go version
       # `make check-regen` builds + installs `af`, runs agent-gen-all.sh --no-build to
       # regenerate internal/templates/roles/ from the current formulas, then
       # `git diff --exit-code` fails the job if the committed templates are stale.
@@ -166,6 +194,7 @@ jobs:
   supply-chain-lint:
     name: supply-chain-lint
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
       - name: verify pip installs use --require-hashes
@@ -182,6 +211,7 @@ jobs:
   toml-conformance:
     name: toml-conformance
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     # The SHIPPED formula-editor engine (web/internal/web/static/scripts/toml-engine.js,
     # embedded via //go:embed static) validates the user's edits in the browser. This job
     # runs the SAME bytes headlessly against the live store formulas and cross-checks each
@@ -226,3 +256,18 @@ jobs:
       # step above is test-engine.js's tomllib ground truth, which this script does not use.
       - name: settings client behaviour (shipped app.js, PUT payload)
         run: node web/conformance/test-settings.js
+
+  advisory-decay:
+    name: advisory-decay
+    runs-on: ubuntu-latest
+    # No `if:` — this is the one job the daily schedule exists for. Its own concurrency group keeps
+    # a scheduled run from cancelling, or being cancelled by, a push or PR run.
+    concurrency:
+      group: ${{ github.workflow }}-advisory-decay-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: advisory audit (every pin against OSV, the vendor advisories and the exception register)
+        run: .github/advisory-audit.sh

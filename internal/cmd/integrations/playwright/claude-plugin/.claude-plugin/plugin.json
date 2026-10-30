@@ -1,0 +1,4 @@
+{
+  "name": "playwright",
+  "description": "Browser automation through the Playwright MCP server, on the integration's own locked CLI and chromium build"
+}
