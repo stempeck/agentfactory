@@ -74,12 +74,14 @@ your repository's security. By accepted architecture decision
 keeps or strengthens every security control — a capability that cannot be built without
 weakening one is not built.
 
-**Reproducible, digest-verified installs.** Bootstrap is a *convergence*: every run brings each
-installed component to a pinned, digest-verified version — Claude Code, Codex, gh, Go, Node.js,
-OpenObserve, Playwright, Ubuntu security updates, and hash-locked Python — and a required
-component that cannot converge exits non-zero instead of running on a drifted version. It writes
-`convergence.json` so a container can prove what it is running, and `quickstart.sh --check` is a
-read-only drift report that audits an install without changing it
+**Reproducible, integrity-verified installs.** Bootstrap is a *convergence*: every run brings
+each installed component to its pinned version and verifies its integrity before use —
+`sha256`/`sha512` digests for the downloaded toolchains (Claude Code, Codex, gh, Go, OpenObserve,
+Playwright), signed apt packages for the system layer (Ubuntu security updates, Node.js), and pip
+`--require-hashes` for Python — and a required component that cannot converge exits non-zero
+instead of running on a drifted version. It writes `convergence.json` so a container can prove
+what it is running, and `quickstart.sh --check` is a read-only drift report that audits an
+install without changing it
 ([ADR-027](docs/architecture/adrs/ADR-027-bootstrap-convergence-contract.md)).
 
 ```bash

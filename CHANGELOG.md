@@ -16,8 +16,9 @@ operational — by accepted decision every change keeps or strengthens every sec
 and a capability that cannot be built without weakening one is not built (ADR-026).
 
 - Every bootstrap re-run **converges** each installed component to its pinned version and
-  **verifies it by digest** (`sha256sum` / `sha512sum --check --strict`) — Claude Code, Codex,
-  gh, Go, Node.js, OpenObserve, Playwright, Ubuntu security updates, and hash-locked Python; a
+  **verifies its integrity before use** — `sha256`/`sha512` digests for the downloaded
+  toolchains (Claude Code, Codex, gh, Go, OpenObserve, Playwright), signed apt packages for the
+  system layer (Ubuntu security updates, Node.js), and pip `--require-hashes` for Python; a
   **required** component that cannot converge **exits non-zero** instead of running on a drifted
   version (`quickstart.sh` `_converge` / `_apt_converge`, `CONVERGE_FAILURES` ledger). (#124)
 - `convergence.json` (`.runtime/bootstrap/convergence.json`) records one row per component, so a
