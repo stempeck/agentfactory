@@ -109,6 +109,52 @@ own working-dir path to the worktree path; runtime churn, not a deliverable. Lef
 STEP-10 exit criteria met: S1 fixed, S2 re-verified already-satisfied, security flagship documented,
 changes committed. Proceeding.
 
+## GATE-3 (Every public claim verified against source)
+
+Scope: full branch diff `git diff origin/main...HEAD` (5 files, +445). Public FEATURE claims that
+reach a user live in README.md and CHANGELOG.md; the three `.marketing/` files are committed-mode
+cycle records whose technical references are verification CITATIONS (grep/file:line output produced
+this session), not user-facing assertions. Checklist run against the added (`+`) lines:
+
+**Item 1 — commands/flags/subcommands asserted but not proven this session: NONE.**
+Every token in the README/CHANGELOG additions was proven against source this session:
+- "`quickstart.sh --check`" / "read-only drift report" → `quickstart.sh:17` (`--check` comment),
+  `_converge_check`; convergence mechanism `quickstart.sh:168` ("Every vendor channel converges
+  through _converge: probe -> compare with the pin -> install").
+- "`_converge` / `_apt_converge`, `CONVERGE_FAILURES` ledger" → `quickstart.sh:251`, `:568`, `:57`/`:288`.
+- "`convergence.json` (`.runtime/bootstrap/convergence.json`)" → `quickstart.sh:55`.
+- "`sha256sum` / `sha512sum --check --strict`" → `quickstart.sh:377`/`:398`/`:818`; integrity routing
+  `:189` (`claude|gh|go|openobserve) integrity="sha256"`), `:190` (`codex) integrity="sha512"`).
+- Component names (Claude Code, Codex, gh, Go, Node.js, OpenObserve, Playwright, Ubuntu security,
+  hash-locked Python) → `OPENOBSERVE_VERSION` `:76`, `PLAYWRIGHT_VERSION` `:94`, `CODEX_VERSION` `:101`,
+  `NODE_APT_VERSION` `:87`, `py/requirements.txt` (`--require-hashes`, ADR-026:23); also the #124
+  merge-commit message (ce8639e5) enumerates the same set.
+- "`.github/advisory-audit.sh` + `advisory-exceptions.json`" → both files present (ls, exec bit).
+- "`fable-secure` … optional external-scanner scan-gate … records `tool absent` and continues" →
+  `fable-secure.formula.toml:338-344`/`:686-692`; absence semantics `USING_INTEGRATIONS.md:152`.
+- "`design-plan-impl` / `design-v7` / `fable-review` / `fable-increment` / `perfeval-agent`" → named
+  verbatim in the #124 merge-commit message; all are shipped formulas/skills (README:242,243,266).
+- ADR links `ADR-025/026/027` → files present in `docs/architecture/adrs/`.
+- Anchor `#plugins--the-model-gateway` → matches existing header "### Plugins & the model gateway".
+
+**Item 2 — counts asserted but not recounted: NONE.** The additions assert no numeric count; the
+component set is enumerated, not counted. (README's existing "Twenty-six"/"Thirteen" counts are
+unchanged by this diff and were re-verified at GATE-1: 26 TOMLs, 13 skill dirs, names matched.)
+
+**Item 3 — URLs not fetched/constructed from a verified pattern: NONE.** README additions use only
+repo-relative ADR paths (files verified present) and one in-page anchor (header verified). No external
+URLs added to Tier A docs. (The `.marketing` records cite real GitHub URLs for this repo: issue #125
+comment — the live operator decision, verified via `gh issue view`; issues #128 — created this session.)
+
+**Item 4 — unshipped promises ("coming soon") outside a Roadmap section: NONE.** #124 is merged to
+main (ce8639e5); CHANGELOG `## Unreleased` means merged-but-untagged, standard usage, not a promise.
+DefenseClaw is NOT claimed as shipped anywhere in Tier A — README/CHANGELOG state "agentfactory ships
+the integration point; the scanner is operator-supplied." The reference-scanner roadmap item is held
+in GitHub issue #128, deliberately NOT asserted in the docs. Operator's "others to come" appears only
+as a quoted operator statement inside the cycle record (story.md), flagged as claim-to-verify.
+
+GATE-3 VERDICT: PASS
+
 ## GATE-2 (Story approval) — RESOLVED 2026-10-31T02:20Z: REORDER
 **Operator decided on issue #125.** Verified live (not taken from manager relay alone):
 - `gh issue view 125` → single comment, author `stempeck`, authorAssociation OWNER, 2026-10-31T02:20:16Z.
