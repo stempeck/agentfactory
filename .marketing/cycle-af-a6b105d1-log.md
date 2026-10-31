@@ -269,3 +269,19 @@ Step 10 (Tier A refresh) stays withheld. Will resume the instant APPROVE / REORD
 - Quiet hold maintained: NOT re-filing #125, NOT re-escalating (manager already FYI'd at 12:09Z),
   NOT running `af done` on Step 10. Step 10 (Tier A refresh) stays withheld. Resume on
   APPROVE / REORDER / END-CYCLE.
+
+## GATE-4 re-verification (2026-10-31, session recycled post-compaction) — HOLD still in effect, ~1h
+Session was recycled at a context-pressure compaction boundary (03:40Z). Re-primed to Step 13;
+GATE-4 HOLD re-checked live (not taken from the pre-compaction log alone):
+- `gh pr view 129` → state OPEN, `reviews: []`, no operator comment (only a CLAassistant bot CLA
+  badge at 02:46Z); `updatedAt` 02:46:40Z == creation. No READY/EDITED/SKIP reply on the PR.
+- `gh issue view 130` → state OPEN, `comments: []`, `updatedAt` 02:46:22Z == creation. Ping untouched.
+- Branch push check (EDITED can arrive as a push): `git fetch` then `HEAD..origin/marketing/
+  cycle-af-a6b105d1` → empty; local HEAD == origin tip 17e1b7b7. No operator edit pushed.
+- Both `## Operator Decision` forms → `Decision: ______` (blank): medium.md:60, linkedin.md:25.
+- Open issue/PR sweep → #130 is the newest issue, #129 the newest PR. No newer decision surface.
+- `af mail inbox` → compaction self-notice only (acked/deleted); no operator decision relayed.
+HOLD is ~1h old and freshly notified (PR #129 + issue #130 both filed 02:46Z); NOT re-filing a
+duplicate, NOT re-escalating to manager this early, NOT running `af done` on Step 13. A blank form
+does not advance — closing the structural gate now would repeat the GATE-2 mechanical-advance defect.
+Next event is an external operator decision on #129 / #130; nothing further is actionable this session.
