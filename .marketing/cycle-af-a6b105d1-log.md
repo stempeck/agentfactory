@@ -194,6 +194,25 @@ STEP-12 exit criteria met: both drafts have DRAFT header + decision form; the on
 captured (real convergence.json); paste.html renders the long-form draft with the figure embedded.
 Proceeding to GATE 4 (HOLD for operator draft approval).
 
+## GATE-4 (HOLD for operator draft approval) — HOLD IN EFFECT (opened 2026-10-31T02:4xZ)
+
+Review routed to a PR per the runbook (§0: open the review PR EARLY at the draft-approval gate;
+the operator will NOT open worktree files; take READY/EDITED/SKIP as PR replies or pushes).
+
+- Branch pushed: `origin/marketing/cycle-af-a6b105d1` (new).
+- **PR #129** opened (base main): carries Tier A (README/CHANGELOG security refresh) + both Tier B
+  drafts presented INLINE, with the decision asks and the merge/release options (deferred to
+  Step 17). https://github.com/stempeck/agentfactory/pull/129
+- **Notify issue #130** filed as the ping, pointing at #129.
+  https://github.com/stempeck/agentfactory/issues/130
+- Both drafts carry a `## Operator Decision` form (READY/EDITED/SKIP); both blank = HOLD.
+
+**HOLD.** An untouched form does not advance; this is a structural gate AND a behavioral HOLD.
+Exit when every draft is resolved READY, EDITED-and-reconciled (mechanics-only, enumerated,
+paste vehicle re-rendered, runbook Voice updated), or SKIP. On EDITED, their text is canonical.
+Not running `af done` on Step 13. Will resume the instant the operator responds on #129 / #130.
+Nothing further is actionable this session — the next event is an external operator decision.
+
 ## GATE-2 (Story approval) — RESOLVED 2026-10-31T02:20Z: REORDER
 **Operator decided on issue #125.** Verified live (not taken from manager relay alone):
 - `gh issue view 125` → single comment, author `stempeck`, authorAssociation OWNER, 2026-10-31T02:20:16Z.
