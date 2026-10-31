@@ -147,9 +147,9 @@ func TestConfigModelsCheck_DirectEndpoint_ClaudeAliasesDoNotHardFail(t *testing.
 	})
 }
 
-// TestCheckedInLitellm_HaikuAliasMatchesModelsJson pins T6/F1: the checked-in litellm.yaml haiku alias
-// must route to the lane models.json declares for the HAIKU class (gpt-5.6-luna), not the main lane.
-// wantLane is derived from models.json so the alias stays pinned to the source of truth if re-laned.
+// TestCheckedInLitellm_HaikuAliasMatchesModelsJson pins T6/F1: every claude-haiku-* alias in the checked-in
+// litellm.yaml must route to the lane models.json declares for the HAIKU class (gpt-5.6-luna), not the main
+// lane. Both the alias ids and wantLane are read from the files, so a new haiku version needs no test change.
 func TestCheckedInLitellm_HaikuAliasMatchesModelsJson(t *testing.T) {
 	moduleRoot := findModuleRoot(t)
 
@@ -171,19 +171,20 @@ func TestCheckedInLitellm_HaikuAliasMatchesModelsJson(t *testing.T) {
 		t.Fatal("models.json codex profile names no ANTHROPIC_DEFAULT_HAIKU_MODEL to match the alias against")
 	}
 
-	var haikuBackend string
+	haikuAliases := 0
 	for _, e := range parseLitellmSeedEntries(t, string(yamlBytes)) {
-		if e.name == "claude-haiku-4-5" {
-			haikuBackend = e.backend
+		if !strings.HasPrefix(e.name, "claude-haiku-") {
+			continue
+		}
+		haikuAliases++
+		lane := e.backend[strings.LastIndex(e.backend, "/")+1:] // "openai/gpt-5.6-luna" -> "gpt-5.6-luna"
+		if lane != wantLane {
+			t.Errorf("%s aliases to lane %q; models.json routes the HAIKU class to %q — "+
+				"the checked-in alias must match the source of truth (T6/F1)", e.name, lane, wantLane)
 		}
 	}
-	if haikuBackend == "" {
-		t.Fatal("no claude-haiku-4-5 alias in checked-in litellm.yaml")
-	}
-	lane := haikuBackend[strings.LastIndex(haikuBackend, "/")+1:] // "openai/gpt-5.6-luna" -> "gpt-5.6-luna"
-	if lane != wantLane {
-		t.Errorf("claude-haiku-4-5 aliases to lane %q; models.json routes the HAIKU class to %q — "+
-			"the checked-in alias must match the source of truth (T6/F1)", lane, wantLane)
+	if haikuAliases == 0 {
+		t.Fatal("no claude-haiku-* alias in checked-in litellm.yaml")
 	}
 }
 

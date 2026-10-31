@@ -1,0 +1,52 @@
+model_list:
+  - model_name: gpt-5.6-sol          # main/agentic model
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-sol
+  - model_name: gpt-5.6-terra        # mid lane: the codex profile's sonnet class
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-terra
+  - model_name: gpt-5.6-luna         # background/haiku-class calls
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-luna
+
+  # Aliases for the model ids the host asks for BY NAME — same rationale as litellm.yaml, routed
+  # through the chatgpt/responses backend instead of openai/. `af config models check` demands one
+  # per claude-* id this factory's direct profiles name; TestCheckedInLitellmCarriesClaudeAliases
+  # fails the build when models.json grows a direct claude-* profile this list does not alias.
+  # LARGE classes (opus/sonnet/fable) go to the MAIN lane; only haiku goes to the small one.
+  - model_name: claude-opus-5
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-sol
+  - model_name: claude-sonnet-5-5
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-sol
+  - model_name: claude-fable-5
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-sol
+  - model_name: claude-fable-5-1
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-sol
+  - model_name: claude-opus-4-8
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-sol
+  - model_name: claude-opus-5-5
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-sol
+  - model_name: claude-haiku-5-5
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-luna
+
+litellm_settings:
+  # af_codex_compat.py sits next to this file and is rewritten by every bootstrap: it flattens
+  # Claude Code's block-array system prompt to a string before translation, because the Codex
+  # backend rejects system-role items ("System messages are not allowed", BerriAI/litellm#21420).
+  # Drop this line only when `af config models check codex-subscription --first` passes without it.
+  callbacks: af_codex_compat.proxy_handler_instance
+  drop_params: true          # drop Anthropic-only params instead of 400ing
+
+router_settings:
+  num_retries: 2
+  timeout: 3000               # agentic turns can run long; don't use 30s
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
