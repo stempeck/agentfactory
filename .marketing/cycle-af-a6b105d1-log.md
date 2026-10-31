@@ -155,6 +155,45 @@ as a quoted operator statement inside the cycle record (story.md), flagged as cl
 
 GATE-3 VERDICT: PASS
 
+## STEP-12 — EXECUTED 2026-10-31 (Phase 4: Tier B drafts in the operator's voice)
+
+**Voice recalibration (done first, not optional):** reread runbook §1 Voice + the PR #114 cuts +
+the operator's canonical finals (cycle-af-50cdad6b-medium.md approved-as-written; -linkedin.md his
+edited short version). Applied register: first person, spaced " - " hyphens (NO em dashes), "="
+shorthand, CAPS for the key beat, question hooks, real output ("SHOW IT"). Applied the #114 cuts:
+NO "proud of"/self-congratulatory emotion, NO non-feature set piece, did NOT reopen with the spent
+"factory of AI agents" phrase. The operator's REORDER line ("factory of agents -> most secure way
+to run multi-agent orchestration") is used as the honest positioning arc (their own words).
+
+**Drafts written (DRAFT header + feedback form each):**
+- `cycle-af-a6b105d1-medium.md` — long-form. Title "My agents run unattended with my credentials.
+  So I made the install prove itself." Subtitle carries the Positioning phrases (multi-agent, Claude
+  Code). Body: failure-mode hook -> convergence/what-shipped -> `--check` + daily CVE audit -> ADR-026
+  positioning + plugins/fable-secure -> ONE inline honest limit -> repo link -> motto. No number in
+  the title (avoided the must-land-a-number trap). One figure marked.
+- `cycle-af-a6b105d1-linkedin.md` — short-form, ~150 words, PLAIN TEXT (no markdown; LinkedIn ships
+  literal asterisks/backticks), question hook + close, two-link footer. Medium URL = publish-time
+  placeholder (runbook Step 5 sequences Medium first).
+
+**Figure CAPTURED (real product evidence, not prose):**
+- `cycle-af-a6b105d1-screen-convergence.png` — the real `.runtime/bootstrap/convergence.json`
+  (2026-10-30 bootstrap) rendered as a terminal table; every value verbatim from the file (10
+  components, pin=installed, per-component integrity, result KEPT). Declared in approach.md Standing
+  Assets. Reading this file for the figure is what surfaced the integrity-mechanism precision fix
+  committed at bbdbd54f (Tier A now matches the convergence.json `integrity` fields exactly).
+- Render path: Playwright MCP is pinned to the branded `chrome` channel (absent here), so used the
+  bundled chromium directly (`~/.cache/ms-playwright/chromium-1248/.../chrome --headless --screenshot`,
+  2x scale). Render-source HTML and the paste-verify render were written INSIDE the worktree and
+  deleted (worktree-containment mail af-30db958e acked; scratchpad avoided).
+
+**Paste vehicle rendered:** `cycle-af-a6b105d1-paste.html` — semantic h1/sub/h2/p/pre/code/figure/a,
+figure embedded via relative src; verified by headless render that the image embeds and layout is
+clean. Regenerable; deleted at Phase 6.
+
+STEP-12 exit criteria met: both drafts have DRAFT header + decision form; the one marked figure is
+captured (real convergence.json); paste.html renders the long-form draft with the figure embedded.
+Proceeding to GATE 4 (HOLD for operator draft approval).
+
 ## GATE-2 (Story approval) — RESOLVED 2026-10-31T02:20Z: REORDER
 **Operator decided on issue #125.** Verified live (not taken from manager relay alone):
 - `gh issue view 125` → single comment, author `stempeck`, authorAssociation OWNER, 2026-10-31T02:20:16Z.
