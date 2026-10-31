@@ -10,41 +10,77 @@
       "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.6-sol",
       "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.6-terra",
       "ANTHROPIC_MODEL": "gpt-5.6-sol",
-      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "256000",
-      "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1050000"
+      "CLAUDE_CODE_EFFORT_LEVEL": "xhigh",
+      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
+      "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
+      "AF_DISABLE_PARALLEL_SUBAGENTS": "1"
     },
     "default": {
-      "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5",
-      "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8",
-      "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5",
-      "ANTHROPIC_MODEL": "claude-opus-4-8",
-      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "300000"
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-5-5",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5-5",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5-5",
+      "ANTHROPIC_MODEL": "claude-opus-5-5",
+      "CLAUDE_CODE_EFFORT_LEVEL": "xhigh",
+      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
+      "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
     },
     "fable-5": {
-      "ANTHROPIC_MODEL": "claude-fable-5"
+      "ANTHROPIC_MODEL": "claude-fable-5",
+      "CLAUDE_CODE_EFFORT_LEVEL": "xhigh",
+      "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
+    },
+    "fable-5-1": {
+      "ANTHROPIC_MODEL": "claude-fable-5-1",
+      "CLAUDE_CODE_EFFORT_LEVEL": "xhigh",
+      "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
     },
     "lmstudio": {
       "ANTHROPIC_API_KEY": "",
       "ANTHROPIC_AUTH_TOKEN": "lmstudio",
       "ANTHROPIC_BASE_URL": "http://host.docker.internal:11434",
-      "ANTHROPIC_DEFAULT_FABLE_MODEL": "your-local-lmstudio-model",
-      "ANTHROPIC_DEFAULT_HAIKU_MODEL": "your-local-lmstudio-model",
-      "ANTHROPIC_DEFAULT_OPUS_MODEL": "your-local-lmstudio-model",
-      "ANTHROPIC_DEFAULT_SONNET_MODEL": "your-local-lmstudio-model",
-      "ANTHROPIC_MODEL": "your-local-lmstudio-model",
-      "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "65536"
+      "ANTHROPIC_DEFAULT_FABLE_MODEL": "qwen/qwen3.8-27b",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen/qwen3.8-27b",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen/qwen3.8-27b",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen/qwen3.8-27b",
+      "ANTHROPIC_MODEL": "qwen/qwen3.8-27b",
+      "CLAUDE_CODE_EFFORT_LEVEL": "medium",
+      "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262144",
+      "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+      "CLAUDE_STREAM_IDLE_TIMEOUT_MS": "1800000",
+      "API_FORCE_IDLE_TIMEOUT": "0",
+      "CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS": "1800000",
+      "AF_BACKEND_POOL_TOKENS": "262144",
+      "AF_DISABLE_PARALLEL_SUBAGENTS": "1"
     },
     "opus-4-8": {
       "ANTHROPIC_MODEL": "claude-opus-4-8",
-      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "300000"
+      "CLAUDE_CODE_EFFORT_LEVEL": "xhigh",
+      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
+      "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
     },
     "opus-5": {
       "ANTHROPIC_MODEL": "claude-opus-5",
-      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "300000"
+      "CLAUDE_CODE_EFFORT_LEVEL": "xhigh",
+      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000"
     },
-    "sonnet-5": {
-      "ANTHROPIC_MODEL": "claude-sonnet-5",
-      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "256000"
+    "opus-5-5": {
+      "ANTHROPIC_MODEL": "claude-opus-5-5",
+      "CLAUDE_CODE_EFFORT_LEVEL": "xhigh",
+      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
+      "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
+    },
+    "opus-5-5-high": {
+      "ANTHROPIC_MODEL": "claude-opus-5-5",
+      "CLAUDE_CODE_EFFORT_LEVEL": "high",
+      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
+      "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
+    },
+    "sonnet-5-5": {
+      "ANTHROPIC_MODEL": "claude-sonnet-5-5",
+      "CLAUDE_CODE_EFFORT_LEVEL": "xhigh",
+      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
+      "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
     },
     "codex-subscription": {
       "ANTHROPIC_BASE_URL": "http://localhost:4000",
@@ -52,30 +88,34 @@
       "ANTHROPIC_MODEL": "gpt-5.6-sol",
       "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.6-luna",
       "ANTHROPIC_API_KEY": "",
+      "CLAUDE_CODE_EFFORT_LEVEL": "xhigh",
+      "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
+      "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
       "AF_DISABLE_PARALLEL_SUBAGENTS": "1"
     }
   },
   "agents": {
-    "design": "fable-5",
-    "design-plan-impl": "opus-4-8",
-    "design-v3": "fable-5",
-    "design-v7": "fable-5",
-    "fable-implement": "sonnet-5",
-    "fable-increment": "opus-4-8",
-    "fable-review": "opus-4-8",
-    "factoryworker": "sonnet-5",
-    "gherkin-breakdown": "opus-4-8",
+    "design": "fable-5-1",
+    "design-plan-impl": "opus-5-5",
+    "design-v3": "fable-5-1",
+    "design-v7": "fable-5-1",
+    "fable-implement": "opus-5-5-high",
+    "fable-increment": "opus-5-5",
+    "fable-review": "fable-5-1",
+    "factoryworker": "opus-5-5-high",
+    "gherkin-breakdown": "opus-5-5",
+    "github-issue": "opus-5-5",
     "gpt-fable-review": "codex",
     "gpt-rootcause-all": "codex",
-    "investigate": "opus-4-8",
-    "manager": "fable-5",
-    "mergepatrol": "opus-4-8",
-    "minimalworker": "opus-4-8",
-    "rapid-implement": "sonnet-5",
-    "rapid-increment": "opus-4-8",
-    "rapid-soldesign-plan": "opus-4-8",
-    "rootcause-all": "fable-5",
-    "ultra-review": "opus-4-8",
-    "web-design": "opus-4-8"
+    "investigate": "opus-5-5",
+    "manager": "fable-5-1",
+    "mergepatrol": "opus-5-5",
+    "minimalworker": "opus-5-5",
+    "rapid-implement": "opus-5-5-high",
+    "rapid-increment": "opus-5-5",
+    "rapid-soldesign-plan": "opus-5-5",
+    "rootcause-all": "opus-5-5",
+    "ultra-review": "opus-5-5",
+    "web-design": "opus-5-5"
   }
 }

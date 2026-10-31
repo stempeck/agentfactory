@@ -38,7 +38,23 @@
     "exclude": []
   },
   "step_context": {
-    "bound_tokens": 200000,
+    "bound_tokens": 262144,
     "handoff_pct": 75
+  },
+  "tokenomics": {
+    "enabled": "default",
+    "budget": "default",
+    "thrift": "default",
+    "dispatch": "default",
+    "interview": "default",
+    "effort": "default",
+    "escalate": "default",
+    "efficiency": "default",
+    "efficiency_effort_level": "medium",
+    "efficiency_thinking_share_pct": 80,
+    "efficiency_repeat_read_floor": 1,
+    "efficiency_max_relaunches": 6,
+    "admission_margin_pct": 16,
+    "learned_min_runs": 2
   }
 }
