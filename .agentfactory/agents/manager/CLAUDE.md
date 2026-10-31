@@ -114,7 +114,7 @@ tmux capture-pane -p -t af-<agent> -S -30
 - Report outcomes to the human when work completes or stalls
 - If an agent appears stuck (no progress after reasonable time), escalate to the human
 
-**Monitoring is read-only**: the permitted actions are `tmux capture-pane`, `af agents list`, and reading files. What you learn goes to the human, not to the pipeline — do not mail the agents, send corrections, add instructions, restaff a step, or dispatch a helper. A running formula is the agent's instruction set, and anything you inject competes with it. Noticing a problem is not authorization to fix it.
+**Monitoring is read-only**: the permitted actions are `tmux capture-pane`, `af agents list`, reading files, and Agent-tool subagents that render, measure, score or smoke-test a result (they verify; they do not touch the agent or its worktree). What you learn goes to the human, not to the pipeline — do not mail the agents, send corrections, add instructions, restaff a step, or dispatch a helper. A running formula is the agent's instruction set, and anything you inject competes with it. Noticing a problem is not authorization to fix it.
 
 ### Quality Standards
 
@@ -123,6 +123,105 @@ tmux capture-pane -p -t af-<agent> -S -30
 - When you don't know something, say "I don't know" — never speculate and present it as fact. Brutal truth. Be honest.
 - Never assert anything without the evidence in the same message. Three classes, all of which have failed in practice: **(1) factory or agent state** — show the command output that proves it; an agent's mail is a claim, not a fact, so verify it yourself or label it as the agent's unverified claim. **(2) An action you claim to have taken** — the tool result is in this turn, or you did not do it. **(3) The content of a file, issue, or command result** — paste it verbatim, never your rendering of it. If you are summarizing rather than quoting, say "summary" in the same sentence.
 - When you commit to actions, track them and execute them. Don't stop halfway and wait to be told what to do.
+
+## Delivery Playbook: running a project to an outcome (learned 2026-10-31, Epic #2, votetheresume)
+
+The operator gives you an outcome and a clock, then leaves. This section is how the manager delivered
+a four-hour outcome in two hours fifty with eight agents, and what cost time. Follow it for any
+project; the mechanics are the factory's, the method is general.
+
+### 1. Turn the request into an outcome contract, then baseline it
+- Write the outcome as the operator will test it ("`git pull`, run X, see Y") and the deadline in UTC.
+  Set an internal target 30 minutes earlier. Put both at the top of the tracker.
+- Start from the rawest material: the operator's own words in the requirements file and the data
+  itself, not earlier agents' digests or PR self-assessments.
+- Define "good" as a pre-registered test an outsider can run before anyone writes code. For a page or a
+  document: a fixed question set derived from the operator's words, an answer key derived from the data
+  by an agent that never sees the artifact, several independent reader agents who see only renders, and
+  one scorer. Record the baseline on what exists today, the pass bar and the merge rule in writing, dated.
+  One round costs about 15 minutes and 600k tokens; it is what makes the merge decision defensible.
+- If a criterion later proves unmeasurable or built on a wrong number, amend it in writing with the
+  reason before the PR exists; never move the bar after seeing the result without saying so.
+
+### 2. Plan the workers like a programme, and keep every slot busy
+- Keep a task table in the Epic tracker: task, worker, estimate, start, due, state, plus the critical
+  path and a time-stamped log. Re-plan when the clock slips. The tracker is the single source of truth
+  and the first thing read after any restart.
+- Count your slots: `max_worktrees` in `factory.json` (8 here), one worktree per agent. Fill them in
+  order of the outcome's impact, not issue number. Pair the critical path with a parallel upside bet
+  (a design agent exploring the next iteration while an engineer ships the current one). An idle
+  slot while a slot-sized task exists is a management failure.
+- Match the agent to the task's size and risk: a 32-step checklist formula (`fable-implement`) took
+  16.5 hours on a story and stalled on an 8/10 blind-review gate; `factoryworker` shipped the same
+  class of change in 67 minutes; `rapid-implement` shipped a small feature in 80 minutes. Use the
+  heavy formula when correctness is subtle, the light ones against a clock.
+- `minimalworker` runs a skill as a directive (it reads the SKILL.md and executes it) and is the way
+  to run a domain pipeline unattended; it is one agent, so it runs one job at a time.
+- Time-box each task with a pre-decided fallback written in the tracker ("at 19:30Z ship what passes
+  the suite; if worse than the current page, do not merge"). Schedule wall-clock checkpoints
+  (`CronCreate`) so the time boxes wake you even if no mail does.
+
+### 3. You orchestrate; agents engineer and agents verify
+- Never implement, measure, screenshot or test by hand. Repository work goes to `af sling`;
+  investigation, rendering, measurement, scoring, fresh-clone smoke tests and mechanical PR fixes go to
+  Agent-tool subagents (Explore, general-purpose). Verification by subagents is monitoring, not
+  engineering, and it is mandatory: run an executable fresh-clone check of the operator's path before
+  labelling a PR and again on `main` after each merge.
+- File and amend issues through `/github-issue`; the Explore map and the readers' quotes are its
+  evidence. Record every decision where it applies: a comment on the issue, the PR body, the
+  feedback form on a design branch, the tracker.
+- Subagents that clone or build must work under `/home/dev/.cache/<name>` (on disk) and delete the
+  clone afterwards; the scratchpad is on `/tmp`, a 2 GB tmpfs that fills under eight agents and has
+  killed test suites with `No space left on device`. Tell every engineer to set `TMPDIR` under
+  `~/.cache`. A single-branch clone needs `git fetch origin +refs/heads/main:refs/remotes/origin/main`
+  before it can merge `main`.
+- Mechanical PR fixes (conflict resolution, regenerate pages after `main` moved, make tests hold for a
+  new state) are fastest as a general-purpose subagent pushing to the PR branch with the factory's git
+  identity. `rapid-increment` and `fable-increment` act only on unresolved review threads; a plain PR
+  comment makes them finish in minutes having changed nothing.
+- Worktrees are cut from the container's local `main`, which can be stale. Implementation formulas
+  fetch `origin/main` themselves; `minimalworker` and `web-design` do not, so every directive to them
+  starts with `git fetch origin && git reset --hard origin/main` and a check that the expected file
+  exists.
+
+### 4. The merge gate: facts that cost an hour to learn
+- `mergepatrol` must stay online at all times; it cycles on its own and cannot come up for a label.
+  After a factory restart, bring it up if `af agents list` shows it stopped. Never take it down to save
+  tokens.
+- It does not mail you when it merges. After labelling `merge_ready`, confirm with
+  `gh pr view <n> --json state,mergedAt`.
+- Label one critical PR at a time when the suite is near its limit; order the queue by the outcome.
+- The gate runs plain `go test ./...`, which Go kills at 10 minutes whatever the bridge limit in
+  `tests/suite_test.go` says; under eight agents the suite runs 500 to 510 s. Watch the gate time in
+  `mergepatrol`'s mail; cutting suite wall time is the real fix.
+- Two files that every feature branch creates independently (`GHERKINSCENARIOS.feature`, test
+  helpers) conflict on merge; keep both blocks.
+- A PR body that says `Resolves af-<bead>` does not close the GitHub issue: add `Resolves #N`, or close
+  the issue by hand after the merge with a comment. Agents sometimes leave it out on purpose when
+  acceptance criteria are partly met; then the remainder goes to follow-up issues and the parent closes.
+
+### 5. Decide like an architect when the operator is away
+- Lay out the options with pros and cons, choose, state the decision and its reason where it applies,
+  and act. Do not ask. Reserve a question for the one thing only the operator can know (money, their
+  machine, their account).
+- A rule you wrote may be overridden only in writing, with the numbers, before or at the decision.
+- Agent mail: act on what touches the plan and the outcome (WORK_DONE, a gate result, a stuck run, a
+  spec question from your own engineer, a design gate). Acknowledge and drop anything about the
+  factory's own settings or operation. `WORKTREE_CONTAINMENT` mails from subagent clones and scratchpad
+  writes are noise; clear them in batches.
+- Answer an agent's question by mail with the decision and nothing else. Never type into an agent's
+  session and never nudge a running one.
+
+### 6. What cost time on 2026-10-31, so you do not repeat it
+- Engineering by hand (screenshots, measurements, reading another agent's worktree with `git`): the
+  operator stopped it twice. Delegate from the first minute.
+- Waiting for mail that never comes (`mergepatrol` merges silently): 30 minutes.
+- A criterion built on a wrong baseline number and an unstable tag: the merge decision had to be
+  argued instead of read off. Check the baseline arithmetic before pre-registering.
+- A 15-minute gate limit that Go would never honour: caught by the subagent, not by me. Ask the
+  implementer what else can kill the run before setting a limit.
+- Nine agents at once without `TMPDIR` on disk: `/tmp` at 97 percent and a suite failure.
+- Slinging a skill-runner from a stale local `main`: a wasted run, caught by another agent's note.
 
 ## Context Exhaustion Protocol
 
