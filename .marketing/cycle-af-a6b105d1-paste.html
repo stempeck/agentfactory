@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>agentfactory security story — Medium paste vehicle (cycle af-a6b105d1)</title>
+<!-- ============================================================================
+     RICH-TEXT PASTE VEHICLE — cycle af-a6b105d1 (security / supply-chain, #124).
+     Medium IGNORES pasted markdown; this is the copy/paste-with-images artifact.
+     HOW TO USE (Tier B — YOU publish; the agent never posts):
+       1. Open this file in a browser.
+       2. TITLE field in Medium:    My agents run unattended with my credentials. So I made the install prove itself.
+       3. SUBTITLE (small-T) field:  Reproducible, integrity-verified installs for a multi-agent Claude Code factory - converge to the pins or fail the build, and prove exactly what ran.
+       4. Select everything BELOW the divider line, copy, paste over the Medium story BODY.
+       5. Verify the figure survived the paste; add the 5 topics per the runbook.
+     This vehicle is regenerable and is DELETED at Phase 6 cleanup — the PNG stays.
+     ============================================================================ -->
+<style>
+  body { max-width: 740px; margin: 40px auto; padding: 0 20px; font-family: Georgia, "Times New Roman", serif; font-size: 20px; line-height: 1.6; color: #242424; }
+  h1 { font-family: -apple-system, Segoe UI, Roboto, sans-serif; font-size: 32px; line-height: 1.25; }
+  .sub { font-family: -apple-system, Segoe UI, Roboto, sans-serif; font-size: 20px; color: #6b6b6b; font-style: italic; margin-top: 6px; }
+  h2 { font-family: -apple-system, Segoe UI, Roboto, sans-serif; font-size: 25px; margin-top: 36px; }
+  pre { background: #f2f2f2; border-radius: 6px; padding: 14px 16px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 16px; overflow-x: auto; }
+  code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.92em; background: #f2f2f2; padding: 1px 5px; border-radius: 4px; }
+  pre code { background: none; padding: 0; }
+  figure { margin: 28px 0; }
+  img { width: 100%; height: auto; border: 1px solid #e6e6e6; border-radius: 8px; }
+  figcaption { font-family: -apple-system, Segoe UI, Roboto, sans-serif; font-size: 15px; color: #6b6b6b; text-align: center; margin-top: 8px; }
+  hr { margin: 40px 0; border: none; border-top: 2px dashed #bbb; }
+  .note { font-family: -apple-system, Segoe UI, Roboto, sans-serif; font-size: 14px; color: #6b6b6b; background: #fbfbe8; border: 1px solid #e6e6c8; border-radius: 6px; padding: 12px 14px; }
+</style>
+</head>
+<body>
+
+<p class="note"><strong>Not part of the article.</strong> Title → Medium title field. The italic line → Medium subtitle (small-T). Then select everything below the dashed line, copy, and paste over the story body. Figure is embedded via a relative path, so keep this HTML next to <code>cycle-af-a6b105d1-screen-convergence.png</code>.</p>
+
+<h1>My agents run unattended with my credentials. So I made the install prove itself.</h1>
+<p class="sub">Reproducible, integrity-verified installs for a multi-agent Claude Code factory - converge to the pins or fail the build, and prove exactly what ran.</p>
+
+<hr>
+
+<p>Here's a thing you stop thinking about once your agents work: they run unattended, for hours, holding your credentials, inside a container you built once and now mostly ignore. I run a lot of them. And one day I asked myself a question I couldn't actually answer - did this container install EXACTLY what I pinned? Or did a base image float, a package pick up a silent point bump, a tool quietly pull "latest" while I wasn't looking?</p>
+
+<p>For autonomous agents that is not a tidiness problem. It is a trust problem. Version drift across containers is one of the quieter ways a run goes weird and you burn an afternoon chasing it - and an unpinned, unaudited dependency walking into the box your agent runs your credentials in is the louder way. "It worked on the last container" is a bad answer when you can't say what the last container even had.</p>
+
+<p>So I made the bootstrap prove itself.</p>
+
+<h2>Bootstrap is now a convergence</h2>
+
+<p>Every time <code>quickstart.sh</code> runs, it does not just "install stuff if missing" anymore. It CONVERGES: for each component it checks what's installed, compares it to the pin, and brings it to exactly that pinned version - then verifies it before anything uses it. The mechanism depends on where the thing comes from = <code>sha256</code>/<code>sha512</code> digests for the downloaded toolchains (Claude Code, Codex, gh, Go, OpenObserve, Playwright), signed apt packages for the system layer (Ubuntu security, Node.js), and pip <code>--require-hashes</code> for Python.</p>
+
+<p>And here's the part that makes it a guarantee instead of a hope: a REQUIRED component that cannot converge does not get waved through. The build exits non-zero. You do not get an agent running on a drifted toolchain - you get a failure you can see.</p>
+
+<p>Then it writes down what it did. <code>convergence.json</code> is one row per component - the pin, what actually landed, how it was verified, and whether it was kept or changed. It is the container proving what it is running, without you re-probing it by hand:</p>
+
+<figure>
+  <img src="cycle-af-a6b105d1-screen-convergence.png" alt="The real convergence.json from a 2026-10-30 agentfactory bootstrap: ten components, each pinned, integrity-verified, and kept.">
+  <figcaption>The actual convergence.json from a real bootstrap - every component pinned, integrity-verified by its own mechanism, and kept.</figcaption>
+</figure>
+
+<h2>Audit an install without touching it</h2>
+
+<p>The switch I reach for most is this one:</p>
+
+<pre><code>./quickstart.sh --check</code></pre>
+
+<p>That is a read-only drift report. It tells you where an existing install has drifted from the pins and changes NOTHING - no installs, no package lists refreshed, no surprises. You can run it on a box that's been up for weeks and just ask "are you still what I think you are?"</p>
+
+<p>And drift is not the only thing that rots. A pin you trusted on Monday can have a CVE disclosed against it on Thursday. So there's a daily audit in CI that runs every pinned package against the advisory databases - a newly disclosed problem in a pin surfaces on its own, instead of waiting for me to cut the next release and notice.</p>
+
+<h2>Why I'm spending the project's time on this</h2>
+
+<p>Because I decided the project has to. This is written down now as an architecture decision the repo is held to: agentfactory is committed to being the most secure way to run an agent, and every change keeps or STRENGTHENS every security control - a capability that cannot be built without weakening one does not get built. That is the real shift. This started as a factory of agents. What it is becoming is the most secure way to run multi-agent orchestration, and the pins-and-convergence work is just the first thing you can see from the outside.</p>
+
+<p>Plugins are part of that too - third-party agents and tools install behind a trust boundary, from a pinned commit, as a read-only snapshot, with their provenance recorded. And there's a security-program review formula, <code>fable-secure</code>, that can call an external scanner over your repo when you bind one as a plugin. Honest about where that one stands: agentfactory ships the integration POINT, not the scanner - bind your own today, and when none is bound the gate records "tool absent" and the review carries on instead of lying about a scan it didn't run. More of those to come.</p>
+
+<p>One limit worth saying plainly, because convergence is easy to oversell: pinning and verifying a known set does not bless a dependency you add OUTSIDE the pins - put an unpinned tool in the box and that's on you, not on the convergence. What this gives you is that the set the project DOES manage is exactly what you pinned, verified, and auditable - every container, every run.</p>
+
+<p>The code is on GitHub: <a href="https://github.com/stempeck/agentfactory">github.com/stempeck/agentfactory</a>. If you run agents unattended - can you say, right now, what your last container actually installed, and prove it? Or are you trusting "latest" like I was? Happy to help if you want to wire this into your own setup.</p>
+
+<p>Learn it, Live it, Share it!</p>
+
+</body>
+</html>

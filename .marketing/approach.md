@@ -254,6 +254,7 @@ gate fails any undeclared file):
 - cycle-af-91fe0795-screen-models-check.png (committed — cycle af-91fe0795 Medium figure, live-embedded)
 - cycle-af-d7166cc1-telemetry-report.png (committed — cycle af-d7166cc1 Medium figure source; retro-declared)
 - cycle-af-d7166cc1-tokenomics-status.png (committed — cycle af-d7166cc1 Medium figure source; retro-declared)
+- cycle-af-a6b105d1-screen-convergence.png (committed — cycle af-a6b105d1 Medium figure: real convergence.json render, to live-embed; delete at cleanup only if the operator SKIPs Medium at GATE 4)
   <!-- The 8 cycle-3 screenshots are real Playwright captures produced by Phase 4/6 (operator
        directed actual screens, #105) and embedded in the live Medium article; they're declared
        here only because the cleanup manifest gate's cycle-image pattern recognizes

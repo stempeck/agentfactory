@@ -66,6 +66,39 @@ model-agnostic framework. If you want programmatic graphs inside a Python app, L
 the better fit. If you live in Claude Code and want autonomous, restartable, coordinated
 agents driven by workflows you can diff and review, that's what this is for.
 
+## Security & reproducible installs
+
+agentfactory runs autonomous agents unattended, holding your credentials, so its security is
+your repository's security. By accepted architecture decision
+([ADR-026](docs/architecture/adrs/ADR-026-most-secure-way-to-run-an-agent.md)), every change
+keeps or strengthens every security control — a capability that cannot be built without
+weakening one is not built.
+
+**Reproducible, integrity-verified installs.** Bootstrap is a *convergence*: every run brings
+each installed component to its pinned version and verifies its integrity before use —
+`sha256`/`sha512` digests for the downloaded toolchains (Claude Code, Codex, gh, Go, OpenObserve,
+Playwright), signed apt packages for the system layer (Ubuntu security updates, Node.js), and pip
+`--require-hashes` for Python — and a required component that cannot converge exits non-zero
+instead of running on a drifted version. It writes `convergence.json` so a container can prove
+what it is running, and `quickstart.sh --check` is a read-only drift report that audits an
+install without changing it
+([ADR-027](docs/architecture/adrs/ADR-027-bootstrap-convergence-contract.md)).
+
+```bash
+./quickstart.sh --check     # read-only: report drift against the pins, change nothing
+```
+
+**Continuously audited.** A daily CI audit runs every pinned package against the advisory
+databases, so a newly disclosed CVE in a pin surfaces without waiting for the next release.
+
+**Trust-bounded extensions.** Third-party agents and tools install behind a trust boundary with
+recorded provenance and fail-closed manifest readers
+([ADR-025](docs/architecture/adrs/ADR-025-plugin-repositories-trust-boundary.md)); see
+[Plugins & the model gateway](#plugins--the-model-gateway). The `fable-secure` formula runs a
+fixed-checklist security-program review and can call an optional external-scanner scan-gate when
+one is bound as a plugin — agentfactory ships the integration point; the scanner is
+operator-supplied.
+
 ## Quick Start
 
 ### Prerequisites

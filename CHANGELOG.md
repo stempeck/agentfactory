@@ -5,6 +5,43 @@ mark pre-release checkpoints. `v0.1.0` is the first formal release.
 
 ## Unreleased
 
+Two changes are pending the next release tag: a security and supply-chain milestone (#124) and
+the earlier plugins / gateway / config-faithful-relaunch work (#117).
+
+### Security and reproducible installs  (#124)
+
+Bootstrap is now a convergence: every re-run brings each installed component to a pinned,
+digest-verified version or fails. This makes agentfactory's standing security commitment
+operational — by accepted decision every change keeps or strengthens every security control,
+and a capability that cannot be built without weakening one is not built (ADR-026).
+
+- Every bootstrap re-run **converges** each installed component to its pinned version and
+  **verifies its integrity before use** — `sha256`/`sha512` digests for the downloaded
+  toolchains (Claude Code, Codex, gh, Go, OpenObserve, Playwright), signed apt packages for the
+  system layer (Ubuntu security updates, Node.js), and pip `--require-hashes` for Python; a
+  **required** component that cannot converge **exits non-zero** instead of running on a drifted
+  version (`quickstart.sh` `_converge` / `_apt_converge`, `CONVERGE_FAILURES` ledger). (#124)
+- `convergence.json` (`.runtime/bootstrap/convergence.json`) records one row per component, so a
+  container can prove what it is running without re-probing it. (#124)
+- `quickstart.sh --check` is now a **read-only drift report** against the pins — it audits an
+  install without changing anything. (#124)
+- A **daily advisory audit** (`.github/advisory-audit.sh` + `advisory-exceptions.json`) runs
+  every pinned package against the advisory databases on a schedule, so a CVE newly disclosed
+  against a pin surfaces without waiting for the next release. (#124)
+- Recorded as **ADR-026** (agentfactory is committed to being the most secure way to run an
+  agent; controls only strengthen) and **ADR-027** (the bootstrap convergence contract). (#124)
+- `fable-secure` (security-program review) gains an **optional external-scanner scan-gate**: it
+  runs when a scanner plugin is bound and records `tool absent` and continues when none is —
+  agentfactory ships the integration point, and the scanner is operator-supplied. (#124)
+
+### Also in this change  (#124)
+
+- Playwright and aws-agents reference integrations, loopback-only telemetry, a recycle-safe
+  `design-plan-impl`, a reworked `design-v7`, `fable-review` / `fable-increment` enhancements,
+  and scripted `perfeval-agent` measurement. (#124)
+
+---
+
 Plugins, a ChatGPT-subscription gateway, and relaunches that run on exactly the config you
 set. Extend the factory with third-party agents and tools behind a trust boundary, bill the
 model gateway to a ChatGPT subscription, and get every relaunch to honor the configuration
