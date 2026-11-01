@@ -74,19 +74,15 @@ your repository's security. By accepted architecture decision
 keeps or strengthens every security control — a capability that cannot be built without
 weakening one is not built.
 
-**Reproducible, integrity-verified installs.** Bootstrap is a *convergence*: every run brings
-each installed component to its pinned version and verifies its integrity before use —
-`sha256`/`sha512` digests for the downloaded toolchains (Claude Code, Codex, gh, Go, OpenObserve,
-Playwright), signed apt packages for the system layer (Ubuntu security updates, Node.js), and pip
-`--require-hashes` for Python — and a required component that cannot converge exits non-zero
-instead of running on a drifted version. It writes `convergence.json` so a container can prove
-what it is running, and `quickstart.sh --check` is a read-only drift report that audits an
-install without changing it
-([ADR-027](docs/architecture/adrs/ADR-027-bootstrap-convergence-contract.md)).
-
-```bash
-./quickstart.sh --check     # read-only: report drift against the pins, change nothing
-```
+**Reproducible, integrity-verified installs.** Bootstrap is a *convergence*: every run of
+`quickstart.sh` or `af install --agents` brings each installed component to its pinned version
+and verifies its integrity before use — `sha256`/`sha512` digests for the downloaded toolchains
+(Claude Code, Codex, gh, Go, OpenObserve, Playwright), signed apt packages for the system layer
+(Ubuntu security updates, Node.js), and pip `--require-hashes` for Python — and a required
+component that cannot converge exits non-zero instead of running on a drifted version. Packages
+from the original container build don't go stale: every run installs each pending Ubuntu security
+update for what is already installed. It writes `convergence.json` so a container can prove what
+it is running ([ADR-027](docs/architecture/adrs/ADR-027-bootstrap-convergence-contract.md)).
 
 **Continuously audited.** A daily CI audit runs every pinned package against the advisory
 databases, so a newly disclosed CVE in a pin surfaces without waiting for the next release.

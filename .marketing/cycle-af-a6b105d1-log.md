@@ -334,3 +334,38 @@ failed the human operator" (L33); cut the "worth saying plainly" limit — "focu
   public copy) aligned to it.
 
 GATE-4 exit criteria met: every draft resolved EDITED-and-reconciled.
+
+## SELF-REVIEW (Step 14, 2026-11-01)
+
+Reviewed `git diff origin/main...HEAD` (8 commits; README, CHANGELOG, `.marketing/` cycle artifacts).
+Privacy mode = COMMITTED (approach.md `Privacy-Decision: COMMITTED`): `.marketing/` artifacts in the diff
+alongside the Tier A doc changes is the expected shape.
+
+Findings and fixes:
+1. **README featured an operator-facing `--check` command — FIXED.** The new "Security & reproducible
+   installs" section showed a `./quickstart.sh --check` code block for operators. That contradicts the
+   operator's PR #129 direction on this same PR (L33: "no `operator` should need to know about this ...
+   The `manager` should know"). Removed the code block and the `--check` clause; the paragraph now leads
+   with what runs it (`quickstart.sh` or `af install --agents`) and adds the security implication he asked
+   for (initial-build packages get every pending Ubuntu security update). `--check` stays documented
+   where the manager needs it: USING_AGENTFACTORY.md:781 and ADR-027:51. The CHANGELOG `--check` bullet is
+   KEPT: it is a factual record of a behavior change, not an operator instruction.
+   Claim re-verification for the new README text (GATE-3 discipline): `af install --agents` runs
+   quickstart.sh = internal/cmd/install.go:974-979 and USING_AGENTFACTORY.md:781 ("Every run of
+   `./quickstart.sh`, `af install --agents` or `af plugin install` converges ..."); pending Ubuntu
+   security updates for installed packages = quickstart.sh:636-660 (`_pending_security` :450-464).
+2. **Relative links — PASS.** ADR-025/026/027 paths exist; `#plugins--the-model-gateway` matches
+   README `### Plugins & the model gateway` (README.md:465).
+3. **Stale or unverified claims — PASS.** No DefenseClaw or bundled-scanner claim in Tier A (scanner is
+   operator-supplied; roadmap gap held in #128). No TODO/FIXME in the diff.
+4. **Cruft — PASS.** The paste-verify render PNG was deleted after use; there are no untracked files.
+   The only `-screen-*.png` this cycle is declared in approach.md Standing Assets. `paste.html` is the
+   regenerable vehicle, deleted at Phase 6.
+5. **Markdown host rendering — PASS.** LinkedIn paste block has no `*` or backticks (plain text). The
+   only em dashes in the drafts sit in agent placeholders that are never pasted ([FIGURE] marker, Medium
+   URL placeholder); paste.html body has 0. Medium md vs paste.html = 18/18 blocks MATCH.
+6. **Unrelated working-tree change — EXCLUDED.** `.agentfactory/agents/marketing-cycle/CLAUDE.md` was
+   modified before this session (factory-rendered identity file, present in the session-start git
+   status). It is not a cycle change and is not committed.
+
+SELF-REVIEW VERDICT: PASS
