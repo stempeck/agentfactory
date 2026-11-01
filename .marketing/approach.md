@@ -67,10 +67,30 @@ token-economics drafts is now the sharpest voice signal we have. What he cut, an
 - SHOW IT. He wants real screenshots/output of outcomes ("the amazing outcomes we get TODAY"), not
   prose generalities and buzzwords. Capture live command output; render figures on approval.
 
+**Voice calibration — 2026-11-01 (PR #129 review, cycle af-a6b105d1).** Glenn answered EDITED with five
+inline review comments on the security draft — direction plus his own prose, not a replacement text.
+Standing rules:
+- SECURITY IMPLICATIONS FIRST. Reproducibility and drift are the means; the point is that agents holding
+  your credentials are not running on packages that are "old and outdated, and subject to CVE's". Ask
+  his question in the hook and answer it with the verified mechanism.
+- His review prose IS copy. Lift it verbatim (mechanics-only), dropping reply-to-you openers like
+  "Agree it's a trust problem." His framing: agents need a blueprint (formulas, personas) AND the most
+  secure environment possible while keeping the freedom to do their job; fewest and safest packages,
+  pinned, updated whenever a CVE could hit us; agentfactory enforces the blueprints, the container
+  enforces good security practice.
+- NO operator-facing diagnostic commands. `quickstart.sh --check` and the like belong to the `manager`
+  agent: "If we have to know about commands to operate the factory, we've already failed the human
+  operator." The win a human sees is `af install --agents` and USING agentfactory.
+- NO limits, gotchas, counter-arguments or "worth saying plainly" asides ("Who asked? Who cares?").
+  Focus on what people CAN DO. In public copy, honesty = never overclaim (precise wording; omit what
+  can't be verified), not disclaimers. Supersedes the 2026-09-22 "state a genuine limit once, inline"
+  allowance and the "honest limitations" beat in Step 4.
+
 **Honesty:** verify every URL, flag, command, and number against code or a live fetch before it
 enters content; omit and flag what you can't verify. State limitations plainly. Be precise, not
 harsh, about other tools ("no workflow-aware crash recovery", not "no crash recovery" — Claude
-Code resumes sessions; it doesn't resume your place in a procedure). Never manufacture activity.
+Code resumes sessions; it doesn't resume your place in a procedure). Limitations belong in records
+and PRs to Glenn, not in public copy (Voice calibration 2026-11-01). Never manufacture activity.
 Skip venues whose bar isn't met (awesome-go wants coverage badges) instead of burning the
 one-shot submission.
 
@@ -126,8 +146,8 @@ end the cycle.
 2. **Medium article** (flagship story): title sells the destination or forces a double-take
    with a number ("95% reliable agents give you 86% reliable workflows"); if the title claims a
    number, the body must land that exact number. Subtitle carries the search phrases (~140
-   chars before feed truncation). Body: failure-mode hook → what shipped → honest limitations →
-   repo link → motto close. Export any diagram as PNG: screenshot GitHub's Mermaid render
+   chars before feed truncation). Body: failure-mode hook → what shipped → what the operator can
+   DO with it → repo link → motto close (no limitations set piece — Voice calibration 2026-11-01). Export any diagram as PNG: screenshot GitHub's Mermaid render
    (watch for label collisions in the render — fix the diagram first, don't ship an occluded
    label).
 3. **LinkedIn post**: 150–200 words, question hook, PLAIN TEXT — LinkedIn renders no markdown;
@@ -222,6 +242,12 @@ or everyone will suspect its AI written." LinkedIn posts should be tight (his cy
 not the 180-200 word range. New calibration sources: cycle-af-50cdad6b-linkedin.md (his edited
 version, short-form) and cycle-af-50cdad6b-medium.md (approved as written, long-form).
 
+Cycle af-a6b105d1 calibration update (2026-11-01): the operator EDITED via PR #129 inline review —
+security implications first (stale packages, CVEs), his review prose lifted verbatim as copy, no
+operator-facing diagnostic commands (`--check` is manager-level; `af install --agents` is the win), no
+limits/gotchas/"worth saying plainly" asides — focus on what people CAN DO. Full rules in §1 "Voice
+calibration — 2026-11-01". New calibration source: cycle-af-a6b105d1-medium.md (his reconciled text).
+
 ## Claim Verification Map
 Commands/flags: grep `internal/cmd/`. Shipped formulas: count `internal/cmd/install_formulas/`.
 Skills: `.claude/skills/`. Test command: `make test` (never `make test-integration` locally).
@@ -254,6 +280,7 @@ gate fails any undeclared file):
 - cycle-af-91fe0795-screen-models-check.png (committed — cycle af-91fe0795 Medium figure, live-embedded)
 - cycle-af-d7166cc1-telemetry-report.png (committed — cycle af-d7166cc1 Medium figure source; retro-declared)
 - cycle-af-d7166cc1-tokenomics-status.png (committed — cycle af-d7166cc1 Medium figure source; retro-declared)
+- cycle-af-a6b105d1-screen-convergence.png (committed — cycle af-a6b105d1 Medium figure: real convergence.json render, to live-embed; delete at cleanup only if the operator SKIPs Medium at GATE 4)
   <!-- The 8 cycle-3 screenshots are real Playwright captures produced by Phase 4/6 (operator
        directed actual screens, #105) and embedded in the live Medium article; they're declared
        here only because the cleanup manifest gate's cycle-image pattern recognizes
