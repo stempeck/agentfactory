@@ -422,3 +422,15 @@ Deviations: only #2 (LinkedIn decision inherited from the PR-level EDITED), just
 operator above. None blocks.
 
 SELF-VERIFY VERDICT: PASS
+
+## STEP-17 DELIVER — HOLD IN EFFECT (2026-11-01T18:1xZ) — awaiting operator merge + release decision
+- No new PR was opened: PR #129 (opened at GATE 4 per runbook §0) is the Tier A PR. Branch pushed; head 1442f3bd.
+- CI green on 1442f3bd: run 41334538160, 7/7 jobs success. `license/cla` pending (pre-existing commit
+  identity; not content). PR is mergeable with no conflicts and blocked only by branch protection.
+- main health: scheduled `test` run on 2035611f succeeded 2026-11-01T05:21Z.
+- PR comment 6561840688: CI status, main health, the post-review README change (0e2fb81f), and the
+  release ask A/B/C. Recommendation: (A) a CHANGELOG-fold PR → a single v0.4.0 led by the security
+  milestone, tagged only on green main after that merges. No reply is treated as C (no release).
+- Manager org-record mail sent.
+HOLD: no merge by the agent (ever), no publish support against an unmerged branch, no tag without an
+explicit A/B. Resume when the PR #129 state is MERGED.
