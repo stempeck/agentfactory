@@ -369,3 +369,11 @@ Findings and fixes:
    status). It is not a cycle change and is not committed.
 
 SELF-REVIEW VERDICT: PASS
+
+## TESTS (Step 15, 2026-11-01)
+- `go build ./...` → clean (runbook Build command).
+- `make test` → exit 0; 22 packages `ok`, 0 `FAIL` (root module unit tier; never test-integration locally).
+- PR #129 CI at head 0e2fb81f (in progress at step close): advisory-decay, regen, supply-chain-lint,
+  toml-conformance, web-unit = pass; unit, integration = pending. license/cla = pending — the same
+  pre-existing commit-identity state as when the PR was opened (CLAassistant comment 2026-10-31);
+  it is not caused by this cycle's content. CI is re-checked green at Step 17 (deliver) before any merge ask.
