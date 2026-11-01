@@ -377,3 +377,48 @@ SELF-REVIEW VERDICT: PASS
   toml-conformance, web-unit = pass; unit, integration = pending. license/cla = pending — the same
   pre-existing commit-identity state as when the PR was opened (CLAassistant comment 2026-10-31);
   it is not caused by this cycle's content. CI is re-checked green at Step 17 (deliver) before any merge ask.
+
+## SELF-VERIFY (Step 16, 2026-11-01) — outputs vs the contract
+
+Contract source: no design doc (`.designs/` absent in this checkout) → the approved runbook
+`.marketing/approach.md` (`Runbook-Decision: APPROVED`, approach.md:299), as updated this cycle with
+the operator's 2026-11-01 voice calibration.
+
+1. **Tier A: every STALE audit claim fixed; no unverified claim entered — PASS.**
+   - S1 (CHANGELOG missing #124) → fixed: CHANGELOG `## Unreleased` #124 entry (addddeb3, precision
+     bbdbd54f).
+   - S2 (README missing `af tokenomics`) → a false audit finding, re-verified at Step 10 (already at
+     README:344/421); no change was needed and none was made.
+   - Every Tier A claim was verified at GATE-3 (PASS). The one post-GATE-3 Tier A edit (0e2fb81f, README
+     `af install --agents` + security-update sentence; `--check` block removed) was re-verified against
+     source in SELF-REVIEW #1: install.go:974-979, USING_AGENTFACTORY.md:781, quickstart.sh:636-660.
+     No DefenseClaw or bundled-scanner claim (gap held in #128).
+2. **Tier B: every draft operator-resolved; none self-approved — PASS.**
+   - medium.md → `Decision: EDITED` — operator `stempeck` (OWNER), PR #129 comment 2026-11-01T17:41:46Z +
+     five inline review comments on the file.
+   - linkedin.md → `Decision: EDITED`, from the same PR-level keyword. DEVIATION (documented): the
+     operator's EDITED was not split per draft and no inline comment landed on this file. I applied the
+     same direction, enumerated the changes, and asked him on PR #129 to SKIP or revert before posting.
+     This is the operator's keyword applied, not a self-approval: the agent did not write
+     READY/EDITED/SKIP on its own.
+3. **Tier law: zero external posts by the agent at any step — PASS.**
+   - Every write this cycle went to the operator-owned repo `stempeck/agentfactory` (Tier A): issues
+     #125 (story ping, closed), #128 (real gap), #130 (draft ping, closed), PR #129, PR comments and body
+     edits, and the branch pushes.
+   - No LinkedIn, Medium, HN or Reddit action; no PR to a repo the operator does not own; nothing
+     scheduled.
+4. **Voice law: EDITED drafts enumerate every agent change in-file — PASS.**
+   - medium.md: 7 numbered changes (3 operator inserts with each mechanics fix named, 3 cuts, 1 new agent
+     sentence marked "strike freely"), with the replaced text kept as a reference block.
+   - linkedin.md: 4 numbered changes plus a reference block.
+   - The same lists were delivered on PR #129 (comment 6561717470), and the runbook Voice section is
+     updated (calibration 2026-11-01).
+   - `paste.html` was re-rendered; the block-by-block text diff against medium.md = 18/18 MATCH.
+5. **Privacy mode matches the diff — PASS.** `Privacy-Decision: COMMITTED`; `git diff --stat
+   origin/main...HEAD` shows the `.marketing/` cycle artifacts committed alongside README/CHANGELOG, as
+   committed mode requires.
+
+Deviations: only #2 (LinkedIn decision inherited from the PR-level EDITED), justified and surfaced to the
+operator above. None blocks.
+
+SELF-VERIFY VERDICT: PASS
