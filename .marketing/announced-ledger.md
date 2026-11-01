@@ -15,6 +15,8 @@ history but absent here are the untold backlog.
 | v0.3.0 release: self-recovery, durable memory & honest surfaces — README five new command families (`af memory`/`af statusline`/`af recovery`/`af fidelity`/`af config fingerprint`), Roadmap "browser formula authoring" corrected to shipped, `docs/recovery-model.md` context-exhaustion section, CHANGELOG v0.3.0 (PR #107) | GitHub release + README/CHANGELOG/docs refresh (PR #107) | 2026-08-23 | https://github.com/stempeck/agentfactory/releases/tag/v0.3.0 |
 | #117 flagship "three things my factory couldn't do": third-party agent **plugins** behind a trust boundary (`af plugin list/install/verify` — consent on install, recorded provenance/content hashes, drift detection, shadow-name & non-embedded-role-template refusals, redeploy-survival; tools/integrations install from pinned commits), the **ChatGPT-subscription model gateway** (`af gateway auth import/status`, `quickstart.sh --litellm --litellm-auth=codex-subscription`, `af config models check --first`), and **stale-config relaunch fidelity** (every respawn rebuilds the launch the same way `af up` does; no token left in the tmux env; `af fidelity status` gains `interventions`/`effort` columns) | Medium article "Three things my agent factory couldn't do last month." | 2026-10-06 | https://medium.com/@glennstempeck/three-things-my-agent-factory-couldnt-do-last-month-4c98d4a7c1b4 |
 | Tier A docs refresh for #117 (**no release cut this cycle**): README formula count 24→**26** (+`lineage`, +`rapid-soldesign`), skills 12→**13** (+`architecture-diagram`), new "Plugins & the model gateway" command block (`af plugin` family + `af gateway auth import/status`), quickstart `--litellm --litellm-auth=codex-subscription`; CHANGELOG `## Unreleased` section for #117 | GitHub README/CHANGELOG (PR #119, merged to `main` `82afc5a7`) | 2026-10-06 | https://github.com/stempeck/agentfactory/pull/119 |
+| #124 **security** flagship, Tier A: new README "Security & reproducible installs" section — ADR-026 (every change keeps or strengthens every security control), bootstrap **convergence** (every `quickstart.sh` / `af install --agents` run brings each component to its pin and verifies it: sha256/sha512 digests, signed apt, pip `--require-hashes`; a required component that can't converge exits non-zero), pending Ubuntu security updates installed for the original build's packages, `convergence.json` (ADR-027), the daily CI advisory audit, trust-bounded plugins (ADR-025) and the `fable-secure` optional external-scanner scan-gate; CHANGELOG entry for #124 | GitHub README/CHANGELOG (PR #129, merged to `main` `0bf9f381`) | 2026-11-01 | https://github.com/stempeck/agentfactory/pull/129 |
+| v0.4.0 release: security & reproducible installs (#124) first, then plugins + ChatGPT-subscription gateway + config-faithful relaunch (#117) and token economics (#111), plus #127 model-generation config; CHANGELOG folded into one `## v0.4.0 — 2026-11-01` (PR #131, closes the standing v0.4.0 tag gap); **first release with prebuilt binaries** (`af` + `webui`, linux amd64/arm64, `SHA256SUMS`) | GitHub release (Latest, tag → `eab2b02c`) | 2026-11-01 | https://github.com/stempeck/agentfactory/releases/tag/v0.4.0 |
 
 *LinkedIn (short-form) was **SKIPPED** this cycle by operator decision (#108: "I'll post the next
 one to LinkedIn. Not this one."). The draft `cycle-af-c967c569-linkedin.md` stays ready with the
@@ -27,7 +29,29 @@ posted. No **GitHub release** was cut this cycle: the operator merged PR #119 wi
 decision, so #117 stays under CHANGELOG `## Unreleased` and the standing `## v0.4.0 — 2026-09-17`
 release gap (token economics, #111) is still open for a future cycle.*
 
-## Untold backlog (updated cycle af-91fe0795, top candidates)
+*Cycle af-a6b105d1 (2026-11-01): Medium **and** LinkedIn **SKIPPED**. Both drafts were operator-EDITED
+on PR #129 and reconciled, then the operator chose not to post: "I'm not posting to social media for
+now, no one reads it." Nothing was posted, so no social row is claimed. The drafts
+`cycle-af-a6b105d1-medium.md` / `-linkedin.md` stay in the tree as unpublished. The release and README
+carried this cycle. The v0.4.0 tag gap from the cycles above is closed.*
+
+## Untold backlog (updated cycle af-a6b105d1)
+Now told (cycle af-a6b105d1), on GitHub surfaces only: the **security / supply-chain** story (#124:
+convergence, integrity verification, daily advisory audit, ADR-026/027) in the README and the v0.4.0
+release; **token economics** (#111) reaches users through the v0.4.0 release notes. Both were drafted for
+social and not posted. The operator rejected token economics as a social story ("played-out and old",
+#125).
+
+Top 3 for next cycle (ranked):
+1. **A reference security-scanner integration for `fable-secure`** (#128, OPEN): the next visible step
+   of the "most secure way to run multi-agent orchestration" positioning the operator set on #125
+   (the operator named DefenseClaw). Tell it when #128 ships, not before; no claim of a bundled scanner until then.
+2. **The dogfooding story, told head-on**: an agent that runs its own repo's marketing cycle, including
+   cutting this release. It has surfaced obliquely for several cycles and is still never its own piece.
+3. **The durable memory vault** (`af memory`): agents that remember across teardowns. It pairs with
+   self-recovery as "recover AND remember" and has never been told head-on.
+
+## Prior backlog (cycle af-91fe0795)
 Now told (cycle af-91fe0795): third-party **plugins** + the trust model (`af plugin` family) head-on;
 the **ChatGPT-subscription gateway** (`af gateway auth`, `--litellm-auth=codex-subscription`);
 **stale-config relaunch fidelity** (`af fidelity status` interventions/effort). Documented in Tier A
