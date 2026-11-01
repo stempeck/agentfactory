@@ -285,3 +285,52 @@ HOLD is ~1h old and freshly notified (PR #129 + issue #130 both filed 02:46Z); N
 duplicate, NOT re-escalating to manager this early, NOT running `af done` on Step 13. A blank form
 does not advance — closing the structural gate now would repeat the GATE-2 mechanical-advance defect.
 Next event is an external operator decision on #129 / #130; nothing further is actionable this session.
+
+## GATE-4 (draft approval) — RESOLVED 2026-11-01T17:41Z: EDITED (both drafts reconciled)
+
+Re-checked live after session restart (2026-11-01T17:51Z), not from the log:
+- `gh pr view 129` → operator `stempeck` (OWNER) top-level comment 17:41:46Z: "EDITED - See the review
+  comments ..." + five COMMENTED reviews 17:42–17:48Z, all inline on `.marketing/cycle-af-a6b105d1-medium.md`
+  (review comment ids 4436682732 L15, 4436688999 L17, 4436691165 L23, 4436699349 L33, 4436704697 L49).
+- No operator push: `origin/marketing/cycle-af-a6b105d1` == 17e1b7b7 (local was one log commit ahead).
+- Issue #130 untouched (ping only).
+
+**Decision scope.** One PR-level EDITED, not split per draft. Medium = EDITED explicitly (all inline
+comments). LinkedIn = EDITED by the same PR-level keyword; its `quickstart.sh --check` clause is exactly
+what the L33 comment rejects, so the same direction was applied and flagged on the PR for SKIP/revert.
+
+**Operator direction (verbatim in PR #129; summarized):** emphasize security implications — did the
+initial-build packages get updated or are they old, outdated and open to CVEs (L15); his trust/blueprint
+paragraph (L17); `quickstart.sh` runs "(which also happens on `af install --agents`)" (L23); no
+operator-facing `--check` — "If we have to know about commands to operate the factory, we've already
+failed the human operator" (L33); cut the "worth saying plainly" limit — "focus on what people CAN DO"
+(L49).
+
+**Claim verification of the operator's new assertions (before they enter copy):**
+- `af install --agents` runs quickstart.sh → internal/cmd/install.go:974-979 (agent-gen-all.sh, then
+  runQuickstartScript); quickstart.sh:3445 says "the next ./quickstart.sh or af install --agents converges".
+- Initial-build packages updated → quickstart.sh:636-660: every convergence run does `apt-get update`, then
+  `--only-upgrade` of every installed package with a newer `<codename>-security` build (`_pending_security`
+  quickstart.sh:450-464); failure → CONVERGE_FAILURES → exit 1 (quickstart.sh:3466-3469).
+- "updating them any time a CVE that could impact us arises" → the daily `advisory-decay` CI job
+  (.github/workflows/test.yml:41-42, 260-273; .github/advisory-audit.sh:2-6: both Python locks, Go
+  toolchain and npm pins via OSV, vendor components via GitHub advisories; fails CI without a commit).
+- "the container itself enforces good security practices" / "least number of and safest packages" →
+  operator positioning (principle statements, his words), not a feature claim; adjacent mechanism
+  verified above. Left verbatim.
+
+**Reconciliation (voice law):**
+- medium.md — 7 enumerated changes in-file: 3 operator inserts (mechanics: "package that were"→"packages
+  that were", "CVE's"→"CVEs", "tie"→"time", stray backtick space), 3 cuts (--check section, "worth saying
+  plainly" paragraph, and the "Honest about where that one stands" gotcha sentence under the same L49 rule),
+  1 new agent sentence answering his hook question (marked strike-freely). Replaced text kept as reference.
+- linkedin.md — 4 enumerated changes: cut `--check` clause; his hook question adapted to the reader
+  ("your initial container build", "your agents vulnerable"); `af install --agents` + security-update
+  clause; length trim of AGENT words only (179→158) per the short-form calibration.
+- paste.html re-rendered; block-by-block text diff vs medium.md = 18/18 MATCH; headless chromium render
+  confirms figure embeds and the --check block is gone (verify PNG written in-worktree, then deleted).
+- approach.md — §1 "Voice calibration — 2026-11-01" + `## Voice` calibration update; Step 4 body template
+  ("honest limitations" → "what the operator can DO") and §1 Honesty (limits go in records/PRs, not
+  public copy) aligned to it.
+
+GATE-4 exit criteria met: every draft resolved EDITED-and-reconciled.

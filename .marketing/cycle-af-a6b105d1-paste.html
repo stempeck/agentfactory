@@ -5,6 +5,7 @@
 <title>agentfactory security story — Medium paste vehicle (cycle af-a6b105d1)</title>
 <!-- ============================================================================
      RICH-TEXT PASTE VEHICLE — cycle af-a6b105d1 (security / supply-chain, #124).
+     Re-rendered 2026-11-01 from the EDITED-and-reconciled draft (PR #129 review).
      Medium IGNORES pasted markdown; this is the copy/paste-with-images artifact.
      HOW TO USE (Tier B — YOU publish; the agent never posts):
        1. Open this file in a browser.
@@ -38,15 +39,19 @@
 
 <hr>
 
-<p>Here's a thing you stop thinking about once your agents work: they run unattended, for hours, holding your credentials, inside a container you built once and now mostly ignore. I run a lot of them. And one day I asked myself a question I couldn't actually answer - did this container install EXACTLY what I pinned? Or did a base image float, a package pick up a silent point bump, a tool quietly pull "latest" while I wasn't looking?</p>
+<p>Here's a thing you stop thinking about once your agents work: they run unattended, for hours, holding your credentials, inside a container you built once and now mostly ignore. I run a lot of them. And one day I asked myself a question I couldn't actually answer - did this container install EXACTLY what I pinned? Or did a base image float, a package pick up a silent point bump, a tool quietly pull "latest" while I wasn't looking? Did the packages that were used with the initial container build get updated or are they now old and outdated, and subject to CVEs that make the agentfactory vulnerable?</p>
 
 <p>For autonomous agents that is not a tidiness problem. It is a trust problem. Version drift across containers is one of the quieter ways a run goes weird and you burn an afternoon chasing it - and an unpinned, unaudited dependency walking into the box your agent runs your credentials in is the louder way. "It worked on the last container" is a bad answer when you can't say what the last container even had.</p>
+
+<p>Knowing what agents are actually going to do (having a blueprint, like the formula/toml and agent personas) and also knowing they're operating in the most secure environment possible WHILE giving them the freedom necessary to do their job effectively is paramount. That starts with using the least number of and safest packages possible, pinning them, updating them any time a CVE that could impact us arises, and letting agentfactory enforce the blueprints while the container itself enforces good security practices.</p>
 
 <p>So I made the bootstrap prove itself.</p>
 
 <h2>Bootstrap is now a convergence</h2>
 
-<p>Every time <code>quickstart.sh</code> runs, it does not just "install stuff if missing" anymore. It CONVERGES: for each component it checks what's installed, compares it to the pin, and brings it to exactly that pinned version - then verifies it before anything uses it. The mechanism depends on where the thing comes from = <code>sha256</code>/<code>sha512</code> digests for the downloaded toolchains (Claude Code, Codex, gh, Go, OpenObserve, Playwright), signed apt packages for the system layer (Ubuntu security, Node.js), and pip <code>--require-hashes</code> for Python.</p>
+<p>Every time <code>quickstart.sh</code> runs (which also happens on <code>af install --agents</code>), it does not just "install stuff if missing" anymore. It CONVERGES: for each component it checks what's installed, compares it to the pin, and brings it to exactly that pinned version - then verifies it before anything uses it. The mechanism depends on where the thing comes from = <code>sha256</code>/<code>sha512</code> digests for the downloaded toolchains (Claude Code, Codex, gh, Go, OpenObserve, Playwright), signed apt packages for the system layer (Ubuntu security, Node.js), and pip <code>--require-hashes</code> for Python.</p>
+
+<p>That includes the packages from the initial container build - every run refreshes apt and installs every pending Ubuntu security update for them, so they don't sit there old and outdated.</p>
 
 <p>And here's the part that makes it a guarantee instead of a hope: a REQUIRED component that cannot converge does not get waved through. The build exits non-zero. You do not get an agent running on a drifted toolchain - you get a failure you can see.</p>
 
@@ -57,23 +62,13 @@
   <figcaption>The actual convergence.json from a real bootstrap - every component pinned, integrity-verified by its own mechanism, and kept.</figcaption>
 </figure>
 
-<h2>Audit an install without touching it</h2>
-
-<p>The switch I reach for most is this one:</p>
-
-<pre><code>./quickstart.sh --check</code></pre>
-
-<p>That is a read-only drift report. It tells you where an existing install has drifted from the pins and changes NOTHING - no installs, no package lists refreshed, no surprises. You can run it on a box that's been up for weeks and just ask "are you still what I think you are?"</p>
-
 <p>And drift is not the only thing that rots. A pin you trusted on Monday can have a CVE disclosed against it on Thursday. So there's a daily audit in CI that runs every pinned package against the advisory databases - a newly disclosed problem in a pin surfaces on its own, instead of waiting for me to cut the next release and notice.</p>
 
 <h2>Why I'm spending the project's time on this</h2>
 
 <p>Because I decided the project has to. This is written down now as an architecture decision the repo is held to: agentfactory is committed to being the most secure way to run an agent, and every change keeps or STRENGTHENS every security control - a capability that cannot be built without weakening one does not get built. That is the real shift. This started as a factory of agents. What it is becoming is the most secure way to run multi-agent orchestration, and the pins-and-convergence work is just the first thing you can see from the outside.</p>
 
-<p>Plugins are part of that too - third-party agents and tools install behind a trust boundary, from a pinned commit, as a read-only snapshot, with their provenance recorded. And there's a security-program review formula, <code>fable-secure</code>, that can call an external scanner over your repo when you bind one as a plugin. Honest about where that one stands: agentfactory ships the integration POINT, not the scanner - bind your own today, and when none is bound the gate records "tool absent" and the review carries on instead of lying about a scan it didn't run. More of those to come.</p>
-
-<p>One limit worth saying plainly, because convergence is easy to oversell: pinning and verifying a known set does not bless a dependency you add OUTSIDE the pins - put an unpinned tool in the box and that's on you, not on the convergence. What this gives you is that the set the project DOES manage is exactly what you pinned, verified, and auditable - every container, every run.</p>
+<p>Plugins are part of that too - third-party agents and tools install behind a trust boundary, from a pinned commit, as a read-only snapshot, with their provenance recorded. And there's a security-program review formula, <code>fable-secure</code>, that can call an external scanner over your repo when you bind one as a plugin. More of those to come.</p>
 
 <p>The code is on GitHub: <a href="https://github.com/stempeck/agentfactory">github.com/stempeck/agentfactory</a>. If you run agents unattended - can you say, right now, what your last container actually installed, and prove it? Or are you trusting "latest" like I was? Happy to help if you want to wire this into your own setup.</p>
 
