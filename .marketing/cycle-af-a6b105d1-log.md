@@ -522,3 +522,12 @@ Diagnostics deleted: the screenshot and body dump (agent dir phase6/). Paste veh
 removed (`git rm`; it was committed to main via #129, so the removal lands in the close-out PR).
 
 PHASE-6 VERDICT: PASS
+
+## CLEANUP (Step 21, 2026-11-01)
+- Manifest gate: "MANIFEST: all files accounted for". No paste vehicle or HTML remains in `.marketing/`.
+- Removed from the git-ignored agent dir: release-build/ (source export + binaries; the shipped copies are the release
+  assets) and release-notes-v0.4.0.md (identical to the published release body apart from one trailing newline from
+  `--jq` output, checked before deleting).
+- Left on purpose: the 1-line regeneration of `.agentfactory/agents/marketing-cycle/CLAUDE.md` (factory-rendered identity
+  file, present at session start, never committed), and 1 stash entry that is not from this cycle (the stash stack is
+  shared, so it is not touched).
