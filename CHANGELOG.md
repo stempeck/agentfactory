@@ -3,10 +3,11 @@
 Notable changes to agentfactory. The project began 2026-05-01; snapshot tags `V001`–`V012`
 mark pre-release checkpoints. `v0.1.0` is the first formal release.
 
-## Unreleased
+## v0.4.0 — 2026-11-01
 
-Two changes are pending the next release tag: a security and supply-chain milestone (#124) and
-the earlier plugins / gateway / config-faithful-relaunch work (#117).
+Security and reproducible installs, plugins and a ChatGPT-subscription gateway, and token
+economics. This release leads with the security and supply-chain milestone (#124), then the
+plugins / gateway / config-faithful-relaunch work (#117) and token economics (#111).
 
 ### Security and reproducible installs  (#124)
 
@@ -118,7 +119,7 @@ you declared instead of whatever an earlier launch left behind. (#117)
   `USING_TOKENOMICS.md`, `USING_AGENTFACTORY.md`, `USING_RECOVERY.md`, `USING_TELEMETRY.md`
   and `CLAUDE.md`. (#117)
 
-## v0.4.0 — 2026-09-17
+---
 
 Token economics. The factory can now **see, bound, and prove** what a run costs its own
 context window — the questions you couldn't answer before: is this run normal, and did my
@@ -166,6 +167,11 @@ change actually help? Off by default. (#111)
 - mergepatrol counts a PR merged only when GitHub says so, not local git (#111)
 - Two new skills (10 → 12): `/improve-solution` and `/perfeval-agent`, both shipped by
   `af install`; new operator guide `USING_TOKENOMICS.md` (#111)
+- This repository's own checked-in factory config moves to the current model generation:
+  Opus 5.5, Sonnet 5.5 and Fable 5.1 profiles, Haiku 5.5 as the default haiku class, declared
+  effort levels and context windows, remapped agents, a runnable lmstudio profile, and a
+  checked-in subscription-mode gateway config. The defaults `af install` writes are
+  unchanged. (#127)
 
 ## v0.3.0 — 2026-08-23
 
