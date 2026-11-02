@@ -434,3 +434,100 @@ SELF-VERIFY VERDICT: PASS
 - Manager org-record mail sent.
 HOLD: no merge by the agent (ever), no publish support against an unmerged branch, no tag without an
 explicit A/B. Resume when the PR #129 state is MERGED.
+
+## STEP-17 DELIVER — PR #129 MERGED; release decision YES (A); CHANGELOG fold #131 — HOLD for merge
+- PR #129 MERGED 2026-11-01T19:24:56Z by `stempeck`, squash 0bf9f381. Post-merge main CI green.
+- Release decision: the operator, in session after the merge, said "merged. cut the release." → YES, option (A)
+  as recommended on #129. Recorded on #129 (comment 6562762564).
+- (A) prerequisite: CHANGELOG-only PR #131 (branch marketing/cycle-af-a6b105d1-release-v0.4.0, 48fedf0b) folds
+  `## Unreleased` (#124, #117) and the never-tagged `## v0.4.0 — 2026-09-17` (#111) into one
+  `## v0.4.0 — 2026-11-01`, security first. Adds #127 (merged after the audit) to the also-list, scoped
+  and verified: only `.agentfactory/` config plus one test changed; `internal/cmd/install.go` untouched, so
+  shipped defaults are unchanged. No `## Unreleased` heading left (matches the v0.3.0 cut). #131 CI green
+  7/7 (run 41341838698).
+- Themed release notes are drafted (agent dir, git-ignored). Tag v0.4.0 on green main ONLY after #131 merges.
+- Worktree containment: scratchpad writes under /tmp tripped WORKTREE_CONTAINMENT (af-eac122ab, acked). Temp
+  files moved into the git-ignored agent dir; scratchpad cleared.
+HOLD: step 17 exit = "PR merged; release cut iff YES". Waiting on the operator's merge of #131, then tag.
+- Re-checked 2026-11-01T20:28Z after the session recycle: #131 still OPEN (head 48fedf0b), CI 7/7 green, no reviews or comments from the operator. origin/main is still 0bf9f381. HOLD continues; no tag yet.
+
+## STEP-17 DELIVER — RESOLVED: #131 MERGED; v0.4.0 RELEASED (2026-11-01)
+- PR #131 MERGED 2026-11-01T21:02:48Z by `stempeck`, squash eab2b02c.
+- Release cut (decision YES, option A): **v0.4.0** published 2026-11-01T21:04:31Z, Latest, tag -> eab2b02c.
+  https://github.com/stempeck/agentfactory/releases/tag/v0.4.0
+  Title: "v0.4.0 — security & reproducible installs, plugins & a ChatGPT-subscription gateway, token economics".
+  Notes = agent-dir release-notes-v0.4.0.md. Before publishing, every claim was checked against main's CHANGELOG v0.4.0
+  section. One fix: the plugins bullet had attached "pinned commit / read-only snapshot" to agent installs; per
+  CHANGELOG that describes integrations, so it was reworded. The `blob/v0.4.0/CHANGELOG.md` link returns 200.
+- Green-main condition: the operator asked why the agent was waiting on CI after the merge. Main's tree at eab2b02c
+  (1e3b7c46) is byte-identical to the PR #131 head tree at 48fedf0b, which passed 7/7 CI (run 41341838698), so the
+  post-merge main run (41349938376) re-tests the same code. The tag was cut without waiting for it; that run's
+  outcome is recorded below when it lands.
+Exit criteria met: PR merged; release cut because the decision was YES.
+
+## STEP-18 PHASE 5 PUBLISH SUPPORT — HOLD IN EFFECT (2026-11-01) — awaiting operator URLs
+- Checklist written: `.marketing/cycle-af-a6b105d1-publish-checklist.md`. Order: Medium FIRST, then LinkedIn, because
+  the LinkedIn footer links to the article. Title, subtitle and the 5 runbook topics are named; homepage is the agent's job.
+- Paste vehicle `cycle-af-a6b105d1-paste.html`: no URL refresh needed (its only link is the repo). Drafts and vehicle
+  are byte-identical to main (`git diff origin/main` clean). Vehicle code spans render as `<code>`, with 0 literal backticks.
+- Correction caught while writing: the vehicle's own note says to copy only what is BELOW the dashed line (the title and
+  subtitle go in their own fields). The step text's generic "select-all" would have pasted the note, title and subtitle
+  into the Medium body. The checklist follows the vehicle's instruction.
+- Notify issue #132 opened (gh). HOLD: the gate resolves when the Medium and LinkedIn URLs (or SKIP) are recorded. Then
+  validate the Medium host against `### homepage-allowlist` → `gh repo edit --homepage`, close #132, and run Phase 6.
+- Post-merge main CI run 41349938376 (eab2b02c, the v0.4.0 tag): SUCCESS, 7/7 jobs green.
+
+## STEP-18 PHASE 5 — RESOLVED: SKIP both (2026-11-01)
+- The operator, in session: "Skip, close it out. Make sure we have a release package published. I'm not posting to social
+  media for now, no one reads it." → Medium = SKIP, LinkedIn = SKIP, recorded in the checklist form. #132 commented and closed.
+- Homepage: unchanged. The exit criterion "homepage updated if an article shipped" does not apply (no article).
+- Release package: v0.4.0 is published (not a draft or prerelease) and is `releases/latest`. The source tarball returns 200 and
+  contains quickstart.sh, go.mod and CHANGELOG.md. No release in this repo has uploaded assets (v0.1.0-v0.3.0 have none, and
+  there is no release workflow); install is clone + quickstart.sh, so the source archive is the package.
+
+## RELEASE PACKAGE — v0.4.0 binaries attached (2026-11-01, operator-directed)
+- The operator: "i need a release" / "we can't put in all this effort ... and not publish a release of the current main build".
+  No earlier release had uploaded assets and there is no release workflow, so this is the first binary package.
+- Built from `git archive v0.4.0` (eab2b02c == current main) with Go 1.26.10 (the CI-pinned toolchain), CGO_ENABLED=0,
+  -trimpath, -buildvcs=false, `-s -w`. Version/Commit/BuildTime ldflags = v0.4.0 / eab2b02c / the commit time
+  2026-11-01T21:02:48Z. The Makefile's `-X main.sourceRoot=$(CURDIR)` is deliberately OMITTED: it is a fallback lookup
+  for py/ (after the factory root, before AF_SOURCE_ROOT), and baking in the build machine's path would ship a dead
+  local path. Each of the 4 binaries contains 0 occurrences of /home/dev.
+- Assets: agentfactory_v0.4.0_linux_{amd64,arm64}.tar.gz (af, webui, LICENSE, CHANGELOG.md; deterministic tar: sorted,
+  uid/gid 0, mtime = commit time, gzip -n) + SHA256SUMS. Release notes gained a "Downloads" section (verify command,
+  and the supported install is still clone + quickstart.sh, with how `af` finds py/).
+- Verified from GitHub: GitHub's asset digests equal SHA256SUMS. A fresh `gh release download` passes `sha256sum -c`,
+  the arm64 `af --version` prints `af version v0.4.0`, and `config fingerprint` equals the installed af
+  (fee12aa8...). The release page lists all 3 assets. The build and verify dirs were in the git-ignored agent dir.
+
+## PHASE-6 (Step 19, 2026-11-01) — verify every published page
+Tier B URLs: none. Medium = SKIP and LinkedIn = SKIP (operator, in session), so no social page exists to verify. The one
+surface published this cycle is the GitHub release, so it is verified against the same checklist. Mode: full
+(screenshot via bundled headless chromium per the runbook capability, plus a full-content fetch of the rendered body).
+
+URL: https://github.com/stempeck/agentfactory/releases/tag/v0.4.0
+1. Literal `##` / `**` / fences / raw `[text](url)`: none. Rendered body_html (API, html+json), code spans excluded:
+   literal # 0, ** 0, fences 0, raw links 0, stray backticks 0. 7 `<h3>` sections render as headings. Screenshot confirms.
+2. Missing, duplicated or placeholder images, stray alt text: none. The notes carry no images. Screenshot shows 5 assets
+   listed once each: the amd64 and arm64 tar.gz, SHA256SUMS, and the 2 source archives.
+3. Subtitle as body paragraph / stray leading `# `: none. The title is in the release title field with the Latest badge,
+   and the body opens with the summary paragraph.
+4. Repo checks: homepageUrl is unchanged (last cycle's Medium article; no article shipped this cycle, so per the step-18
+   exit criterion it is not changed). curl gets 403 (Medium's Cloudflare bot block, a known gotcha), but the article is
+   live in the RSS feed (1 match). Topics contain all 4 runbook primary topics (claude-code, ai-agents,
+   multi-agent-systems, agentic-ai), and topic search lists stempeck/agentfactory under each of the 4.
+   Release links resolve: #111/#117/#124/#127 and blob/v0.4.0/CHANGELOG.md (200).
+Findings requiring operator edits: none.
+Diagnostics deleted: the screenshot and body dump (agent dir phase6/). Paste vehicle `cycle-af-a6b105d1-paste.html`
+removed (`git rm`; it was committed to main via #129, so the removal lands in the close-out PR).
+
+PHASE-6 VERDICT: PASS
+
+## CLEANUP (Step 21, 2026-11-01)
+- Manifest gate: "MANIFEST: all files accounted for". No paste vehicle or HTML remains in `.marketing/`.
+- Removed from the git-ignored agent dir: release-build/ (source export + binaries; the shipped copies are the release
+  assets) and release-notes-v0.4.0.md (identical to the published release body apart from one trailing newline from
+  `--jq` output, checked before deleting).
+- Left on purpose: the 1-line regeneration of `.agentfactory/agents/marketing-cycle/CLAUDE.md` (factory-rendered identity
+  file, present at session start, never committed), and 1 stash entry that is not from this cycle (the stash stack is
+  shared, so it is not touched).
