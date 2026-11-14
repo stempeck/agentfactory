@@ -265,3 +265,40 @@ Findings and fixes:
    change, as committed mode requires.
 
 SELF-REVIEW VERDICT: PASS
+
+## Step 15 — Tests and build on the branch
+
+- `make test` (runbook test command) on `af/marketing-cycle-169e5e` → exit 0; every root-module
+  package `ok`, no `FAIL` lines.
+- `go build ./...` (runbook build command) → OK; `cd web && go build ./...` → OK.
+- Not run locally, per the runbook ("never `make test-integration` locally"): the integration tier
+  is CI's job. Main's integration lane is red on the 4m budget (bead af-7346a737), so this PR's own
+  integration job may fail the same way although the PR changes no code.
+
+## SELF-VERIFY
+
+Contract: the approved runbook plus the operator's instruction (Step 4 verification points 1–5).
+
+- **Tier A — every STALE claim fixed, no unverified claim entered: YES.** S1 (CHANGELOG missing
+  #135) → `## v0.5.0 — 2026-11-14` in CHANGELOG.md (commit `5e02e522`, grammar fix after). Every
+  claim in it is evidenced in GATE-3. Unverifiable #135 claims were omitted (Step 10 entry).
+- **Tier B — every draft operator-resolved, none self-approved: YES (no drafts exist).** Both
+  pieces are SKIP, transcribed from the operator's own instruction and stated to the operator on
+  #136. That is a decline the operator made, not an approval by me. Deviation, documented: the
+  per-draft forms live in the story file because no draft files exist (Step 12, GATE-4 entries).
+- **Tier law — zero external posts by me: YES.** Outward actions this cycle: GitHub issue #136
+  (create, one comment, close) on the operator's own repo, and a rerun of main's failed CI job.
+  Nothing was posted, scheduled or submitted off GitHub.
+- **Voice law — EDITED drafts enumerated: N/A.** No operator text was edited; no EDITED decision.
+- **Privacy mode — diff matches declared mode: YES.** `Privacy-Decision: COMMITTED`;
+  `git diff --stat origin/main...HEAD` lists the three `.marketing/cycle-af-4073aec6-*.md` records
+  with CHANGELOG.md.
+- **Step-4 points:** (1) release-only, no Tier B: met. (2) release covers exactly #133/#135, and
+  only #135 ships to users: the CHANGELOG covers #135, and #133 is cycle records. (3) branch → PR,
+  operator merges: next step. (4) binaries + `SHA256SUMS`: at release, after merge. (5) CHANGELOG
+  section for the version: met.
+- **Open deviation carried forward:** main CI is red (bead af-7346a737). Per preflight-tests, no
+  release is published until main is green or the operator explicitly overrides. Handled at
+  deliver-tier-a.
+
+SELF-VERIFY VERDICT: PASS
