@@ -222,7 +222,9 @@ func adUnder(path, dir string) bool {
 	return path == dir || strings.HasPrefix(path, dir+string(filepath.Separator))
 }
 
-// The 6m figure is the operator's decision in #138: internal/cmd alone outgrew the old 4m.
+// The operator's decision in #138: internal/cmd alone outgrew the old 4m.
+const mtiRootBudget = 6 * time.Minute
+
 func TestMakeTestIntegrationPerPackageBudget(t *testing.T) {
 	recipe, ok := mtiRecipe(readRepoFile(t, "Makefile"), "test-integration")
 	if !ok {
@@ -241,14 +243,76 @@ func TestMakeTestIntegrationPerPackageBudget(t *testing.T) {
 			len(root), len(web), strings.Join(recipe, "\n"))
 	}
 
-	t.Run("the root-module run allows each package 6 minutes", func(t *testing.T) {
-		if root[0].err != nil || root[0].timeout != 6*time.Minute {
-			t.Errorf("root-module integration budget = %v (%v), want 6m0s:\n%s", root[0].timeout, root[0].err, root[0].line)
+	t.Run(fmt.Sprintf("the root-module run allows each package %v", mtiRootBudget), func(t *testing.T) {
+		if err := root[0].budgetErr(); err != nil {
+			t.Errorf("root-module integration run: %v:\n%s", err, root[0].line)
 		}
 	})
 	t.Run("the web module run keeps a budget of its own", func(t *testing.T) {
-		if web[0].err != nil {
-			t.Errorf("web module integration run: %v:\n%s", web[0].err, web[0].line)
+		if err := web[0].budgetErr(); err != nil {
+			t.Errorf("web module integration run: %v:\n%s", err, web[0].line)
+		}
+	})
+}
+
+func TestMakeTestIntegrationPerPackageBudgetParsers(t *testing.T) {
+	t.Run("the recipe ends where make ends it", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, makefile string
+			want           []string
+		}{
+			{"across a blank line", "t:\n\tone\n\n\ttwo\n", []string{"\tone", "\ttwo"}},
+			{"across a column-0 comment", "t:\n\tone\n# note\n\ttwo\n", []string{"\tone", "\ttwo"}},
+			{"across indented blank and comment lines", "t:\n\tone\n  \n  # note\n\ttwo\n", []string{"\tone", "\ttwo"}},
+			{"keeping tab-prefixed notes as recipe lines", "t:\n\t@# note\n\t# note\n\tone\n", []string{"\t@# note", "\t# note", "\tone"}},
+			{"at the next rule", "t:\n\tone\nu:\n\ttwo\n", []string{"\tone"}},
+			{"at a variable whose value continues on tab lines", "t:\n\tone\n\n# note\nV = a \\\n\tb \\\n\tc\n\nu:\n\ttwo\n", []string{"\tone"}},
+			{"at the end of the file", "t:\n\tone\n\ttwo", []string{"\tone", "\ttwo"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if got, ok := mtiRecipe(tc.makefile, "t"); !ok || !slices.Equal(got, tc.want) {
+					t.Errorf("mtiRecipe = %q, %v; want %q, true", got, ok, tc.want)
+				}
+			})
+		}
+		t.Run("not at all without the rule", func(t *testing.T) {
+			if got, ok := mtiRecipe("u:\n\tone\n", "t"); ok {
+				t.Errorf("mtiRecipe = %q, true; want false", got)
+			}
+		})
+	})
+
+	t.Run("each run's budget is judged", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			line    string
+			inWeb   bool
+			allowed bool
+		}{
+			{"the decided root budget", "\tgo test -tags=integration -timeout=" + mtiRootBudget.String() + " ./...", false, true},
+			{"a root run back at the old 4m", "\tgo test -tags=integration -timeout=4m ./...", false, false},
+			{"a root run without -timeout", "\tgo test -tags=integration ./...", false, false},
+			{"a root run whose later -timeout would win", "\tgo test -timeout=" + mtiRootBudget.String() + " -timeout=4m ./...", false, false},
+			{"a web run with a budget of its own", "\tcd web && go test -tags=integration -timeout=4m ./...", true, true},
+			{"a web run without -timeout", "\tcd web && go test -tags=integration ./...", true, false},
+			{"a web run whose -timeout=0 turns the timeout off", "\tcd web && go test -tags=integration -timeout=0 ./...", true, false},
+			{"a web run whose negative -timeout turns the timeout off", "\tcd web && go test -tags=integration -timeout -1m ./...", true, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				runs := mtiGoTestRuns([]string{tc.line})
+				if len(runs) != 1 || runs[0].inWeb != tc.inWeb {
+					t.Fatalf("mtiGoTestRuns(%q) = %+v; want one run with inWeb=%v", tc.line, runs, tc.inWeb)
+				}
+				if err := runs[0].budgetErr(); (err == nil) != tc.allowed {
+					t.Errorf("budgetErr() = %v; want allowed=%v", err, tc.allowed)
+				}
+			})
+		}
+	})
+
+	t.Run("a shell comment that spells out a go test run is not one", func(t *testing.T) {
+		if runs := mtiGoTestRuns([]string{"\t@# go test -timeout=0 ./... would run unbounded"}); len(runs) != 0 {
+			t.Errorf("mtiGoTestRuns counted a comment as %d run(s): %+v", len(runs), runs)
 		}
 	})
 }
@@ -260,15 +324,29 @@ type mtiGoTestRun struct {
 	err     error
 }
 
+func (run mtiGoTestRun) budgetErr() error {
+	switch {
+	case run.err != nil:
+		return run.err
+	case run.inWeb && run.timeout <= 0:
+		return fmt.Errorf("budget = %v, which go test reads as no timeout at all", run.timeout)
+	case !run.inWeb && run.timeout != mtiRootBudget:
+		return fmt.Errorf("budget = %v, want %v", run.timeout, mtiRootBudget)
+	}
+	return nil
+}
+
 func mtiRecipe(makefile, target string) ([]string, bool) {
 	var recipe []string
 	inRule := false
 	for _, line := range strings.Split(makefile, "\n") {
+		trimmed := strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, target+":"):
 			inRule = true
 		case inRule && strings.HasPrefix(line, "\t"):
 			recipe = append(recipe, line)
+		case inRule && (trimmed == "" || strings.HasPrefix(trimmed, "#")):
 		case inRule:
 			return recipe, true
 		}
@@ -280,7 +358,6 @@ func mtiGoTestRuns(recipe []string) []mtiGoTestRun {
 	var runs []mtiGoTestRun
 	for _, line := range recipe {
 		command := strings.TrimLeft(strings.TrimSpace(line), "@+-")
-		// The recipe's own @# notes quote `go test ./...`; they are not runs.
 		if strings.HasPrefix(command, "#") {
 			continue
 		}
