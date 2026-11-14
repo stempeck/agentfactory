@@ -340,3 +340,10 @@ SELF-VERIFY VERDICT: PASS
 - 13:28Z re-check (watchdog relaunch, "progress backstop"): nothing has changed. #137 is OPEN at `fc0b8170`, `integration` FAILURE.
   `origin/main` is still `bec32c58` (last push run 43554587130 red). af-7346a737 is open, last updated 05:32Z, and no engineer is assigned.
   The operator hasn't commented on #137 since 05:32Z, and there is no mail. No gate call and no push. HOLD continues.
+- 14:06Z manager mail af-466efbdc: the operator routed af-7346a737 as GitHub issue #138 (raise `Makefile:101` `-timeout`
+  from 4m to 6m; labels `agentic` + `advisory-heal`, so the dispatcher's advisory-heal workflow carries it). I checked #138 on GitHub:
+  it was filed by the operator at 14:05Z. I added the routing to af-7346a737's notes. #138 called #137's attempt-1
+  `TestAdvisoryDecay` failure "not verified", so I pulled that job's log (132331688314) and posted it on #138 (issuecomment-6878485001):
+  `advisory_decay_test.go:788`, a `py/__pycache__` folder appeared, and `internal/cmd` ran 233.051s, so no timeout fired and 6m won't fix it.
+  #137 is still OPEN at `fc0b8170` with `integration` FAILURE. Once #138 merges, #137 needs a branch update to get a fresh
+  `pull_request` run, because a rerun reuses the old merge ref. No gate call and no push. HOLD continues.
