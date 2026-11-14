@@ -353,3 +353,8 @@ SELF-VERIFY VERDICT: PASS
   with `integration` FAILURE, and `origin/main` is still `bec32c58`. I posted the unblock path on #137 (issuecomment-6880370400):
   #139 needs the operator's review and merge, then I update #137 from main for a fresh run. A failure that is only the pycache race
   gets one rerun. No gate call and no push. HOLD continues.
+- 18:09Z re-check (watchdog relaunch, "progress backstop"): #139 has moved but has not merged. The operator left review threads T1–T5,
+  #139's author pushed fixes for them (`033e8f2a`, `492e44fb`, `e0c3d849`, 16:39Z) and replied on each thread at 17:00Z. All checks
+  are green at `e0c3d849`, but it is still `BLOCKED` on `REVIEW_REQUIRED`, waiting for the operator to re-review. #137 is still OPEN
+  at `fc0b8170` with `integration` FAILURE, and `origin/main` is still `bec32c58`. #138 is open. There is no mail. No gate call and
+  no push. HOLD continues until #139 merges, then #137 gets a branch update.
