@@ -325,3 +325,9 @@ SELF-VERIFY VERDICT: PASS
   decision. Manager raised it at 04:30Z, 04:40Z and 05:10Z with no answer, so the decision is now also
   on PR #137's comment.
 - HOLD: the gate stays open until #137 is merged.
+- 07:25Z re-check (watchdog relaunch, "progress backstop"): nothing has changed. #137 is OPEN at `fc0b8170` with
+  `integration` FAILURE. `origin/main` is still `bec32c58`, and its last push run (43554587130) is red. The
+  operator hasn't commented on #137 since 05:32Z, af-7346a737 is open with no engineer assigned, and there
+  is no mail. I didn't call `af done --phase-complete --gate`: it closes this step (`internal/cmd/done.go:246`)
+  and would start publish support before the merge. I didn't push, because a push to #137 only reruns the
+  same red `integration` job. HOLD continues.
