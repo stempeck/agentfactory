@@ -302,3 +302,26 @@ Contract: the approved runbook plus the operator's instruction (Step 4 verificat
   deliver-tier-a.
 
 SELF-VERIFY VERDICT: PASS
+
+## Step 17 — Deliver (HOLD)
+
+- PR #137 pushed and open (head `fc0b8170`). The body has the release recommendation and the main-CI blocker.
+- PR CI, run 43556893600: every check passed except `integration`. Attempt 1:
+  `TestAdvisoryDecay_FailsOnFixtureAdvisory/shipped_locks_and_register_pass_at_the_earliest_recheck_by`
+  (`py/__pycache__` appeared during the `py/` snapshot, `internal/cmd` 233.051s). Attempt 2 (rerun):
+  `panic: test timed out after 4m0s`, `internal/cmd` 240.012s, the same failure as main. Not rerun again.
+- Main health: still red. Push run 43554587130 on `bec32c58` failed `integration` on both attempts. The
+  2026-11-14 scheduled run (43561155995) shows success but ran only `advisory-decay`.
+- Operator surface: PR comment #issuecomment-6872443854 (CI status, main health, merge and release
+  decisions). Manager org record sent, with a routing request for af-7346a737; its notes are updated
+  with the PR evidence.
+- Release decision: v0.5.0 recommended. Tag only on the merge commit, and only once main's `integration`
+  passes or the operator replies `RELEASE NOW` on #137.
+- Fidelity correction (STEP_FIDELITY af-a5854077): my first PR comment and manager mail left the merge
+  to the operator while `integration` was red. That broke the green-before-merge directive. I edited
+  the comment to withdraw the merge request and sent the manager a CORRECTION mail. The merge will be
+  requested only after the af-7346a737 fix lands on main and a rerun of this PR's CI is green.
+- Routing: manager (af-ca130dcb) says dispatching an engineer for af-7346a737 is the operator's
+  decision. Manager raised it at 04:30Z, 04:40Z and 05:10Z with no answer, so the decision is now also
+  on PR #137's comment.
+- HOLD: the gate stays open until #137 is merged.
