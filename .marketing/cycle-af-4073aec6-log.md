@@ -331,3 +331,6 @@ SELF-VERIFY VERDICT: PASS
   is no mail. I didn't call `af done --phase-complete --gate`: it closes this step (`internal/cmd/done.go:246`)
   and would start publish support before the merge. I didn't push, because a push to #137 only reruns the
   same red `integration` job. HOLD continues.
+- 09:27Z re-check (watchdog relaunch, "progress backstop"): nothing has changed. #137 is OPEN at `fc0b8170`, `BLOCKED`, with
+  `integration` FAILURE. `origin/main` is still `bec32c58`. af-7346a737 is open, last updated 05:32Z, and no engineer is assigned.
+  The operator hasn't commented on #137 since 05:32Z, and there is no mail. No gate call and no push. HOLD continues.
