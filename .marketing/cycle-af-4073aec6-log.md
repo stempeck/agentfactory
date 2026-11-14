@@ -92,8 +92,10 @@ HEAD = origin/main = `bec32c58`, so no checkout or stash was needed.
   CHANGELOG.md` → no match | **STALE**".
 - Claims judged VERIFIED (so not on the STALE list) are also command-backed: README.md:266
   "Twenty-six" vs `ls internal/cmd/install_formulas/*.toml | wc -l` = 26; README.md:279
-  "Thirteen" vs `ls -d .claude/skills/*/ | wc -l` = 13; all 37 README command paths exit 0 on
-  `--help` in a binary built from `bec32c58`.
+  "Thirteen" vs `ls -d .claude/skills/*/ | wc -l` = 13. README command paths: originally
+  evidenced by `--help` exit 0, which GATE 3 found proves nothing (`af telemetry bogusverb
+  --help` also exits 0). Re-proven at GATE 3 from the binary's `Available Commands` lists and
+  positional usage lines. All still VERIFIED, and the audit row is amended.
 
 **Item 2 — Every NEW feature absent from announced-ledger.md (checked, not assumed)? YES.**
 - `grep -niE 'window|startup|advisory-heal|healing|config-seed|#135|#134' announced-ledger.md`
@@ -150,3 +152,69 @@ GATE-1 VERDICT: PASS
    green. Binaries + `SHA256SUMS` as v0.4.0.
 5. Commits on `af/marketing-cycle-169e5e`: the CHANGELOG, then the cycle records (committed
    mode).
+
+## GATE-3
+
+Scope: `git diff origin/main...HEAD` = CHANGELOG.md (+78) and the three cycle records under
+`.marketing/`. Proof source: a binary built from this branch's base (`bec32c58`) plus greps of the
+tree.
+
+**Item 1 — Any command, flag or subcommand not proven this session? NONE.**
+- Subcommands proven by the binary's `Available Commands` lists: root (`up`, `sling`, `agents`,
+  `dispatch`, `memory`, `recovery`, `install`, `config`, `statusline`, `tokenomics`, `telemetry`),
+  `config` → `models`; `config models` → `check`; `agents` → `list`; `dispatch` → `status`;
+  `recovery` → `reset`; `memory` → `add list pin show status unpin`.
+- Positional verbs proven by usage lines: `af telemetry [on|off|status|report|band|usage|compare|rebuild|startup]`,
+  `af tokenomics [on|off|status]`, `af statusline [on|off|status|render]`.
+- Flags proven by flag lists or source: `--accept-window` (`af up --help` flags; `internal/cmd/sling.go:113`);
+  `af sling --agent` / `--formula` (sling flags); `af telemetry startup --agent` limited to manager and
+  supervisor (`internal/cmd/telemetry_startup.go:51` "the startup turn is measured for manager and
+  supervisor only") and `--json` (telemetry flags); `af memory pin --agent` (pin flags);
+  `af memory list --all-rows` / `--type` / `--formula` (list flags); `af dispatch status --json`,
+  `af agents list --json` (flags); `af install --init` (flags).
+- Behaviour claims checked in source: `WINDOW_MISMATCH` (`internal/cmd/window_text.go:47`); `WINDOW`
+  alarm in the statusline alerts block (`internal/cmd/statusline.go:593`); `unobserved`
+  (`internal/cmd/window_detector.go:219`); `window_declared` / `window_applied`
+  (`internal/cmd/agents.go:108-109`); `af tokenomics status` "prints the resolved context window
+  TOGETHER with where that number came from" (its help); `af config models check` "every profile
+  whose model id is not foreign … an unrecognised id, a window that differs from the declaration, or
+  a probe that cannot complete fails the check" (its help); `STARTUP` alarm
+  (`internal/cmd/startup_signal.go:13`) cleared by `af recovery reset` ("cleared the startup
+  measurement (STARTUP alarm)", `internal/cmd/recovery.go:209`); old directive warning
+  (`internal/cmd/up.go:589` `staleDirectiveFullList = "(af memory list)"`); sender `af`
+  (`internal/cmd/dispatch.go:1224`); `WORKFLOW_COMPLETE` / `WORKFLOW_STALL` (`dispatch.go:1230,1240`);
+  `stall` JSON field (`dispatch.go:134`); STALL column (`dispatch.go:2670`); `hold` / `drop` / `skip`
+  lines (`dispatch.go:1686`, `:992`, `:339`); advisory exit codes (`.github/advisory-audit.sh`:
+  `finding) exit 1`, `infrastructure) exit 3`, `exit 2` on setup errors, `exit 0`); `excused-fixable`
+  (`advisory-audit.sh:378`); labels `agentic,advisory-heal` (`.github/workflows/test.yml:333`), filing
+  only in the repository the filing steps' `if:` names (`test.yml:327`, mirrored by the CHANGELOG
+  wording); checksum-verified `gh` (`.github/install-gh.sh:31`); `Resolves …#N`
+  (`fable-implement.formula.toml:1291`); seeded config names and manager+supervisor-only
+  `agents.json` (`internal/cmd/seed_configs.go:23,32-33`); `AF_SOURCE_ROOT` (`seed_configs.go:154`);
+  `.config-seed.log` in the config dir `.agentfactory` (`install.go:427`, `config/paths.go:13`); BSD
+  sed (`quickstart.sh:2176`).
+- Removed rather than verified: the four #135 claims listed in the Step 10 log entry, the
+  web-console stall display, and "at `af up`" for the `WINDOW` alarm.
+
+**Item 2 — Any count not recounted from the filesystem? NONE.**
+- Version and size figures were each read from the file that sets them: Claude Code `2.1.322`
+  (`quickstart.sh:105`); 90,000-token budget (`internal/cmd/startup_budget.go:21`
+  `startupTurnBudgetTokens = 90000`); 3,072-byte pinned block (`internal/memory/slice.go:25,92`
+  `DefaultStandingBytes = 3072` "bounds the rendered pinned block"); 8,192 bytes (`af memory list`
+  `--all-rows` help); Go 1.27.4 (`go.mod:5`, `web/go.mod:5`, `test.yml:72`); Node.js 22.23.5
+  (`quickstart.sh:87` `NODE_APT_VERSION="22.23.5-1nodesource1"`); `oauthlib==4.0.1`, `filelock==4.2.9`
+  (`py/litellm-requirements.txt:1647,694`); ADR-028/029 (`ls docs/architecture/adrs/`). The CHANGELOG
+  names the six seeded files individually and asserts no total.
+
+**Item 3 — Any URL not fetched or built from a verified pattern? NONE.**
+- `https://github.com/stempeck/agentfactory/issues/136`: `gh issue view 136` → OPEN, same URL.
+- `https://medium.com/@glennstempeck/three-things-my-agent-factory-couldnt-do-last-month-4c98d4a7c1b4`:
+  live `gh repo view --json homepageUrl` returns exactly this URL (snapshot record only).
+- `https://medium.com`: the runbook's homepage-allowlist prefix, quoted.
+- `[USING_ADVISORYLOOPS.md](USING_ADVISORYLOOPS.md)`: relative link; the file exists at repo root.
+
+**Item 4 — Any unshipped promise outside a Roadmap section? NONE.**
+- `git diff origin/main...HEAD | grep '^+' | grep -iE 'coming soon|will ship|planned|future release|soon'`
+  → no output. Everything in the v0.5.0 section is merged in `bec32c58`.
+
+GATE-3 VERDICT: PASS
