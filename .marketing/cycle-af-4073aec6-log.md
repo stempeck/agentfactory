@@ -239,3 +239,29 @@ from this step to account for.
   would announce drafts that do not exist, so none was opened. #136 is closed now that both gates
   are resolved. The release discussion (including the CI blocker) continues on the CHANGELOG PR.
 - SKIP handling: marked skipped for the cycle report; no argument.
+
+## SELF-REVIEW
+
+`git log --oneline origin/main..HEAD`: 4 commits (CHANGELOG; cycle records; GATE-3 evidence;
+GATE-4 SKIP). `git diff --stat origin/main...HEAD`: CHANGELOG.md plus the three
+`.marketing/cycle-af-4073aec6-*.md` records.
+
+Findings and fixes:
+1. CHANGELOG grammar: "Over budget or missing rulings raises a `STARTUP` alarm" → "A startup
+   over budget, or one missing its rulings, raises a `STARTUP` alarm". Fixed.
+2. Stale claims reintroduced: none. The section adds only #135 content verified at GATE 3, and
+   no existing CHANGELOG line changed (`+78`, `-0` apart from the fix above).
+3. Relative links: one, `[USING_ADVISORYLOOPS.md](USING_ADVISORYLOOPS.md)`. The file exists at
+   repo root, the same directory as CHANGELOG.md, so it resolves on GitHub.
+4. Host rendering: headings, bullets and inline code only, the same constructs as the v0.4.0
+   section. No tables, HTML or nested fences. Two lines run to 100 columns, which is cosmetic in
+   markdown.
+5. Cruft: `git ls-files --others --exclude-standard` → empty. No TODO/FIXME, screenshots, paste
+   vehicles or debug files in the diff. Scratch files (`af-head` binary, `preflight-test.log`)
+   live in the git-ignored agent dir and are removed at cleanup.
+6. The release date `2026-11-14` in the heading assumes the tag goes out today. If main CI keeps
+   the tag waiting past today, the heading date is corrected on this branch before merge.
+7. Privacy mode: COMMITTED. `.marketing/` cycle records appear in the diff alongside the doc
+   change, as committed mode requires.
+
+SELF-REVIEW VERDICT: PASS

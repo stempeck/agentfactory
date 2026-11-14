@@ -32,8 +32,8 @@ become healing pull requests, and new factories start from current configs. (#13
 
 - `af telemetry startup [--agent manager|supervisor] [--json]` reports each role's latest startup
   turn: context occupancy at its first Stop against a 90,000-token budget, the harness version,
-  and whether the pinned rulings were delivered. Over budget or missing rulings raises a `STARTUP`
-  alarm; `af recovery reset <agent>` clears it. (#135)
+  and whether the pinned rulings were delivered. A startup over budget, or one missing its
+  rulings, raises a `STARTUP` alarm; `af recovery reset <agent>` clears it. (#135)
 - Startup no longer reads the whole memory vault, and `af up` warns when `agents.json` still
   carries the old `af memory list` directive. (#135)
 - `af memory pin <id> --agent <name>` serves a note's date and subject at the head of every
