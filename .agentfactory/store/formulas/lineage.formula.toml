@@ -75,11 +75,11 @@ default = "manager"
 id = "inherit"
 title = "Read what was inherited — without acting on it"
 description = """
-Run `af memory list` for your own vault, and `af memory list --all` to see every
+Run `af memory list --all-rows` for your own vault, and `af memory list --all --all-rows` to see every
 agent's. In audit-only mode the factory-wide view IS the job: you are looking for
 rot anywhere, not just in notes addressed to you.
 
-`af memory show` reads only YOUR vault, and `af memory list --all` gives metadata, not bodies.
+`af memory show` reads only YOUR vault, and `af memory list --all --all-rows` gives metadata, not bodies.
 Read other agents' notes by absolute path from your agent dir. Never `cd` out of the
 worktree and never write scratch outside it: a `cd` into the vault and a Write to /tmp
 each trip WORKTREE_CONTAINMENT. Inside a worktree `af root` returns the WORKTREE, so take

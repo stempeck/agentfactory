@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -20,79 +22,111 @@ import (
 // fails on the PR-head by VALUE (not a compile error) when only dispatch.go is reverted.
 // ============================================================================
 
-// BODY-1 KEYSTONE (must FAIL on head): a terminal DUAL-SOURCE phase of an
-// ISSUE-started workflow must gate advancement on PR merge-readiness. pr-iterate is
-// dual-source with source:issue listed BEFORE source:pr (mirrors dispatch.json), so
-// phaseMapping's first match is source:issue and m.Source=="issue". With a complete
-// instance but a NOT-merge-ready PR, head SKIPS the terminal gate (m.Source!="pr")
-// and returns phaseAdvance — silently terminating an un-merge-ready PR. The fix gates
-// on phaseConsumesPR(mappings, phase) and returns phaseWait.
-func TestEvaluatePhase_TerminalDualSourceIssueStarted_GatesOnPRMergeReadiness(t *testing.T) {
+// BODY-1 KEYSTONE: a terminal DUAL-SOURCE phase of an ISSUE-started workflow must reach the
+// PR gate. pr-iterate is dual-source with source:issue listed BEFORE source:pr (mirrors
+// dispatch.json), so phaseMapping's first match is source:issue and m.Source=="issue". With a
+// complete instance and a CLOSED linked PR, only a gate keyed on phaseConsumesPR(mappings, phase)
+// stalls; the order-dependent m.Source guard would skip it and return phaseAdvance.
+func TestEvaluatePhase_TerminalDualSourceIssueStarted_GatesOnPRState(t *testing.T) {
 	store := installMemStore(t)
 	cfg := featureWorkflowDualSourceFullCfg() // pr-iterate terminal, source:issue BEFORE source:pr
 	wf := &cfg.Workflows[0]
 
-	// The terminal phase's own instance is genuinely complete (non-empty pointer ⇒
-	// the latch path is not taken; instanceComplete gates on the close reason only).
 	complete := seedClosedEpic(t, store, config.CloseReasonFormulaComplete)
-	stubLinkedPRs(t, []int{42}) // the issue resolves to exactly one linked PR
+	stubLinkedPRs(t, []int{42})
+	stubItemState(t, "CLOSED")
 
-	// The linked PR is NOT merge-ready (mergeable + green but NOT approved) ⇒
-	// prArtifactComplete is false ⇒ a fired gate must return phaseWait.
-	orig := ghPRStatus
-	ghPRStatus = func(repo string, prNumber int) (prStatus, error) {
-		return prStatus{Mergeable: true, Approved: false, ChecksGreen: true}, nil
-	}
-	t.Cleanup(func() { ghPRStatus = orig })
-
-	// pr-iterate's FIRST mapping is source:issue (listed before source:pr) — the exact
-	// shape that made the old m.Source guard skip the gate.
 	if _, ok := phaseMapping(cfg.Mappings, "pr-iterate"); !ok {
 		t.Fatal("pr-iterate mapping missing from featureWorkflowDualSourceFullCfg")
 	}
-	entry := dispatchEntry{
-		Agent: "iterate", Workflow: "feature-workflow", Phase: "pr-iterate",
-		PhaseInstanceID: complete.ID, PhaseDispatchedAt: time.Now().Add(-time.Hour),
+	outcome, reason := evaluatePhase(context.Background(), store, "owner/repo", terminalIssueItem(), "issue",
+		terminalIterateRecord(complete.ID), cfg.Mappings, wf, "pr-iterate")
+
+	if outcome != phaseStall {
+		t.Fatalf("evaluatePhase(terminal dual-source pr-iterate, issue-started, PR CLOSED) = %v, "+
+			"want phaseStall — the terminal gate must fire via phaseConsumesPR, not the order-dependent m.Source", outcome)
 	}
-	item := ghItem{Number: 7, URL: "https://github.com/owner/repo/issues/7",
-		Labels: labels("agentic", "feature-workflow", "pr-iterate")}
-
-	outcome, _ := evaluatePhase(context.Background(), store, "owner/repo", item, "issue",
-		entry, cfg.Mappings, wf, "pr-iterate")
-
-	if outcome != phaseWait {
-		t.Fatalf("evaluatePhase(terminal dual-source pr-iterate, issue-started, PR not merge-ready) = %v, "+
-			"want phaseWait — the terminal gate must fire via phaseConsumesPR, not the order-dependent m.Source. "+
-			"(FAILS on head: m.Source==\"issue\" skips the gate ⇒ phaseAdvance.)", outcome)
+	if want := `terminal pr phase "pr-iterate": linked PR #42 is closed without merging`; reason != want {
+		t.Errorf("stall reason = %q, want %q", reason, want)
 	}
 }
 
-// BODY-1 companion positive: the same terminal dual-source pr-iterate advances ONLY
-// when the linked PR is genuinely merge-ready. Documents the happy path the gate guards.
-func TestEvaluatePhase_TerminalDualSourceIssueStarted_AdvancesWhenPRMergeReady(t *testing.T) {
+// BODY-1 companion positive: the same terminal advances while the linked PR is open for the
+// operator's review, approved or not and green or not (#755 D1).
+func TestEvaluatePhase_TerminalDualSourceIssueStarted_AdvancesWhenPROpen(t *testing.T) {
 	store := installMemStore(t)
 	cfg := featureWorkflowDualSourceFullCfg()
 	wf := &cfg.Workflows[0]
 
 	complete := seedClosedEpic(t, store, config.CloseReasonFormulaComplete)
 	stubLinkedPRs(t, []int{42})
-	stubPRStatusGreen(t) // mergeable + approved + green
+	var asked []string
+	stubItemStates(t, func(repo string, number int, source string) (string, error) {
+		asked = append(asked, fmt.Sprintf("%s#%d/%s", repo, number, source))
+		return "OPEN", nil
+	})
 
-	if _, ok := phaseMapping(cfg.Mappings, "pr-iterate"); !ok {
-		t.Fatal("pr-iterate mapping missing from featureWorkflowDualSourceFullCfg")
-	}
-	entry := dispatchEntry{
-		Agent: "iterate", Workflow: "feature-workflow", Phase: "pr-iterate",
-		PhaseInstanceID: complete.ID, PhaseDispatchedAt: time.Now().Add(-time.Hour),
-	}
-	item := ghItem{Number: 7, URL: "https://github.com/owner/repo/issues/7",
-		Labels: labels("agentic", "feature-workflow", "pr-iterate")}
-
-	outcome, _ := evaluatePhase(context.Background(), store, "owner/repo", item, "issue",
-		entry, cfg.Mappings, wf, "pr-iterate")
+	outcome, _ := evaluatePhase(context.Background(), store, "owner/repo", terminalIssueItem(), "issue",
+		terminalIterateRecord(complete.ID), cfg.Mappings, wf, "pr-iterate")
 
 	if outcome != phaseAdvance {
-		t.Fatalf("evaluatePhase(terminal dual-source pr-iterate, issue-started, PR merge-ready) = %v, want phaseAdvance", outcome)
+		t.Fatalf("evaluatePhase(terminal dual-source pr-iterate, issue-started, PR OPEN) = %v, want phaseAdvance", outcome)
+	}
+	if !equalStrs(asked, []string{"owner/repo#42/pr"}) {
+		t.Errorf("ghItemState calls = %v, want the linked PR's state read once as a pr: [owner/repo#42/pr]", asked)
+	}
+}
+
+// #755 D1 per-state table for a PR-consuming terminal phase: OPEN and MERGED complete, CLOSED and
+// any unknown state stall with a reason, and a gh error retries with a reason naming the error.
+func TestEvaluatePhase_TerminalPRStateTable(t *testing.T) {
+	cases := []struct {
+		name       string
+		state      string
+		err        error
+		want       phaseOutcome
+		wantReason string
+	}{
+		{"open_unapproved_red_completes", "OPEN", nil, phaseAdvance, ""},
+		{"merged_completes", "MERGED", nil, phaseAdvance, ""},
+		{"closed_stalls", "CLOSED", nil, phaseStall, `terminal pr phase "pr-iterate": linked PR #42 is closed without merging`},
+		{"unknown_state_stalls", "DRAFTISH", nil, phaseStall, `terminal pr phase "pr-iterate": linked PR #42 has unknown state "DRAFTISH"`},
+		{"gh_error_retries", "", errors.New("HTTP 502"), phaseRetry, "HTTP 502"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := installMemStore(t)
+			cfg := featureWorkflowDualSourceFullCfg()
+			complete := seedClosedEpic(t, store, config.CloseReasonFormulaComplete)
+			stubLinkedPRs(t, []int{42})
+			stubItemStates(t, func(string, int, string) (string, error) { return tc.state, tc.err })
+
+			outcome, reason := evaluatePhase(context.Background(), store, "owner/repo", terminalIssueItem(), "issue",
+				terminalIterateRecord(complete.ID), cfg.Mappings, &cfg.Workflows[0], "pr-iterate")
+
+			if outcome != tc.want {
+				t.Errorf("outcome = %v, want %v", outcome, tc.want)
+			}
+			if tc.err != nil {
+				if !strings.Contains(reason, tc.wantReason) {
+					t.Errorf("retry reason = %q, want it to name the gh error %q", reason, tc.wantReason)
+				}
+			} else if reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+func terminalIssueItem() ghItem {
+	return ghItem{Number: 7, URL: "https://github.com/owner/repo/issues/7",
+		Labels: labels("agentic", "feature-workflow", "pr-iterate")}
+}
+
+func terminalIterateRecord(instanceID string) dispatchEntry {
+	return dispatchEntry{
+		Agent: "iterate", Workflow: "feature-workflow", Phase: "pr-iterate",
+		PhaseInstanceID: instanceID, PhaseDispatchedAt: time.Now().Add(-time.Hour),
 	}
 }
 

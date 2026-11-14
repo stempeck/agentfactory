@@ -156,7 +156,7 @@ func TestRecoveryReset(t *testing.T) {
 		}
 	})
 
-	t.Run("mutates breaker state only", func(t *testing.T) {
+	t.Run("mutates only breaker state and the startup measurement", func(t *testing.T) {
 		root := setupRecoveryResetFactory(t)
 		fake := installFakeTmuxPresent(t, session.SessionName("worker"))
 		installMemStore(t)

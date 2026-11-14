@@ -166,6 +166,8 @@ type mockTmux struct {
 	// calls is the cross-method call order, so a test can pin that a tmux effect happens
 	// before the pane is respawned rather than merely at some point.
 	calls []string
+	// onRespawn runs inside RespawnPane, so a test can act at the instant the pane is replaced.
+	onRespawn func()
 }
 
 func (m *mockTmux) ClearHistory(pane string) error {
@@ -177,6 +179,9 @@ func (m *mockTmux) ClearHistory(pane string) error {
 func (m *mockTmux) RespawnPane(pane, command string) error {
 	m.calls = append(m.calls, "RespawnPane")
 	m.respawnPaneCalls = append(m.respawnPaneCalls, struct{ pane, cmd string }{pane, command})
+	if m.onRespawn != nil {
+		m.onRespawn()
+	}
 	return m.respawnErr
 }
 

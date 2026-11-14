@@ -145,7 +145,7 @@ func installPanicSeams(t *testing.T) {
 		t.Errorf("telemetry.Export was called with the gate off")
 		return nil
 	}
-	launchAgentSession = func(*cobra.Command, string, string, string, string, string, bool) error {
+	launchAgentSession = func(*cobra.Command, string, string, string, string, string, launchGates) error {
 		t.Errorf("launchAgentSession was called")
 		return nil
 	}

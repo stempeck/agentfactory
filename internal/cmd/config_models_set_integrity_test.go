@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -16,8 +18,8 @@ import (
 // literal token, and a fitness attestation vouching for bytes it never saw.
 
 const (
-	pinnedRegistry  = `{"models":{"opus":{"ANTHROPIC_MODEL":"claude-opus-4-8"},"gpu":{"ANTHROPIC_MODEL":"local-gpu"}}}`
-	droppedRegistry = `{"models":{"opus":{"ANTHROPIC_MODEL":"claude-opus-4-8"}}}`
+	pinnedRegistry  = `{"models":{"opus":{"ANTHROPIC_MODEL":"claude-opus-4-8","CLAUDE_CODE_MAX_CONTEXT_TOKENS":"1000000"},"gpu":{"ANTHROPIC_MODEL":"local-gpu"}}}`
+	droppedRegistry = `{"models":{"opus":{"ANTHROPIC_MODEL":"claude-opus-4-8","CLAUDE_CODE_MAX_CONTEXT_TOKENS":"1000000"}}}`
 )
 
 // seedPinningDispatch writes a dispatch.json whose only mapping pins the model profile "gpu".
@@ -399,11 +401,10 @@ func TestConfigModelsSet_InvalidatesStaleAttestation(t *testing.T) {
 		}
 	})
 
-	t.Run("a profile name that is not a plain file name never reaches the filesystem", func(t *testing.T) {
-		root := setupConfigFactory(t)
-		// Profile names are not validated anywhere, and the attestation path joins them straight
-		// into a filesystem path — so an invalidation sweep must never treat a traversal sequence
-		// as a file it may delete.
+	// The attestation path joins a profile name straight into a filesystem path, so "../victim"
+	// names this bystander rather than an attestation.
+	seedBystander := func(t *testing.T, root string) string {
+		t.Helper()
 		bystander := filepath.Join(root, ".runtime", "victim.json")
 		if err := os.MkdirAll(filepath.Dir(bystander), 0o755); err != nil {
 			t.Fatalf("mkdir .runtime: %v", err)
@@ -411,11 +412,31 @@ func TestConfigModelsSet_InvalidatesStaleAttestation(t *testing.T) {
 		if err := os.WriteFile(bystander, []byte(`{"keep":"me"}`), 0o644); err != nil {
 			t.Fatalf("seed bystander file: %v", err)
 		}
+		return bystander
+	}
+
+	t.Run("a profile name that is not a plain file name is refused before it reaches the filesystem", func(t *testing.T) {
+		root := setupConfigFactory(t)
+		bystander := seedBystander(t, root)
 
 		traversal := `{"models":{"../victim":{"ANTHROPIC_MODEL":"claude-opus-4-8"}}}`
-		if _, _, err := runConfigModelsSetSplit(t, traversal); err != nil {
-			t.Fatalf("the registry itself is legal today; the guard must not start rejecting it: %v", err)
+		if _, _, err := runConfigModelsSetSplit(t, traversal); err == nil {
+			t.Fatal("a profile named ../victim was saved; no window record can be filed under it")
 		}
+		if _, err := os.Stat(bystander); err != nil {
+			t.Errorf("a refused save must not delete a file outside the attestation directory: %v", err)
+		}
+	})
+
+	t.Run("the sweep never deletes outside the attestation directory for such a name", func(t *testing.T) {
+		root := setupConfigFactory(t)
+		bystander := seedBystander(t, root)
+
+		// A models.json written by hand still loads with such a name, so the sweep meets it in the
+		// registry a save replaces even though the save itself can no longer carry it.
+		before := map[string]map[string]string{"../victim": {"ANTHROPIC_MODEL": "claude-opus-4-8"}}
+		var warn bytes.Buffer
+		invalidateStaleFitnessAttestations(root, before, map[string]map[string]string{}, &warn)
 		if _, err := os.Stat(bystander); err != nil {
 			t.Errorf("a profile name must never be used to delete a file outside the attestation directory: %v", err)
 		}
@@ -434,4 +455,78 @@ func mustRoot(t *testing.T) string {
 		t.Fatalf("resolve factory root: %v", err)
 	}
 	return root
+}
+
+// t28UnusableProfileNames are names validWindowName refuses, so no window record or launch fact can be
+// filed under them: every watched launch of such a profile probes again and dates it 0001-01-01.
+var t28UnusableProfileNames = []struct{ label, name string }{
+	{"traversal", "../victim"},
+	{"slash", "team/zeta"},
+	{"leading dot", ".hidden"},
+	{"backslash", `back\slash`},
+	{"tab", "tab\there"},
+	{"129 bytes", strings.Repeat("p", windowFieldMaxBytes+1)},
+}
+
+func t28Registry(t *testing.T, name string) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"models": map[string]map[string]string{
+		"opus": {"ANTHROPIC_MODEL": "claude-opus-4-8", config.EnvMaxContextTokens: "1000000"},
+		name:   {"ANTHROPIC_MODEL": "claude-opus-4-8"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+func TestConfigModelsSet_RejectsAProfileNameWindowFilesCannotCarry(t *testing.T) {
+	for _, tc := range t28UnusableProfileNames {
+		t.Run(tc.label, func(t *testing.T) {
+			if validWindowName(tc.name) {
+				t.Fatalf("fixture %q is a name validWindowName accepts", tc.name)
+			}
+			root := setupConfigFactory(t)
+			seedRegistry(t, droppedRegistry)
+			before, err := os.ReadFile(config.ModelsConfigPath(root))
+			if err != nil {
+				t.Fatalf("read seeded models.json: %v", err)
+			}
+			_, stderr, err := runConfigModelsSetSplit(t, t28Registry(t, tc.name))
+			if err == nil {
+				t.Errorf("saved a profile named %q, which no window record can be filed under (stderr=%q)", tc.name, stderr)
+			} else if msg := err.Error(); !strings.Contains(msg, tc.name) && !strings.Contains(msg, strconv.Quote(tc.name)) {
+				t.Errorf("the rejection %q does not name the profile %q", msg, tc.name)
+			}
+			if after, _ := os.ReadFile(config.ModelsConfigPath(root)); !bytes.Equal(before, after) {
+				t.Errorf("models.json changed on a save that must be rejected:\nbefore=%s\nafter=%s", before, after)
+			}
+		})
+	}
+	t.Run("control: a name validWindowName accepts still saves", func(t *testing.T) {
+		for _, name := range []string{"team-zeta", strings.Repeat("p", windowFieldMaxBytes)} {
+			setupConfigFactory(t)
+			if _, stderr, err := runConfigModelsSetSplit(t, t28Registry(t, name)); err != nil {
+				t.Errorf("a profile named %q (%d bytes) was rejected: %v (stderr=%q)", name, len(name), err, stderr)
+			}
+		}
+	})
+}
+
+// Every setter is strict and every loader tolerant: a models.json that already holds such a name has
+// to keep loading, or the factory that saved it before the rule existed could not start.
+func TestLoadModelsConfig_ToleratesAProfileNameWindowFilesCannotCarry(t *testing.T) {
+	for _, tc := range t28UnusableProfileNames {
+		t.Run(tc.label, func(t *testing.T) {
+			root := setupConfigFactory(t)
+			writeRawModels(t, root, t28Registry(t, tc.name))
+			cfg, err := config.LoadModelsConfig(root)
+			if err != nil {
+				t.Fatalf("a models.json holding the profile %q no longer loads: %v", tc.name, err)
+			}
+			if cfg == nil || cfg.Models[tc.name] == nil {
+				t.Errorf("the profile %q was dropped on load: %+v", tc.name, cfg)
+			}
+		})
+	}
 }

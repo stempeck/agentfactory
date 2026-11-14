@@ -97,6 +97,177 @@ func TestWorkflowAdvisoryDecaySchedule(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("the scan accepts the healing loop's additions", func(t *testing.T) {
+		for name, mutated := range map[string]string{
+			"a job-level permissions block and a guarded second step": strings.Replace(adScheduleFixture,
+				"    steps:\n      - run: .github/advisory-audit.sh\n",
+				"    permissions:\n      contents: read\n      issues: write\n    steps:\n      - run: .github/advisory-audit.sh\n"+
+					"      - name: install gh\n        if: failure() && github.repository == 'stempeck/agentfactory-pro'\n        run: .github/install-gh.sh\n"+
+					"      - name: file healing issues\n        if: failure() && github.repository == 'stempeck/agentfactory-pro'\n        run: .github/advisory-issue.sh\n", 1),
+			"workflow_dispatch inputs before the schedule": strings.Replace(adScheduleFixture, "  schedule:\n",
+				"  workflow_dispatch:\n    inputs:\n      advisory_dry_run:\n        description: \"Print the healing issues the advisory-decay job would file, and file none\"\n"+
+					"        type: boolean\n        default: false\n  schedule:\n", 1),
+		} {
+			if mutated == adScheduleFixture {
+				t.Fatalf("%s: the mutation did not apply to the fixture", name)
+			}
+			if v := adScheduleViolations(mutated); len(v) != 0 {
+				t.Errorf("%s: rejected: %v", name, v)
+			}
+		}
+	})
+}
+
+const (
+	adRecordEnv    = "ADVISORY_AUDIT_RECORD: ${{ runner.temp }}/advisory-record.json"
+	adFilingStepIf = "        if: failure() && github.repository == 'stempeck/agentfactory-pro' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.advisory_dry_run))"
+	adAuditStep    = "name: advisory audit (every pin against OSV, the vendor advisories and the exception register)\n" +
+		"        env:\n          " + adRecordEnv + "\n        run: .github/advisory-audit.sh"
+)
+
+// The filing step turns a red daily run into healing issues; these are the properties that keep it
+// from filing on a PR run, from losing the audit's record, or from widening the token's scope.
+func TestWorkflowAdvisoryIssueStep(t *testing.T) {
+	raw := readRepoFile(t, ".github/workflows/test.yml")
+	code := cvCode(raw)
+
+	start := strings.Index(code, "\n  advisory-decay:\n")
+	if start == -1 {
+		t.Fatal("test.yml has no advisory-decay job")
+	}
+	job := code[start+1:]
+	if end := regexp.MustCompile(`(?m)^  \S`).FindAllStringIndex(job, 2); len(end) == 2 {
+		job = job[:end[1][0]]
+	}
+	var steps []string
+	if i := strings.Index(job, "\n    steps:\n"); i != -1 {
+		for _, s := range strings.Split(job[i+len("\n    steps:\n"):], "\n      - ") {
+			if strings.TrimSpace(s) != "" {
+				steps = append(steps, s)
+			}
+		}
+	}
+	stepWith := func(needle string) int {
+		for i, s := range steps {
+			if strings.Contains(s, needle) {
+				return i
+			}
+		}
+		return -1
+	}
+	audit, install, filing := stepWith("run: .github/advisory-audit.sh"), stepWith("name: install gh"), stepWith("name: file healing issues")
+	if install == -1 {
+		t.Errorf("test.yml has no \"install gh\" step in the advisory-decay job; steps: %q", steps)
+	}
+	if filing == -1 {
+		t.Fatalf("test.yml has no \"file healing issues\" step in the advisory-decay job; steps: %q", steps)
+	}
+	if audit == -1 {
+		t.Fatalf("the advisory-decay job no longer runs .github/advisory-audit.sh; steps: %q", steps)
+	}
+	if len(steps) != 4 {
+		t.Errorf("the advisory-decay job has %d steps, want 4 (checkout, audit, install gh, file healing issues)", len(steps))
+	}
+	if !(audit < install && install < filing) {
+		t.Errorf("step order audit=%d install=%d filing=%d, want the audit, then the gh install, then the filing", audit, install, filing)
+	}
+
+	t.Run("the audit step is unchanged", func(t *testing.T) {
+		if got := strings.TrimSpace(steps[audit]); got != adAuditStep {
+			t.Errorf("the audit step changed (#755 changes only what filing needs):\ngot:\n%s\nwant:\n%s", got, adAuditStep)
+		}
+	})
+
+	t.Run("gh is installed whenever the filing step runs", func(t *testing.T) {
+		if install == -1 {
+			t.Fatal("no install gh step")
+		}
+		for _, want := range []string{adFilingStepIf + "\n", "run: .github/install-gh.sh"} {
+			if !strings.Contains(steps[install], want) {
+				t.Errorf("the install gh step lacks %q; got:\n%s", strings.TrimSpace(want), steps[install])
+			}
+		}
+		if strings.Contains(steps[install], "ADVISORY_AUDIT_RECORD") {
+			t.Error("the install gh step carries the audit record; only the audit and the filer touch it")
+		}
+	})
+
+	t.Run("the pro repository is the only repository test", func(t *testing.T) {
+		tests := regexp.MustCompile(`github\.repository\s*[=!]=\s*'[^']*'`).FindAllString(code, -1)
+		if want := "github.repository == 'stempeck/agentfactory-pro'"; len(tests) != 2 || tests[0] != want || tests[1] != want {
+			t.Errorf("repository tests = %q, want exactly two %q (the install and filing steps), so the published copy skips both", tests, want)
+		}
+	})
+
+	t.Run("both steps name the same record path", func(t *testing.T) {
+		if n := strings.Count(raw, adRecordEnv); n != 2 {
+			t.Errorf("%q appears %d times, want 2 (the audit step writes it, the filing step reads it)", adRecordEnv, n)
+		}
+		for _, i := range []int{audit, filing} {
+			if !strings.Contains(steps[i], adRecordEnv) {
+				t.Errorf("step %q lacks %q", strings.SplitN(steps[i], "\n", 2)[0], adRecordEnv)
+			}
+		}
+	})
+
+	t.Run("the filing step runs only on a failed daily or dry run of this repository", func(t *testing.T) {
+		if !strings.Contains(steps[filing], adFilingStepIf+"\n") {
+			t.Errorf("the filing step lacks the line\n%s\ngot:\n%s", adFilingStepIf, steps[filing])
+		}
+	})
+
+	t.Run("issues write is granted to the advisory-decay job only", func(t *testing.T) {
+		if n := strings.Count(raw, "issues: write"); n != 1 {
+			t.Errorf("test.yml names \"issues: write\" %d times (comments included), want exactly 1", n)
+		}
+		if !strings.Contains(job, "\n    permissions:\n      contents: read\n      issues: write\n") {
+			t.Error("the advisory-decay job lacks a job-level permissions block of contents: read and issues: write")
+		}
+		top := regexp.MustCompile(`(?m)^permissions:\n((?:  .*\n)*)`).FindStringSubmatch(code)
+		if top == nil || top[1] != "  contents: read\n" {
+			t.Errorf("the workflow-level permissions block must stay contents: read only; got %q", top)
+		}
+	})
+
+	t.Run("no step can hide its failure", func(t *testing.T) {
+		if strings.Contains(steps[audit], "continue-on-error") {
+			t.Error("the audit step carries continue-on-error; failure() would never fire the filing step")
+		}
+		for _, i := range []int{install, filing} {
+			if i != -1 && strings.Contains(steps[i], "continue-on-error") {
+				t.Errorf("step %q carries continue-on-error; a red run must stay red until its heal merges", strings.SplitN(steps[i], "\n", 2)[0])
+			}
+		}
+	})
+
+	t.Run("workflow_dispatch stays a bare key with the dry-run input", func(t *testing.T) {
+		if !regexp.MustCompile(`(?m)^  workflow_dispatch:$`).MatchString(raw) {
+			t.Error("`  workflow_dispatch:` is no longer a bare key line")
+		}
+		in := regexp.MustCompile(`(?m)^  workflow_dispatch:\n    inputs:\n      advisory_dry_run:\n((?:        .*\n)*)`).FindStringSubmatch(code)
+		if in == nil {
+			t.Fatal("workflow_dispatch has no inputs.advisory_dry_run block")
+		}
+		for _, want := range []string{"        type: boolean\n", "        default: false\n"} {
+			if !strings.Contains(in[1], want) {
+				t.Errorf("inputs.advisory_dry_run lacks %q; got:\n%s", want, in[1])
+			}
+		}
+	})
+
+	t.Run("the filing step's labels, dry-run switch and script", func(t *testing.T) {
+		for _, want := range []string{
+			"ADVISORY_ISSUE_LABELS: agentic,advisory-heal\n",
+			"ADVISORY_DEDUPE_LABEL: advisory-heal\n",
+			"ADVISORY_ISSUE_DRY_RUN: ${{ inputs.advisory_dry_run && '1' || '' }}\n",
+			"run: .github/advisory-issue.sh\n",
+		} {
+			if !strings.Contains(steps[filing], want) {
+				t.Errorf("the filing step lacks %q", strings.TrimSuffix(want, "\n"))
+			}
+		}
+	})
 }
 
 const adScheduleFixture = `on:

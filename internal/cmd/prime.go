@@ -96,6 +96,13 @@ func runPrime(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if sessionChanged && startupMeasured(role) {
+		respawned := os.Getenv(config.EnvLaunchKind) == startupLaunchRespawn
+		if payload.Source == "startup" && !respawned {
+			writeStartupTurnPending(cwd, payload.SessionID)
+		}
+	}
+
 	// 4a. A session begins only when the persisted id actually changes. The SessionStart hook
 	// fires on resume as well as on a fresh session, so recording per firing would multiply one
 	// session into many and make every per-session view wrong. Recorded here rather than beside

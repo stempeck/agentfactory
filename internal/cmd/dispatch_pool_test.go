@@ -55,7 +55,7 @@ func TestDispatchAdmit_InertWithoutPoolFact(t *testing.T) {
 // from the pool fact, which is exactly "refuses ONLY via the declared pool" and the record's
 // pool_tokens proves it.
 //
-// RED today: with no declared window ResolveWindow yields WindowSourceHost/Fallback, the gate's
+// RED today: with no declared window PredictWindow/SessionWindow yield WindowSourceFallback/Host, the gate's
 // `pool.Source != WindowSourceDeclared` short-circuit returns nil, and nothing is denied. GREEN
 // after: the pool operand reads AF_BACKEND_POOL_TOKENS=200000, arms on it, and a 95% launcher
 // (190000) breaches the 180000 ceiling — a deny whose record carries pool_tokens=200000.

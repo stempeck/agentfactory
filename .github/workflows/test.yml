@@ -28,7 +28,11 @@
 #   - advisory-decay    : .github/advisory-audit.sh — every pinned package against the
 #                    advisory databases and .github/advisory-exceptions.json. It also
 #                    runs daily on the schedule, so a pin that becomes vulnerable (or an
-#                    exception that expires) fails CI without any commit.
+#                    exception that expires) fails CI without any commit. When a daily run
+#                    of stempeck/agentfactory-pro fails, its last two steps install the gh
+#                    release quickstart.sh pins (.github/install-gh.sh) and file one healing
+#                    issue per pin from the audit's record (.github/advisory-issue.sh); a
+#                    failed manual run with advisory_dry_run prints them and files none.
 
 name: test
 
@@ -38,6 +42,11 @@ on:
     tags: ['V*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      advisory_dry_run:
+        description: "Print the healing issues the advisory-decay job would file, and file none"
+        type: boolean
+        default: false
   schedule:
     - cron: '17 5 * * *'
 
@@ -60,7 +69,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.10'
+          go-version: '1.27.4'
       - run: go version
       # Issue #435: this lane's header declares "no external backend on PATH", yet
       # TestWebBridgeHostListenerRoundTrip (internal/cmd/quickdocker_test.go) extracts and
@@ -108,7 +117,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.10'
+          go-version: '1.27.4'
       - run: go version
       # The web console lives in its OWN Go module (web/go.mod, module
       # github.com/stempeck/agentfactory-web) and is INVISIBLE to the root `unit` job's
@@ -140,17 +149,18 @@ jobs:
     # job's Issue #435 "never silently skipped" guarantee precedent.
     # AF_REQUIRE_LIVE_CLAUDE: "1" is the same switch for the #673 live deny probe
     # (internal/cmd/dispatch_admit_live_probe_integration_test.go): it turns "claude not on PATH"
-    # from a skip into a failure. It is deliberately NOT set yet — no step here installs the claude
-    # CLI, so setting it today would fail this gating lane for a missing dependency rather than for
-    # a real regression. Add the install step and the flag together, or not at all; until then the
-    # probe's live half is dormant in CI and only its compiled-binary leg runs.
+    # from a skip into a failure, and does the same for the window agreement test
+    # (internal/cmd/harness_window_integration_test.go). The install step below and this flag land
+    # together: the step hands the pinned harness to those two tests through AF_TEST_CLAUDE_BIN, so
+    # a missing harness is a failure of this lane, never a silent skip.
     env:
       AF_REQUIRE_REAL_STORE: "1"
+      AF_REQUIRE_LIVE_CLAUDE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.10'
+          go-version: '1.27.4'
       - run: go version
       - name: install system deps (tmux for internal/cmd/integration_test.go; libsqlite3-0 so the Python issue-store's sqlite3 can load libsqlite3.so.0)
         run: sudo apt-get update && sudo apt-get install -y tmux libsqlite3-0
@@ -163,8 +173,45 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: install the pinned Claude Code harness (sha256-checked against quickstart.sh)
+        run: |
+          qs_value() { sed -n 's/^'"$1"'="\([^"$]*\)"$/\1/p' quickstart.sh | head -1; }
+          v=$(qs_value CLAUDE_CODE_VERSION)
+          case "$(uname -m)" in
+            aarch64|arm64) platform=linux-arm64; sha=$(qs_value CLAUDE_CODE_SHA256_ARM64) ;;
+            x86_64|amd64)  platform=linux-x64;   sha=$(qs_value CLAUDE_CODE_SHA256_AMD64) ;;
+            *) echo "unsupported runner arch $(uname -m)" >&2; exit 1 ;;
+          esac
+          bin="$RUNNER_TEMP/claude-bin"; mkdir -p "$bin"
+          curl -fsSL -o "$bin/claude" "https://downloads.claude.ai/claude-code-releases/$v/$platform/claude"
+          printf '%s  %s\n' "$sha" "$bin/claude" | sha256sum --check --strict
+          chmod +x "$bin/claude" && "$bin/claude" --version
+          echo "AF_TEST_CLAUDE_BIN=$bin/claude" >> "$GITHUB_ENV"
       - name: make test-integration
         run: make test-integration
+      # If 2.1.308 is withdrawn upstream, pick a release that does not yet recognise a tracked
+      # `claude-` id, then replace every 2.1.308 in this step and both sha256 values from that
+      # release's manifest (platforms[...].checksum for linux-arm64 and linux-x64). If
+      # claude-fable-5-2 leaves .agentfactory/models.json, choose a tracked id the chosen
+      # release does not recognise and name it in the final grep.
+      - name: negative control - the window agreement test fails on the pre-pin harness 2.1.308
+        run: |
+          case "$(uname -m)" in
+            aarch64|arm64) platform=linux-arm64; sha=fdd22e6cbb734d580f5664c48df4294eeec850218ff07f186f9af30426396ee1 ;;
+            x86_64|amd64)  platform=linux-x64;   sha=356733f185fa988e6bf3aa9a555269fdd167982a2e2a80d3c8a78037bb92ad58 ;;
+            *) echo "unsupported runner arch $(uname -m)" >&2; exit 1 ;;
+          esac
+          neg="$RUNNER_TEMP/claude-2.1.308"; mkdir -p "$neg" "$HOME/.cache/af-test"
+          curl -fsSL -o "$neg/claude" "https://downloads.claude.ai/claude-code-releases/2.1.308/$platform/claude"
+          printf '%s  %s\n' "$sha" "$neg/claude" | sha256sum --check --strict
+          chmod +x "$neg/claude"
+          log="$RUNNER_TEMP/window-negative-control.log"
+          if AF_TEST_CLAUDE_BIN="$neg/claude" PATH="$PWD/.venv/bin:$PATH" TMPDIR="$HOME/.cache/af-test" GOTMPDIR="$HOME/.cache/af-test" CGO_ENABLED=0 \
+              go test -tags=integration -timeout=4m -count=1 ./internal/cmd -run '^TestShippedClaudeProfilesWindowAgreement$' > "$log" 2>&1; then
+            cat "$log"; echo "TestShippedClaudeProfilesWindowAgreement passed on Claude Code 2.1.308" >&2; exit 1
+          fi
+          cat "$log"
+          grep -qF 'does not recognise model "claude-fable-5-2"' "$log"
       # The venv exists from here on (make test-integration's $(VENV_MARKER) rule built it).
       - name: dry-run the LiteLLM lock (every pinned wheel resolves with its hash)
         run: |
@@ -181,7 +228,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.10'
+          go-version: '1.27.4'
       - run: go version
       # `make check-regen` builds + installs `af`, runs agent-gen-all.sh --no-build to
       # regenerate internal/templates/roles/ from the current formulas, then
@@ -265,9 +312,25 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-advisory-decay-${{ github.event_name }}-${{ github.head_ref || github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    permissions:
+      contents: read
+      issues: write
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - name: advisory audit (every pin against OSV, the vendor advisories and the exception register)
+        env:
+          ADVISORY_AUDIT_RECORD: ${{ runner.temp }}/advisory-record.json
         run: .github/advisory-audit.sh
+      - name: install gh
+        if: failure() && github.repository == 'stempeck/agentfactory-pro' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.advisory_dry_run))
+        run: .github/install-gh.sh
+      - name: file healing issues
+        if: failure() && github.repository == 'stempeck/agentfactory-pro' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.advisory_dry_run))
+        env:
+          ADVISORY_AUDIT_RECORD: ${{ runner.temp }}/advisory-record.json
+          ADVISORY_ISSUE_LABELS: agentic,advisory-heal
+          ADVISORY_DEDUPE_LABEL: advisory-heal
+          ADVISORY_ISSUE_DRY_RUN: ${{ inputs.advisory_dry_run && '1' || '' }}
+        run: .github/advisory-issue.sh

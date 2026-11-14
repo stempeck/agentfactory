@@ -309,12 +309,21 @@ func Expire(factoryRoot, agent, id string) error {
 // It writes NO new frontmatter. A reopened note is indistinguishable from one that never
 // graduated, deliberately: the emitted shape is a golden (codec_test.go), and a provenance key
 // here would buy one breadcrumb at the cost of the invariant that every note in the vault emits
-// the same keys in the same order. The event is recorded where a human will see it — the nag mail.
+// the same keys in the same order, except the operator's `standing` mark. The event is recorded
+// where a human will see it — the nag mail.
 func Reopen(factoryRoot, agent, id string) error {
 	return mark(factoryRoot, agent, id, StatusGraduated, func(n *Note) {
 		n.Status = StatusActive
 		n.GraduatedTo = ""
 	})
+}
+
+func Pin(factoryRoot, agent, id string) error {
+	return mark(factoryRoot, agent, id, StatusActive, func(n *Note) { n.Standing = true })
+}
+
+func Unpin(factoryRoot, agent, id string) error {
+	return mark(factoryRoot, agent, id, StatusActive, func(n *Note) { n.Standing = false })
 }
 
 // mark applies a frontmatter-only rewrite. Last-writer-wins is the correct semantic here: the

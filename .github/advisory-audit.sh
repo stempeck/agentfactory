@@ -5,6 +5,9 @@
 # .github/advisory-exceptions.json. It also fails when a newer nodejs release on the pinned major
 # carries security fixes, and when a pinned release asset no longer answers.
 # Bash 3.2 compatible, because macOS runs it under /bin/bash.
+# With ADVISORY_AUDIT_RECORD=<absolute path> it also writes the finding record (schema v1) there, the
+# one input the healing-issue filer reads. Exit codes: 0 clean, 1 finding, 2 setup, 3 infrastructure
+# errors only.
 set -u
 
 cd "$(dirname "$0")/.." || exit 2
@@ -14,13 +17,24 @@ register=.github/advisory-exceptions.json
 locks="py/requirements.txt py/litellm-requirements.txt"
 qs=quickstart.sh
 npm_lock=internal/cmd/integrations/playwright/af/package-lock.json
+rec="${ADVISORY_AUDIT_RECORD:-}"
+case "$rec" in
+  ""|/*) ;;
+  *) echo "ERROR: ADVISORY_AUDIT_RECORD=$rec: cannot write the finding record" >&2; exit 2 ;;
+esac
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/advisory-audit.XXXXXX") || exit 2
 trap 'rm -rf "$work"' EXIT
 
-errors=0
+# Every optional file the record writer reads exists, so a run that stops early still writes a record.
+for f in errors expired node_newer unexcused candidates fixes fixes_raw probes; do : > "$work/$f"; done
+echo '[]' > "$work/register.json"
+
+errors=0 expired=0 node_behind=0 excused_fixable=0
+# The record splits errors on the record separator, because a message may carry remote text with newlines.
 err() {
   echo "ERROR: $*" >&2
+  printf '%s\036' "$*" >> "$work/errors"
   errors=$((errors + 1))
 }
 
@@ -163,7 +177,7 @@ printf 'BerriAI/litellm %s\n' "$litellm_version" >> "$work/vendors"
 # patched version, or sits above a patched version on its own major.minor line (a backport).
 # A range or patched version it cannot read fails closed, and so does an open-ended range whose
 # only patched version is at or below its lower bound: such data cannot say what is fixed.
-cat > "$work/compare.awk" <<'AWK'
+cat > "$work/vfuncs.awk" <<'AWK'
 function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
 function vparse(v, a,    s, rel, pre, parts, n, i) {
   s = trim(v); sub(/^[vV]/, "", s); sub(/-stable$/, "", s)
@@ -215,6 +229,8 @@ function status(range, patched,    cons, n, i, c, op, ver, X, r, upper, haveLow,
   if (vcmp(V, M) >= 0) return "no"
   return "yes"
 }
+AWK
+cat > "$work/compare.awk" <<'AWK'
 BEGIN { FS = "\t"; if (!vparse(version, V)) bad = 1 }
 {
   if (bad) { s = "unparseable" } else if (NF < 4 || $3 == "") { s = "unparseable" } else { s = status($3, $4) }
@@ -258,7 +274,7 @@ while read -r repo version; do
     | if ((.vulnerabilities // []) | length) == 0 then [$id, $aliases, "", ""]
       else (.vulnerabilities[] | [$id, $aliases, (.vulnerable_version_range // ""), (.patched_versions // "")]) end
     | @tsv' "$work/advisories.$slug" \
-    | awk -v version="$version" -f "$work/compare.awk" \
+    | awk -v version="$version" -f "$work/vfuncs.awk" -f "$work/compare.awk" \
     | while IFS="$us" read -r id aliases st; do
         printf '%s\037%s\037GitHub %s %s (%s)\037%s@%s\n' "$id" "$aliases" "$repo" "$version" "$st" "${repo##*/}" "$version" >> "$work/findings"
       done
@@ -285,7 +301,8 @@ else
       | .[] | select((.version | startswith($line)) and .security == true and ((.version | num) > $p)) | .version' \
       "$work/node_index" > "$work/node_newer"
     while IFS= read -r newer; do
-      err "nodejs $node_pin is behind $newer, a newer v$node_major security release; move NODE_APT_VERSION"
+      echo "ERROR: nodejs $node_pin is behind $newer, a newer v$node_major security release; move NODE_APT_VERSION" >&2
+      node_behind=$((node_behind + 1))
     done < "$work/node_newer"
   fi
 
@@ -348,16 +365,82 @@ if jq -e 'type == "array"' "$register" > /dev/null 2>&1; then
   jq -r '.[] | (.package + "@" + .version) as $k | (.id, (.aliases // [])[]) | . + "\u001f" + $k' "$register" | LC_ALL=C sort -u > "$work/excused"
   jq -r --arg today "$today" '.[] | select(.recheck_by < $today) | "\(.id) (recheck_by \(.recheck_by))"' "$register" > "$work/expired"
   while IFS= read -r line; do
-    err "register entry $line has expired as of $today; re-review it and set a new recheck_by"
+    echo "ERROR: register entry $line has expired as of $today; re-review it and set a new recheck_by" >&2
+    expired=$((expired + 1))
   done < "$work/expired"
+  cp "$register" "$work/register.json"
 else
   err "$register is missing or is not a JSON array"
   : > "$work/excused"
 fi
 
+# ---- The fix table ------------------------------------------------------------------------------
+# The one place a fix is derived: the excused-fixable probe and the record writer both read
+# $work/fixes. A candidate is kept only when it parses and is strictly newer than the pin; every
+# other one (unparseable, at or below the pin, a GIT-range commit, or any candidate of a pin that does
+# not parse) goes to $work/fixes_raw for display. GitHub patched_versions are not filtered by
+# package: the advisory's whole list binds to the vendor key, and the newer-than-pin filter narrows it.
+
+while IFS="$us" read -r id aliases against keys; do
+  case "$against" in
+    "OSV "*)
+      [ -f "$work/vuln.$id" ] || continue
+      for key in $keys; do
+        pin=$(awk -v k="$key" '$2 "@" $3 == k {print $1 " " $2; exit}' "$work/pins")
+        eco=${pin%% *} pkg=${pin#* }
+        jq -r --arg id "$id" --arg key "$key" --arg eco "$eco" --arg pkg "$pkg" '
+          def norm: if $eco == "PyPI" then ascii_downcase | gsub("[-_.]+"; "-") else . end;
+          (.affected // [])[] | select((.package.ecosystem // "") == $eco and ((.package.name // "") | norm) == ($pkg | norm))
+          | (.ranges // [])[] | (if .type == "GIT" then "git" else "version" end) as $kind
+          | (.events // [])[] | select(.fixed != null) | [$id, $key, $kind, .fixed] | join("\u001f")' "$work/vuln.$id" >> "$work/candidates"
+      done ;;
+    "GitHub "*)
+      repo=${against#GitHub }
+      slug=$(printf '%s' "${repo%% *}" | tr '/' '_')
+      jq -r --arg id "$id" --arg key "$keys" '
+        select(.ghsa_id == $id) | (.vulnerabilities // [])[] | (.patched_versions // "") | split(",")[]
+        | sub("^[ \t]+"; "") | sub("[ \t]+$"; "") | sub("^>=[ ]*"; "") | select(length > 0)
+        | [$id, $key, "version", .] | join("\u001f")' "$work/advisories.$slug" >> "$work/candidates" ;;
+  esac
+done < "$work/findings"
+
+# Each kept row carries its vparse tuple as a fixed-width third field, so the sort orders an
+# advisory's fixes lowest version first (1.94.0 before 1.100.4) and the cut drops it again.
+cat > "$work/newer.awk" <<'AWK'
+BEGIN { FS = "\037"; printf "" > fixes }
+{
+  pin = $2; sub(/.*@/, "", pin)
+  if ($3 != "git" && vparse(pin, P) && vparse($4, C) && vcmp(C, P) > 0)
+    printf "%s%s%s%s%012d%012d%012d%012d%d%012d%s%s\n", $1, FS, $2, FS, C[1], C[2], C[3], C[4], C[5], C[6], FS, $4 > fixes
+  else print $1 FS $2 FS $4 > raw
+}
+AWK
+awk -v fixes="$work/fixes.keyed" -v raw="$work/fixes_raw" -f "$work/vfuncs.awk" -f "$work/newer.awk" "$work/candidates"
+LC_ALL=C sort -u "$work/fixes.keyed" | cut -d "$us" -f 1,2,4 > "$work/fixes"
+LC_ALL=C sort -u -o "$work/fixes_raw" "$work/fixes_raw"
+
+# probe ID KEY NAME: an entry that excuses KEY while a fix above the pin is published must say so with
+# fix_available, or the exception outlives its reason. One line per (entry, key, advisory): an
+# advisory both OSV and GitHub report is one finding, not two.
+probe() {
+  local id=$1 key=$2 name=$3 fixed entry ack
+  fixed=$(awk -F"$us" -v id="$id" -v k="$key" '$1 == id && $2 == k {printf "%s%s", sep, $3; sep = ", "}' "$work/fixes")
+  [ -n "$fixed" ] || return 0
+  jq -r --arg n "$name" --arg k "$key" '.[] | select(.package + "@" + .version == $k and (.id == $n or any((.aliases // [])[]; . == $n)))
+    | [.id, (.fix_available // "")] | join("\u001f")' "$work/register.json" > "$work/probe.entries"
+  while IFS="$us" read -r entry ack; do
+    [ -z "$ack" ] || continue
+    grep -qxF "$entry$us$key$us$id" "$work/probes" && continue
+    printf '%s\037%s\037%s\n' "$entry" "$key" "$id" >> "$work/probes"
+    echo "ERROR: register entry $entry excuses $key although $fixed is published; set fix_available or move the pin" >&2
+    excused_fixable=$((excused_fixable + 1))
+  done < "$work/probe.entries"
+}
+
 unexcused=0
 while IFS="$us" read -r id aliases against keys; do
   excused_by=""
+  uncovered=0
   for key in $keys; do
     hit=""
     for name in $id $aliases; do
@@ -367,12 +450,14 @@ while IFS="$us" read -r id aliases against keys; do
       fi
     done
     if [ -z "$hit" ]; then
-      excused_by=""
-      break
+      uncovered=1
+      printf '%s\037%s\037%s\037%s\n' "$id" "$aliases" "$against" "$key" >> "$work/unexcused"
+      continue
     fi
     [ -n "$excused_by" ] || excused_by=$hit
+    probe "$id" "$key" "$hit"
   done
-  if [ -n "$excused_by" ]; then
+  if [ "$uncovered" -eq 0 ] && [ -n "$excused_by" ]; then
     echo "excused   $id [$aliases] $against (register: $excused_by)"
   else
     echo "UNEXCUSED $id [$aliases] $against"
@@ -380,5 +465,92 @@ while IFS="$us" read -r id aliases against keys; do
   fi
 done < "$work/findings"
 
-echo "advisory audit: $(jq length "$work/queries.json") OSV pins, $(wc -l < "$work/vendors" | tr -d ' ') vendor repos, $(wc -l < "$work/findings" | tr -d ' ') reported, $unexcused unexcused, $errors errors (as of $today)"
-[ "$errors" -eq 0 ] && [ "$unexcused" -eq 0 ]
+if [ "$unexcused" -gt 0 ] || [ "$expired" -gt 0 ] || [ "$node_behind" -gt 0 ] || [ "$excused_fixable" -gt 0 ]; then
+  class=finding
+elif [ "$errors" -gt 0 ]; then
+  class=infrastructure
+else
+  class=clean
+fi
+
+echo "advisory audit: $(jq length "$work/queries.json") OSV pins, $(wc -l < "$work/vendors" | tr -d ' ') vendor repos, $(wc -l < "$work/findings" | tr -d ' ') reported, $unexcused unexcused, $expired expired, $node_behind node-behind, $excused_fixable excused-fixable, $errors errors (as of $today)"
+
+# ---- The finding record ---------------------------------------------------------------------------
+# Written after the summary so a record that cannot be written still leaves the run's output intact.
+# The writer groups and joins the $work files; it never re-derives a class, a key or a fix. A key
+# with an expired finding carries its probe rows as that finding's excused_fixable rather than as a
+# second finding, so one key files one issue whose remedy names the published fix.
+
+if [ -n "$rec" ]; then
+  cat > "$work/record.jq" <<'JQ'
+def rows($s): $s | split("\n") | map(select(length > 0) | split("\u001f"));
+def lines($s): $s | split("\n") | map(select(length > 0));
+def firsts(f): reduce .[] as $x ([]; if any(.[]; (. | f) == ($x | f)) then . else . + [$x] end);
+def meets($a; $b): any($a[]; . as $x | any($b[]; . == $x));
+def ingroups(f): to_entries | group_by(.value | f) | map(sort_by(.key) | map(.value));
+(lines($pins) | map(split(" "))) as $P
+| (lines($vendors) | map(split(" "))) as $V
+| rows($fixes) as $F
+| rows($fixes_raw) as $R
+| rows($findings) as $FR
+| $reg[0] as $G
+| def pinned_in($k): ([$P[] | select(.[1] + "@" + .[2] == $k) | {ecosystem: .[0], repo: ""}]
+      + [$V[] | select((.[0] | split("/") | last) + "@" + .[1] == $k) | {ecosystem: "GitHub", repo: .[0]}]) | firsts(.);
+  def located($class; $k): {class: $class, key: $k, pinned: (pinned_in($k) | length > 0), pinned_in: pinned_in($k)};
+  def fixed($id; $k): [$F[] | select(.[0] == $id and .[1] == $k) | .[2]];
+  def names: [.id] + (.aliases // []);
+  def splitnames($s): $s | split(" ") | map(select(length > 0));
+  (rows($unexcused) | ingroups(.[3]) | map(.[0][3] as $k
+    | (map(. as $r | ($r[2] | split(" ")) as $w | {
+        id: $r[0], aliases: splitnames($r[1]), source: $w[0],
+        ecosystem: (if $w[0] == "GitHub" then "GitHub" else ([$P[] | select(.[1] + "@" + .[2] == $k) | .[0]] | first // "") end),
+        repo: (if $w[0] == "GitHub" then $w[1] else "" end),
+        against: $r[2], fixed: fixed($r[0]; $k),
+        fixed_raw: ([$R[] | select(.[0] == $r[0] and .[1] == $k) | .[2]] | join(", "))}) | firsts(.id)) as $adv
+    | ($adv | map(.id, .aliases[])) as $an
+    | located("unexcused"; $k) + {
+        fix_published: any($adv[]; .fixed | length > 0),
+        advisories: $adv,
+        register: ([$G[] | (.package + "@" + .version) as $ek | select($ek != $k and meets(names; $an))
+          | {id, aliases: (.aliases // []), reviewed, recheck_by, key: $ek}] | unique_by([.key, .id]))})) as $unexcusedF
+  | (rows($probes) | ingroups(.[1]) | map(.[0][1] as $k
+    | {key: $k, entries: (map({id: .[0], advisory: .[2], fixed: fixed(.[2]; $k)}) | sort_by(.id, .advisory))})) as $probed
+  | def probed($k): [$probed[] | select(.key == $k) | .entries[]];
+  ([$G[] | select(.recheck_by < $today)] | ingroups(.package + "@" + .version) | map((.[0].package + "@" + .[0].version) as $k
+    | located("expired"; $k) + {entries: (sort_by(.id) | map(names as $en | {
+        id, aliases: (.aliases // []), reviewed, recheck_by,
+        excuses: ([$FR[] | select(meets([.[0]] + splitnames(.[1]); $en) and (splitnames(.[3]) | index([$k]) != null)) | .[0]] | unique),
+        fix_available: (.fix_available // "")})),
+      excused_fixable: probed($k)})) as $expiredF
+  | (lines($node_newer) as $nn | if ($nn | length) > 0
+      then [{class: "node-behind", key: ("nodejs@" + $node_pin), pinned: true, pinned_in: [{ecosystem: "apt", repo: ""}], releases: $nn}]
+      else [] end) as $nodeF
+  | ($expiredF | map(.key)) as $expiredKeys
+  | [$probed[] | .key as $k | select(any($expiredKeys[]; . == $k) | not) | located("excused-fixable"; $k) + {entries}] as $fixableF
+  | {schema: 1, today: $today, exit_class: $class, counts: $counts,
+     findings: ($unexcusedF + $expiredF + $nodeF + $fixableF | sort_by(.class, .key)),
+     errors: ($errs | split("\u001e") | map(select(length > 0)))}
+JQ
+  if [ -d "$rec" ] || ! : 2>/dev/null > "$rec.tmp"; then
+    echo "ERROR: ADVISORY_AUDIT_RECORD=$rec: cannot write the finding record" >&2
+    exit 2
+  fi
+  counts=$(jq -n -c --argjson r "$(wc -l < "$work/findings" | tr -d ' ')" --argjson u "$unexcused" --argjson e "$expired" \
+    --argjson n "$node_behind" --argjson f "$excused_fixable" --argjson x "$errors" \
+    '{reported: $r, unexcused: $u, expired: $e, node_behind: $n, excused_fixable: $f, errors: $x}')
+  if ! jq -n -f "$work/record.jq" --arg today "$today" --arg class "$class" --argjson counts "$counts" --arg node_pin "${node_pin:-}" \
+      --rawfile pins "$work/pins" --rawfile vendors "$work/vendors" --rawfile findings "$work/findings" \
+      --rawfile unexcused "$work/unexcused" --rawfile fixes "$work/fixes" --rawfile fixes_raw "$work/fixes_raw" \
+      --rawfile probes "$work/probes" --rawfile node_newer "$work/node_newer" --rawfile errs "$work/errors" \
+      --slurpfile reg "$work/register.json" > "$rec.tmp" || ! mv "$rec.tmp" "$rec"; then
+    rm -f "$rec.tmp"
+    echo "ERROR: ADVISORY_AUDIT_RECORD=$rec: cannot write the finding record" >&2
+    exit 2
+  fi
+fi
+
+case $class in
+  finding) exit 1 ;;
+  infrastructure) exit 3 ;;
+esac
+exit 0

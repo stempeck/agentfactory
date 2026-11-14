@@ -186,7 +186,7 @@ git stash list              # Should be empty
 If dirty state from previous work:
 ```bash
 # If changes are relevant to this issue:
-git add -A && git commit -m "WIP: <description>"
+git add -A && git commit -m "WIP: <description>"   # PRIVATE worktree; in a shared one add and commit by path (guard below)
 
 # If changes are unrelated cruft (PRIVATE worktree only — see the guard below):
 git stash push -u -m "design-v7-{{issue}}-prework"
@@ -236,7 +236,7 @@ ls .designs/{{issue}}/source.md 2>/dev/null || echo "No prior source.md found"
 
 **If NO prior artifacts exist:**
 - This is acceptable — most design work starts fresh.
-- Close this step with the reason recorded: `af done --skip "No prior design contract found"` (there is no `--reason` flag; `--skip <reason>` is how a step closes with a recorded reason)
+- Close this step with plain `af done`, and say in your reply that no prior design contract was found: the reply is the record. (`af done` has no `--reason` flag, and its `--skip <reason>` flag is accepted but read by nothing, so a reason passed there is recorded nowhere.)
 - Proceed to `preflight-tests`.
 
 **Exit criteria:** Prior design state reviewed and either preserved, archived, or confirmed absent."""
@@ -420,6 +420,8 @@ snapshot the sub-agents will read, and that context carries into every later ste
 region to the snapshot with `sed -n`/`awk` FIRST, then read the snapshot section once when you need
 to understand it; grep for the symbol to find the range, do not print the range to find the symbol.
 
+**Count first, then list.** Never pipe a grep whose output becomes a snapshot fact — a claim that no test holds a literal, the list of files holding a pin — through `head -N`. Print the match count, then the whole list (or write the list to a fragment file and read that). A truncated list makes a present match look like a verified absence; it did so on issue 743 and again on issue 751, and only the fidelity verifiers caught it.
+
 1. **Package tree**: Run `find . -type f -name "*.go" -not -path "*/vendor/*" | head -200` from the codebase root. Paste the full output.
 
 2. **Module identity**: Run `head -5 go.mod`. Paste the output.
@@ -433,9 +435,9 @@ to understand it; grep for the symbol to find the range, do not print the range 
 6. **Referenced types and functions**: For every struct, interface, or function named in the problem statement, grep for its definition and paste the actual signature with file:line — the signature line (a struct's field list), not the body, and not its call sites' code (list call sites as `file:line` pointers).
 
 7. **Dynamic values**: For any runtime values captured, mark them with ⚡ and note: "Dynamic — value as of snapshot time, will change."
-   Capture two classes of dynamic value explicitly, because a source that hands over a prior design inherits that design's premises and they go stale: (a) the live state of every issue and PR number the source or any document it references cites (`gh issue view <n> --json state,closedAt`, `gh pr view <n> --json state,mergedAt`), and (b) the installed version of every external tool it names (`claude --version`, plus any other CLI the source relies on). When a captured value contradicts a premise in a referenced document (a "pending" phase already merged, a version threshold already met), write a **Facts that supersede the source's premises** note at the top of `codebase-snapshot.md`, above section 1, so all three analysts read it before the code sections.
+   Capture three classes of dynamic value explicitly, because a source that hands over a prior design inherits that design's premises and they go stale: (a) the live state of every issue and PR number the source or any document it references cites (`gh issue view <n> --json state,closedAt`, `gh pr view <n> --json state,mergedAt`), and (b) the installed version of every external tool it names (`claude --version`, plus any other CLI the source relies on), and (c) the governance of every GitHub repository the design may write to — open issues or pull requests in, or merge into: `gh api repos/<owner>/<repo>/rulesets`, `gh api repos/<owner>/<repo>/rules/branches/<default>` and `gh api repos/<owner>/<repo>/branches/<default>/protection` (a 404 from the protection endpoint does NOT mean the branch is unprotected; rulesets are a separate system), plus `gh api user` and that identity's permission on the repository (`gh api repos/<owner>/<repo>/collaborators/<login>/permission`), stating which actor the rules let bypass them. When a captured value contradicts a premise in a referenced document (a "pending" phase already merged, a version threshold already met), write a **Facts that supersede the source's premises** note at the top of `codebase-snapshot.md`, above section 1, so all three analysts read it before the code sections.
 
-**Gate 1.3b:** `codebase-snapshot.md` must exist and contain at least sections 1 and 2. If the problem references formulas, section 3 is required. If it references CLI commands, section 4 is required. If the source or a document it references cites an issue or PR number or names an external tool, section 7 must record that issue/PR's live state and that tool's installed version (item 7 above); a snapshot that omits them fails this gate. Run the size check after Step 1.3c has appended Decision History, and again before closing this step; above 100 KB, replace pasted bodies and regions with signatures and `file:line` pointers until it passes:
+**Gate 1.3b:** `codebase-snapshot.md` must exist and contain at least sections 1 and 2. If the problem references formulas, section 3 is required. If it references CLI commands, section 4 is required. If the source or a document it references cites an issue or PR number or names an external tool, section 7 must record that issue/PR's live state and that tool's installed version (item 7 above); a snapshot that omits them fails this gate. If the design may write to a GitHub repository (issues, pull requests, merges), section 7 must also record that repository's rulesets and the acting identity's role (item 7(c)). Run the size check after Step 1.3c has appended Decision History, and again before closing this step; above 100 KB, replace pasted bodies and regions with signatures and `file:line` pointers until it passes:
 ```bash
 OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
 SNAP_BYTES=$(wc -c < "$OUTPUT_DIR/codebase-snapshot.md" | tr -d ' ')
@@ -453,7 +455,11 @@ violate ADRs or reverse recent deliberate changes.
    and read any ADRs whose title or content relates to the problem domain keywords.
    For each relevant ADR, paste its title, status, and the key decision verbatim — locate the
    `## Decision` heading (and an amendment's `### Decision`) programmatically and quote that span with
-   its true line numbers; guessed line ranges land on Context text.
+   its true line numbers; guessed line ranges land on Context text. Quote the full span only for the
+   ADRs the problem statement names or whose title names the affected subsystem; for every other
+   relevant ADR quote the first eight lines of the span and state the line it ends at — the analysts
+   Read the file for the rest. Keep `## Decision History` under 20 KB in total: a first assembly over
+   the 100 KB gate costs a second pass over every fragment.
 
 2. **Prior design search**: Run `ls .designs/` and identify any prior designs on the same
    or related issues. For each relevant prior design, read its `design-doc.md` and paste:
@@ -592,7 +598,7 @@ outputs while a verifier runs) is the normal case and is in contract.
    one mail to the supervisor naming the launch turn and each output file's mtime
    (`af mail send supervisor -s "design-v7: fidelity gate flagging in-contract waiting turns" -m "..."`,
    mtimes from `ls -la --time-style=+%H:%M:%S "$OUTPUT_DIR"`), then `af prime`, then a durability commit
-   of the sub-agent files on disk (`git add "$OUTPUT_DIR"/*.md && { git diff --cached --quiet || git commit -m "design({{issue}}): Phase 2 durability commit"; }`)
+   of the sub-agent files on disk (`git add "$OUTPUT_DIR"/*.md && { git diff --cached --quiet -- "$OUTPUT_DIR" || git commit -m "design({{issue}}): Phase 2 durability commit" -- "$OUTPUT_DIR"; }`; the pathspec keeps a sibling agent's staged files out of the commit in a shared worktree)
    so a kill cannot lose them. Never re-launch in response to gate mail.
 
 **Entry:** `source.md` and `verification.md` exist with all ACs and constraints captured.
@@ -1131,7 +1137,7 @@ final, so the elevation and six-sigma files are verified while the Dimensions an
 2. **Verifier B.** When the final Dimensions pass has completed and the `ls` check above passes, launch
    ONE background Agent call (`description` `"Fidelity Verifier B"`) with the same prompt and
    FILES = the dimension files that exist plus `audit.md conflicts.md dependencies.md`,
-   REPORT = `verification-dimensions.md`, CROSS = `elevation_assessment.md six_sigma_gaps.md`.
+   REPORT = `verification-dimensions.md`, CROSS = `verification-elevation-gaps.md` (Verifier A's report: its claim table already carries every existing-code claim of the elevation and six-sigma analyses with a verdict, so Verifier B compares against it instead of re-reading the two analyses).
 3. **While Verifier B runs**, read the Phase 2 outputs that Step 3.1 will need — audit.md, conflicts.md,
    dependencies.md, the six dimension files, elevation_assessment.md and six_sigma_gaps.md — each
    completely (line-range chunks for files above ~30 KB). A file read completely during this wait counts
@@ -1151,8 +1157,8 @@ files. You have full codebase access.
 Read ALL of these files from $OUTPUT_DIR/:
 - codebase-snapshot.md (ground truth from Phase 1)
 - $FILES (the analysis files whose claims you verify)
-- $CROSS (unless "none": read these for the Cross-analysis contradictions section only; another
-  verifier checks their claims)
+- $CROSS (unless "none": the other verifier's report — read its Claim Details table for the Cross-analysis
+  contradictions section only, comparing its verdicts with the claims in $FILES; do not re-verify the files it covers)
 
 ## Your Process
 
@@ -1191,6 +1197,7 @@ For each claim:
    - INACCURATE: factually wrong — provide the CORRECT information
    - UNVERIFIABLE: about proposed new code (exclude)
    - UNVERIFIABLE-EXTERNAL: rests on documentation outside this repository (list separately; never counted as VERIFIED)
+   Write the classification word ALONE in the Classification cell — exactly VERIFIED, INACCURATE, UNVERIFIABLE or UNVERIFIABLE-EXTERNAL; a qualifier such as partial or incomplete belongs in the Correction column. The merge block counts INACCURATE rows by that cell and warns when the count disagrees with your Summary.
 
 ### Step 3: Write $REPORT
 
@@ -1218,7 +1225,7 @@ information that should be used instead.
 
 ## Cross-analysis contradictions
 
-Where two analysis files — two of $FILES, or one of $FILES and one of $CROSS — make
+Where two analysis files — two of $FILES, or one of $FILES and a claim recorded in $CROSS — make
 incompatible factual claims about the SAME existing code (not proposals), list both and state
 which one the code supports, with the command you ran.
 
@@ -1239,7 +1246,7 @@ OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
 A="$OUTPUT_DIR/verification-elevation-gaps.md"; B="$OUTPUT_DIR/verification-dimensions.md"
 ls -la "$A" "$B" || { echo "FAIL: a fidelity verifier report is missing; launch that verifier and wait"; exit 1; }
 count() { awk -v k="$1" 'index($0, k) == 1 { sub(/^[^:]*:[ ]*/, ""); n += $0 + 0 } END { print n + 0 }' "$A" "$B"; }
-ROWS=$(awk -F'|' '{ for (i = 2; i < NF; i++) { c = $i; gsub(/[ *]/, "", c); if (c == "INACCURATE") { n++; break } } } END { print n + 0 }' "$A" "$B")
+ROWS=$(awk -F'|' '{ for (i = 2; i < NF; i++) { c = $i; gsub(/[ *]/, "", c); if (index(c, "INACCURATE") == 1) { n++; break } } } END { print n + 0 }' "$A" "$B")
 demote() { awk '!h && /^# / { h = 1; next } { if ($0 ~ /^## /) sub(/^## /, "### "); print }' "$1"; }
 {
   echo "# Fidelity Verification Report"
@@ -1442,6 +1449,10 @@ in ways none could detect alone.
    option, check whether it contradicts any ADR or prior design from the Decision
    History section of codebase-snapshot.md. This is the primary defense against
    designs that violate existing architectural decisions.
+   The snapshot holds one line per prior-design decision, without the options that design rejected.
+   Print the full row of each one now, with the `sed` form of `phase-4-finalize` Step 4.3b, and give
+   every recommendation that takes a rejected alternative, narrows a choice or moves a placement its
+   Decisions Made row at first writing. Step 4.3b checks exactly this; found there, it is a rewrite.
 
 4. **Produce a supplementary conflict table:**
 
@@ -1480,6 +1491,13 @@ Read `six_sigma_gaps.md`. For each gap:
 | Partially feasible | Document in Risk Registry with caveats. Address what is feasible |
 | Infeasible | Document in "Six-Sigma Caveats" with specific logical constraint |
 
+"Address" is judged clause by clause in `phase-4-finalize` Step 4.2, so settle it here, while the
+design is still being decided: split each Feasible gap's `Ideal state` into its clauses (each
+sentence, each item), and do the same for what a Partially feasible gap's `Feasibility rationale`
+calls feasible. Every clause is either delivered by a component you can name, or declined. A gap you
+close by a different mechanism than its ideal state proposes has declined clauses. Each declined
+clause gets one row (gap, clause, reason) in the `Clauses declined` table of the template.
+
 ---
 
 **Step 3.4: Write `$OUTPUT_DIR/design-doc.md`**
@@ -1509,6 +1527,11 @@ does not count and fails the check.)
 (Keep the header cell spelled `AC id` — no hyphen — because the Step 4.4 finalize check
 counts lines matching `^| AC-`; a header spelled `| AC-id |` would false-count.)
 
+(Do not retype the rows. Gate B's Gate 3.0 table in `$OUTPUT_DIR/synthesis-checklist.md` already holds,
+for every AC, the quote, the clause list and the component per clause; `grep '^| AC-'` on that file
+prints them. Build the rows from those lines by script, append the `Verified by` cell, and rewrite
+only the cells a synthesis ruling changed. Copy the Problem Statement from `source.md` by script too.)
+
 ## Architecture Elevation Verdict
 
 **Verdict**: [from elevation_assessment.md]
@@ -1527,7 +1550,9 @@ counts lines matching `^| AC-`; a header spelled `| AC-id |` would false-count.)
 [Main pieces and how they fit together]
 
 ### Component Dependency Graph
-[From dependencies.md]
+[From dependencies.md, followed by a table of everything synthesis added beyond the dimension files
+(component, call site, flag, state file): addition, owning component, phase that builds it, files it
+edits. Step 4.5 checks each addition against every "does not depend on" statement copied from dependencies.md.]
 
 ### Interface
 [CLI/API summary from api.md]
@@ -1559,6 +1584,11 @@ Every conflict row MUST have a resolution. "Unresolved" is NOT acceptable.
 ## Six-Sigma Caveats
 
 | Gap | Category | Impact | Feasibility | Constraint |
+
+| Gap | Clause declined | Reason |
+
+(`Clauses declined`: one row per clause of a gap's Ideal state the design does not deliver, from
+Step 3.3. Step 4.2 fails a clause that is neither delivered by a named component nor listed here.)
 
 [Closing paragraph: practical ceiling and accepted residual risk]
 
@@ -1597,15 +1627,24 @@ cross-check it against `synthesis-checklist.md` Addendum A (every INACCURATE row
 was flagged INACCURATE, use the corrected version. A claim the addendum does not mention is checked against
 `verification-report.md` itself.
 
-**Context management:** Synthesis is context-heavy. If context is filling up
-after reading all outputs but before writing design-doc.md:
+**Fallbacks and limits:** write every fallback, limit or residual together with its precondition and
+with what happens when the precondition fails (no match, several matches, a stale file, no upstream,
+a value taken at a different moment in each run). The `self-verify` step traces each one through the
+component text; a fallback that cannot work in the case it is stated for is cheaper to catch here.
+
+**Context management:** Synthesis is context-heavy, and a hand-off discards everything Step 3.1 read:
+a fresh session holds none of those files, whatever the hand-off message says, and must read them all
+again. If context is filling up, the time to hand off is therefore BEFORE Step 3.1, not after it:
 ```bash
-af handoff -s "Phase 3 synthesis in progress — outputs read, ready to write design-doc" \
-  -m "Issue: {{issue}}
+af handoff -s "Phase 3 synthesis not started — nothing read yet" -m "Issue: {{issue}}
 Output dir: $OUTPUT_DIR
-Completed: read all sub-agent outputs, cross-perspective conflict mining, elevation/gap processing
-Ready for: write design-doc.md (continue in phase-3-synthesis step)"
+Completed: Gate B (synthesis-checklist.md written)
+Ready for: phase-3-synthesis from Step 3.1 — read every output and write design-doc.md in one session"
 ```
+Once Step 3.1 has started, finish the step in the same session. Write `design-doc.md` as section files
+under `.runtime/scratch/` that a small script joins into `$OUTPUT_DIR/design-doc.md`: a session that is
+recycled anyway then resumes at the next unwritten section, and a later correction is a patch to one
+section instead of an edit inside a large file.
 
 **Exit criteria:** `$OUTPUT_DIR/design-doc.md` exists. AC Traceability table
 populated. Elevation verdict honored. Feasible gaps closed. No INACCURATE claims
@@ -1649,12 +1688,34 @@ echo "Dimension files present."
 
 **Step 4.2: Six-Sigma Gaps Addressed**
 
+Print each gap's closure contract. These lines are the operand of this check; open a gap's other
+lines only where a clause is unclear. If this same session read `six_sigma_gaps.md` in Step 3.1, the
+lines are already in context: run only the count, and check the clauses against the components
+Step 3.3 named and the `Clauses declined` table:
+
+```bash
+OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
+grep -c "^### Gap " "$OUTPUT_DIR/six_sigma_gaps.md"
+grep -E "^### Gap |^[*][*](Ideal state|Feasibility)" "$OUTPUT_DIR/six_sigma_gaps.md"
+```
+
 For EVERY gap in `six_sigma_gaps.md` classified as **Feasible**:
+- Split its `Ideal state` into clauses (each sentence, each lettered item). For each clause, name
+  the component, phase or test in `design-doc.md` that delivers it. A component that carries the
+  gap's name but delivers less than the clause says (fewer keys, one layer of several, a figure
+  left open, a state reported but never announced) does NOT close it. A clause the design declines
+  must be declined by name, with its reason, in Decisions Made or Six-Sigma Caveats.
+- Where the closure adds a new reader of an existing store or function, open that function and
+  read how it selects what it returns (newest entry, per agent, how long an entry counts as
+  current). The analysts worked from the snapshot's description of it, and a closure that is right
+  on paper can be wrong against the selection rule.
 - Does `design-doc.md` contain a component, phase, or mitigation that closes this gap?
-- If NO: the design is incomplete. Return to `phase-3-synthesis` and add coverage.
+- If NO, or if any clause is neither delivered nor declined: the design is incomplete. Return to
+  `phase-3-synthesis` and add coverage.
 
 For EVERY gap classified as **Partially feasible**:
-- Is the feasible portion addressed in the design?
+- Is the feasible portion addressed in the design? The feasible portion is what the gap's
+  `Feasibility rationale` calls feasible; check it clause by clause as above.
 - Is the infeasible portion documented in the Risk Registry or Six-Sigma Caveats?
 
 ---
@@ -1674,6 +1735,17 @@ For EVERY gap classified as **Partially feasible**:
   History section of `codebase-snapshot.md`.
 - No recommended option reverses a deliberate recent change without explicit
   justification in the Decisions Made table.
+- The snapshot holds one line per prior-design decision, so the options a design rejected and
+  its rationale are not in it. For every `design-doc.md:<line>` its Prior Designs sub-section
+  cites, print the full row from the design it belongs to and read the options, chosen and
+  rationale cells against the recommended options:
+  ```bash
+  ( cd "${AF_WORKTREE:-.}" && sed -n '<line>p' <cited-design-path> | cut -c1-1200 )
+  ```
+  A recommended option that takes an alternative a prior row rejected, narrows what it chose, or
+  moves a placement it fixed needs a row in the Decisions Made table naming that design and line.
+  If Step 3.1b printed these rows in this same session, do not print them again: check that each
+  such departure has its row.
 - If any contradiction exists without justification: STOP, return to
   `phase-3-synthesis` and add justification or change the recommendation.
 
@@ -1706,6 +1778,11 @@ Any missing row or unmapped clause: STOP, return to `gate-b-synthesis-regroundin
 - Dependency graph matches `design-doc.md`'s Component Dependency Graph.
 - Implementation phases respect dependencies (no component before its deps).
 - No circular dependencies.
+- Every component, call site, flag or state file that synthesis added beyond the dimension files
+  is in the graph, with the phase that builds it and the files it edits. `dependencies.md` was
+  written before synthesis added anything, so re-check against those additions each statement
+  `design-doc.md` copies from it about what does NOT depend on what (independent chains, "share
+  no file", "needs nothing").
 
 ---
 
@@ -1722,7 +1799,8 @@ Any missing row or unmapped clause: STOP, return to `gate-b-synthesis-regroundin
 In the agent-driven formula context, the PR IS the review workflow (Supervisor
 reviews the PR). Commit now. Durability commits made during Phase 2 usually mean every artifact is already
 in HEAD; a bare `git commit` with nothing staged exits 1 and would fail this chain, so the commit is
-conditional:
+conditional, and it names the output directory so that a sibling agent's staged files in a shared
+worktree are neither counted nor committed:
 
 ```bash
 OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
@@ -1731,7 +1809,7 @@ OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
 ( cd "${AF_WORKTREE:-.}" &&
 find .designs/ -maxdepth 1 -type l -delete;
 git add "$OUTPUT_DIR"/ &&
-if git diff --cached --quiet; then echo "design artifacts already committed incrementally:"; git log --oneline -- "$OUTPUT_DIR" | head -20;
+if git diff --cached --quiet -- "$OUTPUT_DIR"; then echo "design artifacts already committed incrementally:"; git log --oneline -- "$OUTPUT_DIR" | head -20;
 else git commit -m "design: design-v7 artifacts for {{issue}}
 
 - source.md (verbatim requirements)
@@ -1743,7 +1821,7 @@ else git commit -m "design: design-v7 artifacts for {{issue}}
 - six_sigma_gaps.md (six-sigma gap analysis)
 - verification-report.md (fidelity verification of all codebase claims)
 - synthesis-checklist.md (Gate B: pre-synthesis re-grounding)
-- design-doc.md (with AC Traceability, elevation verdict, six-sigma caveats)"; fi )
+- design-doc.md (with AC Traceability, elevation verdict, six-sigma caveats)" -- "$OUTPUT_DIR"; fi )
 ```
 
 Run `af done` from your agent directory afterwards (never from the worktree root).
@@ -1765,10 +1843,19 @@ needs = ["phase-4-finalize"]
 description = """
 Review your own changes before running tests.
 
-**1. Review the diff:**
+**1. Review what changed, not the whole diff:**
 ```bash
-git diff origin/{{default_branch}}...HEAD     # All changes vs main
+git diff --stat origin/{{default_branch}}...HEAD   # Which files changed vs main: names and sizes
 git log --oneline origin/{{default_branch}}..HEAD  # All commits
+```
+Do NOT print the full `git diff origin/{{default_branch}}...HEAD`: it is every design artifact this run
+wrote (on a pipeline branch, every sibling agent's documents too), hundreds of kilobytes that are
+already in your context or are not yours to review. Print a hunk only for a file the stat lists that
+you did not expect (`git diff origin/{{default_branch}}...HEAD -- <that-file>`). Check `design-doc.md`
+itself mechanically instead of reading it again:
+```bash
+OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
+grep -n -E 'TODO|FIXME|TBD|[[]UNVERIFIED' "$OUTPUT_DIR/design-doc.md"   # cruft: expect no line
 ```
 
 **2. Check for common issues:**
@@ -1859,12 +1946,39 @@ Gate: verify the produced `design-doc.md` matches the contract established by
 design-v7 PRODUCES the design contract — so this step is a final
 self-verification that the produced design doc is faithful to the source.
 
-**1. Re-open `$OUTPUT_DIR/source.md`** one last time.
+**1. Compare the document with `$OUTPUT_DIR/source.md` by script.** Do not read `source.md` again for
+this; open it only at an id the script reports:
+```bash
+OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
+python3 - "$OUTPUT_DIR/source.md" "$OUTPUT_DIR/design-doc.md" <<'PY'
+import sys
+src = open(sys.argv[1]).read().split(chr(10))
+doc = open(sys.argv[2]).read().split(chr(10))
+quote, constraints = {}, []
+for i, line in enumerate(src):
+    if line.startswith("### AC-") and i + 1 < len(src) and src[i + 1].startswith("> "):
+        quote[line.split()[1]] = src[i + 1][2:]
+    if line.startswith("### C-"):
+        constraints.append(line.split()[1])
+bad = [a for a, q in quote.items() if not any(r.startswith("| " + a + " |") and q in r for r in doc)]
+gone = [c for c in constraints if not any(r.startswith("- " + c + ":") for r in doc)]
+print("ACs:", len(quote), "| rows whose quote is not the source's first quoted line:", bad)
+print("constraints:", len(constraints), "| missing from Constraints Respected:", gone)
+if not quote:
+    print("no quote line found under any ### AC- heading: compare the rows by eye")
+sys.exit(1 if bad or gone or not quote else 0)
+PY
+```
+A reported AC whose text holds a `|` is a table-escaping difference, not a paraphrase: check that row by eye.
 
 **2. For each AC in `source.md`:**
 - Find the corresponding row in `design-doc.md` AC Traceability table.
-- Confirm the "verbatim quote" column matches `source.md` (no paraphrase).
+- Confirm the "verbatim quote" column matches `source.md` (no paraphrase): the script above is this check.
 - Confirm the "Addressed by" and "Verified by" columns are concrete.
+- For every limit, residual or fallback a row states, trace it through the component text: which
+  call site runs it, on which input, under which precondition (a live session, a fresh reading,
+  an existing record). A fallback whose precondition fails in the very case it is stated for is a
+  broken row: fix the mechanism or the statement.
 
 **3. For each constraint in `source.md`:**
 - Confirm it appears in `design-doc.md` "Constraints Respected" section.
@@ -1875,6 +1989,16 @@ self-verification that the produced design doc is faithful to the source.
 
 **5. Verify all feasible gaps are closed:**
 - Cross-check six_sigma_gaps.md feasible gaps against design-doc.md components.
+
+Steps 4.3 and 4.2 of `phase-4-finalize` established items 4 and 5 for the document as it was at
+the Phase 4 commit. Check them here on what changed since; do not derive them again from the
+analysis files:
+```bash
+OUTPUT_DIR="${AF_WORKTREE:-$(git rev-parse --show-toplevel)}/.designs/{{issue}}"
+git log --oneline -6 -- "$OUTPUT_DIR/design-doc.md"
+git diff <phase-4-commit>..HEAD -- "$OUTPUT_DIR/design-doc.md"
+```
+If no commit follows the Phase 4 one, items 4 and 5 stand as verified.
 
 **6. Document any deviation with justification:**
 If any AC clause or constraint cannot be faithfully addressed, STOP and mail
@@ -1949,7 +2073,8 @@ git push -u origin $(git branch --show-current)
 git status                  # Clean, or only sibling-owned identity files in a shared worktree
 git stash list              # No entries carrying your tag
 git log origin/{{default_branch}}..HEAD   # Your commits
-git diff origin/{{default_branch}}...HEAD # Your changes (expected — design artifacts only)
+git diff --stat origin/{{default_branch}}...HEAD | tail -1   # Totals of your changes; never print the full diff
+git diff --name-only origin/{{default_branch}}...HEAD | grep -v "^.designs/{{issue}}/"   # Expect no line, or only a sibling agent's documents on a pipeline branch
 ```
 
 **Exit criteria:** Branch pushed, no untracked files of yours, every `.designs/{{issue}}/` artifact

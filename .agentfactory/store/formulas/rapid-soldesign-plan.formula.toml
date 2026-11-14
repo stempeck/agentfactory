@@ -42,6 +42,9 @@ The orchestrator never busy-waits. When an action says "wait for signal X":
    When the sub-agent mails you, the `af mail check --inject` hook wakes this session and you
    re-run the check. Unprocessed completion mails accumulate in the inbox, so on each
    wake you can tell exactly which signals have arrived.
+4. Mail that matches no awaited signal — a persistent sub-agent's NOTICE, IMPROVEMENT
+   self-edit report or READY ping — is not a signal: read it for content worth carrying
+   into a later action, archive it, run the step's check, and end the turn as in 3.
 
 **NEVER probe dispatch/liveness with a mutating command.** Verifying "is the sub-agent
 already dispatched / still alive" during an await — including when a STEP_FIDELITY verdict
@@ -127,6 +130,9 @@ ran its cleanup step, and by finalize the row had silently reverted to `Pending 
 had to be re-derived by hand. Nothing failed loudly; the file simply went backwards.
 
 **Therefore: every action that edits the progress file commits it in the same action.**
+
+Edit rows with `sed -i "s@<old row>@<new row>@"` and grep the row afterwards: never `#` as
+the delimiter, because row text carries `PR #N` and a `#`-delimited edit silently does nothing.
 
 ```bash
 ROOT="${AF_WORKTREE:-$AF_ROOT}"
@@ -272,18 +278,24 @@ description = """
    FAILS on a multi-URL string, so normalize first: fetch every issue named and combine
    them into one problem input. A single URL/number falls through the loop unchanged, so
    the common case is untouched.
+   Each issue's comments are fetched with it: issue authors move verified evidence into
+   comments ("see the comment for additional context"), and a summary without them sends
+   both sub-agents to re-fetch them or to work from the superseded body (observed on #754,
+   where two comments replaced the body's unverified harness evidence).
    ```bash
    ISSUE_URIS=$(printf '%s' "{{issue_uri}}" | grep -oE 'https?://[^ ,]+/issues/[0-9]+')
    [ -n "$ISSUE_URIS" ] || ISSUE_URIS="{{issue_uri}}"   # bare number / single value
    ISSUE_NUMBER=$(basename "{{issue_uri}}")             # deterministic id — every step derives it identically
    ISSUE_TITLE=""; ISSUE_BODY=""; N_ISSUES=0
    for u in $ISSUE_URIS; do
-     J=$(gh issue view "$u" --json number,title,body 2>/dev/null)
+     J=$(gh issue view "$u" --json number,title,body,comments 2>/dev/null)
      [ -n "$J" ] || { echo "ERROR: could not fetch GitHub issue at $u"; exit 1; }
      N=$(echo "$J" | jq -r '.number'); T=$(echo "$J" | jq -r '.title'); B=$(echo "$J" | jq -r '.body')
+     C=$(echo "$J" | jq -r '[.comments[]? | "### Comment by \\(.author.login) at \\(.createdAt)\\n\\n\\(.body)"] | join("\\n\\n")')
      N_ISSUES=$((N_ISSUES + 1))
      ISSUE_TITLE="${ISSUE_TITLE:+$ISSUE_TITLE; }#$N $T"
      ISSUE_BODY="${ISSUE_BODY}$(printf '\\n\\n## Issue #%s — %s (%s)\\n\\n%s' "$N" "$T" "$u" "$B")"
+     [ -n "$C" ] && ISSUE_BODY="${ISSUE_BODY}$(printf '\\n\\n### Comments on #%s\\n\\n%s' "$N" "$C")"
    done
    [ "$N_ISSUES" -gt 1 ] && ISSUE_TITLE="Combined design: $ISSUE_TITLE"
    ```
@@ -637,6 +649,10 @@ poll, sleep, nudge, or keepalive.
      its artifact exists on disk. A dead-or-idle agent will never mail again: treat it as
      complete, mail {{orchestrator}} a WARNING naming the agent and the missing signal, and
      proceed. Do NOT nudge, sleep, or poll — this is a one-shot check on an existing wake.
+     An ALIVE agent can be frozen too (usage limit on #624, `API Error … ENOTFOUND` on #751):
+     if `tmux capture-pane -p -t "af-<agent>" | grep -v '^[[:space:]]*$' | tail -15 | grep -qE 'API Error|reached your .* limit|usage limit'`,
+     mail {{orchestrator}} an ESCALATE naming it once (ledger key `analyst_stall_escalated=` or
+     `designer_stall_escalated=`) and keep waiting — no artifact means NOT complete, and a re-sling wipes it.
 
 3. **Verify both initial artifacts exist on the shared worktree:**
    Analyst and designer share this orchestrator's worktree, so their files are
@@ -688,6 +704,8 @@ poll, sleep, nudge, or keepalive.
    "Design Complete" status, **commit it**, then `af done` to advance.
    ```bash
    ROOT="${AF_WORKTREE:-$AF_ROOT}"
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
    git -C "$ROOT" add "${DESIGN_DIR}design-refinement-progress.md"
    git -C "$ROOT" reset HEAD -- .agentfactory/ 2>/dev/null || true
    git -C "$ROOT" diff --cached --quiet || \
@@ -748,7 +766,9 @@ a task, then waits to be woken by the reply mail. Do NOT poll, sleep, nudge, or 
    ```bash
    REVIEW=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: REVIEW WRITTEN.*round 1")) | .id' | head -1)
    ```
-   - If empty: STOP and end your turn (you were woken by other mail; keep waiting).
+   - If empty: STOP and end your turn (you were woken by other mail; keep waiting). On a
+     repeat empty wake, first run await-completion's frozen-agent pane check against
+     `af-{{analyst_name}}` (escalate once, ledger key `analyst_stall_escalated=`).
    - If non-empty: `af mail delete "$REVIEW"` and continue to action 4.
 
 4. **Assign the designer to incorporate findings:**
@@ -785,13 +805,16 @@ a task, then waits to be woken by the reply mail. Do NOT poll, sleep, nudge, or 
    ```bash
    UPDATED=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.subject | test("RAPIDSOL: DESIGN UPDATED")) | .id' | head -1)
    ```
-   - If empty: STOP and end your turn (keep waiting).
+   - If empty: STOP and end your turn (keep waiting). On a repeat empty wake, first run
+     the same frozen-agent pane check against `af-{{designer_name}}` (ledger key `designer_stall_escalated=`).
    - If non-empty: `af mail delete "$UPDATED"`, update the progress file at
      `${AF_WORKTREE:-$AF_ROOT}/${DESIGN_DIR}design-refinement-progress.md` (edit in
      place — never a fresh copy from cwd) with round-1 completion, **commit it**, and
      `af done` to advance.
      ```bash
      ROOT="${AF_WORKTREE:-$AF_ROOT}"
+     ISSUE_ID=$(basename "{{issue_uri}}")
+     DESIGN_DIR=".designs/$ISSUE_ID/"
      git -C "$ROOT" add "${DESIGN_DIR}design-refinement-progress.md"
      git -C "$ROOT" reset HEAD -- .agentfactory/ 2>/dev/null || true
      git -C "$ROOT" diff --cached --quiet || \
@@ -819,8 +842,21 @@ Event-driven throughout. Do NOT poll, sleep, nudge, or keepalive.
 **Actions:**
 
 1. **Assign the designer to commit the cross-reviewed design (if not already done):**
-   If `HEAD:{{design_dir}}design-doc.md` is not yet committed and you have not already
-   mailed the commit task, mail it now:
+   Decide with this check, not by eye. {{designer_name}} commits as it goes, so
+   design-doc.md is already on HEAD from its Phase-3 commit, before any cross-review edit
+   exists: presence on HEAD alone proves nothing. What matters is uncommitted work under
+   the design dir.
+   ```bash
+   ROOT="${AF_WORKTREE:-$AF_ROOT}"
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   if git -C "$ROOT" cat-file -e "HEAD:${DESIGN_DIR}design-doc.md" 2>/dev/null && [ -z "$(git -C "$ROOT" status --porcelain -- "$DESIGN_DIR")" ]; then
+     echo "DESIGNER_COMMIT_NEEDED=no — design-doc.md on HEAD and ${DESIGN_DIR} clean: skip actions 1-2, go to action 3"
+   else
+     echo "DESIGNER_COMMIT_NEEDED=yes"
+   fi
+   ```
+   If `DESIGNER_COMMIT_NEEDED=yes` and you have not already mailed the commit task, mail it now:
    ```bash
    # Derive and send absolute: {{design_dir}}/{{issue_id}} are deferred literals here, and
    # the designer runs git from its own agent workspace, so a relative pathspec stages
@@ -841,13 +877,17 @@ Event-driven throughout. Do NOT poll, sleep, nudge, or keepalive.
 
 3. **Verify the design doc is committed on HEAD (shared worktree):**
    ```bash
-   if ! git -C "${AF_WORKTREE:-$AF_ROOT}" cat-file -e "HEAD:{{design_dir}}design-doc.md" 2>/dev/null; then
-     echo "COMMIT VERIFICATION FAILED: {{design_dir}}design-doc.md not committed on HEAD"
+   # Derive first: against a literal {{design_dir}} the cat-file always fails, so this check
+   # escalates and exits 1 — aborting the formula — while design-doc.md sits on HEAD.
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   if ! git -C "${AF_WORKTREE:-$AF_ROOT}" cat-file -e "HEAD:${DESIGN_DIR}design-doc.md" 2>/dev/null; then
+     echo "COMMIT VERIFICATION FAILED: ${DESIGN_DIR}design-doc.md not committed on HEAD"
      af mail send {{orchestrator}} -s "ESCALATE: Commit verification failed — design-doc.md is not on HEAD" \
-       -m "{{design_dir}}design-doc.md is not committed on HEAD of the PR branch. Cannot open a design PR without it."
+       -m "${DESIGN_DIR}design-doc.md is not committed on HEAD of the PR branch. Cannot open a design PR without it."
      exit 1
    fi
-   echo "Path verification: design-doc.md committed on HEAD at {{design_dir}}"
+   echo "Path verification: design-doc.md committed on HEAD at ${DESIGN_DIR}"
    ```
 
 4. **Finalize the design commit and clean stray .agentfactory/ artifacts:**
@@ -999,8 +1039,9 @@ Event-driven throughout. Do NOT poll, sleep, nudge, or keepalive.
 
 7. **Release both agents — assign each to signal DONE and run af done (if not already):**
    ```bash
-   af mail send {{analyst_name}} -s "RAPIDSOL" -m "ALL REVIEWS COMPLETE AND COMMITTED — Send: af mail send $AF_ACTOR -s 'RAPIDSOL: ANALYST DONE [{{issue_id}}]' then run af done. The cross-review round is finished. Thank you for staying alive through the process."
-   af mail send {{designer_name}} -s "RAPIDSOL" -m "ALL REVIEWS COMPLETE AND COMMITTED — Send: af mail send $AF_ACTOR -s 'RAPIDSOL: DESIGNER DONE [{{issue_id}}]' then run af done. The cross-review round is finished."
+   ISSUE_ID=$(basename "{{issue_uri}}")   # {{issue_id}} never renders: without this the agents are told to send a literal placeholder
+   af mail send {{analyst_name}} -s "RAPIDSOL" -m "ALL REVIEWS COMPLETE AND COMMITTED — Send: af mail send $AF_ACTOR -s 'RAPIDSOL: ANALYST DONE [$ISSUE_ID]' then run af done. The cross-review round is finished. Thank you for staying alive through the process."
+   af mail send {{designer_name}} -s "RAPIDSOL" -m "ALL REVIEWS COMPLETE AND COMMITTED — Send: af mail send $AF_ACTOR -s 'RAPIDSOL: DESIGNER DONE [$ISSUE_ID]' then run af done. The cross-review round is finished."
    ```
    Then STOP and end your turn — the agents' DONE mails will wake you.
 
@@ -1049,11 +1090,15 @@ needs = ["commit-and-pr"]
 description = """
 **Entry criteria:** PR opened and {{pr_url}} recorded. Analyst and designer released.
 
-Event-driven (see the Event-Driven Wait Protocol). The implementation-plan agent is
-autonomous: given the PR link it reads the PR, produces the implementation plan, and
-pushes its results back to the PR. It needs NO task instructions. It signals completion
-to this orchestrator (the dispatch caller) via the standard WORK_DONE mail, which wakes
-this session.
+Event-driven (see the Event-Driven Wait Protocol). Given only the PR link, {{impl_name}}
+writes the implementation plan and pushes it to the PR; its WORK_DONE mail wakes you.
+
+**Later wakes (`impl_dispatched=` already in the ledger): actions 1–4 are DONE — run ONLY
+action 5.** Never re-run action 3: its `af sling --reset` wipes the live {{impl_name}}.
+Run action 5's WORK_DONE check and its stall check as two separate short Bash calls with
+nothing else in either, and write no ledger or progress lines on an empty wake. The
+fidelity gate sees ~300 characters of each result, so a combined or embellished check
+reads as unverifiable (flagged twice on #754 while every directive was honoured).
 
 **Actions:**
 
@@ -1061,7 +1106,9 @@ this session.
    ```bash
    cd "${AF_WORKTREE:-$AF_ROOT}"
    BRANCH=$(git rev-parse --abbrev-ref HEAD)
-   PR_URL="{{pr_url}}"
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   [ -f "$VARS" ] && . "$VARS"
+   PR_URL="${pr_url:-}"   # {{pr_url}} never renders; commit-and-pr recorded the URL in the ledger
    case "$PR_URL" in
      https://*) : ;;
      *) PR_URL=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null) ;;
@@ -1098,9 +1145,11 @@ this session.
 
 3. **Dispatch {{impl_name}} with the PR link — nothing else (only if not already dispatched):**
    Do NOT add task instructions, skill invocations, or checkout steps — that is the
-   agent's job, not the formula's.
+   agent's job, not the formula's. The ledger guard stops a later session's `--reset` wiping the live agent.
    ```bash
-   af sling --agent {{impl_name}} --reset "$PR_URL"
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   grep -q '^impl_dispatched=' "$VARS" 2>/dev/null && echo "ALREADY DISPATCHED — not re-slinging" || \
+     { af sling --agent {{impl_name}} --reset "$PR_URL" && printf 'impl_dispatched=%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$VARS"; }
    ```
 
 4. **Verify the {{impl_name}} session started (one-time check):**
@@ -1114,27 +1163,51 @@ this session.
    fi
    echo "{{impl_name}} session verified alive."
    ```
-   Then STOP and end your turn — the agent's WORK_DONE mail will wake you.
+   Then STOP and end your turn — the agent's WORK_DONE mail will wake you. Later wakes:
+   run only action 5, as the top of this step says.
 
 5. **On wake, check for the WORK_DONE mail from {{impl_name}}:**
    Its final `af done` mails `WORK_DONE: <instance>` here — no custom signal is injected.
    ```bash
    DONE=$(af mail inbox --json 2>/dev/null | jq -r '.[] | select(.from == "{{impl_name}}") | select(.subject | test("WORK_DONE")) | .id' | head -1)
+   echo "DONE=${DONE:-<none>}"
    ```
-   - If empty: STOP and end your turn (keep waiting).
+   - If empty: run this stall check once, then STOP and end your turn (keep waiting).
+     An agent can sit ALIVE yet frozen: on #751 every turn of {{impl_name}} returned
+     `API Error … (ENOTFOUND)` for ~2h while the watchdog's nudges failed the same way,
+     and only its pane showed why. It can self-recover, so escalate once — never re-sling.
+     ```bash
+     VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+     STALL=""
+     if ! tmux has-session -t "af-{{impl_name}}" 2>/dev/null; then STALL="its session is gone"
+     elif tmux capture-pane -p -t "af-{{impl_name}}" | grep -v '^[[:space:]]*$' | tail -15 | grep -qE 'API Error|reached your .* limit|usage limit'; then STALL="its pane shows an API or usage-limit error"; fi
+     echo "STALL=${STALL:-none}"
+     if [ -n "$STALL" ] && ! grep -q '^impl_stall_escalated=' "$VARS" 2>/dev/null; then
+       af mail send {{orchestrator}} -s "ESCALATE: {{impl_name}} stalled without WORK_DONE" \
+         -m "dispatch-impl await: no WORK_DONE from {{impl_name}} and $STALL. Operator-side fix (network, API, credits). The orchestrator keeps waiting and will not re-sling."
+       printf 'impl_stall_escalated=%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$VARS"
+     fi
+     ```
    - If non-empty: `af mail delete "$DONE"`, update the progress file at
      `${AF_WORKTREE:-$AF_ROOT}/.designs/$(basename "{{issue_uri}}")/design-refinement-progress.md`
      (edit in place — never a fresh copy from cwd; the implementation-plan agent may have
-     ALREADY written its own outcome section into this same file, so re-read it before
-     editing rather than overwriting), **commit it**, and `af done` to advance.
+     ALREADY written its own outcome section into this same file, which the row-anchored
+     `sed` below leaves intact), **commit it**, and `af done` to advance.
 
      The dispatch rows are already on origin (action 2) — fill only the completion rows
      (`implementation_plan_outline.md created`, the Impl row's `Completed`). {{impl_name}}
      has finished, so nothing resets the branch now; a local commit holds until finalize pushes.
+     The Impl row's `Started` cell keeps action 2's timestamp via the `\\1` capture, so no
+     re-read is needed to learn it.
      ```bash
      ROOT="${AF_WORKTREE:-$AF_ROOT}"
      ISSUE_ID=$(basename "{{issue_uri}}")
      DESIGN_DIR=".designs/$ISSUE_ID/"
+     PROGRESS="$ROOT/${DESIGN_DIR}design-refinement-progress.md"
+     TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+     sed -i "s@^| Impl | {{impl_name}} | Dispatched | \\([^|]*\\) | - |@| Impl | {{impl_name}} | Completed | \\1 | $TS |@" "$PROGRESS"
+     sed -i "s@^| implementation_plan_outline.md created | Pending | - |@| implementation_plan_outline.md created | Complete | $TS |@" "$PROGRESS"
+     grep -q '^| implementation_plan_outline.md created | Complete' "$PROGRESS" && grep -q '^| Impl | {{impl_name}} | Completed' "$PROGRESS" || { echo "ROW NOT UPDATED: set both completion rows by hand, re-run"; exit 1; }
      git -C "$ROOT" add "${DESIGN_DIR}design-refinement-progress.md"
      git -C "$ROOT" reset HEAD -- .agentfactory/ 2>/dev/null || true
      git -C "$ROOT" diff --cached --quiet || \
@@ -1143,8 +1216,9 @@ this session.
 
 **Exit criteria:**
 - Dispatch rows committed **and pushed** BEFORE `af sling` (present on origin/<branch>)
-- {{impl_name}} dispatched via `af sling --agent {{impl_name}} --reset "$PR_URL"` (no instruction text)
+- {{impl_name}} dispatched via `af sling --agent {{impl_name}} --reset "$PR_URL"` (no instruction text), exactly once (`impl_dispatched=` in the ledger)
 - {{impl_name}} session verified alive
+- Every empty-DONE wake ran the stall check; a stalled {{impl_name}} escalated at most once (`impl_stall_escalated=`)
 - WORK_DONE mail from {{impl_name}} received and archived
 - Completion rows updated **and committed**
 """
@@ -1213,9 +1287,21 @@ description = """
    **PR**: $PR_URL
    ```
    The final status is only visible on the PR if it is actually committed; commit-and-pr
-   ran several steps ago and cannot carry a change made now:
+   ran several steps ago and cannot carry a change made now. This block runs in its own
+   shell, so it derives `DESIGN_DIR`/`ISSUE_ID` and reads `PR_URL` from the ledger: unset,
+   `git add` matches nothing and `git push` prints "Everything up-to-date", so COMPLETE
+   silently never reaches the PR.
    ```bash
    cd "${AF_WORKTREE:-$AF_ROOT}"
+   ISSUE_ID=$(basename "{{issue_uri}}")
+   DESIGN_DIR=".designs/$ISSUE_ID/"
+   VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
+   [ -f "$VARS" ] && . "$VARS"
+   PR_URL="${pr_url:-$(gh pr list --head "$(git rev-parse --abbrev-ref HEAD)" --json url --jq '.[0].url' 2>/dev/null)}"
+   PROGRESS="${DESIGN_DIR}design-refinement-progress.md"
+   TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   sed -i "s@^\\*\\*Status\\*\\*: In Progress\\$@**Status**: COMPLETE\\n**Completed**: $TS\\n**PR**: $PR_URL@" "$PROGRESS"
+   grep -q '^\\*\\*Status\\*\\*: COMPLETE' "$PROGRESS" || { echo "HEADER NOT UPDATED: set Status/Completed/PR by hand, re-run"; exit 1; }
    git add "${DESIGN_DIR}design-refinement-progress.md"
    git reset HEAD -- .agentfactory/ 2>/dev/null || true
    git diff --cached --quiet || git commit -m "chore($ISSUE_ID): mark rapid-soldesign-plan run COMPLETE"
@@ -1244,7 +1330,7 @@ description = """
    VARS="${AF_WORKTREE:-$AF_ROOT}/.agentfactory/agents/${AF_ACTOR}/.work/formula-vars.env"
    [ -f "$VARS" ] && . "$VARS"
    ISSUE_TITLE="${issue_title:-$(gh issue view "{{issue_uri}}" --json title --jq '.title' 2>/dev/null)}"
-   PR_URL="{{pr_url}}"
+   PR_URL="${pr_url:-}"   # {{pr_url}} never renders; the ledger sourced above holds the URL commit-and-pr recorded
    case "$PR_URL" in
      https://*) : ;;
      *) PR_URL=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null) ;;
@@ -1252,6 +1338,11 @@ description = """
    git fetch origin "$BRANCH" 2>/dev/null || true      # self-contained: action 1 may have run in a prior session
    OUTLINE_PATH=$(git -C "${AF_WORKTREE:-$AF_ROOT}" ls-tree -r --name-only "origin/$BRANCH" 2>/dev/null | grep -E "^${DESIGN_DIR}.*implementation_plan_outline\\.md$" | head -1)
    [ -n "$OUTLINE_PATH" ] || OUTLINE_PATH="${DESIGN_DIR}implementation_plan_outline.md"
+   # {{impl_name}} peer-reviews its own outline. On #751 that review said "Needs revision"
+   # while this mail's fixed Next Step said "begin implementation", and the operator
+   # needed a correction mail. Quote the outline's own recommendation instead.
+   RECOMMENDATION=$(git -C "${AF_WORKTREE:-$AF_ROOT}" show "origin/$BRANCH:$OUTLINE_PATH" 2>/dev/null | grep -m1 -E '^[*][*]Recommendation[*][*]:' | sed -E 's/^[*][*]Recommendation[*][*]:[[:space:]]*//')
+   [ -n "$RECOMMENDATION" ] || RECOMMENDATION="(the outline states no Recommendation line — read its review sections before implementing)"
    af mail send {{orchestrator}} -s "RAPIDSOL: COMPLETE [$ISSUE_ID]" -m "
    Rapid design refinement complete for $ISSUE_TITLE.
 
@@ -1263,9 +1354,12 @@ description = """
    - Implementation plan: $OUTLINE_PATH (pushed to the PR branch by {{impl_name}})
    - Cross-review artifacts: ${DESIGN_DIR}cross-review/
 
+   ## Plan review recommendation
+   $RECOMMENDATION
+
    ## Next Step
-   Hand the implementation_plan_outline.md to your implementation workflow to begin
-   phase-by-phase implementation.
+   Act on the recommendation above. Only a Proceed verdict means hand the
+   implementation_plan_outline.md straight to your implementation workflow.
    "
    ```
 
@@ -1275,8 +1369,9 @@ description = """
 - Progress file updated to COMPLETE **and committed + pushed** (an uncommitted final
   status never reaches the PR)
 - RAPIDSOL: COMPLETE mail sent to {{orchestrator}} with the PR link, the issue id and
-  title RENDERED (no `{{...}}` literals in subject or body), and the implementation plan
-  named by its RESOLVED path (the real subdirectory location, not a bare filename)
+  title RENDERED (no `{{...}}` literals in subject or body), the implementation plan
+  named by its RESOLVED path (the real subdirectory location, not a bare filename), and
+  the outline's own `**Recommendation**:` line quoted (a Needs-revision plan is never announced as ready)
 """
 
 [vars]

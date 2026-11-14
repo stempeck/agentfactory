@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
@@ -41,6 +42,9 @@ func installFakeTmuxPresent(t *testing.T, sessions ...string) *fakeTmux {
 // invokeAgentsList runs runAgentsList via agentsListCmd so cmd.Context() is wired.
 func invokeAgentsList(t *testing.T) string {
 	t.Helper()
+	// agentsListCmd inherits rootCmd's writer, and helpers such as execMemoryOut leave rootCmd
+	// pointed at their own buffer, which would swallow the output captured here.
+	rootCmd.SetOut(nil)
 	var runErr error
 	out := captureStdout(t, func() {
 		agentsListCmd.SetContext(t.Context())
@@ -356,5 +360,135 @@ func TestAgentsList_ForeignRoot(t *testing.T) {
 	}
 	if byName["homeagent"].ForeignRoot {
 		t.Errorf("homeagent.foreign_root = true, want false (AF_ROOT matches querying root)")
+	}
+}
+
+// agwWindowsDir is the record directory spelled out, so a fixture never depends on the helper
+// under test to find where it plants.
+func agwWindowsDir(root string) string {
+	return filepath.Join(root, ".agentfactory", "statusline", "windows")
+}
+
+func agwWriteJSON(t *testing.T, path string, v any) {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAgentsList_JSON_WindowFields pins the one documented exception to the stable key set: the
+// two window keys appear only while this agent's own figure of its current launch disagrees with
+// its declaration, and never on the strength of another agent's figure on the same identity.
+func TestAgentsList_JSON_WindowFields(t *testing.T) {
+	const (
+		profile  = "fable-5-2"
+		modelID  = "claude-fable-5-2"
+		version  = "2.1.308"
+		declared = int64(1000000)
+	)
+	now := time.Now().UTC().Truncate(time.Second)
+	launched := now.Add(-time.Hour)
+	key := version + "|1000000|" + modelID
+
+	fact := map[string]any{
+		"profile": profile, "model_id": modelID, "declared": declared,
+		"harness_version": version, "launched_at": launched,
+	}
+	entry := func(agents map[string]any, applied int64) map[string]any {
+		return map[string]any{
+			"model_id": modelID, "harness_version": version, "declared": declared,
+			"applied": applied, "agents": agents, "first_seen": launched, "last_seen": now,
+			"sessions": len(agents), "source": "session",
+		}
+	}
+	figure := func(applied int64) map[string]any {
+		return map[string]any{"applied": applied, "launched_at": launched, "last_seen": now}
+	}
+
+	tests := []struct {
+		name        string
+		plantFact   bool
+		identities  map[string]any
+		wantPresent bool
+	}{
+		{
+			name:        "this agent's divergent figure shows both keys",
+			plantFact:   true,
+			identities:  map[string]any{key: entry(map[string]any{"worker": figure(200000)}, 200000)},
+			wantPresent: true,
+		},
+		{
+			name:       "no launch fact shows neither",
+			identities: map[string]any{key: entry(map[string]any{"worker": figure(200000)}, 200000)},
+		},
+		{
+			name:       "no entry for its identity shows neither",
+			plantFact:  true,
+			identities: map[string]any{"2.1.322|1000000|" + modelID: entry(map[string]any{"worker": figure(200000)}, 200000)},
+		},
+		{
+			name:       "equal figures show neither",
+			plantFact:  true,
+			identities: map[string]any{key: entry(map[string]any{"worker": figure(declared)}, declared)},
+		},
+		{
+			name:      "only another agent's divergent figure shows neither",
+			plantFact: true,
+			identities: map[string]any{key: entry(map[string]any{
+				"worker": figure(declared),
+				"other":  figure(200000),
+			}, 200000)},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupTestFactoryForStep(t)
+			t.Chdir(dir)
+			writeAgentsJSON(t, dir, `{"agents":{"worker":{"type":"autonomous","description":"d"},"other":{"type":"autonomous","description":"d"}}}`)
+			installMemStore(t)
+			installFakeTmuxPresent(t, session.SessionName("worker"), session.SessionName("other"))
+			if tc.plantFact {
+				agwWriteJSON(t, filepath.Join(agwWindowsDir(dir), "launched", "worker.json"), fact)
+			}
+			agwWriteJSON(t, filepath.Join(agwWindowsDir(dir), profile+".json"), map[string]any{
+				"profile": profile, "identities": tc.identities,
+			})
+
+			out := invokeAgentsList(t)
+			var arr []map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &arr); err != nil {
+				t.Fatalf("unmarshal %q: %v", out, err)
+			}
+			var row map[string]json.RawMessage
+			for _, r := range arr {
+				if string(r["name"]) == `"worker"` {
+					row = r
+				}
+			}
+			if row == nil {
+				t.Fatalf("no worker row in %q", out)
+			}
+			gotDeclared, hasDeclared := row["window_declared"]
+			gotApplied, hasApplied := row["window_applied"]
+			if !tc.wantPresent {
+				if hasDeclared || hasApplied {
+					t.Errorf("window keys must be absent, got window_declared=%s window_applied=%s", gotDeclared, gotApplied)
+				}
+				return
+			}
+			if string(gotDeclared) != "1000000" {
+				t.Errorf("window_declared = %q, want 1000000 (row %q)", gotDeclared, out)
+			}
+			if string(gotApplied) != "200000" {
+				t.Errorf("window_applied = %q, want this agent's own figure 200000 (row %q)", gotApplied, out)
+			}
+		})
 	}
 }

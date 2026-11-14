@@ -73,6 +73,13 @@ func LoadDispatchConfig(root string) (*DispatchConfig, error) {
 		}
 		return nil, fmt.Errorf("reading dispatch config: %w", err)
 	}
+	return ParseDispatchConfig(data)
+}
+
+// ParseDispatchConfig is LoadDispatchConfig without the file read, so a caller holding
+// dispatch.json bytes that are not on disk yet (the config seed) gets the dispatcher's own
+// verdict on them: an ErrMissingField-wrapped error is the "not configured" friendly skip.
+func ParseDispatchConfig(data []byte) (*DispatchConfig, error) {
 	var cfg DispatchConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing dispatch config: %w", err)
@@ -193,6 +200,27 @@ func validateDispatchConfig(cfg *DispatchConfig) error {
 			return fmt.Errorf("%w: dispatch config must have at least one mapping", ErrMissingField)
 		}
 	}
+	if err := ValidateDispatchStructure(cfg); err != nil {
+		return err
+	}
+	if cfg.IntervalSecs <= 0 {
+		cfg.IntervalSecs = 300 // default 5 minutes
+	}
+	if cfg.RetryAfterSecs <= 0 {
+		cfg.RetryAfterSecs = 1800 // default 30 minutes
+	}
+	if cfg.NotifyOnComplete == "" {
+		cfg.NotifyOnComplete = defaultNotifyAgent
+	}
+	return nil
+}
+
+// ValidateDispatchStructure runs the mapping, workflow and cron rules without the
+// not-configured checks validateDispatchConfig applies first, so the starter-config seed,
+// which writes dispatch.json inert (no repos), can refuse a file that would fail these
+// rules only once a repo is added. Like validateDispatchConfig it normalises mappings in
+// place (label -> labels, the default source).
+func ValidateDispatchStructure(cfg *DispatchConfig) error {
 	for i, m := range cfg.Mappings {
 		if m.Label != "" && len(m.Labels) > 0 {
 			return fmt.Errorf("%w: mapping has both label and labels (ambiguous)", ErrMissingField)
@@ -217,24 +245,12 @@ func validateDispatchConfig(cfg *DispatchConfig) error {
 	if err := validateWorkflows(cfg); err != nil {
 		return err
 	}
-	if err := validateCrons(cfg); err != nil {
-		return err
-	}
-	if cfg.IntervalSecs <= 0 {
-		cfg.IntervalSecs = 300 // default 5 minutes
-	}
-	if cfg.RetryAfterSecs <= 0 {
-		cfg.RetryAfterSecs = 1800 // default 30 minutes
-	}
-	if cfg.NotifyOnComplete == "" {
-		cfg.NotifyOnComplete = defaultNotifyAgent
-	}
-	return nil
+	return validateCrons(cfg)
 }
 
 // validateWorkflows checks the struct-level (no-agents.json-needed) rules for the
 // workflow pipeline (issue #378 Phase 1). It MUST run after the mapping loop in
-// validateDispatchConfig so the Label->Labels migration and the Source default have
+// ValidateDispatchStructure so the Label->Labels migration and the Source default have
 // completed: phase resolution reads Labels, and the mixed-source check reads the
 // defaulted Source.
 func validateWorkflows(cfg *DispatchConfig) error {

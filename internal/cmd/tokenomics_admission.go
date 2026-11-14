@@ -89,25 +89,41 @@ func (a admission) handoffHelps() bool {
 	return a.decision.Verdict == tokenomics.VerdictNoFit && a.freshFits
 }
 
-// profileWindow resolves the window for ONE already-resolved profile.
+// predictedProfileWindow and sessionProfileWindow resolve the window for ONE already-resolved profile.
 //
-// It takes the model NAME rather than the agent, and that is the whole point. An earlier spelling
+// They take the model NAME rather than the agent, and that is the whole point. An earlier spelling
 // took the agent and re-derived the profile from cfg.Agents/cfg.Default — a second copy of #480's
 // precedence chain that had already lost the .runtime/model_override leg resolveRecordModel honours
 // (telemetry_record.go:113-131). Under `af sling --model X` that copy fed the window of one profile
 // into an arithmetic whose appetite was keyed on another. The chain has exactly one implementation
 // now, and the window and the appetite cannot describe two different profiles.
 //
-// resolveTokenomicsWindow (tokenomics.go:378) answers for the DEFAULT profile with no host reading,
-// which is right for a factory-wide status surface and wrong here: a decision about this agent's
-// session has both a resolved profile and a live host-reported total, and answering it from the
-// default profile would predict one backend's capacity from another's.
-func profileWindow(factoryRoot, model string, hostReported int64) tokenomics.Window {
+// resolveTokenomicsWindow answers for the DEFAULT profile with no host reading, which is right for a
+// factory-wide status surface and wrong here: a decision about this agent's session has both a
+// resolved profile and a live host-reported total, and answering it from the default profile would
+// predict one backend's capacity from another's.
+func predictedProfileWindow(factoryRoot, model string) tokenomics.Window {
+	return tokenomics.PredictWindow(admissionProfile(factoryRoot, model))
+}
+
+// sessionProfileWindow falls back to the prediction because a session with no healthy reading has
+// no observation to weigh, and the prediction is what the launch already divided by.
+func sessionProfileWindow(factoryRoot, model string, hostReported int64) tokenomics.Window {
+	profile := admissionProfile(factoryRoot, model)
+	if w, ok := tokenomics.SessionWindow(profile, hostReported); ok {
+		return w
+	}
+	return tokenomics.PredictWindow(profile)
+}
+
+// admissionProfile is nil when models.json does not load, which both window functions read as an
+// undeclared profile.
+func admissionProfile(factoryRoot, model string) map[string]string {
 	cfg, err := config.LoadModelsConfig(factoryRoot)
 	if err != nil || cfg == nil {
-		return tokenomics.ResolveWindow(nil, hostReported)
+		return nil
 	}
-	return tokenomics.ResolveWindow(cfg.Models[model], hostReported)
+	return cfg.Models[model]
 }
 
 // learnedStep is everything ONE digest read answers about a (formula, step, model) key: the two
@@ -235,7 +251,7 @@ func stepAdmission(factoryRoot, workDir, agent, formula, stepLabel string,
 	model, _ := resolveRecordModel(factoryRoot, workDir, agent, "")
 	learned := learnedFor(factoryRoot, formula, stepLabel, model)
 	a := admission{
-		window:    profileWindow(factoryRoot, model, hostReported),
+		window:    sessionProfileWindow(factoryRoot, model, hostReported),
 		occupancy: occ,
 		appetite:  learned.marginal,
 		stepLabel: stepLabel,
@@ -569,7 +585,7 @@ func selectEffortLevel(factoryRoot, agentDir, nextStepLabel, declared, formula s
 	}
 	// The single #480 precedence chain, not a second derivation: the digest is keyed on the model
 	// spelling the RECORD writer files under, and a second chain here would eventually resolve a
-	// profile the learned side never wrote (profileWindow's doc states the same rule for the window).
+	// profile the learned side never wrote (the window wrappers' doc states the same rule for the window).
 	model, _ := resolveRecordModel(factoryRoot, agentDir, agentName, "")
 	learned := learnedFor(factoryRoot, formula, nextStepLabel, model)
 
@@ -598,7 +614,7 @@ func capacityLastResort(factoryRoot, model string, learned learnedStep, policy t
 	if !learned.found {
 		return false
 	}
-	window := profileWindow(factoryRoot, model, 0)
+	window := predictedProfileWindow(factoryRoot, model)
 	return tokenomics.Admit(window, tokenomics.Occupancy{Known: true}, learned.peak, policy).
 		Verdict == tokenomics.VerdictNoFit
 }

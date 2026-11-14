@@ -15,13 +15,14 @@ import (
 // context so highly that destroying messages became an agent's only relief. Here the cost is a
 // bounded constant paid once per session, so relief comes from notes graduating or expiring
 // rather than from anything being deleted. Under-serving is therefore the correct failure
-// direction: five relevant notes with the rest one `af memory list` away beats an unbounded
-// block nobody can afford to keep.
+// direction: five relevant notes with the rest one `af memory list --type`/`--formula` away
+// beats an unbounded block nobody can afford to keep.
 // Source: .designs/515/scale.md:30-33 (Option S-A), recorded 2026-08-15.
 const (
-	DefaultK            = 5
-	DefaultExcerptChars = 400
-	DefaultTotalBytes   = 4096
+	DefaultK             = 5
+	DefaultExcerptChars  = 400
+	DefaultTotalBytes    = 4096
+	DefaultStandingBytes = 3072
 )
 
 // Per-type TTLs. A gotcha or an outcome is about a codebase that moves under it, so it goes
@@ -84,10 +85,12 @@ type Budget struct {
 	K int
 	// ExcerptChars caps each note's body, in runes.
 	ExcerptChars int
-	// TotalBytes caps the whole block, measured as the sum of the canonical emitted forms of
-	// the returned notes — the concrete artifact, so the ceiling is falsifiable rather than
+	// TotalBytes caps the whole block, measured as the rendered pinned block plus the rendered
+	// newest-note entries — the concrete artifact, so the ceiling is falsifiable rather than
 	// nominal.
 	TotalBytes int
+	// StandingBytes bounds the rendered pinned block inside TotalBytes.
+	StandingBytes int
 	// Formula is the scope key. When a run is hooked to a formula, notes tagged with it rank
 	// ahead of everything else; when it is empty the ranking is recency alone.
 	Formula string
@@ -98,9 +101,10 @@ type Budget struct {
 
 func DefaultBudget() Budget {
 	return Budget{
-		K:            DefaultK,
-		ExcerptChars: DefaultExcerptChars,
-		TotalBytes:   DefaultTotalBytes,
+		K:             DefaultK,
+		ExcerptChars:  DefaultExcerptChars,
+		TotalBytes:    DefaultTotalBytes,
+		StandingBytes: DefaultStandingBytes,
 	}
 }
 
@@ -116,6 +120,9 @@ func (b Budget) normalised() Budget {
 	}
 	if b.TotalBytes <= 0 {
 		b.TotalBytes = DefaultTotalBytes
+	}
+	if b.StandingBytes <= 0 {
+		b.StandingBytes = DefaultStandingBytes
 	}
 	if b.Now.IsZero() {
 		// Every serving path sets Now; this is the safety net for one that forgets. Defaulting
@@ -136,18 +143,26 @@ func (b Budget) normalised() Budget {
 // the codec could not read are none of them served. Suppression at read time is what makes
 // staleness correct even on a factory where no periodic hygiene job ever runs.
 //
-// The overflow count a caller needs for the "…and N more" line is the difference between two
-// calls — Slice with an effectively unbounded Budget minus Slice with the real one — NOT
-// len(notes) - len(result), which counts the graduated, expired and malformed notes this
-// function excluded and would over-report. The signature stays (notes, Budget) rather than
+// Pins come first, oldest first, outside K and inside StandingBytes, and a pin's TTL is suspended
+// while it stands (D-14); the newest notes share what the rendered pinned block leaves of
+// TotalBytes.
+//
+// The overflow count a caller needs for the "…and N more" line is the unpinned notes the budget
+// dropped: the difference between two calls — Slice with an effectively unbounded Budget minus
+// Slice with the real one, counting unpinned notes only — NOT len(notes) - len(result), which
+// counts the graduated, expired and malformed notes this function excluded and would over-report. The signature stays (notes, Budget) rather than
 // growing a second return value because the exclusions, not the ceilings, are what a caller
 // gets wrong when it computes that number itself.
 func Slice(notes []Note, b Budget) []Note {
 	b = b.normalised()
 
+	pins := Pins(notes, b.Now)
+	k := PinsShown(pins, b.StandingBytes)
+	budget := b.TotalBytes - PinnedBlockBytes(pins[:k], len(pins)-k)
+
 	servable := make([]Note, 0, len(notes))
 	for _, n := range notes {
-		if n.Malformed || n.Status != StatusActive {
+		if n.Malformed || n.Status != StatusActive || n.Standing {
 			continue
 		}
 		// A zero Expires means "no TTL", never "expired at the epoch".
@@ -168,15 +183,16 @@ func Slice(notes []Note, b Budget) []Note {
 		return servable[j].Created.Before(servable[i].Created)
 	})
 
-	out := make([]Note, 0, b.K)
+	out := append(make([]Note, 0, k+b.K), pins[:k]...)
+	newest := 0
 	total := 0
 	for _, n := range servable {
-		if len(out) >= b.K {
+		if newest >= b.K {
 			break
 		}
 		n.Body = excerpt(n.Body, b.ExcerptChars)
-		size := len(Emit(n))
-		if size > b.TotalBytes {
+		size := len(InjectedEntry(n, b.Now))
+		if size > budget {
 			// A note that would not fit even in an empty block is unservable at this budget, so
 			// it is skipped rather than stopped on. Evidence is unbounded, which makes one such
 			// note reachable, and stopping would let it starve every note ranked below it:
@@ -184,7 +200,7 @@ func Slice(notes []Note, b Budget) []Note {
 			// servable notes exist reads as injection having silently stopped working.
 			continue
 		}
-		if total+size > b.TotalBytes {
+		if total+size > budget {
 			// Stop rather than skip: the result stays a prefix of the notes that CAN be served at
 			// this budget, so the overflow really is "…and N more" rather than an arbitrary
 			// subset. (Not a prefix of the ranking itself — the branch above may already have
@@ -192,6 +208,7 @@ func Slice(notes []Note, b Budget) []Note {
 			break
 		}
 		out = append(out, n)
+		newest++
 		total += size
 	}
 	return out

@@ -74,6 +74,9 @@ type Note struct {
 	// Expires is the TTL stamp. The ZERO value means "no TTL" — the note is review-nagged
 	// rather than expired. It must never be read as "expired at the epoch".
 	Expires time.Time
+	// Standing is the operator's pin. It is a mark like Status, not a type, so the closed type
+	// vocabulary stays closed (ADR-022).
+	Standing bool
 	// Body is the Markdown text after the frontmatter, preserved verbatim.
 	Body string
 	// Malformed reports that the frontmatter failed the restricted dialect. Such a note is

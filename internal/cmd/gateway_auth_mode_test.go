@@ -228,3 +228,86 @@ func TestGatewayAuthMode_Tier5DefaultApiKeyWhenNeither(t *testing.T) {
 		t.Error("migrated = false; an absent-record migration must report migrated=true")
 	}
 }
+
+// `af install --init` seeds litellm.yaml from the clone, so its lanes are af's evidence, not the
+// operator's: an imported credential handle must decide the mode before the yaml scan does.
+func TestGatewayAuthMode_HandleOutranksLitellmYamlLanes(t *testing.T) {
+	const openaiOnly = "model_list:\n  - model_name: claude-haiku\n    litellm_params:\n      model: openai/gpt-4o\n"
+	const chatgptOnly = "model_list:\n  - model_name: claude-haiku\n    litellm_params:\n      model: chatgpt/gpt-5\n"
+	cases := []struct {
+		label    string
+		yaml     string
+		handles  []func(*testing.T, string)
+		wantMode string
+		wantErr  string
+	}{
+		{"openai_lanes_subscription_handle", openaiOnly, []func(*testing.T, string){writeK1SubscriptionHandle}, "codex-subscription", ""},
+		{"chatgpt_lanes_api_key_handle", chatgptOnly, []func(*testing.T, string){writeK1ApiKeyHandle}, "api-key", ""},
+		{"openai_lanes_both_handles", openaiOnly, []func(*testing.T, string){writeK1ApiKeyHandle, writeK1SubscriptionHandle}, "", "--litellm-auth"},
+		{"openai_lanes_no_handle", openaiOnly, nil, "api-key", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.label, func(t *testing.T) {
+			root := gatewayFactoryRoot(t)
+			if err := os.WriteFile(filepath.Join(config.ConfigDir(root), "litellm.yaml"), []byte(c.yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			for _, write := range c.handles {
+				write(t, root)
+			}
+			mode, migrated, err := gatewayAuthMode(root)
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("gatewayAuthMode = %q, %v; want the both-handles refusal naming %s", mode, err, c.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("gatewayAuthMode: %v", err)
+			}
+			if mode != c.wantMode || !migrated {
+				t.Errorf("gatewayAuthMode = %q, migrated=%v; want %q, migrated=true", mode, migrated, c.wantMode)
+			}
+		})
+	}
+}
+
+// The reviewer's scenario end to end: the tracked litellm.yaml seeded into a fresh factory, then
+// `af gateway auth import` (or an OpenAI key as well), then `af install --agents --litellm`.
+func TestGatewayAuthMode_FreshSeededFactoryFollowsImportedHandle(t *testing.T) {
+	tracked, err := os.ReadFile(filepath.Join(findModuleRoot(t), ".agentfactory", "litellm.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedFresh := func(t *testing.T) string {
+		t.Helper()
+		src := newAFSourceWithConfigs(t, starterSrcCloneConfigs(map[string]string{"litellm.yaml": string(tracked)}))
+		root, configDir := starterSrcFresh(t)
+		if _, err := starterSrcSeed(configDir, src, false); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		return root
+	}
+
+	t.Run("subscription_handle", func(t *testing.T) {
+		t.Setenv("AF_LITELLM_AUTH", "")
+		root := seedFresh(t)
+		writeK1SubscriptionHandle(t, root)
+		if mode, _, err := gatewayAuthMode(root); err != nil || mode != "codex-subscription" {
+			t.Errorf("gatewayAuthMode = %q, %v; want codex-subscription", mode, err)
+		}
+		mode, explicit, err := resolveLitellmAuthMode(nil, root)
+		if err != nil || mode != "codex-subscription" || explicit {
+			t.Errorf("resolveLitellmAuthMode = %q, explicit=%v, %v; want codex-subscription, false, nil", mode, explicit, err)
+		}
+	})
+
+	t.Run("both_handles", func(t *testing.T) {
+		root := seedFresh(t)
+		writeK1ApiKeyHandle(t, root)
+		writeK1SubscriptionHandle(t, root)
+		if mode, _, err := gatewayAuthMode(root); err == nil || !strings.Contains(err.Error(), "--litellm-auth") {
+			t.Errorf("gatewayAuthMode = %q, %v; want the both-handles refusal naming --litellm-auth", mode, err)
+		}
+	})
+}

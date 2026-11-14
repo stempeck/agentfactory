@@ -52,7 +52,7 @@ func installMemStore(t *testing.T) *memstore.Store {
 func installNoopLaunchSession(t *testing.T) {
 	t.Helper()
 	orig := launchAgentSession
-	launchAgentSession = func(*cobra.Command, string, string, string, string, string, bool) error {
+	launchAgentSession = func(*cobra.Command, string, string, string, string, string, launchGates) error {
 		return nil
 	}
 	t.Cleanup(func() { launchAgentSession = orig })
@@ -1978,7 +1978,7 @@ func TestRunFormulaInstantiation_PassesWorktreeToLaunch(t *testing.T) {
 
 	var capturedWTPath, capturedWTID string
 	orig := launchAgentSession
-	launchAgentSession = func(_ *cobra.Command, _, _, wtPath, wtID, _ string, _ bool) error {
+	launchAgentSession = func(_ *cobra.Command, _, _, wtPath, wtID, _ string, _ launchGates) error {
 		capturedWTPath = wtPath
 		capturedWTID = wtID
 		return nil
@@ -3169,7 +3169,7 @@ func installCapturingLaunchSession(t *testing.T) *launchCapture {
 	t.Helper()
 	cap := &launchCapture{}
 	orig := launchAgentSession
-	launchAgentSession = func(_ *cobra.Command, _, agentName, worktreePath, worktreeID, _ string, _ bool) error {
+	launchAgentSession = func(_ *cobra.Command, _, agentName, worktreePath, worktreeID, _ string, _ launchGates) error {
 		cap.agentName = agentName
 		cap.worktreePath = worktreePath
 		cap.worktreeID = worktreeID

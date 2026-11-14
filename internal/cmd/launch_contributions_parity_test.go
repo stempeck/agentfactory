@@ -26,7 +26,7 @@ const k14GoldenLine = "export AF_ROOT='<ROOT>' AF_ROLE='manager' AF_ACTOR='manag
 	"CLAUDE_CODE_ENABLE_TELEMETRY='' OTEL_METRICS_EXPORTER='' OTEL_LOGS_EXPORTER='' OTEL_EXPORTER_OTLP_PROTOCOL='' " +
 	"OTEL_EXPORTER_OTLP_ENDPOINT='' OTEL_EXPORTER_OTLP_HEADERS='' OTEL_RESOURCE_ATTRIBUTES='' " +
 	"OPENAI_API_KEY='' CHATGPT_TOKEN_DIR='' CHATGPT_AUTH_FILE='' CHATGPT_API_BASE='' CODEX_HOME='' " +
-	"AF_EFFORT_OBJECTIVE='' AF_EFFORT_STEP_LABEL='' AF_EFFORT_FORMULA='' " +
+	"AF_EFFORT_OBJECTIVE='' AF_EFFORT_STEP_LABEL='' AF_EFFORT_FORMULA='' AF_LAUNCH_KIND='' " +
 	"GIT_AUTHOR_NAME='agentfactory-cli' GIT_AUTHOR_EMAIL='293373236+agentfactory-cli@users.noreply.github.com' " +
 	"GIT_COMMITTER_NAME='agentfactory-cli' GIT_COMMITTER_EMAIL='293373236+agentfactory-cli@users.noreply.github.com' " +
 	"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0='core.hooksPath' GIT_CONFIG_VALUE_0='<ROOT>/.agentfactory/githooks' " +
@@ -130,7 +130,7 @@ func (fx *k14Fixture) sling(t *testing.T, fake *fakeTmux, cliModel string) k14La
 	cmd, buf := launchCmd(t)
 	var err error
 	stderr := captureStderr(t, func() {
-		err = launchAgentSession(cmd, fx.root, "manager", fx.wtPath, fx.wtID, cliModel, false)
+		err = launchAgentSession(cmd, fx.root, "manager", fx.wtPath, fx.wtID, cliModel, launchGates{})
 	})
 	ops := append([]string(nil), fake.ops[start:]...)
 	return k14Launch{line: k14LineFromOps(ops, session.SessionName("manager")), ops: ops, output: buf.String() + stderr, err: err}
@@ -199,8 +199,9 @@ func k14AssertParity(t *testing.T, up, sling, respawn string) {
 	if up != sling {
 		t.Errorf("af up and af sling lines differ:\n up:   %s\n sling: %s", up, sling)
 	}
-	if got := strings.TrimSuffix(respawn, " 'af prime'"); got != up {
-		t.Errorf("respawn line differs from af up beyond the 'af prime' prompt:\n up:      %s\n respawn: %s", up, respawn)
+	unmarked := strings.Replace(respawn, "AF_LAUNCH_KIND='respawn'", "AF_LAUNCH_KIND=''", 1)
+	if got := strings.TrimSuffix(unmarked, " 'af prime'"); got != up {
+		t.Errorf("respawn line differs from af up beyond the AF_LAUNCH_KIND='respawn' mark and the 'af prime' prompt:\n up:      %s\n respawn: %s", up, respawn)
 	}
 }
 
@@ -219,7 +220,14 @@ func TestLaunchContributionsParity(t *testing.T) {
 			if strings.Contains(l, "AF_BUILD_") {
 				t.Errorf("%s: no build-host.json, yet the line carries AF_BUILD_*: %s", name, l)
 			}
-			fx.exec(t, l)
+			run := fx.exec(t, l)
+			want := ""
+			if name == "respawn" {
+				want = "respawn"
+			}
+			if got, ok := run.env["AF_LAUNCH_KIND"]; !ok || got != want {
+				t.Errorf("%s: the launched process saw AF_LAUNCH_KIND=%q (set %v), want %q", name, got, ok, want)
+			}
 		}
 	})
 

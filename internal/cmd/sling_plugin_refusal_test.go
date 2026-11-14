@@ -30,7 +30,7 @@ func g2SlingPluginAgent(t *testing.T, manifest string, noLaunch bool) g2SlingRun
 	store := installMemStore(t)
 	launches := 0
 	origLaunch := launchAgentSession
-	launchAgentSession = func(*cobra.Command, string, string, string, string, string, bool) error {
+	launchAgentSession = func(*cobra.Command, string, string, string, string, string, launchGates) error {
 		launches++
 		return nil
 	}

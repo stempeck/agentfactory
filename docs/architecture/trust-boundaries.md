@@ -185,6 +185,67 @@ happens via **mail** (a fresh bead in the agent's inbox with subject
 `QUALITY_GATE` or `STEP_FIDELITY`), not by blocking the tool call. This
 is an architectural decision (see `subsystems/hooks.md`).
 
+### GitHub issue → dispatcher → healing agents (advisory-heal)
+
+**Trust model:** A red scheduled `advisory-decay` run on stempeck/agentfactory-pro files one issue
+per pin, and the `advisory-heal` dispatch workflow in pro's tracked `.agentfactory/dispatch.json`
+routes each issue through fable-implement, fable-review and fable-increment. The public repository
+runs the same code with the install and filing steps skipped, and is healed only by a publish. What
+the agents treat as work input is bounded at every hop:
+- **Who can start a heal:** whoever can apply labels. The dispatcher acts on any issue that carries
+  `agentic` plus the `advisory-heal` workflow label; it does not check who applied them or that the
+  filing step opened the issue. GitHub grants label rights only to collaborators with triage
+  access or above, and the job's own token (`issues: write`, granted to the `advisory-decay` job
+  alone). The first phase label is the dedicated `heal-implement`, never a label an issue template
+  applies.
+- **What the issue may carry:** validated identifiers only. The filer renders advisory ids,
+  aliases, `package@version` keys, versions, dates, ecosystems and repository names after checking
+  each against a fixed grammar, and fails the step on any field that does not match; it never
+  pastes advisory text, so no imperative from an advisory feed reaches an agent. Every key is
+  rendered inside backticks. The class, the key and the fix all come from the audit's record; the
+  filer decides only which findings share an issue, by a fixed sibling map over validated package
+  names (Go `stdlib` and `toolchain`, npm `playwright` and `playwright-core`, at one version) that a
+  test holds equal to the audit's two-package lines.
+- **Which `gh` files the issue:** the release `quickstart.sh` pins. The install step reads
+  `GH_VERSION` and its `GH_SHA256_*` sums from `quickstart.sh`, refuses a download whose sha256
+  differs, installs under the job's temporary directory, and puts that directory first on the PATH
+  of the steps after it.
+- **Who can add work input:** collaborators only. The filer locks each issue as it creates it,
+  and fable-implement locks the pull request it opens for an issue link when the repository is
+  public, so the comments and reviews the later phases read come only from collaborators.
+- **What an agent may change in the register:** on its own, an agent may move a pin, delete a
+  register entry or shorten a `recheck_by`; each is a strengthening. A new entry, a `recheck_by`
+  moved later, or adding or changing `fix_available` (the operator's acknowledgement of a
+  published fix) is a proposal accepted only by the operator's merge of the pull request that
+  proposes it, whose body starts `Operator acceptance required:`.
+
+**Known gap (not enforced):** The agents' single GitHub identity is the admin and only
+collaborator of both repositories. On stempeck/agentfactory-pro, where heals are merged, GitHub
+offers no ruleset or branch protection for the repository's plan, so nothing requires a review; on
+stempeck/agentfactory the `main-rules` ruleset requires a review that no second account exists to
+give, so every merge on its `main` lands through the admin bypass. "Only the operator merges" and
+"a register-widening change needs the operator's acceptance" are therefore conventions, backed by
+the formulas (no healing formula runs `gh pr merge`) and by the dispatcher, which completes a heal
+on an open pull request and never approves or merges it, rather than by GitHub. A non-bypassing
+agent identity plus CODEOWNERS on the register would make them mechanical.
+
+**Anchors:**
+- gh install step: `.github/workflows/test.yml:288-290` (`.github/install-gh.sh`); filing step and
+  its repository guard: `.github/workflows/test.yml:291-298`; job-level `issues: write`:
+  `.github/workflows/test.yml:277-279`.
+- Filer (grammar checks, backticked keys, `gh issue lock`): `.github/advisory-issue.sh`.
+- Record writer and the one fix rule: `.github/advisory-audit.sh` (`ADVISORY_AUDIT_RECORD`, the
+  `probe` function).
+- Workflow validation (each phase resolves on its first single-label mapping, one `source`):
+  `validateWorkflows`, `internal/config/dispatch.go:256`; the workflow engine:
+  `handleWorkflowItem`, `terminalPROutcome` and `workflowCtx.terminal` in
+  `internal/cmd/dispatch.go`.
+- Closing reference, self-check and public-PR lock: the `submit-and-exit` step of
+  `internal/cmd/install_formulas/fable-implement.formula.toml`; no healing formula merges:
+  `TestFableImplementClosingReference` (`internal/cmd/formula_fable_implement_test.go`).
+- The register rule: [ADR-027](adrs/ADR-027-bootstrap-convergence-contract.md) Decision item 4;
+  the runbook: `USING_ADVISORYLOOPS.md` "Advisory healing loop".
+
 ---
 
 ## What is NOT trusted

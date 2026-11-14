@@ -411,13 +411,29 @@ func TestConfigModelsSet_PairingWarning(t *testing.T) {
 		}
 	})
 
+	// The pairing lint stays silent for a claude- model, but with no declaration the fourth lint
+	// speaks: af would run on whatever window the host applies and could not say when it is smaller.
+	t.Run("a claude- model derives its own window", func(t *testing.T) {
+		setupConfigFactory(t)
+		_, stderr, err := runConfigModelsSetSplit(t, `{"models":{"opus":{"ANTHROPIC_MODEL":"claude-opus-4-8","CLAUDE_CODE_AUTO_COMPACT_WINDOW":"220000"}}}`)
+		if err != nil {
+			t.Fatalf("runConfigModelsSet: %v (stderr=%q)", err, stderr)
+		}
+		const want = "warning: model \"opus\" declares no CLAUDE_CODE_MAX_CONTEXT_TOKENS; af will use whatever window the host applies to \"claude-opus-4-8\" and cannot tell you when that is smaller than you expect\n"
+		if stderr != want {
+			t.Errorf("stderr =\n  %q\nwant exactly the window-declaration warning\n  %q", stderr, want)
+		}
+		if strings.Contains(stderr, "which the host caps at") {
+			t.Errorf("a claude- model must draw no pairing warning, got %q", stderr)
+		}
+	})
+
 	// Each of these is legal AND coherent, so none may warn. Together they pin every
 	// conjunct of the lint: an over-eager predicate fails at least one of them.
 	silent := []struct {
 		name string
 		body string
 	}{
-		{"a claude- model derives its own window", `{"models":{"opus":{"ANTHROPIC_MODEL":"claude-opus-4-8","CLAUDE_CODE_AUTO_COMPACT_WINDOW":"220000"}}}`},
 		{"a window below the cap is honoured in full", `{"models":{"codex":{"ANTHROPIC_MODEL":"gpt-5.6-sol","CLAUDE_CODE_AUTO_COMPACT_WINDOW":"150000"}}}`},
 		{"a window exactly at the cap is not capped", `{"models":{"codex":{"ANTHROPIC_MODEL":"gpt-5.6-sol","CLAUDE_CODE_AUTO_COMPACT_WINDOW":"200000"}}}`},
 		// The Go zero value for an absent ANTHROPIC_MODEL is "", which is not claude-
@@ -734,4 +750,41 @@ func mustReadDir(t *testing.T, dir string) []string {
 		names = append(names, e.Name())
 	}
 	return names
+}
+
+// K4 scopes the window gate to profiles that are not foreign, and the gate returns before it reads a
+// foreign profile's record, so a refusal predicted for one at save would be false every time. The
+// not-foreign profile beside it, with the same shortfall on record, proves the record is read.
+func TestConfigModelsSet_ForeignProfilePredictsNoRefusal(t *testing.T) {
+	const foreign, foreignModel = "sol", "gpt-5.6-sol"
+	root := setupConfigFactory(t)
+	resetWindowPass()
+	t.Cleanup(resetWindowPass)
+	wdStubVersion(t, wdNew)
+	foreignRec := wgShortfall(wdNew, wdDeclared, 262144, foreignModel, "scout")
+	foreignRec.Class = "foreign"
+	wdPlantRecord(t, root, foreign, map[string]windowRecord{wdKey(wdNew, wdDeclared, foreignModel): foreignRec})
+	wdPlantRecord(t, root, wdProfile, map[string]windowRecord{wdKey(wdNew, wdDeclared, wdModel): wgShortfall(wdNew, wdDeclared, 262144, wdModel, "scout")})
+
+	foreignProfile := map[string]string{"ANTHROPIC_MODEL": foreignModel, config.EnvMaxContextTokens: "1000000"}
+	body, err := json.Marshal(map[string]any{"models": map[string]map[string]string{
+		foreign:   foreignProfile,
+		wdProfile: {"ANTHROPIC_MODEL": wdModel, config.EnvMaxContextTokens: "1000000"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err := runConfigModelsSetSplit(t, string(body))
+	if err != nil {
+		t.Fatalf("config models set: %v (stderr=%q)", err, stderr)
+	}
+	if n := strings.Count(stderr, "would be refused"); n != 1 || !strings.Contains(stderr, `profile "`+wdProfile+`" declares`) {
+		t.Errorf("want exactly one predicted refusal, the not-foreign %s's; got %d:\n%s", wdProfile, n, stderr)
+	}
+	if strings.Contains(stderr, `profile "`+foreign+`" declares`) {
+		t.Errorf("the save predicted a refusal for the foreign profile %s, which the gate never refuses:\n%s", foreign, stderr)
+	}
+	if line := windowSavePrediction(root, foreign, foreignProfile); line != "" {
+		t.Errorf("windowSavePrediction(%s) = %q, want \"\" for a foreign profile", foreign, line)
+	}
 }

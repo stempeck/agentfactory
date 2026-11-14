@@ -28,9 +28,10 @@ var validAgentName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
 // reservedNames mirrors internal/config/config.go's map: "dispatch" collides with the
 // af-dispatch infra session; "operator" collides with the web console's synthetic mail
 // sender identity, which would otherwise be indistinguishable from a real agent of that name;
+// "af" collides the same way with the sender of every operator escalation af itself files;
 // "watchdog" collides with the af-watchdog control-plane session (#548 H-2). Nothing
 // auto-syncs this mirror to config.go, so any addition there must be repeated here.
-var reservedNames = map[string]bool{"dispatch": true, "operator": true, "watchdog": true}
+var reservedNames = map[string]bool{"af": true, "dispatch": true, "operator": true, "watchdog": true}
 
 // ValidateAgentName mirrors internal/config/config.go:299-313 in full — the regex ALONE is
 // insufficient; the empty / length / reserved checks are load-bearing.

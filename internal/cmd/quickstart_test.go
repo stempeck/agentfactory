@@ -315,7 +315,7 @@ func TestQuickstartTelemetryProvisioning(t *testing.T) {
 	t.Run("seeded_config_not_committed", func(t *testing.T) {
 		for _, p := range []string{".agentfactory/telemetry.json", ".agentfactory/secrets/telemetry.auth"} {
 			if _, err := os.Stat(filepath.Join(root, p)); err == nil {
-				t.Errorf("%s must not be a committed artifact (O-3: left in the ignored models.json tier)", p)
+				t.Errorf("%s must not be a committed artifact (O-3: telemetry.json/secrets stay machine-local, deliberately ignored)", p)
 			}
 		}
 	})

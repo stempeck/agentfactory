@@ -14,6 +14,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/session"
 	"github.com/stempeck/agentfactory/internal/tokenomics"
+	"github.com/stempeck/agentfactory/internal/worktree"
 )
 
 func TestErrNotProvisioned_IsDetectable(t *testing.T) {
@@ -398,5 +399,88 @@ func TestRunUp_RelaunchClearsRefusalBreadcrumb(t *testing.T) {
 	if _, ok := readLastRefusal(agentDir); ok {
 		t.Error("af up relaunch carried the refusal breadcrumb into the fresh session; the observer " +
 			"would relay a dead session's refusal against a step that never earned it")
+	}
+}
+
+// t18UpFactory is a factory whose manager runs on the declaring profile with a recorded shortfall, in a
+// repository with tracked scaffold, started with no worktree to inherit.
+func t18UpFactory(t *testing.T) string {
+	t.Helper()
+	root := setupTestFactoryForDone(t, "manager")
+	t18TrackedScaffoldRepo(t, root, "manager")
+	setupHermeticSessions(t)
+	wgWriteModels(t, root, "manager")
+	wdStubVersion(t, wdNew)
+	wgReset(t)
+	(&mailRecorder{}).install(t)
+	wgPlantShortfall(t, root, wdNew, "scout")
+	t.Setenv("AF_WORKTREE", "")
+	t.Setenv("AF_WORKTREE_ID", "")
+	t.Setenv("AF_ROLE", "")
+	t.Setenv("AF_ROOT", root)
+	t.Chdir(root)
+	return root
+}
+
+func t18RefusedUp(t *testing.T) string {
+	t.Helper()
+	cmd, buf := launchCmd(t)
+	var err error
+	stderr := captureStderr(t, func() { err = runUp(cmd, []string{"manager"}) })
+	out := buf.String() + stderr
+	if err == nil || !strings.Contains(err.Error(), "some agents failed to start") {
+		t.Fatalf("af up manager on a recorded shortfall = %v, want \"some agents failed to start\"\n%s", err, out)
+	}
+	if !strings.Contains(out, `manager: agent "manager": profile `) {
+		t.Fatalf("fixture: af up failed for a reason other than the window refusal:\n%s", out)
+	}
+	return out
+}
+
+func TestUp_WindowRefusalTakesBackItsCreatedWorktree(t *testing.T) {
+	root := t18UpFactory(t)
+	for run := 1; run <= 2; run++ {
+		when := fmt.Sprintf("refused af up #%d", run)
+		out := t18RefusedUp(t)
+		if !strings.Contains(out, "Created worktree ") {
+			t.Errorf("%s created no worktree, so it adopted one an earlier refusal left behind:\n%s", when, out)
+		}
+		if strings.Contains(out, "warning: removing refused worktree") {
+			t.Errorf("%s could not take back the worktree it created:\n%s", when, out)
+		}
+		t18RequireNoWorktree(t, root, "manager", when)
+	}
+}
+
+func TestUp_WindowRefusalLeavesAnAdoptedWorktree(t *testing.T) {
+	root := t18UpFactory(t)
+	wtPath, wtID := t18CreateAgentWorktree(t, root, "manager")
+	work := filepath.Join(wtPath, "work-in-progress.txt")
+	if err := os.WriteFile(work, []byte("uncommitted work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metaFile := filepath.Join(worktree.WorktreesDir(root), wtID+".meta.json")
+	metaBefore, err := os.ReadFile(metaFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := worktree.ReadMeta(root, wtID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := t18RefusedUp(t)
+	if strings.Contains(out, "Created worktree ") {
+		t.Fatalf("fixture: af up created a worktree instead of adopting the agent's own %s:\n%s", wtID, out)
+	}
+
+	if got, err := os.ReadFile(work); err != nil || string(got) != "uncommitted work\n" {
+		t.Errorf("the refusal destroyed the adopted worktree's uncommitted work (read %q, %v)", got, err)
+	}
+	if after, err := os.ReadFile(metaFile); err != nil || string(after) != string(metaBefore) {
+		t.Errorf("the refusal changed the adopted worktree's meta:\n before %s\n after  %s (%v)", metaBefore, after, err)
+	}
+	if branches := strings.TrimSpace(t18Git(t, root, "branch", "--list", meta.Branch)); branches == "" {
+		t.Errorf("the refusal deleted the adopted worktree's branch %s", meta.Branch)
 	}
 }

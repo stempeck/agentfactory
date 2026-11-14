@@ -3,7 +3,9 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +22,7 @@ import (
 // handleWorkflowItem (or its leaf helpers) in isolation: ghItem values are built
 // directly, completion is seeded via setupHermeticSessions+seedClosedEpic, and
 // side effects are asserted through the editItemLabels / dispatchItem /
-// ghLinkedPRs / ghPRStatus / sendWorkflowCompleteMail package-var seams. No live
+// ghLinkedPRs / ghItemState / sendWorkflowCompleteMail package-var seams. No live
 // gh, tmux, or sling. None of these tests may call t.Parallel (package globals).
 // ============================================================================
 
@@ -79,7 +81,7 @@ func recordSlings(t *testing.T, store *memstore.Store, slung *[]string, ids *[]s
 func recordWorkflowMail(t *testing.T, mails *[]string) {
 	t.Helper()
 	orig := sendWorkflowCompleteMail
-	sendWorkflowCompleteMail = func(recipient, workflow, itemKey string) error {
+	sendWorkflowCompleteMail = func(_ context.Context, _ issuestore.Store, _, recipient, workflow, itemKey string) error {
 		*mails = append(*mails, fmt.Sprintf("%s|%s|%s", recipient, workflow, itemKey))
 		return nil
 	}
@@ -94,14 +96,18 @@ func stubLinkedPRs(t *testing.T, prs []int) {
 	t.Cleanup(func() { ghLinkedPRs = orig })
 }
 
-// stubPRStatusGreen swaps ghPRStatus to a mergeable+approved+green PR.
-func stubPRStatusGreen(t *testing.T) {
+// stubItemState swaps ghItemState to report one GitHub state for every item.
+func stubItemState(t *testing.T, state string) {
 	t.Helper()
-	orig := ghPRStatus
-	ghPRStatus = func(repo string, prNumber int) (prStatus, error) {
-		return prStatus{Mergeable: true, Approved: true, ChecksGreen: true}, nil
-	}
-	t.Cleanup(func() { ghPRStatus = orig })
+	stubItemStates(t, func(string, int, string) (string, error) { return state, nil })
+}
+
+// stubItemStates swaps ghItemState to f.
+func stubItemStates(t *testing.T, f func(repo string, number int, source string) (string, error)) {
+	t.Helper()
+	orig := ghItemState
+	ghItemState = f
+	t.Cleanup(func() { ghItemState = orig })
 }
 
 // crossSourceCfg is the canonical AC-2 example: enhancement(issue) → pr-review(pr)
@@ -235,7 +241,7 @@ func TestWorkflow_TerminalPhase_RemovesAgentic(t *testing.T) {
 	wf := &cfg.Workflows[0]
 
 	complete := seedClosedEpic(t, store, config.CloseReasonFormulaComplete)
-	stubPRStatusGreen(t) // terminal pr gate: mergeable+approved+green
+	stubItemState(t, "OPEN") // terminal pr gate: the PR is open for review
 
 	var edits []labelEdit
 	var slung, ids []string
@@ -281,6 +287,69 @@ func TestWorkflow_TerminalPhase_RemovesAgentic(t *testing.T) {
 	}
 }
 
+// A failed WORKFLOW_COMPLETE is the operator's lost merge cue. Nothing irreversible may happen before
+// it is sent: once agentic is removed, no later tick sees the item again.
+func TestWorkflow_TerminalMailFailureIsRetried(t *testing.T) {
+	fake, store := setupHermeticSessions(t)
+	cfg := crossSourceCfg()
+	complete := seedClosedEpic(t, store, config.CloseReasonFormulaComplete)
+	stubItemState(t, "OPEN")
+
+	var edits []labelEdit
+	var slung, ids []string
+	recordLabelEdits(t, &edits)
+	recordSlings(t, store, &slung, &ids)
+	attempts, delivered := 0, 0
+	orig := sendWorkflowCompleteMail
+	sendWorkflowCompleteMail = func(_ context.Context, _ issuestore.Store, _, _, _, _ string) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("issue store unavailable")
+		}
+		delivered++
+		return nil
+	}
+	t.Cleanup(func() { sendWorkflowCompleteMail = orig })
+
+	const key = "owner/repo#99"
+	root := t.TempDir()
+	state := seedStallState(t, root, map[string]dispatchEntry{key: {
+		Agent: "iterate", Workflow: "feature-workflow", Phase: "pr-iterate",
+		PhaseInstanceID: complete.ID, PhaseDispatchedAt: time.Now().Add(-time.Hour),
+	}})
+	item := ghItem{Number: 99, URL: "https://github.com/owner/repo/pull/99",
+		Labels: labels("agentic", "feature-workflow", "pr-iterate")}
+	stats := &dispatchCycleStats{start: time.Now()}
+
+	stderr := stallTick(t, root, fake, &state, stats, cfg, item, "pr")
+	if attempts != 1 || delivered != 0 {
+		t.Fatalf("tick 1: %d attempts, %d delivered; want 1 attempt that failed", attempts, delivered)
+	}
+	if len(edits) != 0 {
+		t.Errorf("tick 1 edited the labels (%+v) although the completion mail was not sent; no later tick would see the item", edits)
+	}
+	if e, ok := state.Dispatched[key]; !ok || e.Phase != "pr-iterate" || e.PhaseInstanceID != complete.ID {
+		t.Errorf("tick 1 lost the record (%+v, present %v); the next tick cannot retry without it", e, ok)
+	}
+	if stats.errors != 1 || !strings.Contains(stderr, "stall") {
+		t.Errorf("tick 1: stats.errors = %d, stderr %q; want one stall, never a bare warning", stats.errors, stderr)
+	}
+
+	stallTick(t, root, fake, &state, stats, cfg, item, "pr")
+	if attempts != 2 || delivered != 1 {
+		t.Errorf("tick 2: %d attempts, %d delivered; want the retry delivered exactly once", attempts, delivered)
+	}
+	if len(edits) != 1 || !equalStrs(edits[0].remove, []string{"pr-iterate", "agentic"}) {
+		t.Errorf("tick 2 edits = %+v, want one edit removing pr-iterate and agentic", edits)
+	}
+	if _, ok := state.Dispatched[key]; ok {
+		t.Errorf("tick 2 kept the record after a delivered completion mail")
+	}
+	if len(slung) != 0 {
+		t.Errorf("slung = %v, want none: a finished workflow is never re-slung", slung)
+	}
+}
+
 // --- AC 3: TestWorkflow_EndToEnd_AdvancesToCompletion (cross-source AC-2) ---
 
 func TestWorkflow_EndToEnd_AdvancesToCompletion(t *testing.T) {
@@ -291,7 +360,7 @@ func TestWorkflow_EndToEnd_AdvancesToCompletion(t *testing.T) {
 	const key = "owner/repo#7"
 
 	stubLinkedPRs(t, []int{42}) // the single linked PR for the cross-source gates
-	stubPRStatusGreen(t)
+	stubItemState(t, "OPEN")
 
 	var edits []labelEdit
 	var slung, ids []string
@@ -387,6 +456,41 @@ func TestWorkflow_AmbiguousCursor_Stalls(t *testing.T) {
 	}
 	if len(edits) != 0 || len(slung) != 0 {
 		t.Errorf("ambiguous cursor must not edit labels (%v) or sling (%v)", edits, slung)
+	}
+
+	t.Run("the stall runs with the tick's store open", func(t *testing.T) {
+		var actors []string
+		orig := newIssueStore
+		newIssueStore = func(root, actor string) (issuestore.Store, error) {
+			actors = append(actors, actor)
+			return orig(root, actor)
+		}
+		t.Cleanup(func() { newIssueStore = orig })
+		var mails []stallMailCall
+		recordStallMail(t, &mails, nil)
+		cmd, _, _ := phase3Cmd()
+		handleWorkflowItem(cmd, t.TempDir(), fake, &dispatchState{Dispatched: map[string]dispatchEntry{}}, &dispatchCycleStats{start: time.Now()}, cfg, "owner/repo", item, "issue", wf)
+		if !slices.Equal(actors, []string{dispatchStoreActor}) {
+			t.Errorf("issue stores opened = %q, want one, as %q: the stall mail needs the tick's store", actors, dispatchStoreActor)
+		}
+		if len(mails) != 1 || !mails[0].withStore {
+			t.Errorf("stall mails = %+v, want one handed the tick's store", mails)
+		}
+	})
+}
+
+func TestWorkflow_StoreOpenFailureStalls(t *testing.T) {
+	fake, _ := setupHermeticSessions(t)
+	cfg := crossSourceCfg()
+	orig := newIssueStore
+	newIssueStore = func(_, _ string) (issuestore.Store, error) { return nil, errors.New("store down") }
+	t.Cleanup(func() { newIssueStore = orig })
+	cmd, _, errBuf := phase3Cmd()
+	stats := &dispatchCycleStats{start: time.Now()}
+	state := dispatchState{Dispatched: map[string]dispatchEntry{}}
+	handleWorkflowItem(cmd, t.TempDir(), fake, &state, stats, cfg, "owner/repo", issueItem("enhancement"), "issue", &cfg.Workflows[0])
+	if stats.errors != 1 || !strings.Contains(errBuf.String(), "cannot open issue store") {
+		t.Errorf("stats.errors = %d, stderr %q; want one stall naming the store open", stats.errors, errBuf.String())
 	}
 }
 
@@ -684,53 +788,101 @@ func TestWorkflow_StallCeiling_Exceeded(t *testing.T) {
 	}
 }
 
-// --- HIGH-A: terminal pr phase complete but PR not green ⇒ WAIT (defer), not advance/stall ---
+// --- #755 D1: a terminal PR phase ends on the PR's state alone. Approval, checks and mergeability
+// are never read: one GitHub account cannot approve its own PR, and a heal's own advisory-decay
+// check stays red while any other finding is open. ---
 
-func TestWorkflow_TerminalPrNotGreen_Waits(t *testing.T) {
+func TestWorkflow_TerminalOpenOrMergedPR_Completes(t *testing.T) {
+	for _, prState := range []string{"OPEN", "MERGED"} {
+		t.Run(prState, func(t *testing.T) {
+			fake, store := setupHermeticSessions(t)
+			cfg := crossSourceCfg()
+			wf := &cfg.Workflows[0]
+
+			complete := seedClosedEpic(t, store, config.CloseReasonFormulaComplete)
+			var asked []string
+			stubItemStates(t, func(repo string, number int, source string) (string, error) {
+				asked = append(asked, fmt.Sprintf("%s#%d/%s", repo, number, source))
+				return prState, nil
+			})
+
+			var edits []labelEdit
+			var slung, ids []string
+			var mails []string
+			recordLabelEdits(t, &edits)
+			recordSlings(t, store, &slung, &ids)
+			recordWorkflowMail(t, &mails)
+
+			cmd, _, _ := phase3Cmd()
+			stats := &dispatchCycleStats{start: time.Now()}
+			state := dispatchState{Dispatched: map[string]dispatchEntry{"owner/repo#99": {
+				Agent: "iterate", Workflow: "feature-workflow", Phase: "pr-iterate",
+				PhaseInstanceID: complete.ID, PhaseDispatchedAt: time.Now().Add(-time.Hour),
+			}}}
+			item := ghItem{Number: 99, URL: "https://github.com/owner/repo/pull/99",
+				Labels: labels("agentic", "feature-workflow", "pr-iterate")}
+
+			handleWorkflowItem(cmd, t.TempDir(), fake, &state, stats, cfg, "owner/repo", item, "pr", wf)
+
+			if !equalStrs(asked, []string{"owner/repo#99/pr"}) {
+				t.Errorf("ghItemState calls = %v, want exactly [owner/repo#99/pr]", asked)
+			}
+			if len(mails) != 1 || !strings.HasSuffix(mails[0], "|feature-workflow|owner/repo#99") {
+				t.Errorf("completion mails = %v, want one for feature-workflow owner/repo#99", mails)
+			}
+			if len(edits) != 1 || len(edits[0].add) != 0 || !equalStrs(edits[0].remove, []string{"pr-iterate", "agentic"}) {
+				t.Errorf("terminal label edits = %+v, want one edit removing [pr-iterate agentic]", edits)
+			}
+			if _, ok := state.Dispatched["owner/repo#99"]; ok {
+				t.Errorf("record still held after completion: %+v", state.Dispatched["owner/repo#99"])
+			}
+			if len(slung) != 0 || stats.errors != 0 {
+				t.Errorf("slung = %v, stats.errors = %d; want no sling and no error", slung, stats.errors)
+			}
+		})
+	}
+}
+
+func TestWorkflow_TerminalClosedPR_StallsAndKeepsTheRecord(t *testing.T) {
 	fake, store := setupHermeticSessions(t)
 	cfg := crossSourceCfg()
 	wf := &cfg.Workflows[0]
 
 	complete := seedClosedEpic(t, store, config.CloseReasonFormulaComplete)
-	// PR is mergeable + green but NOT approved ⇒ prArtifactComplete == false.
-	orig := ghPRStatus
-	ghPRStatus = func(repo string, prNumber int) (prStatus, error) {
-		return prStatus{Mergeable: true, Approved: false, ChecksGreen: true}, nil
-	}
-	t.Cleanup(func() { ghPRStatus = orig })
+	stubItemState(t, "CLOSED")
 
 	var edits []labelEdit
 	var slung, ids []string
 	var mails []string
+	var stallMails []stallMailCall
 	recordLabelEdits(t, &edits)
 	recordSlings(t, store, &slung, &ids)
 	recordWorkflowMail(t, &mails)
+	recordStallMail(t, &stallMails, nil)
 
-	cmd, _, _ := phase3Cmd()
+	cmd, _, errBuf := phase3Cmd()
 	stats := &dispatchCycleStats{start: time.Now()}
-	before := dispatchEntry{
+	state := dispatchState{Dispatched: map[string]dispatchEntry{"owner/repo#99": {
 		Agent: "iterate", Workflow: "feature-workflow", Phase: "pr-iterate",
 		PhaseInstanceID: complete.ID, PhaseDispatchedAt: time.Now().Add(-time.Hour),
-	}
-	state := dispatchState{Dispatched: map[string]dispatchEntry{"owner/repo#99": before}}
+	}}}
 	item := ghItem{Number: 99, URL: "https://github.com/owner/repo/pull/99",
 		Labels: labels("agentic", "feature-workflow", "pr-iterate")}
 
 	handleWorkflowItem(cmd, t.TempDir(), fake, &state, stats, cfg, "owner/repo", item, "pr", wf)
 
-	// A completed formula whose terminal artifact is not yet ready waits — no
-	// advance, no mail, no re-sling (re-slinging a done formula would --reset it).
-	if len(edits) != 0 || len(mails) != 0 || len(slung) != 0 {
-		t.Errorf("terminal-not-green must WAIT: edits=%v mails=%v slung=%v (want none)", edits, mails, slung)
+	const reason = `workflow "feature-workflow" terminal pr phase "pr-iterate": linked PR #99 is closed without merging`
+	if !strings.Contains(errBuf.String(), "stall owner/repo#99: "+reason) {
+		t.Errorf("stderr = %q, want the stall line %q", errBuf.String(), reason)
 	}
-	if stats.skipped != 1 {
-		t.Errorf("stats.skipped = %d, want 1 (phaseWait defers to next cycle)", stats.skipped)
+	if len(stallMails) != 1 || stallMails[0].reason != reason {
+		t.Errorf("stall mails = %+v, want one with reason %q", stallMails, reason)
 	}
-	if stats.errors != 0 {
-		t.Errorf("terminal-not-green is a WAIT, not a stall; stats.errors=%d, want 0", stats.errors)
+	if got := state.Dispatched["owner/repo#99"]; got.Stall != reason || got.PhaseInstanceID != complete.ID {
+		t.Errorf("record = %+v, want it kept with Stall %q", got, reason)
 	}
-	if state.Dispatched["owner/repo#99"] != before {
-		t.Errorf("record must remain unchanged on wait, got %+v", state.Dispatched["owner/repo#99"])
+	if len(edits) != 0 || len(mails) != 0 || len(slung) != 0 || stats.errors != 1 {
+		t.Errorf("edits=%v mails=%v slung=%v errors=%d; want none, none, none, 1", edits, mails, slung, stats.errors)
 	}
 }
 

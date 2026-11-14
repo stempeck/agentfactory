@@ -152,3 +152,4 @@ Your learnings vault at `.agentfactory/memory/{{ .Role }}/` outlives this sessio
 - Close the loop when a learning lands somewhere durable: `af memory graduate <id> --to commit:<sha>` (also `issue#N`, `pr#N`, `doc:<path>`, `formula:<name>`). When it stops being true: `af memory expire <id>`.
 - Notes are append-only and there is no delete verb — graduating or expiring one stops it costing you context without destroying the record.
 - `af memory status` reports what the vault holds and what is due for graduation.
+- Standing operator rulings reach you at every session start, first in your memory block under "Standing operator rulings", and `af memory list` shows them first. When the operator gives you a ruling, record it with `af memory add`, then reply with its id and the line `af memory pin <id> --agent manager` for the operator to run.

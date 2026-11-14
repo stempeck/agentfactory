@@ -33,17 +33,18 @@ import (
 const fallbackCaller = "manager"
 
 var (
-	slingFormulaName string
-	slingVars        []string
-	slingAgent       string
-	slingNoLaunch    bool
-	slingReset       bool
-	slingCaller      string
-	slingPersistent  bool
-	slingModel       string
-	slingSkipFitness bool
-	slingBare        bool
-	slingInputDigest string
+	slingFormulaName  string
+	slingVars         []string
+	slingAgent        string
+	slingNoLaunch     bool
+	slingReset        bool
+	slingCaller       string
+	slingPersistent   bool
+	slingModel        string
+	slingSkipFitness  bool
+	slingAcceptWindow bool
+	slingBare         bool
+	slingInputDigest  string
 )
 
 // InstantiateParams contains parameters for formula instantiation.
@@ -109,6 +110,7 @@ func init() {
 	slingCmd.Flags().BoolVar(&slingPersistent, "persistent", false, "Keep session alive after formula completion (do not auto-terminate). !IMPORTANT! ONLY used in formulas instructions, not ad-hoc specialist dispatch. Use with caution: the session will not auto-terminate on formula completion.")
 	slingCmd.Flags().StringVar(&slingModel, "model", "", "Per-agent model profile (or raw model id) from models.json — overrides the per-agent default for this launch")
 	slingCmd.Flags().BoolVar(&slingSkipFitness, "skip-fitness", false, "Launch a non-loopback model profile without a fitness attestation (loud override; see `af config models attest`)")
+	slingCmd.Flags().BoolVar(&slingAcceptWindow, "accept-window", false, "Launch despite a measured or recorded context-window shortfall (always prints the warning)")
 	slingCmd.Flags().BoolVar(&slingBare, "bare", false, "Sling an --agent with no task, for a recurring or scheduled re-sling (creates no assignment bead)")
 	slingCmd.Flags().StringVar(&slingInputDigest, "input-digest", "", "SHA-256 (64 lowercase hex) of the frozen inputs this run is based on, recorded on the instance_start record")
 	rootCmd.AddCommand(slingCmd)
@@ -238,6 +240,15 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 			reportSlingRefusal(cmd.OutOrStdout(), cmd.ErrOrStderr(), root, dispatchCaller(callerWd, root), agentName, dispatchRefusalItem(task, entry.Formula), r)
 		}
 		return err
+	}
+	if !slingNoLaunch && !slingAcceptWindow {
+		if err := precheckWindowGate(root, agentName, slingModel, entry.Model, cmd.ErrOrStderr()); err != nil {
+			var wr *windowRefusal
+			if errors.As(err, &wr) {
+				reportWindowRefusal(cmd.OutOrStdout(), wr)
+			}
+			return err
+		}
 	}
 
 	agentDir := config.AgentDir(root, agentName)
@@ -401,7 +412,15 @@ func dispatchToSpecialist(cmd *cobra.Command, root, callerWd, agentName, task st
 		return nil
 	}
 
-	return launchAgentSession(cmd, root, agentName, worktreePath, worktreeID, slingModel, slingSkipFitness)
+	if err := launchAgentSession(cmd, root, agentName, worktreePath, worktreeID, slingModel, launchGates{SkipFitness: slingSkipFitness, AcceptWindow: slingAcceptWindow}); err != nil {
+		var wr *windowRefusal
+		if errors.As(err, &wr) {
+			reportWindowRefusal(cmd.OutOrStdout(), wr)
+		}
+		return err
+	}
+	ensureSlingWatchdog(cmd, root)
+	return nil
 }
 
 // buildSpecialistCLIVars appends the synthetic task var to the operator's --var list, and only
@@ -501,6 +520,22 @@ func runFormulaInstantiation(cmd *cobra.Command, root, wd string, args []string)
 		if err := precheckNamedFormula(root, slingFormulaName); err != nil {
 			return err
 		}
+		if !slingNoLaunch && !slingAcceptWindow {
+			agent := slingAgent
+			if agent == "" {
+				agent, _ = detectAgentName(wd, root)
+			}
+			// --reset never stops a running session, so a live agent is not launched and not gated.
+			if entry, err := resolveCallerAgent(root, agent); err == nil && !agentSessionLive(root, agent) {
+				if err := precheckWindowGate(root, agent, slingModel, entry.Model, cmd.ErrOrStderr()); err != nil {
+					var wr *windowRefusal
+					if errors.As(err, &wr) {
+						reportWindowRefusal(cmd.OutOrStdout(), wr)
+					}
+					return err
+				}
+			}
+		}
 		if slingAgent != "" {
 			store, err := newIssueStore(root, slingAgent)
 			if err != nil {
@@ -544,7 +579,8 @@ func runFormulaInstantiation(cmd *cobra.Command, root, wd string, args []string)
 	}
 
 	// K14 must run before worktree setup, which would otherwise render a substituted
-	// CLAUDE.md for a non-embedded plugin agent. Fatal, unlike a launch failure below.
+	// CLAUDE.md for a non-embedded plugin agent. Fatal, like a window refusal below
+	// and unlike any other launch failure.
 	if err := refusePluginAgentWithoutTemplate(root, agentName); err != nil {
 		return fmt.Errorf("formula beads for %s were created, but its session was not set up or launched: %w; after remediating, run `af up %s`", agentName, err, agentName)
 	}
@@ -571,9 +607,20 @@ func runFormulaInstantiation(cmd *cobra.Command, root, wd string, args []string)
 		}
 	}
 
-	if err := launchAgentSession(cmd, root, agentName, worktreePath, worktreeID, slingModel, slingSkipFitness); err != nil {
+	if err := launchAgentSession(cmd, root, agentName, worktreePath, worktreeID, slingModel, launchGates{SkipFitness: slingSkipFitness, AcceptWindow: slingAcceptWindow}); err != nil {
+		// A running session receives the new beads, so a refusal against it launched nothing that failed.
+		var wr *windowRefusal
+		if errors.As(err, &wr) && !agentSessionLive(root, agentName) {
+			reportWindowRefusal(cmd.OutOrStdout(), wr)
+			if outcome.IsCreated() {
+				removeRefusedWorktree(cmd, root, worktreeID, agentName)
+			}
+			return fmt.Errorf("formula beads for %s were created, but its session was not launched: %w", agentName, err)
+		}
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: session launch failed: %v\n", err)
 		// Non-fatal — beads were created successfully
+	} else {
+		ensureSlingWatchdog(cmd, root)
 	}
 
 	return nil
@@ -1109,7 +1156,7 @@ func detectAgentName(wd, root string) (string, error) {
 // test suite hits its global timeout. The seam mirrors newIssueStore in
 // helpers.go and lets dispatch-path tests exercise the full pipeline
 // without depending on tmux + claude being present on PATH.
-var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath, worktreeID, cliModel string, skipFitness bool) error {
+var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath, worktreeID, cliModel string, gates launchGates) error {
 	t := newCmdTmux()
 	if !t.IsAvailable() {
 		return fmt.Errorf("tmux is not installed or not available")
@@ -1146,7 +1193,8 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 		agentDir = config.AgentDir(worktreePath, agentName)
 	}
 	ensureFactoryIntegrationServices(cmd.Context(), cmd, root, cmd.ErrOrStderr())
-	c, reports, err := launchContributions(cmd.Context(), root, agentName, agentDir, entry, cliModel, skipFitness, true, cmd.ErrOrStderr())
+	gates.ReportCoverage = true
+	c, reports, err := launchContributions(cmd.Context(), root, agentName, agentDir, entry, cliModel, gates, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
@@ -1157,7 +1205,9 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 		writeModelOverride(agentDir, reports.ModelName)
 	}
 
-	if err := mgr.Start(); err != nil {
+	// launchAgentSession has no liveness guard of its own, and a sling to a running agent must leave
+	// that session's launch fact alone.
+	if err := reports.startWithWindowLaunchFact(root, agentName, !mgr.Live(), cmd.ErrOrStderr(), mgr.Start); err != nil {
 		if err == session.ErrAlreadyRunning {
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: already running\n", session.SessionName(agentName))
 			return nil
@@ -1191,6 +1241,38 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 	return nil
 }
 
+// ensureSlingWatchdog sits outside the launchAgentSession seam so a no-op launch stub cannot hide
+// it; TestMain stubs it because a direct call would meet the real tmux.
+var ensureSlingWatchdog = startSlingWatchdog
+
+// startSlingWatchdog returns before launchWatchdog when the watchdog is healthy, because
+// launchWatchdog prints its pane-inert line ahead of its own healthy check. In agent context a
+// present-but-dead watchdog is not handed over: authKillGuard refuses the kill a zombie needs, and
+// its refusal would tell an agent its command stops the whole factory.
+func startSlingWatchdog(cmd *cobra.Command, root string) {
+	t := newCmdTmux()
+	name := session.WatchdogSessionName()
+	present, _ := t.HasSession(name)
+	if present && t.IsAgentRunning(name, "af") {
+		return
+	}
+	if present && callerAuthority() == AuthorityAgent {
+		fmt.Fprintln(cmd.ErrOrStderr(), "warning: the watchdog session is present but not running; an agent cannot replace it — run 'af up' from an operator shell")
+		return
+	}
+	agentsCfg, err := config.LoadAgentConfig(config.AgentsConfigPath(root))
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: watchdog not started: %v\n", err)
+		return
+	}
+	startupCfg, err := config.LoadStartupConfig(root)
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: watchdog not started: %v\n", err)
+		return
+	}
+	launchWatchdog(cmd, newCmdTmux(), root, startupCfg.WatchdogAgents, agentsCfg)
+}
+
 // resolveLaunchModelEnv resolves the per-agent model-env export set for a launch
 // (issue #480). It loads models.json, reads the .runtime/model_override marker
 // (precedence step 2), applies the unknown-profile / incomplete-endpoint fail-fast,
@@ -1206,25 +1288,25 @@ var launchAgentSession = func(cmd *cobra.Command, root, agentName, worktreePath,
 // The marker is read here in the cmd layer and passed INTO the pure resolver; the
 // resolver never reads a file or the environment (ADR-004).
 func resolveLaunchModelEnv(root, agentName, agentDir, cliModel, legacyModel string, skipFitness bool, warn io.Writer) (string, []config.EnvVar, error) {
-	return resolveModelEnvForSession(root, agentName, agentDir, cliModel, legacyModel, skipFitness, true, warn)
+	return resolveModelEnvForSession(root, agentName, agentDir, cliModel, legacyModel, launchGates{SkipFitness: skipFitness, ReportCoverage: true}, warn)
 }
 
 // resolveRespawnModelEnv re-resolves the export set for a session being rebuilt in place — handoff,
 // compact-handoff, watchdog. It is resolveLaunchModelEnv with the launch REPORTS suppressed: a
-// respawn is a continuation, not a decision, so it must add no line the operator did not already see
-// when they started the agent, and repeating a coverage warning on every compact would train them to
-// ignore it. Only the reports are dropped; the fail-safe warnings a respawn has always emitted (a
-// broken models.json, a missing secret) are untouched, as is the resolved env. The production
-// respawn gets the same silence by passing reportCoverage=false to the launch composer.
+// respawn is a continuation, not a decision, so it adds no REPORT line, and repeating a coverage
+// warning on every compact would train the operator to ignore it. The fail-safe warnings a respawn
+// has always emitted (a broken models.json, a missing secret) are untouched, as is the resolved env.
+// The production respawn, respawnSession → launchContributions, fills HarnessVersion and so does print
+// the window warning; this wrapper passes none and reaches no window gate.
 func resolveRespawnModelEnv(root, agentName, agentDir, legacyModel string, warn io.Writer) (string, []config.EnvVar, error) {
-	return resolveModelEnvForSession(root, agentName, agentDir, "", legacyModel, false, false, warn)
+	return resolveModelEnvForSession(root, agentName, agentDir, "", legacyModel, launchGates{}, warn)
 }
 
-// resolveModelEnvForSession is the shared body. reportCoverage distinguishes a fresh launch from a
+// resolveModelEnvForSession is the shared body. gates.ReportCoverage distinguishes a fresh launch from a
 // respawn, which cliModel cannot: a plain `af up` passes no --model and is still a launch the
 // operator is watching, so gating the coverage report on profile SELECTION would silence it on the
 // one path that runs most.
-func resolveModelEnvForSession(root, agentName, agentDir, cliModel, legacyModel string, skipFitness, reportCoverage bool, warn io.Writer) (string, []config.EnvVar, error) {
+func resolveModelEnvForSession(root, agentName, agentDir, cliModel, legacyModel string, gates launchGates, warn io.Writer) (string, []config.EnvVar, error) {
 	profileSelecting := cliModel != ""
 
 	cfg, err := config.LoadModelsConfig(root)
@@ -1268,7 +1350,7 @@ func resolveModelEnvForSession(root, agentName, agentDir, cliModel, legacyModel 
 		//
 		// Presence only. The value is never read into the message, because an endpoint URL can carry
 		// credentials in its userinfo and this warning reaches a terminal and a log.
-		if reportCoverage && os.Getenv(baseURLKey) != "" {
+		if gates.ReportCoverage && os.Getenv(baseURLKey) != "" {
 			warnAboutCoverageOnce(warn, "", "warning: %s is set in the environment but this launch resolved no model profile; the agent will inherit that endpoint unchecked — unset it in your shell rc, or define a profile so af can select a gateway and verify its class coverage\n", baseURLKey)
 		}
 		return "", nil, nil
@@ -1296,10 +1378,10 @@ func resolveModelEnvForSession(root, agentName, agentDir, cliModel, legacyModel 
 	// subscription mode (a file: gateway secret, D1, with the Phase-1 handle present on disk) must not
 	// proceed on a credential the gateway cannot actually use. The hard-fail set matches checkProfile's
 	// own (D13/subscriptionHardFailState) so `af config models check` and a launch never disagree about
-	// the same record; `unverified` is a warning, never a refusal (D9). Gated on reportCoverage, not
+	// the same record; `unverified` is a warning, never a refusal (D9). Gated on gates.ReportCoverage, not
 	// profileSelecting (F2/BODY-1/D4): a plain `af up` passes no --model yet is a launch the operator
 	// is watching (K4 names `af up` explicitly), so gating on profile SELECTION would skip the very
-	// path that runs most; a respawn (reportCoverage == false) still never reaches it, so a routine
+	// path that runs most; a respawn (gates.ReportCoverage == false) still never reaches it, so a routine
 	// handoff can never brick on a credential problem it cannot fix mid-session. Expiry is judged
 	// from the LIVE handle's own exp (F1/D7), never the .runtime mirror LiteLLM lets go stale; an
 	// unreadable/no-exp handle is "unknown" — surfaced, never judged expired and never backfilled
@@ -1311,7 +1393,7 @@ func resolveModelEnvForSession(root, agentName, agentDir, cliModel, legacyModel 
 	// credential the gateway uses, so a launch must not refuse on the subscription handle's state —
 	// `af config models check` is the surface that reports that ambiguity.
 	mode, _, modeErr := gatewayAuthMode(root)
-	if tok := modelEnvValue(env, "ANTHROPIC_AUTH_TOKEN"); reportCoverage && strings.HasPrefix(tok, secretPrefix) && modeErr == nil && mode == gatewayAuthProfileName {
+	if tok := modelEnvValue(env, "ANTHROPIC_AUTH_TOKEN"); gates.ReportCoverage && strings.HasPrefix(tok, secretPrefix) && modeErr == nil && mode == gatewayAuthProfileName {
 		_, state := readGatewayAuthState(root)
 		if subscriptionHardFailState(state) {
 			return "", nil, fmt.Errorf("model %q: E5: subscription credential state %q refuses launch — run `af gateway auth import` after `codex login`", name, state)
@@ -1331,11 +1413,15 @@ func resolveModelEnvForSession(root, agentName, agentDir, cliModel, legacyModel 
 	// no endpoint (a plain model-id passthrough) is not gated at all, and a respawn
 	// (non-selecting) never reaches the refuse branch — so a routine handoff can never brick.
 	if endpoint := modelEnvValue(env, "ANTHROPIC_BASE_URL"); profileSelecting && endpoint != "" && !config.IsLoopbackEndpoint(endpoint) {
-		if skipFitness {
+		if gates.SkipFitness {
 			fmt.Fprintf(warn, "warning: --skip-fitness: launching model %q on non-loopback endpoint %s without a fitness attestation (operator override)\n", name, endpoint)
 		} else if !hasFitnessAttestation(root, name) {
 			return "", nil, fmt.Errorf("model %q targets a non-loopback endpoint with no fitness attestation; run `af config models attest %s` after verifying it, or pass --skip-fitness to override", name, name)
 		}
+	}
+
+	if err := windowGate(root, agentName, name, cfg.Models[name], gates, warn); err != nil {
+		return "", nil, err
 	}
 
 	// Class-coverage report (issue #598): `af config models check` records which model classes the
@@ -1343,7 +1429,7 @@ func resolveModelEnvForSession(root, agentName, agentDir, cliModel, legacyModel 
 	// gateway still coming up must not stall or fail a launch — and it only ever warns, unlike the
 	// attestation interlock above, because a class the operator never uses being unserved is not a
 	// reason to refuse the ones that are.
-	if endpoint := modelEnvValue(env, "ANTHROPIC_BASE_URL"); reportCoverage && endpoint != "" {
+	if endpoint := modelEnvValue(env, "ANTHROPIC_BASE_URL"); gates.ReportCoverage && endpoint != "" {
 		if warning, ok := modelCoverageWarning(root, name); ok {
 			warnAboutCoverageOnce(warn, name, "warning: %s\n", warning)
 		}

@@ -32,7 +32,31 @@ af telemetry report    # per-step timing and occupancy, from local records
 af telemetry band      # each closed step against what the factory has learned
 af telemetry rebuild   # fold closed steps into the learned digest the band reads
 af telemetry usage     # token and session figures, from the backend
+af telemetry startup   # the manager's and supervisor's startup turn, at its first Stop
 ```
+
+`af telemetry startup [--agent manager|supervisor] [--json]` reports each agent's latest startup
+turn: the context occupancy at the first Stop of a freshly launched session (a respawn is not
+measured), the budget it is judged against, the harness version and whether the pinned rulings
+block was delivered (`rulings_block`: `present`, `partial`, `no_pins` or `absent`). It first
+measures a pending startup turn that has reached its first Stop, so it writes: the measurement at
+`<factory-root>/.runtime/startup_turn/<agent>.json` and, with telemetry on, one `startup_end`
+record. It sends no mail and always exits 0; read `.state` (`ok` or `error`), and each agent's own
+`state` (`measured` or `no measurement`, never a pass). The figure has six stated limits:
+
+- It errs low when a Stop hook sends the turn on, because the scan ends at the first Stop record.
+- It errs high when the operator's first request arrives inside the startup turn.
+- It arrives up to one watchdog tick after the first Stop, because the tick is what measures; where
+  no watchdog runs, it arrives only when `af telemetry startup` is run.
+- A startup turn that compacts before its first Stop is measured at its peak from before the
+  compaction when compaction proceeds, as for the interactive manager
+  (`af compact-handoff --interactive`). An autonomous agent such as the supervisor is not measured
+  at all in that case: its PreCompact hook recycles the session first, and a respawned session is
+  not measured, so that agent's latest figure stays.
+- A startup whose first turn is only an API error is measured at the end of its next turn that
+  carries usage, which also holds the operator's next request, so it errs high.
+- A `claude` typed by hand in the shell of a pane `af up` or `af sling` started is measured as a
+  startup, its first Stop being the end of the operator's first request.
 
 The toggle is a file — `<factory-root>/.agentfactory/.telemetry-gate` containing `on` — so the
 equivalent manual form is `echo on > "$(af root)/.agentfactory/.telemetry-gate"`. It is never

@@ -640,7 +640,7 @@ func TestMemoryNag_OrdinaryAgentSessionIsStillRefused(t *testing.T) {
 
 // TestMemoryNag_StatusTableCarriesDueAndFlagged pins the columns memory_protocol.go:24 promises 42
 // role templates. They are appended after BYTES, never spliced in: the row is read positionally by
-// TestMemoryStatus_CountsByLifecycleState.
+// TestMemoryStatus_ReportsCountsAndVaultPath's statusRowFor.
 func TestMemoryNag_StatusTableCarriesDueAndFlagged(t *testing.T) {
 	factoryRoot, _ := setupMemoryFixture(t)
 	seedDueNote(t, factoryRoot, "alice", "due-1", "a learning nobody answered")

@@ -963,7 +963,7 @@ func TestConfigModelsSet_ModelCoverage_WarnsOnStderrAndStillSaves(t *testing.T) 
 
 func TestConfigModelsSet_ModelCoverage_SilentForDirectProfiles(t *testing.T) {
 	setupConfigFactory(t)
-	stdin := `{"models":{"opus-5":{"ANTHROPIC_MODEL":"claude-opus-5"},"sonnet-5":{"ANTHROPIC_MODEL":"claude-sonnet-5"}}}`
+	stdin := `{"models":{"opus-5":{"ANTHROPIC_MODEL":"claude-opus-5","CLAUDE_CODE_MAX_CONTEXT_TOKENS":"1000000"},"sonnet-5":{"ANTHROPIC_MODEL":"claude-sonnet-5","CLAUDE_CODE_MAX_CONTEXT_TOKENS":"1000000"}}}`
 
 	_, stderr, err := runConfigModelsSetSplit(t, stdin)
 	if err != nil {

@@ -183,7 +183,7 @@ func TestPrimeHook_OpenPipeStdinDoesNotBlock(t *testing.T) {
 func TestPrimeHookHeader_UnderBudget(t *testing.T) {
 	primeSurfaceFixture(t)
 
-	const budget = 1024
+	const budget = startupPrimeHookBytes
 	stdout := primeHookCapturing(t, `{"session_id":"sess-budget","source":"startup"}`)
 
 	if len(stdout) == 0 {

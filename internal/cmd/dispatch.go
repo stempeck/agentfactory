@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/stempeck/agentfactory/internal/config"
 	"github.com/stempeck/agentfactory/internal/issuestore"
 	"github.com/stempeck/agentfactory/internal/lock"
+	"github.com/stempeck/agentfactory/internal/mail"
 	"github.com/stempeck/agentfactory/internal/session"
 	"github.com/stempeck/agentfactory/internal/statusline"
 )
@@ -126,6 +128,10 @@ type dispatchEntry struct {
 	RefusalClass        string    `json:"refusal_class,omitempty"`
 	RefusedAt           time.Time `json:"refused_at,omitzero"`
 	ConsecutiveRefusals int       `json:"consecutive_refusals,omitempty"`
+
+	// Stall is the last stall reason mailed for this item (issue #751 K13). It is persisted because every
+	// tick is a new process, and it is what lets a stall that repeats every tick mail only once.
+	Stall string `json:"stall,omitempty"`
 }
 
 // cronState tracks when each operator-defined schedule last fired (issue #610), keyed by the
@@ -245,6 +251,9 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		var items []ghItem
 		var itemMappings [][]config.DispatchMapping
 		var itemSources []string
+		// A source is swept only after a query that succeeded below its limit, so a failed or
+		// truncated answer never stands in for "this item left the open set".
+		complete := map[string]bool{}
 
 		if len(issueMappings) > 0 {
 			issues, err := queryGitHubIssues(repo, dispatchCfg.TriggerLabel)
@@ -254,6 +263,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 				if len(issues) == 50 {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warning: query returned 50 results (limit reached) for %s — some items may be missed\n", repo)
 				}
+				complete["issue"] = len(issues) < 50
 				for range issues {
 					itemMappings = append(itemMappings, issueMappings)
 					itemSources = append(itemSources, "issue")
@@ -270,6 +280,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 				if len(prs) == 50 {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warning: query returned 50 results (limit reached) for %s — some items may be missed\n", repo)
 				}
+				complete["pr"] = len(prs) < 50
 				for range prs {
 					itemMappings = append(itemMappings, prMappings)
 					itemSources = append(itemSources, "pr")
@@ -285,7 +296,7 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 			// owned by handleWorkflowItem (its own skip/retry/record/label logic) and
 			// MUST `continue` without ever touching the non-workflow retry-window or
 			// record write below (HIGH-3). A non-workflow item (nil) falls through to
-			// today's exact code, byte-for-byte unchanged (C-10).
+			// the non-workflow path below (C-10).
 			if wf := matchWorkflow(item, dispatchCfg.Workflows); wf != nil {
 				handleWorkflowItem(cmd, root, t, &state, stats, dispatchCfg, repo, item, itemSources[i], wf)
 				continue
@@ -293,10 +304,20 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 
 			agent, model := matchItemToAgent(item, itemMappings[i])
 			if agent == "" {
-				stats.skipped++
+				reportUnmatchedItem(cmd, stats, repo, item)
 				continue
 			}
 			dispatchNonWorkflowItem(cmd, root, t, &state, stats, dispatchCfg, repo, item, itemSources[i], agent, model)
+		}
+
+		seen := make(map[string]bool, len(items))
+		for _, item := range items {
+			seen[fmt.Sprintf("%s#%d", repo, item.Number)] = true
+		}
+		for _, source := range []string{"issue", "pr"} {
+			if complete[source] {
+				sweepClosedWorkflowItems(cmd, &state, repo, source, seen)
+			}
 		}
 	}
 
@@ -306,6 +327,17 @@ func runDispatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("saving dispatch state: %w", err)
 	}
 	return nil
+}
+
+// reportUnmatchedItem names a trigger-labeled item that no mapping or workflow claims, which was
+// otherwise skipped without a trace (issue #751 K13).
+func reportUnmatchedItem(cmd *cobra.Command, stats *dispatchCycleStats, repo string, item ghItem) {
+	names := make([]string, len(item.Labels))
+	for i, l := range item.Labels {
+		names[i] = l.Name
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "skip %s#%d: no mapping or workflow matches its labels (%s)\n", repo, item.Number, strings.Join(names, ", "))
+	stats.skipped++
 }
 
 // dispatchNonWorkflowItem is the item loop's body for an item routed to agent by a plain mapping. It is
@@ -659,7 +691,7 @@ var cronSling = func(root string, argv []string) (string, error) {
 // Issue #378 Phase 2 — completion foundation. These are PURE predicate/capture
 // helpers (no loop branch yet); Phase 3 wires them into runDispatch. Each is
 // hermetically testable via the newIssueStore memstore seam and the ghLinkedPRs/
-// ghPRStatus package-var seams below.
+// ghItemState package-var seams below.
 // ============================================================================
 
 // parseInstanceIDFromStdout extracts the formula-instance epic ID from sling's
@@ -810,7 +842,7 @@ const linkedPRsGraphQL = `query($owner:String!,$repo:String!,$number:Int!){
 
 // ghLinkedPRs returns the PR numbers linked to (i.e. that close) the given issue,
 // via the pinned W-6 GraphQL query (linkedPRsGraphQL). Package-var seam (ADR-009,
-// mirroring ghPRStatus) so tests inject linked-PR sets without a real gh.
+// mirroring ghItemState) so tests inject linked-PR sets without a real gh.
 //
 // The linkage is AGENT-AUTHORED and NOT universally present: it is populated only
 // when the producing PR body carries a GitHub closing keyword (`Resolves #N` /
@@ -881,79 +913,87 @@ func hasLinkedPR(repo string, issueNumber int) bool {
 	return len(prs) == 1
 }
 
-// prStatus is the agent-independent, landed-ready state of a PR, derived from the
-// three gh fields the K6b source:pr terminal gate needs. It deliberately carries
-// NO "merged" field: gating terminal completion on merge is circular — the PR's
-// "Resolves #N" auto-closes the tracking issue on merge, dropping it out of the
-// --state open query before the next cycle can observe completion (HIGH-A). The
-// human merge happens AFTER the pipeline finishes.
-type prStatus struct {
-	Mergeable   bool // mergeStateStatus == CLEAN
-	Approved    bool // reviewDecision == APPROVED
-	ChecksGreen bool // every statusCheckRollup entry passing
-}
-
-// ghPRStatus reads a PR's mergeable/approved/checks-green state via one
+// ghItemState reads an issue's or a PR's GitHub state (OPEN, CLOSED or MERGED) through one
 // agent-independent gh call. Package-var seam so tests inject without a real gh.
-var ghPRStatus = func(repo string, prNumber int) (prStatus, error) {
-	out, err := exec.Command("gh", "pr", "view", fmt.Sprintf("%d", prNumber),
+var ghItemState = func(repo string, number int, source string) (string, error) {
+	if source != "issue" && source != "pr" {
+		return "", fmt.Errorf("%s#%d has unknown source %q", repo, number, source)
+	}
+	out, err := exec.Command("gh", source, "view", fmt.Sprintf("%d", number),
 		"--repo", repo,
-		"--json", "mergeStateStatus,reviewDecision,statusCheckRollup",
+		"--json", "state",
 	).Output()
 	if err != nil {
-		return prStatus{}, fmt.Errorf("gh pr view %d: %w", prNumber, err)
+		return "", fmt.Errorf("gh %s view %d: %w", source, number, err)
 	}
 	var resp struct {
-		MergeStateStatus  string `json:"mergeStateStatus"`
-		ReviewDecision    string `json:"reviewDecision"`
-		StatusCheckRollup []struct {
-			State      string `json:"state"`
-			Conclusion string `json:"conclusion"`
-		} `json:"statusCheckRollup"`
+		State string `json:"state"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
-		return prStatus{}, fmt.Errorf("parsing gh pr view %d: %w", prNumber, err)
+		return "", fmt.Errorf("parsing gh %s view %d: %w", source, number, err)
 	}
-	green := true
-	for _, c := range resp.StatusCheckRollup {
-		if !checkRollupGreen(c.State, c.Conclusion) {
-			green = false
-			break
-		}
+	if resp.State == "" {
+		return "", fmt.Errorf("gh %s view %d answered no state", source, number)
 	}
-	return prStatus{
-		Mergeable:   resp.MergeStateStatus == "CLEAN",
-		Approved:    resp.ReviewDecision == "APPROVED",
-		ChecksGreen: green,
-	}, nil
+	return resp.State, nil
 }
 
-// checkRollupGreen reports whether one statusCheckRollup entry is passing.
-// GitHub returns two node shapes: CheckRun carries a conclusion
-// (SUCCESS/NEUTRAL/SKIPPED are passing terminal values; anything else, including
-// an empty conclusion on an in-progress run, is not green); StatusContext carries
-// a state, where only SUCCESS is green.
-func checkRollupGreen(state, conclusion string) bool {
-	if conclusion != "" {
-		switch conclusion {
-		case "SUCCESS", "NEUTRAL", "SKIPPED":
-			return true
-		default:
-			return false
-		}
-	}
-	return state == "SUCCESS"
-}
-
-// prArtifactComplete is the K6b source:pr terminal-phase artifact predicate: the
-// PR must be mergeable AND approved AND checks-green (HIGH-A) — NOT merged. A gh
-// error is treated as "not complete."
-func prArtifactComplete(repo string, prNumber int) bool {
-	st, err := ghPRStatus(repo, prNumber)
+// terminalPROutcome is the K6b gate of a final phase that consumes a PR (#755 D1): the PR must be
+// open for the operator's review, or already merged. Approval, checks and mergeability are never
+// read, because one GitHub account cannot approve its own PR and a heal's own advisory-decay check
+// stays red while any other finding is open. Merge is not required either: the PR's "Resolves #N"
+// closes the tracking issue on merge, dropping it out of the --state open query before the next
+// cycle could observe completion (HIGH-A). The operator merges AFTER the pipeline finishes.
+func terminalPROutcome(repo string, prNumber int, phase string) (phaseOutcome, string) {
+	state, err := ghItemState(repo, prNumber, "pr")
 	if err != nil {
-		return false
+		return phaseRetry, fmt.Sprintf("reading linked PR #%d: %v", prNumber, err)
 	}
-	return st.Mergeable && st.Approved && st.ChecksGreen
+	switch state {
+	case "OPEN", "MERGED":
+		return phaseAdvance, ""
+	case "CLOSED":
+		return phaseStall, fmt.Sprintf("terminal pr phase %q: linked PR #%d is closed without merging", phase, prNumber)
+	default:
+		return phaseStall, fmt.Sprintf("terminal pr phase %q: linked PR #%d has unknown state %q", phase, prNumber, state)
+	}
+}
+
+// sweepClosedWorkflowItems drops the workflow record of every item of repo and source that this
+// cycle's query did not return and that GitHub reports CLOSED or MERGED (#755 D4). The queries are
+// open-only and pruneDispatchState exempts workflow records, so an item merged or closed before its
+// terminal phase would otherwise be held forever. Absence from the query is never enough on its own,
+// because the query filters on the trigger label: only GitHub's answer drops a record, and an error
+// or an unknown state keeps it.
+func sweepClosedWorkflowItems(cmd *cobra.Command, state *dispatchState, repo, source string, seen map[string]bool) {
+	prefix := repo + "#"
+	for key, entry := range state.Dispatched {
+		if entry.Workflow == "" || entry.Source != source || !strings.HasPrefix(key, prefix) || seen[key] {
+			continue
+		}
+		number, err := strconv.Atoi(strings.TrimPrefix(key, prefix))
+		if err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: workflow record %s names no item number; keeping it\n", key)
+			continue
+		}
+		itemState, err := ghItemState(repo, number, source)
+		if err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: cannot read the state of %s, keeping its workflow record: %v\n", key, err)
+			continue
+		}
+		switch itemState {
+		case "OPEN":
+		case "CLOSED", "MERGED":
+			if dispatchDryRun {
+				fmt.Fprintf(cmd.OutOrStdout(), "would drop %s: workflow %q record; GitHub reports it %s\n", key, entry.Workflow, itemState)
+				continue
+			}
+			delete(state.Dispatched, key)
+			fmt.Fprintf(cmd.OutOrStdout(), "drop %s: workflow %q record dropped; GitHub reports it %s\n", key, entry.Workflow, itemState)
+		default:
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s has unknown state %q; keeping its workflow record\n", key, itemState)
+		}
+	}
 }
 
 // ============================================================================
@@ -963,7 +1003,7 @@ func prArtifactComplete(repo string, prNumber int) bool {
 // → terminal) gating each advance on the Phase-2 completion predicates. The
 // non-workflow path falls through unchanged (C-10). Every side effect routes
 // through a package-var seam (editItemLabels, dispatchItem, ghLinkedPRs,
-// ghPRStatus, sendWorkflowCompleteMail, newIssueStore, the injected cmdTmux) so the
+// ghItemState, sendWorkflowCompleteMail, newIssueStore, the injected cmdTmux) so the
 // branch is hermetically unit-testable.
 // ============================================================================
 
@@ -1101,9 +1141,9 @@ type phaseOutcome int
 
 const (
 	phaseIncomplete phaseOutcome = iota // formula not genuinely done ⇒ re-sling / skip
-	phaseWait                           // formula done, artifact pending (terminal PR not green, or transient gh) ⇒ defer, no re-sling
-	phaseStall                          // formula done, artifact definitively wrong (0/>1 linked PR) ⇒ detectable stall
+	phaseStall                          // formula done, artifact definitively wrong (0/>1 linked PR, a closed PR) ⇒ detectable stall
 	phaseAdvance                        // fully complete ⇒ advance or terminal
+	phaseRetry                          // formula done, transient gh error ⇒ retry next cycle
 )
 
 // evaluatePhase gates an advance on the Phase-2 predicates (K6: IsTerminal +
@@ -1148,22 +1188,20 @@ func evaluatePhase(ctx context.Context, store issuestore.Store, repo string, ite
 	idx := phaseIndex(wf.Phases, phase)
 	isLast := idx == len(wf.Phases)-1
 	if isLast {
-		// A terminal PR-consuming phase gates on the PR being mergeable+approved+green
-		// (HIGH-A), NOT merged — dual-source-aware via phaseConsumesPR, so a dual-source
-		// terminal (e.g. pr-iterate, whose source:issue mapping is listed first) gates
-		// even when the tracking item is an issue. A terminal phase that consumes no PR
-		// has no downstream artifact: IsTerminal + provenance IS its completion (W-9).
+		// A terminal PR-consuming phase gates on the linked PR's state (terminalPROutcome) —
+		// dual-source-aware via phaseConsumesPR, so a dual-source terminal (e.g. pr-iterate,
+		// whose source:issue mapping is listed first) gates even when the tracking item is an
+		// issue. A terminal phase that consumes no PR has no downstream artifact: IsTerminal +
+		// provenance IS its completion (W-9).
 		if phaseConsumesPR(mappings, phase) {
 			prNum, count, err := resolveLinkedPR(repo, item, itemSource)
 			if err != nil {
-				return phaseWait, "" // transient gh error ⇒ retry next cycle
+				return phaseRetry, fmt.Sprintf("resolving the linked PR: %v", err)
 			}
 			if count != 1 {
 				return phaseStall, fmt.Sprintf("terminal pr phase %q resolved %d linked PRs (want exactly 1)", phase, count)
 			}
-			if !prArtifactComplete(repo, prNum) {
-				return phaseWait, "" // PR not yet mergeable+approved+green ⇒ wait, do not re-sling a done formula
-			}
+			return terminalPROutcome(repo, prNum, phase)
 		}
 		return phaseAdvance, ""
 	}
@@ -1174,7 +1212,7 @@ func evaluatePhase(ctx context.Context, store issuestore.Store, repo string, ite
 	if itemSource == "issue" && phaseConsumesPR(mappings, wf.Phases[idx+1]) {
 		prs, err := ghLinkedPRs(repo, item.Number)
 		if err != nil {
-			return phaseWait, "" // transient gh error ⇒ retry next cycle
+			return phaseRetry, fmt.Sprintf("resolving linked PRs for the handoff: %v", err)
 		}
 		if len(prs) != 1 {
 			return phaseStall, fmt.Sprintf("issue→pr handoff at phase %q resolved %d linked PRs (want exactly 1)", phase, len(prs))
@@ -1183,35 +1221,37 @@ func evaluatePhase(ctx context.Context, store issuestore.Store, repo string, ite
 	return phaseAdvance, ""
 }
 
-// sendWorkflowCompleteMail fires the single workflow-complete notification on
-// terminal advance (LOW-3), DISTINCT from each phase's per-instance WORK_DONE
-// (done.go sendWorkDoneMail). Package-var seam mirroring sendWorkDoneMail:
-// isTestBinary() short-circuits under `go test`, os.Executable() with an `af` PATH
-// fallback, one `af mail send <recipient> -s <subject> -m <body>` subprocess.
-var sendWorkflowCompleteMail = func(recipient, workflow, itemKey string) error {
+// sendWorkflowCompleteMail files in-process with sender "af" because the dispatcher has no
+// agent identity: a subprocess `af mail send` resolved no sender, so nothing was filed.
+var sendWorkflowCompleteMail = func(ctx context.Context, store issuestore.Store, root, recipient, workflow, itemKey string) error {
 	if isTestBinary() {
 		return nil
 	}
-	afPath, err := os.Executable()
-	if err != nil {
-		afPath, _ = exec.LookPath("af")
-	}
-	if afPath == "" {
-		return fmt.Errorf("cannot find af binary")
-	}
 	subject := fmt.Sprintf("WORKFLOW_COMPLETE: %s", workflow)
 	body := fmt.Sprintf("Workflow %q completed all phases for %s.", workflow, itemKey)
-	c := exec.Command(afPath, "mail", "send", recipient, "-s", subject, "-m", body)
-	c.Env = os.Environ()
-	var stderr bytes.Buffer
-	c.Stderr = &stderr
-	if err := c.Run(); err != nil {
-		if stderr.Len() > 0 {
-			return fmt.Errorf("mail send to %s failed: %w\nsubprocess stderr: %s", recipient, err, strings.TrimSpace(stderr.String()))
-		}
-		return fmt.Errorf("mail send to %s: %w", recipient, err)
+	return fileDispatcherMail(ctx, store, root, recipient, subject, body)
+}
+
+var sendWorkflowStallMail = func(ctx context.Context, store issuestore.Store, root, recipient, workflow, itemKey, reason string) error {
+	if isTestBinary() {
+		return nil
 	}
-	return nil
+	body := fmt.Sprintf("Workflow %q stalled for %s: %s", workflow, itemKey, reason)
+	return fileDispatcherMail(ctx, store, root, recipient, "WORKFLOW_STALL: "+workflow, body)
+}
+
+// fileDispatcherMail files through the store the tick already opened, so a mail adds no second
+// connection under a second actor. A tick whose store failed to open has none: that is an error the
+// caller reports, never a second attempt to open it here.
+func fileDispatcherMail(ctx context.Context, store issuestore.Store, root, to, subject, body string) error {
+	if store == nil {
+		return errors.New("issue store unavailable")
+	}
+	router, err := mail.NewRouter(root, store)
+	if err != nil {
+		return err
+	}
+	return router.Send(ctx, mail.NewMessage("af", to, subject, body))
 }
 
 // workflowCtx bundles the per-item dependencies of the K8 state machine so the
@@ -1230,6 +1270,11 @@ type workflowCtx struct {
 	source      string
 	wf          *config.Workflow
 	itemKey     string
+
+	// The item's record as it stood before run(): three handlers delete the entry and then stall in
+	// the same tick, so the dedupe cannot read the stored reason from the entry inside stall().
+	lastStall  string
+	priorAgent string
 }
 
 // handleWorkflowItem drives the K8 state machine for one workflow-labeled item. It
@@ -1243,15 +1288,39 @@ func handleWorkflowItem(cmd *cobra.Command, root string, t cmdTmux, state *dispa
 		repo: repo, item: item, source: source, wf: wf,
 		itemKey: fmt.Sprintf("%s#%d", repo, item.Number),
 	}
+	prior := state.Dispatched[w.itemKey]
+	w.lastStall, w.priorAgent = prior.Stall, prior.Agent
 	w.run()
 }
 
-// stall surfaces a distinctly-named, detectable stall (never a silent skip) and
-// counts it as an error so it stands apart from busy-defers. Phase 4 (K9) lifts
-// these into `af dispatch status`; Phase 3 makes them observable on stderr.
+// stall surfaces a distinctly-named, detectable stall (never a silent skip), counts it
+// as an error so it stands apart from busy-defers, and mails WORKFLOW_STALL once per
+// distinct reason (issue #751 K13). The reason is recorded on the entry even when it was
+// already mailed, re-creating an entry its handler deleted: otherwise the next tick reads
+// no stored reason and mails the same stall again. A halted agent is neither mailed nor
+// recorded, because the breaker already escalates RECOVERY HALTED; a failed send records
+// nothing, so the next tick retries it.
 func (w *workflowCtx) stall(format string, args ...any) {
-	fmt.Fprintf(w.cmd.ErrOrStderr(), "stall %s: "+format+"\n", append([]any{w.itemKey}, args...)...)
+	reason := fmt.Sprintf(format, args...)
+	fmt.Fprintf(w.cmd.ErrOrStderr(), "stall %s: %s\n", w.itemKey, reason)
 	w.stats.errors++
+	if dispatchDryRun || format == haltedStallReason {
+		return
+	}
+	if reason != w.lastStall {
+		if err := sendWorkflowStallMail(w.ctx, w.store, w.root, w.dispatchCfg.NotifyOnComplete, w.wf.Label, w.itemKey, reason); err != nil {
+			fmt.Fprintf(w.cmd.ErrOrStderr(), "warning: workflow-stall mail for %s failed: %v\n", w.itemKey, err)
+			return
+		}
+	}
+	entry, ok := w.state.Dispatched[w.itemKey]
+	if !ok {
+		// Workflow is what keeps a record with no DispatchedAt from being pruned.
+		entry = dispatchEntry{Agent: w.priorAgent, ItemURL: w.item.URL, Source: w.source, Workflow: w.wf.Label}
+	}
+	entry.Stall = reason
+	w.state.Dispatched[w.itemKey] = entry
+	w.lastStall = reason
 }
 
 func (w *workflowCtx) agentBusy(agent string) bool {
@@ -1580,18 +1649,19 @@ func processCrons(cmd *cobra.Command, root string, t cmdTmux, dispatchCfg *confi
 }
 
 func (w *workflowCtx) run() {
-	phase, ambiguous := workflowCursor(w.item, w.wf.Phases)
-	if ambiguous {
-		w.stall("workflow %q has an ambiguous cursor (multiple phase labels present)", w.wf.Label)
-		return
-	}
-
+	// Opened first: every stall after this point mails through the tick's store.
 	store, err := newIssueStore(w.root, dispatchStoreActor)
 	if err != nil {
 		w.stall("workflow %q cannot open issue store: %v", w.wf.Label, err)
 		return
 	}
 	w.store = store
+
+	phase, ambiguous := workflowCursor(w.item, w.wf.Phases)
+	if ambiguous {
+		w.stall("workflow %q has an ambiguous cursor (multiple phase labels present)", w.wf.Label)
+		return
+	}
 
 	if phase == "" {
 		w.bootstrap()
@@ -1610,8 +1680,11 @@ func (w *workflowCtx) run() {
 	switch outcome {
 	case phaseStall:
 		w.stall("workflow %q %s", w.wf.Label, reason)
-	case phaseWait:
-		w.stats.skipped++ // complete formula, artifact pending ⇒ defer (no re-sling, no advance)
+	case phaseRetry:
+		// A transient gh error proves nothing about a stall, so a stored one stays. The line keeps a held
+		// item from looking like one that is about to advance (#755).
+		fmt.Fprintf(w.cmd.ErrOrStderr(), "hold %s: workflow %q phase %q: %s\n", w.itemKey, w.wf.Label, phase, reason)
+		w.stats.skipped++
 	case phaseAdvance:
 		if nextPhaseLabel(w.wf.Phases, phase) == "" {
 			w.terminal(phase)
@@ -1708,14 +1781,22 @@ func (w *workflowCtx) advance(phase string) {
 	w.stats.dispatched++
 }
 
-// terminal: last phase complete ⇒ remove the last phase label AND agentic in ONE
-// edit (C-8), drop the correlation record, and fire ONE workflow-complete notify
-// (LOW-3, distinct from per-phase WORK_DONE). The workflow label is left in place;
-// the item drops out of the trigger-label query because agentic is gone.
+// terminal: last phase complete ⇒ fire ONE workflow-complete notify (LOW-3, distinct
+// from per-phase WORK_DONE), drop the correlation record, and remove the last phase
+// label AND agentic in ONE edit (C-8). The workflow label is left in place; the item
+// drops out of the trigger-label query because agentic is gone.
 func (w *workflowCtx) terminal(phase string) {
 	if dispatchDryRun {
 		fmt.Fprintf(w.cmd.OutOrStdout(), "would complete %s: workflow %q remove %q + %q\n", w.itemKey, w.wf.Label, phase, w.dispatchCfg.TriggerLabel)
 		w.stats.dispatched++
+		return
+	}
+	// The mail goes before anything irreversible: once agentic is removed no later tick sees
+	// the item, so a failed send would be the operator's lost merge cue. A failed send changes
+	// nothing and the next tick re-enters terminal() for the same linked PR; a crash or failed
+	// save after a sent mail re-sends it, a duplicate cue rather than a lost one.
+	if err := sendWorkflowCompleteMail(w.ctx, w.store, w.root, w.dispatchCfg.NotifyOnComplete, w.wf.Label, w.itemKey); err != nil {
+		w.stall("workflow %q completion mail failed: %v", w.wf.Label, err)
 		return
 	}
 	// Crash-safety (#413 CRIT-1, ORDER MATTERS): make the record deletion durable BEFORE
@@ -1731,9 +1812,6 @@ func (w *workflowCtx) terminal(phase string) {
 	if err := editItemLabels(w.repo, w.item.Number, w.source, nil, []string{phase, w.dispatchCfg.TriggerLabel}); err != nil {
 		w.stall("workflow %q terminal label edit failed: %v", w.wf.Label, err)
 		return
-	}
-	if err := sendWorkflowCompleteMail(w.dispatchCfg.NotifyOnComplete, w.wf.Label, w.itemKey); err != nil {
-		fmt.Fprintf(w.cmd.ErrOrStderr(), "warning: workflow-complete mail for %s failed: %v\n", w.itemKey, err)
 	}
 	fmt.Fprintf(w.cmd.OutOrStdout(), "complete %s: workflow %q finished (removed %q + %q)\n", w.itemKey, w.wf.Label, phase, w.dispatchCfg.TriggerLabel)
 	w.stats.dispatched++
@@ -2418,6 +2496,9 @@ type dispatchStatusEntry struct {
 	RefusalClass        string    `json:"refusal_class,omitempty"`
 	RefusedAt           time.Time `json:"refused_at,omitzero"`
 	ConsecutiveRefusals int       `json:"consecutive_refusals,omitempty"`
+
+	// Stall (issue #751 K13, additive) is omitempty so an unstalled entry keeps the pinned shapes.
+	Stall string `json:"stall,omitempty"`
 }
 
 // dispatchStatusJSON is the top-level success shape of
@@ -2486,6 +2567,7 @@ func emitDispatchStatusJSON(cmd *cobra.Command, running bool, entries map[string
 			RefusalClass:        e.RefusalClass,
 			RefusedAt:           e.RefusedAt,
 			ConsecutiveRefusals: e.ConsecutiveRefusals,
+			Stall:               e.Stall,
 		})
 	}
 
@@ -2585,7 +2667,7 @@ func formatDispatchStatus(running bool, entries map[string]dispatchEntry, agentS
 
 	fmt.Fprintln(&buf)
 	w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ISSUE\tSOURCE\tAGENT\tWORKFLOW\tPHASE\tSTATUS\tDISPATCHED")
+	fmt.Fprintln(w, "ISSUE\tSOURCE\tAGENT\tWORKFLOW\tPHASE\tSTATUS\tDISPATCHED\tSTALL")
 	for _, key := range keys {
 		entry := entries[key]
 
@@ -2619,8 +2701,13 @@ func formatDispatchStatus(running bool, entries map[string]dispatchEntry, agentS
 			phase = "-"
 		}
 
+		stall := entry.Stall
+		if stall == "" {
+			stall = "-"
+		}
+
 		age := now.Sub(entry.DispatchedAt).Round(time.Minute)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s ago\n", key, entry.Source, entry.Agent, workflow, phase, status, age)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s ago\t%s\n", key, entry.Source, entry.Agent, workflow, phase, status, age, stall)
 	}
 	w.Flush()
 

@@ -88,8 +88,12 @@ the gate close is the boundary an operator is waiting on, not a place to spend a
 > K0 pre-build spike that would verify each shipped gateway profile's payload accounting
 > (`.designs/596/implementation-plan/spikes.md`) was **not run** in this factory — so **gateway
 > primary-trigger coverage is unverified, and for an under-reporting profile only the 2-hour
-> `progress_backstop` is guaranteed** (and only while the agent holds an open ready step). Operators
-> running a gateway profile should run spike (a) per profile and record the verdict in `spikes.md`.
+> `progress_backstop` is guaranteed** (and only while the agent holds an open ready step). The
+> window detector and the probe close the gap for the window itself: the detector compares the
+> window each session reports with the one its profile declares and records any difference, and
+> the probe (`af config models check <profile>`, and a launch on an identity no session has reported
+> yet) measures the window Claude Code applies to the profile's model. A launch whose recorded
+> window falls short of its declaration is refused until you fix it or pass `--accept-window`.
 >
 > **Two profile keys are the per-profile levers on that constant.** `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
 > declares the backend's real context window — the number the host divides by when it reports
@@ -101,13 +105,21 @@ the gate close is the boundary an operator is waiting on, not a place to spend a
 > compaction timing. It still says how full the window is, which is the reading recovery acts on;
 > it just stops saying how close compaction is.
 >
-> **The in-factory signal is `af statusline status`.** It prints a `context-window drift` advisory
-> naming each agent whose declared window disagrees with the window the host reports back, and a
-> `pairing warning:` line for a profile whose declared auto-compact window will silently cap. Both
-> go to stdout, appended last, and neither changes the exit code. The drift check needs a live
-> session under this factory root and a healthy occupancy reading to compare against, so an agent
-> whose channel is dark is skipped rather than named; a profile you have not launched is checked at
-> write time instead, by `af config models set`.
+> **The in-factory signal is pushed to you.** The first time a session reports a window other than
+> its profile's declaration, the window detector records it under
+> `.agentfactory/statusline/windows/<profile>.json` and mails a `WINDOW_MISMATCH` to `manager` and
+> the escalation target. Until it clears, the operator alarm carries a `WINDOW` class on every
+> agent's status line, at `af up` and in `af statusline status`; its reason is `mismatch`,
+> `accepted` (launched with `--accept-window`), `foreign`, or `unobserved` (the session has reported
+> no window since launch), and its line names the act that clears it. The record keeps each agent's
+> figure until that agent reports again, and a refused agent cannot report: once the cause is fixed,
+> removing `.agentfactory/statusline/windows/<profile>.json` (that file, not the directory, which
+> also holds launch facts) is the reset, and a divergence still present is reported again.
+> `af statusline status` still prints the `context-window drift` advisory for a live agent with no
+> launch fact (one started by an older af, or launched while `claude --version` returned nothing)
+> and a `pairing warning:` line for a profile whose declared auto-compact window will silently cap,
+> both on stdout and neither changing the exit code.
+> A profile you have not launched is checked at write time instead, by `af config models set`.
 >
 > **Alignment is what restores `context_threshold_pct`'s meaning.** Recovery triggers on the
 > host-reported percentage against a single factory-wide threshold — there is no per-profile
@@ -284,7 +296,9 @@ The breaker is durable (factory-root `.runtime/recovery/<agent>.json`), survives
 and **never expires on its own**. That is the point: it is a terminal state that blocks further
 recycling until a human has looked. If the escalation could not reach a live recipient, a breadcrumb
 is left at `.runtime/recovery_halt_undelivered` — an escalation whose outcome is unknown is never
-counted as having arrived.
+counted as having arrived. Every operator escalation goes through one send, so the same file also
+receives the undelivered `WINDOW` and `STARTUP` operator mails, each line led by its class label
+(`RECOVERY HALTED`, `WINDOW` or `STARTUP`).
 
 **Runbook.** Before clearing it, find out why recycling did not help:
 
@@ -304,9 +318,11 @@ Then clear the breaker:
 af recovery reset <agent>
 ```
 
-`af recovery reset` is **operator-only** and mutates breaker state only. It does not kill or start
-sessions, does not touch worktrees, and does not close beads. If the agent is not running, relaunch
-it separately with `af up <agent>` — the reset does not do it for you.
+`af recovery reset` is **operator-only** and mutates breaker state and the agent's `STARTUP`
+measurement only. The `STARTUP` alarm of an agent that is gone for good clears this way, since such
+an agent never has the next measured startup that would clear it on its own. It does not kill or
+start sessions, does not touch worktrees, and does not close beads. If the agent is not running,
+relaunch it separately with `af up <agent>` — the reset does not do it for you.
 
 ### Provisioning: agents the factory cannot see
 
@@ -350,8 +366,9 @@ watchdog tick. Every key is optional; the shipped defaults are what appear below
 }
 ```
 
-Set `"enabled": false` to turn the surface off entirely, or list agent names in `"exclude"` to leave
-individual agents alone while the rest stay covered.
+Set `"enabled": false` to turn recycling off entirely, or list agent names in `"exclude"` to leave
+individual agents alone while the rest stay covered. `"enabled": false` does not stop the window
+detector, which runs beside the occupancy poll on every tick.
 
 ### Step context bounds
 

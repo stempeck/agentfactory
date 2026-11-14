@@ -59,6 +59,8 @@ func StatuslineSessionsDir(root string) string {
 	return filepath.Join(StatuslineDir(root), "sessions")
 }
 
+func StatuslineWindowsDir(root string) string { return filepath.Join(StatuslineDir(root), "windows") }
+
 // MemoryDir is the agent learnings vault: one directory per agent, one Markdown note per file.
 // It sits at the TOP level of .agentfactory/ deliberately, because that is the only place
 // nothing else owns: it is outside .agentfactory/worktrees/, which every teardown path is free

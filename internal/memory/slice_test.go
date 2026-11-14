@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -107,8 +108,8 @@ func TestSlice_KCeiling(t *testing.T) {
 	}
 }
 
-// TestSlice_TotalByteCeiling measures the bytes that actually reach the hook — the canonical
-// emitted form of each returned note — because a test that measured post-truncation bodies
+// TestSlice_TotalByteCeiling measures the bytes that actually reach the hook — the rendered
+// entry of each returned note — because a test that measured post-truncation bodies
 // would find "<= 4096" trivially true and would stay green if the ceiling were never
 // implemented at all.
 func TestSlice_TotalByteCeiling(t *testing.T) {
@@ -135,10 +136,10 @@ func TestSlice_TotalByteCeiling(t *testing.T) {
 
 	total := 0
 	for _, n := range got {
-		total += len(Emit(n))
+		total += len(InjectedEntry(n, sliceNow))
 	}
 	if total > DefaultTotalBytes {
-		t.Errorf("emitted total = %d bytes, want <= %d", total, DefaultTotalBytes)
+		t.Errorf("rendered total = %d bytes, want <= %d", total, DefaultTotalBytes)
 	}
 }
 
@@ -247,9 +248,16 @@ func TestBudgetDefaultsArePinned(t *testing.T) {
 		t.Errorf("DefaultTotalBytes = %d, want 4096", DefaultTotalBytes)
 	}
 
+	if DefaultStandingBytes != 3072 {
+		t.Errorf("DefaultStandingBytes = %d, want 3072", DefaultStandingBytes)
+	}
+
 	b := DefaultBudget()
 	if b.K != 5 || b.ExcerptChars != 400 || b.TotalBytes != 4096 {
 		t.Errorf("DefaultBudget() = {K:%d Excerpt:%d Total:%d}, want {5 400 4096}", b.K, b.ExcerptChars, b.TotalBytes)
+	}
+	if b.StandingBytes != 3072 {
+		t.Errorf("DefaultBudget().StandingBytes = %d, want 3072", b.StandingBytes)
 	}
 }
 
@@ -442,8 +450,8 @@ func TestSlice_AnOversizedNoteDoesNotStarveTheBlock(t *testing.T) {
 	}
 	thin := servable("thin", sliceNow.Add(-2*time.Hour))
 
-	if size := len(Emit(fat)); size <= DefaultTotalBytes {
-		t.Fatalf("the fixture emits %d bytes and fits inside the %d-byte block; the test proves nothing",
+	if size := len(InjectedEntry(fat, sliceNow)); size <= DefaultTotalBytes {
+		t.Fatalf("the fixture renders %d bytes and fits inside the %d-byte block; the test proves nothing",
 			size, DefaultTotalBytes)
 	}
 
@@ -479,7 +487,7 @@ func TestSlice_AnOversizedNoteDoesNotStarveTheBlock(t *testing.T) {
 // reason; these are the same kind of claim.
 func TestSlice_CeilingBoundariesAreInclusive(t *testing.T) {
 	exact := servable("exact-fit", sliceNow)
-	size := len(Emit(exact))
+	size := len(InjectedEntry(exact, sliceNow))
 
 	b := DefaultBudget()
 	b.Now = sliceNow
@@ -569,4 +577,188 @@ func TestGraduationDueThresholdIsPinned(t *testing.T) {
 			t.Errorf("GraduationDueAfter (%v) must arrive before the shortest TTL (%v)", GraduationDueAfter, ttl)
 		}
 	}
+}
+
+// standingNote is a pinned note whose PinnedLine is exactly 16+subjectLen bytes ("- [YYYY-MM-DD] ",
+// the subject, the newline) for a dated note, so a fixture can be sized against the standing
+// ceiling by arithmetic rather than by asking the code under test.
+func standingNote(id string, created time.Time, subjectLen int) Note {
+	subject := id + " "
+	if len(subject) < subjectLen {
+		subject += strings.Repeat("s", subjectLen-len(subject))
+	}
+	subject = subject[:subjectLen]
+	n := servable(id, created)
+	n.Body = "# " + subject + "\n\nwhy it stands\n"
+	n.Standing = true
+	return n
+}
+
+func TestSlice_PinnedFirstOldestFirst(t *testing.T) {
+	day := 24 * time.Hour
+	fresh := servable("fresh", sliceNow.Add(-time.Hour))
+	newer := standingNote("pin-newer", sliceNow.Add(-10*day), 30)
+	older := standingNote("pin-older", sliceNow.Add(-200*day), 30)
+	tieA := standingNote("pin-tie-a", sliceNow.Add(-50*day), 30)
+	tieB := standingNote("pin-tie-b", sliceNow.Add(-50*day), 30)
+	undated := standingNote("pin-undated", time.Time{}, 30)
+
+	in := []Note{fresh, undated, newer, tieA, older, tieB}
+	b := DefaultBudget()
+	b.Now = sliceNow
+
+	wantPins := []string{"pin-older", "pin-tie-a", "pin-tie-b", "pin-newer", "pin-undated"}
+	if got := idsOf(Pins(in, sliceNow)); !equalIDs(got, wantPins) {
+		t.Errorf("Pins: got %v, want %v (oldest first, ties in input order, undated last)", got, wantPins)
+	}
+	want := append(append([]string{}, wantPins...), "fresh")
+	if got := idsOf(Slice(in, b)); !equalIDs(got, want) {
+		t.Errorf("Slice: got %v, want %v (every pin first, whatever its age, then the newest notes)", got, want)
+	}
+}
+
+func TestSlice_StandingIgnoresTTL(t *testing.T) {
+	day := 24 * time.Hour
+	lapsedPin := standingNote("lapsed-pin", sliceNow.Add(-200*day), 30)
+	lapsedPin.Expires = sliceNow.Add(-day)
+	lapsedPlain := servable("lapsed-plain", sliceNow.Add(-200*day))
+	lapsedPlain.Expires = sliceNow.Add(-day)
+	expiredPin := standingNote("expired-pin", sliceNow.Add(-100*day), 30)
+	expiredPin.Status = StatusExpired
+	graduatedPin := standingNote("graduated-pin", sliceNow.Add(-100*day), 30)
+	graduatedPin.Status = StatusGraduated
+	graduatedPin.GraduatedTo = "issue#631"
+	malformedPin := standingNote("malformed-pin", sliceNow.Add(-100*day), 30)
+	malformedPin.Malformed = true
+
+	in := []Note{lapsedPlain, expiredPin, graduatedPin, malformedPin, lapsedPin}
+	b := DefaultBudget()
+	b.Now = sliceNow
+
+	want := []string{"lapsed-pin"}
+	if got := idsOf(Pins(in, sliceNow)); !equalIDs(got, want) {
+		t.Errorf("Pins: got %v, want %v", got, want)
+	}
+	if got := idsOf(Slice(in, b)); !equalIDs(got, want) {
+		t.Errorf("Slice: got %v, want %v (a standing note's TTL is suspended; status and Malformed are not)", got, want)
+	}
+}
+
+func TestSlice_PinsOutsideKAndNewestBlock(t *testing.T) {
+	var in []Note
+	var wantNewest []string
+	for i := 0; i < 8; i++ {
+		id := "note-" + strconv.Itoa(i)
+		in = append(in, servable(id, sliceNow.Add(-time.Duration(i+1)*time.Hour)))
+		if i < DefaultK {
+			wantNewest = append(wantNewest, id)
+		}
+	}
+	// The pins are NEWER than every ordinary note, so a pin that was not filtered out of the
+	// newest-notes ranking would take one of its five places and be shown twice.
+	pinA := standingNote("pin-a", sliceNow.Add(-3*time.Minute), 30)
+	pinB := standingNote("pin-b", sliceNow.Add(-2*time.Minute), 30)
+	pinC := standingNote("pin-c", sliceNow.Add(-1*time.Minute), 30)
+	pinC.Body += strings.Repeat("x", 5000)
+	in = append(in, pinC, pinA, pinB)
+
+	b := DefaultBudget()
+	b.Now = sliceNow
+	got := Slice(in, b)
+
+	want := append([]string{"pin-a", "pin-b", "pin-c"}, wantNewest...)
+	if !equalIDs(idsOf(got), want) {
+		t.Fatalf("Slice: got %v, want %v (pins first and outside K, then the five newest notes)", idsOf(got), want)
+	}
+	seen := map[string]bool{}
+	for _, n := range got {
+		if seen[n.ID] {
+			t.Errorf("%s is served twice", n.ID)
+		}
+		seen[n.ID] = true
+	}
+	if got[2].Body != pinC.Body {
+		t.Errorf("a pin was excerpted: got %d runes, want %d", len([]rune(got[2].Body)), len([]rune(pinC.Body)))
+	}
+}
+
+func TestSlice_PinsOverCeilingServeOldestPrefix(t *testing.T) {
+	day := 24 * time.Hour
+
+	t.Run("an over-ceiling vault serves the oldest prefix and leaves the newest block its budget", func(t *testing.T) {
+		const pinCount, lineBytes = 30, 118
+		var in, pins []Note
+		var want []string
+		for i := 0; i < pinCount; i++ {
+			p := standingNote(fmt.Sprintf("pin-%02d", i), sliceNow.Add(-time.Duration(100-i)*day), lineBytes-16)
+			pins = append(pins, p)
+			if i < 24 {
+				want = append(want, p.ID)
+			}
+		}
+		for i := len(pins) - 1; i >= 0; i-- {
+			in = append(in, pins[i])
+		}
+		for i := 0; i < DefaultK; i++ {
+			id := "newest-" + strconv.Itoa(i)
+			in = append(in, servable(id, sliceNow.Add(-time.Duration(i+1)*time.Minute)))
+			want = append(want, id)
+		}
+
+		// 24 pins: 78 + 24*118 + 67 + 1 = 2978 <= 3072; 25 pins: 3096 > 3072.
+		const shownBytes = 78 + 24*lineBytes + 67 + 1
+		if got := PinsShown(pins, DefaultStandingBytes); got != 24 {
+			t.Errorf("PinsShown = %d, want 24", got)
+		}
+		if got := PinnedBlockBytes(pins[:24], pinCount-24); got != shownBytes {
+			t.Errorf("PinnedBlockBytes(24 shown, 6 not) = %d, want %d", got, shownBytes)
+		}
+
+		b := DefaultBudget()
+		b.Now = sliceNow
+		got := Slice(in, b)
+		if !equalIDs(idsOf(got), want) {
+			t.Fatalf("Slice: got %v, want %v", idsOf(got), want)
+		}
+
+		newestBudget := DefaultTotalBytes - shownBytes
+		if newestBudget < 1024 {
+			t.Errorf("the newest block's budget is %d B, want >= 1024", newestBudget)
+		}
+		spent := 0
+		for _, n := range got[24:] {
+			spent += len(InjectedEntry(n, sliceNow))
+		}
+		if spent == 0 || spent > newestBudget {
+			t.Errorf("the newest notes are charged %d B, want 0 < charged <= %d", spent, newestBudget)
+		}
+	})
+
+	t.Run("a vault that fits whole only without the closing line is served whole", func(t *testing.T) {
+		// 25 pins of 118 B and one of 43 B: 78 + 2950 + 43 + 1 = 3072 with every pin shown, but
+		// 78 + 2950 + 67 + 1 = 3096 with the last one held back, so a scan that climbs and stops at
+		// the first k over the ceiling stops at 24.
+		var pins []Note
+		var want []string
+		for i := 0; i < 25; i++ {
+			p := standingNote(fmt.Sprintf("pin-%02d", i), sliceNow.Add(-time.Duration(100-i)*day), 118-16)
+			pins = append(pins, p)
+			want = append(want, p.ID)
+		}
+		short := standingNote("pin-25", sliceNow.Add(-50*day), 43-16)
+		pins = append(pins, short)
+		want = append(want, short.ID)
+
+		if got := PinnedBlockBytes(pins, 0); got != 3072 {
+			t.Fatalf("the fixture's whole block is %d B, want exactly 3072", got)
+		}
+		if got := PinsShown(pins, DefaultStandingBytes); got != len(pins) {
+			t.Errorf("PinsShown = %d, want %d", got, len(pins))
+		}
+		b := DefaultBudget()
+		b.Now = sliceNow
+		if got := idsOf(Slice(pins, b)); !equalIDs(got, want) {
+			t.Errorf("Slice: got %v, want every pin %v", got, want)
+		}
+	})
 }

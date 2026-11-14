@@ -827,15 +827,18 @@ var gatewayBackendGuardInFlight atomic.Bool
 //  3. The heartbeat is written LAST, so its presence means "a complete tick finished"
 //     rather than "a tick started" — a tick wedged in pollAgents must not look healthy.
 func watchdogTick(cmd *cobra.Command, root string, scope map[string]struct{}, agentStates map[string]*watchdogAgentState, failures map[string]int, silenceThreshold int) {
+	resetWindowPass()
 	now := time.Now()
 
 	recoveryCfg := watchdogRecoveryConfig(cmd, root)
 	noteRecoveredAgents(pollOccupancyFn(root, watchdogAgentsSnapshot(root), recoveryCfg, now), recoveryCfg, now)
+	detectWindowsFn(root, windowDetectInput{Site: windowAtTick, Now: now, Warn: cmd.ErrOrStderr()})
 
 	pollAgents(cmd, root, paneScopeExcludingRecovered(scope, now), agentStates, failures, silenceThreshold)
 	triggerTelemetryBackendGuard(cmd, root)
 	triggerGatewayBackendGuard(cmd, root)
 	triggerIntegrationServicesGuard(cmd, root)
+	pollStartupSignalFn(root, now)
 
 	if err := writeWatchdogHeartbeat(root, now); err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "watchdog: heartbeat write failed: %v\n", err)
@@ -1021,11 +1024,11 @@ func watchdogHeartbeatPath(root string) string {
 // Scope: that guarantee is PROCESS-LOCAL. telemetryBackendGuardInFlight is a
 // package-level atomic, so it orders this process's ticks against each other and
 // nothing else. On a first af up the two callers are sequential anyway (the
-// cold-start guard at up.go:479 completes before launchWatchdog at up.go:523), but af up
+// cold-start guard at up.go:495 completes before launchWatchdog at up.go:541), but af up
 // is idempotent and routinely re-run against a factory whose watchdog is already
 // ticking — two processes, one of them holding no knowledge of the other's attempt.
 // What bounds that case is not this flag: it is relaunch.sh's own
-// `tmux has-session -t telemetry || …` check-then-act (quickstart.sh:2943) plus
+// `tmux has-session -t telemetry || …` check-then-act (quickstart.sh:2994) plus
 // tmux's refusal to create a duplicate session name, so the worst outcome is a
 // redundant probe and a refused second launch, never two backends.
 //

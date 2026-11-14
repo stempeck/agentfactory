@@ -16,7 +16,7 @@ import (
 func renderInjectionBlock(t *testing.T, n memory.Note) string {
 	t.Helper()
 	var buf bytes.Buffer
-	renderMemoryInjection(&buf, []memory.Note{n}, 0, time.Now().UTC())
+	renderMemoryInjection(&buf, []memory.Note{n}, 0, 0, time.Now().UTC())
 	return buf.String()
 }
 

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -370,6 +371,75 @@ func TestRunUp_UnreachableEscalationRecipient_LoudlyWarns(t *testing.T) {
 	}
 }
 
+// Every needle is matched against one line and spells the quoted name: the test's temporary
+// factory path contains "manager", so a bare whole-output match passes by accident.
+func TestRunUp_UnreachableManagerSink_LoudlyWarns(t *testing.T) {
+	const cannotReceive = `escalation recipient "manager" CANNOT RECEIVE an operator escalation`
+
+	runUpLines := func(t *testing.T, agentsJSON string) []string {
+		t.Helper()
+		root := t.TempDir()
+		initTestGitRepo(t, root)
+		writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
+		writeAFFile(t, root, "agents.json", agentsJSON)
+		writeAFFile(t, root, "startup.json", `{"agents":["supervisor"]}`)
+
+		t.Setenv("AF_WORKTREE", "")
+		t.Setenv("AF_WORKTREE_ID", "")
+		t.Chdir(root)
+
+		setupHermeticSessions(t)
+
+		cmd := &cobra.Command{}
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+
+		_ = runUp(cmd, nil)
+		return strings.Split(buf.String(), "\n")
+	}
+	lineHolding := func(lines []string, needles ...string) (string, bool) {
+		for _, line := range lines {
+			holdsAll := true
+			for _, n := range needles {
+				if !strings.Contains(line, n) {
+					holdsAll = false
+					break
+				}
+			}
+			if holdsAll {
+				return line, true
+			}
+		}
+		return "", false
+	}
+
+	t.Run("manager in agents.json and not live", func(t *testing.T) {
+		lines := runUpLines(t,
+			`{"agents":{"manager":{"type":"autonomous","description":"m"},"supervisor":{"type":"autonomous","description":"s"}}}`)
+
+		if _, ok := lineHolding(lines, cannotReceive, `add "manager" to startup.json agents or start it now`); !ok {
+			t.Errorf("an unreachable manager sink must draw one line holding %q and the startup.json remedy; out=%q",
+				cannotReceive, lines)
+		}
+		if line, ok := lineHolding(lines, "recovery-halt", `"manager"`); ok {
+			t.Errorf("manager receives no recovery mail, so no recovery-halt line may name it: %q", line)
+		}
+	})
+
+	t.Run("manager not in agents.json", func(t *testing.T) {
+		lines := runUpLines(t, `{"agents":{"supervisor":{"type":"autonomous","description":"s"}}}`)
+
+		if _, ok := lineHolding(lines, cannotReceive, "it is not in agents.json", "af install manager"); !ok {
+			t.Errorf("a manager sink missing from the roster must draw one line holding %q, the roster cause "+
+				"and the 'af install manager' remedy; out=%q", cannotReceive, lines)
+		}
+		if line, ok := lineHolding(lines, `add "manager" to startup.json`); ok {
+			t.Errorf("startup.json cannot make a sink the roster lacks reachable, so it must not be the remedy: %q", line)
+		}
+	})
+}
+
 // The fidelity active-formula guard must check the af-up-RESOLVED root, not the
 // raw cwd. A formula hooked at the root must block fidelity:"off" even when
 // `af up` is invoked from a subdirectory (wd != root).
@@ -640,10 +710,10 @@ func TestRunUp_FreshScaffold_WatchdogLaunchesScoped(t *testing.T) {
 	root := t.TempDir()
 	initTestGitRepo(t, root)
 	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
-	// The default agents.json seeded by `af install --init` (install.go:109).
+	// The default agents.json seeded by `af install --init` (builtinRoleEntries, seed_configs.go).
 	writeAFFile(t, root, "agents.json",
 		`{"agents":{"manager":{"type":"interactive","description":"m"},"supervisor":{"type":"autonomous","description":"s"}}}`)
-	// The reconciled scaffold seed (install.go:113, N6): both names are real agents.
+	// The reconciled scaffold seed (startup.json, N6): both names are real agents.
 	writeAFFile(t, root, "startup.json",
 		`{"agents":["manager","supervisor"],"quality":"default","fidelity":"default","start_dispatch":true,"watchdog_agents":["manager","supervisor"]}`)
 
@@ -1011,5 +1081,167 @@ func TestUp_TightenedRecoveryAbsentStepContextStartupConfigLoads(t *testing.T) {
 		t.Error("the clamped ladder must leave a warning for the cmd layer to surface")
 	} else if !strings.Contains(warning, "handoff_pct") {
 		t.Errorf("warning must name the on-disk key, got %q", warning)
+	}
+}
+
+// writeRoleDirectiveAgents writes an agents.json whose entries carry the given directives,
+// typed as af seeds its built-in roles.
+func writeRoleDirectiveAgents(t *testing.T, root string, directives map[string]string) {
+	t.Helper()
+	agents := map[string]config.AgentEntry{}
+	for name, directive := range directives {
+		agentType := "autonomous"
+		if name == "manager" {
+			agentType = "interactive"
+		}
+		agents[name] = config.AgentEntry{Type: agentType, Description: name, Directive: directive}
+	}
+	data, err := json.Marshal(map[string]any{"agents": agents})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAFFile(t, root, "agents.json", string(data))
+}
+
+// runUpWithRoleDirectives runs a blanket `af up` over a factory whose agents carry the given
+// directives and returns the verb's combined output and error.
+func runUpWithRoleDirectives(t *testing.T, directives map[string]string) (string, error) {
+	t.Helper()
+	root := t.TempDir()
+	initTestGitRepo(t, root)
+	writeAFFile(t, root, "factory.json", `{"type":"factory","version":1,"name":"test"}`)
+	writeRoleDirectiveAgents(t, root, directives)
+
+	t.Setenv("AF_WORKTREE", "")
+	t.Setenv("AF_WORKTREE_ID", "")
+	t.Chdir(root)
+
+	setupHermeticSessions(t)
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	err := runUp(cmd, nil)
+	return buf.String(), err
+}
+
+const roleDirectiveWarningMarker = "'s directive in .agentfactory/agents.json orders a full memory read"
+
+func roleDirectiveWarningLines(out string) []string {
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, roleDirectiveWarningMarker) {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func staleRoleDirectiveWarning(name string) string {
+	return fmt.Sprintf("warning: %s's directive in .agentfactory/agents.json orders a full memory read, "+
+		"and af never rewrites that file; replace it with %q", name, builtinRoleDirective)
+}
+
+// af never rewrites a live agents.json, so a factory seeded before the directive stopped ordering
+// a full `af memory list` keeps that order until the operator replaces it. `af up` is where the
+// operator hears so: one warning line per stale built-in role, and the verb still succeeds.
+func TestRunUp_StaleRoleDirective_Warns(t *testing.T) {
+	const fullListDirective = "Read your memory (af memory list) and docs, and prove it. Record durable learnings with af memory add."
+	const pre630Directive = "Read your memory and docs, and prove it."
+
+	cases := []struct {
+		name       string
+		directives map[string]string
+		stale      []string
+	}{
+		{
+			name:       "full-list literal on both roles",
+			directives: map[string]string{"manager": fullListDirective, "supervisor": fullListDirective},
+			stale:      []string{"manager", "supervisor"},
+		},
+		{
+			name:       "pre-#630 sentence on both roles",
+			directives: map[string]string{"manager": pre630Directive, "supervisor": pre630Directive},
+			stale:      []string{"manager", "supervisor"},
+		},
+		{
+			name:       "pre-#630 sentence with surrounding whitespace",
+			directives: map[string]string{"manager": "  " + pre630Directive + "\n", "supervisor": builtinRoleDirective},
+			stale:      []string{"manager"},
+		},
+		{
+			name:       "only the stale role warns",
+			directives: map[string]string{"manager": builtinRoleDirective, "supervisor": fullListDirective},
+			stale:      []string{"supervisor"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := runUpWithRoleDirectives(t, tc.directives)
+
+			if err != nil {
+				t.Errorf("a stale directive must warn, never fail af up; err=%v", err)
+			}
+			got := roleDirectiveWarningLines(out)
+			if len(got) != len(tc.stale) {
+				t.Errorf("want %d stale-directive warning line(s), one per stale role %v; got %d: %q\nout=%q",
+					len(tc.stale), tc.stale, len(got), got, out)
+			}
+			for _, name := range tc.stale {
+				want := staleRoleDirectiveWarning(name)
+				n := 0
+				for _, line := range got {
+					if line == want {
+						n++
+					}
+				}
+				if n != 1 {
+					t.Errorf("want exactly one line %q, got %d\nout=%q", want, n, out)
+				}
+			}
+		})
+	}
+}
+
+func TestRunUp_CurrentRoleDirective_NoWarning(t *testing.T) {
+	const fullListDirective = "Read your memory (af memory list) and docs, and prove it. Record durable learnings with af memory add."
+
+	cases := []struct {
+		name       string
+		directives map[string]string
+	}{
+		{
+			name:       "the seeded directive on both roles",
+			directives: map[string]string{"manager": builtinRoleDirective, "supervisor": builtinRoleDirective},
+		},
+		{
+			name:       "an operator's own directive",
+			directives: map[string]string{"manager": "Run af prime to load formula context.", "supervisor": ""},
+		},
+		{
+			name: "a stale directive on an agent that is not a built-in role",
+			directives: map[string]string{
+				"manager": builtinRoleDirective, "supervisor": builtinRoleDirective, "analyst": fullListDirective,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, d := range tc.directives {
+				if d == builtinRoleDirective && strings.Contains(d, "(af memory list)") {
+					t.Fatalf("builtinRoleDirective %q still orders a full memory read, so it is not a current directive", d)
+				}
+			}
+			out, err := runUpWithRoleDirectives(t, tc.directives)
+
+			if err != nil {
+				t.Errorf("af up over current directives: err=%v\nout=%q", err, out)
+			}
+			if got := roleDirectiveWarningLines(out); len(got) != 0 {
+				t.Errorf("a current directive must not warn; got %q", got)
+			}
+		})
 	}
 }

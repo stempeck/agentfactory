@@ -50,7 +50,7 @@ modes, tests, performance, history, operations, architecture.
 | Suite won't run on base or head | Record what blocked it in the log artifact; it goes in the coverage statement — never silently skip residence |
 | PR adds no tests | Mutation log opens `Reverted: NONE — NO-TESTS` with cited diff evidence; a recorded, evidenced null result passes |
 | Sideways check MISMATCH | Becomes a [Verified] Blocker finding — the review continues, it does not halt |
-| Gap-hunter sub-agent crashes | Re-spawn once, also with no model override (inherit the session model); the `## Gap-Hunter` section must exist with a Result regardless |
+| Gap-hunter sub-agent crashes, or is lost when the session cycles (its launch line still says IN-FLIGHT in a fresh session) | Re-spawn once, also with no model override (inherit the session model); the `## Gap-Hunter` section must exist with a Result regardless |
 | PR gained commits mid-review | Re-check head sha vs target.md before posting; re-anchor against the current diff or review the new commits — never post stale anchors |
 | Posting returns HTTP 422 | A comment anchor is outside the diff — fix it or move that finding to the review body with a permalink; do NOT retry blindly |
 | Context filling | Use af handoff to cycle to fresh session |
@@ -521,8 +521,11 @@ other half available.
 # WORKTREE_CONTAINMENT and one under todos/ is a nested factory root that the CLI refuses. Run each
 # suite IN PLACE from the worktree root by detaching at the sha, and restore the branch in the SAME
 # command chain: no CLI verb may run while HEAD is detached or on another branch (af done /
-# af prime then lose the hooked formula). All git pathspecs are cwd-relative: run these from the
-# worktree root (`cd "$(git rev-parse --show-toplevel)"` in a subshell) or use `git -C <root>`.
+# af prime then lose the hooked formula). While a detached suite runs in the background, stay in
+# the boundary: `gh ... --repo <owner/repo>` needs no checkout, and `git -C <root> diff <a> <b>` /
+# `git show <sha>:<path>` read objects only, so run them from your agent dir — a `cd /tmp` for a
+# "neutral" cwd draws an urgent WORKTREE_CONTAINMENT. All git pathspecs are
+# cwd-relative: run these from the worktree root (`cd "$(git rev-parse --show-toplevel)"` in a subshell) or use `git -C <root>`.
 # TEST_CMD was recorded in target.md at preflight
 git checkout -q --detach <head-sha> && <TEST_CMD> 2>&1 | tee todos/fable-review/head_tests.log; git checkout -q $(cat todos/fable-review/original_branch.txt)
 git checkout -q --detach <base-sha> && <TEST_CMD> 2>&1 | tee todos/fable-review/base_tests.log; git checkout -q $(cat todos/fable-review/original_branch.txt)
@@ -546,6 +549,10 @@ git status --porcelain      # must be empty before the next CLI verb
 - If preflight recorded that the installed binary IS the head, your own session's hook
   transcript attachments (`jq 'select(.type=="attachment")'` over the session .jsonl) and
   `.runtime/` files are execution artifacts of this PR's code — cite them as residence.
+- **A backgrounded suite is not a blocked step — wait for it inside the turn.** Arm a Monitor (or a
+  `run_in_background` until-loop) on the run's exit marker and draft this step's notes while it
+  runs; never `ScheduleWakeup` to wait. If nothing is left to draft, end the turn on one
+  printed marker-check line, the evidence Phase 9's wait prints.
 
 **Exit criteria:** base_tests.log and head_tests.log exist (execution artifacts, or
 recorded blockers); commit narrative read."""
@@ -577,7 +584,9 @@ Record all three in `todos/fable-review/passes.md`. Findings go in the ledger as
 - List every abstraction this diff adds or extends. For each: *if this abstraction were
   removed, what breaks?* Would a different boundary DELETE the need for half this diff
   (schema invariant, handle separation, single interface method) instead of adding to it?
-- Duplicate mechanism check: does the codebase already have the thing this diff builds?
+- Duplicate mechanism check: does the codebase already have the thing this diff builds? Grep the
+  TEST tree too: a hand-written list in the diff (a new const or slice naming one config, id or
+  file) usually duplicates an existing enumeration.
 - Second-source-of-truth check: does any value now live in two places?
 - Objections to the diff's shape must be **grounded** — a file:line, a named simpler
   pattern in this codebase, a deletion ledger. "Feels over-engineered" is not a finding.
@@ -655,6 +664,12 @@ Record in `todos/fable-review/outside.md`, every row with a verdict:
   UNAFFECTED / UPDATED-IN-PR / **FINDING** (→ ledger).
 - **Duplicate-logic sweep**: the same computation/validation/constant elsewhere that
   needed the same change — a fix applied once to copy-pasted logic is a bug fixed half.
+- **State-reader sweep**: for every NEW piece of stored state the diff adds (a mark, a flag, a
+  record field, a latch file), list every reader and set each reader's condition for acting on it
+  side by side. Open with `State readers: [list, or none]`. A term one reader applies and another
+  lacks (liveness, class, age, identity) is a row — UNAFFECTED (the spec makes the difference) /
+  **FINDING** — and the state on which the readers differ gets PRODUCED once, here or in Phase 7's
+  run.
 - **Same-carrier sweep**: when the diff fixes how ONE value travels through a mechanism (an env
   family, a session-env twin, a cache, a marker file), list every OTHER value that mechanism
   carries and ask, per value, whether the fix reaches it. One row per value: UNAFFECTED /
@@ -662,6 +677,11 @@ Record in `todos/fable-review/outside.md`, every row with a verdict:
   this sweep was missing; the blind gap-hunter then found the fourth key the same twin persisted
   and no launch cleared — the finding the reviewer who had just proved that twin stale for one
   key was best placed to make, and did not.
+  When the carrier is a SET OF FILES (gateway configs, mode files, seeds), its members are the
+  files the runtime LOADS, not the ones a bootstrap writes: a tracked file whose writer seeds it
+  only when absent (`[ ! -f "$target" ]`) is the live config on a clone of this repo, and the
+  writer's heredoc never runs there. Enumerate the set from the launch lines and from the
+  codebase's own list (grep the test tree for `Files = []string`), never from the PR's comment.
 - **Stale-prose sweep**: for every touched file, read the UNCHANGED comments, doc strings and
   help text in that file and grep them for claims the diff falsifies (a comment that still says
   a boundary of "unknown" makes the verb decline, a paragraph that still says the arm-off path
@@ -680,13 +700,46 @@ Record in `todos/fable-review/outside.md`, every row with a verdict:
   one PR's importer matched the literal `"ChatGPT"` while the Codex CLI serializes
   `"chatgpt"`, its fixtures agreed with the code, and only the gap-hunter's upstream fetch
   exposed the Blocker. Open the section with `Foreign-format literals: [list, or none]`.
+  For a dependency or pin bump, the PR's account of what changed upstream is testimony too:
+  download both versions' published artifacts with `python3 -I -m pip download --no-deps --dest
+  todos/fable-review/scratch/<dir>` run FROM YOUR AGENT DIR (never `cd /tmp` for a neutral cwd: it
+  draws a WORKTREE_CONTAINMENT), `sha256sum` the new one against the locked hash, and diff
+  the two extracted trees; then read the dependents' own metadata and imports for the changed API.
+  Then find WHY the current version was chosen: `git log -L<line>,<line>:<file>` on the pin line
+  leads to the commit and the design row that picked it. Check that the new version still has that
+  property. Where the property is runtime behaviour, extract the hash-verified artifact under
+  scratch and RUN it from an empty cwd there, because a static scan of a binary is still a
+  reading.
+- **Changed-script execution sweep**: for every shell script, CI step or generated command the
+  diff touches, RUN it from an archived head tree (`todos/fable-review/scratch/head-run`) with its
+  real inputs wherever the run has no remote side effect — dry-run flags, record/output paths
+  under scratch, read-only feeds — and, when the base script runs on the same tree, diff base
+  against head output on identical input. Reading the script is Pass B; running it is where the
+  class-of-input findings live: on #752 the audit script run against the live feeds plus the
+  filer in dry-run mode on a crafted register exposed two contradictory issues for one key that
+  no test and no reading had generated. One row per script: `RAN (inputs: …)` / `NOT RUNNABLE
+  HERE — <why>` (the why goes into the coverage statement).
+  A script too large or too side-effecting to run whole (a bootstrap whose read-only mode still
+  writes a record into the factory root) is run at the changed FUNCTION instead. Copy the base and
+  head versions under scratch with the trailing entry call (`main "$@"`) deleted, `source` each in
+  a fresh `bash -c`, set the script's own mode variable (for example `CHECK_ONLY=true`), and call
+  the function on the real host.
+  A diff that touches only GENERATED files (a hash lock and its sidecar, a rendered template, an
+  embedded manifest) still owes rows here: RUN the generator that writes them on the archived head
+  tree and `cmp` every output against the head sha's file. Identical output is the only proof the PR
+  carries generator output and not a hand edit; any difference is a **FINDING** row.
 - **Merge sweep** (mandatory when Phase 0 recorded `CONFLICTING` or a moved base; otherwise
   write the row `Merge sweep: not needed — <mergeable>, <N> commits behind`): a textual merge
   proves nothing about the merged program. `git -C <root> merge-tree --write-tree origin/{{default_branch}}
   <head-sha>` prints a tree id (conflict markers inside the conflicted files) — `git -C <root>
   archive <tree-id> | tar -x -C todos/fable-review/scratch/merged-src`, resolve each conflict
   by hand there (your resolutions ARE the review's reconciliation guidance), then `go build`,
-  `go vet` and TEST_CMD in that copy. Every break the textual merge hid is a **FINDING** row:
+  `go vet` and TEST_CMD in that copy (backgrounded: wait for it inside the turn with a Monitor on its
+  EXIT line while you write the other sweep rows, never on a `ScheduleWakeup`), after the COPY PREP every runnable copy in this formula gets:
+  `git init` + `git remote add origin <origin-url>` + `git add -A && git -c user.name=r -c
+  user.email=r@r commit -qm copy` inside it. Tests that shell out to `quickdocker.sh --help` need
+  the remote, and `TestEmbeddedIntegrationManifests` / `TestPR724_T10_EmbeddedAcquireModesMatchGitIndex`
+  read the git INDEX, so a copy without either reads as a merge break. Every break the textual merge hid is a **FINDING** row:
   a signature main changed under a stub the PR wrote, a main-side enumeration test that now
   demands a row for the PR's new config file, a seam that gained main-side behavior the PR's
   new caller cannot opt out of. A failure that also fails on main at the same sha is
@@ -695,15 +748,17 @@ Record in `todos/fable-review/outside.md`, every row with a verdict:
 - **Stay inside the worktree boundary.** The worktree sits on its branch, not at the PR
   head, so read head files with `git show <head-sha>:<path>` and sweep with
   `git grep -n <pattern> <head-sha> -- <path>` from the worktree root (`git -C <root>`;
-  `git archive` and pathspecs are cwd-relative). Never extract the head tree to `~/.cache`
+  `git archive` and pathspecs are cwd-relative). The sha goes BEFORE `--`: a sha placed after
+  `--` is a pathspec that matches nothing, and the sweep silently reads the WORKING TREE — your
+  branch, i.e. main — not the head (three sweeps on #752 had to be redone for this). Never extract the head tree to `~/.cache`
   or `/tmp` — every such path trips WORKTREE_CONTAINMENT. If a runnable copy is
   unavoidable, `git -C <root> archive <head-sha> | tar -x -C todos/fable-review/scratch/head-src`
-  (inside the boundary; cleanup-workspace removes it). Exclude the PR's own design corpus from
+  (inside the boundary; cleanup-workspace removes it), then the merge sweep's COPY PREP. Exclude the PR's own design corpus from
   every sweep with a pathspec ARRAY — `EX=(':(exclude).designs' ':(exclude).analysis')` and
   `"${EX[@]}"` — never a quoted string in a variable: that is word-split, the excludes vanish
   silently, and the sweep floods the context with design-doc hits (it did, twice, on #711).
 
-**Exit criteria:** outside.md complete; every row has a verdict; the `Foreign-format literals:` line is present; findings ledgered. The gate greps the artifact for the literal tokens `TBD` and `TODO` regardless of context — never write either one into the file, not even to say none remain."""
+**Exit criteria:** outside.md complete; every row has a verdict; the `Foreign-format literals:` and `State readers:` lines are present; findings ledgered. The gate greps the artifact for the literal tokens `TBD` and `TODO` regardless of context — never write either one into the file, not even to say none remain."""
 
 [[steps]]
 id = "gate-5-sweep-complete"
@@ -715,7 +770,7 @@ description = """
 Run this command:
 ```bash
 F=todos/fable-review/outside.md
-grep -q "Identifiers swept:" $F && grep -q "Merge sweep" $F && ! grep -qE "TBD|TODO" $F && grep -qE "UNAFFECTED|UPDATED-IN-PR|FINDING" $F && echo "GATE 5 PASS" || echo "GATE 5 FAIL: sweep incomplete (Identifiers swept / Merge sweep row / verdicts)"
+grep -q "Identifiers swept:" $F && grep -q "State readers:" $F && grep -q "Merge sweep" $F && ! grep -qE "TBD|TODO" $F && grep -qE "UNAFFECTED|UPDATED-IN-PR|FINDING" $F && echo "GATE 5 PASS" || echo "GATE 5 FAIL: sweep incomplete (Identifiers swept / State readers / Merge sweep row / verdicts)"
 ```
 
 **If FAIL**: Go back to phase-5-outside-the-diff. Do NOT proceed.
@@ -739,7 +794,7 @@ echo "Reverted: <key-production-files>" > todos/fable-review/mutation_log.txt
 <TEST_PATTERN_CMD for the PR's new tests> 2>&1 | tee -a todos/fable-review/mutation_log.txt | grep -E '^ *(--- (PASS|FAIL)|FAIL|ok)'   # the log keeps every line; your context carries only the verdict lines
 git checkout -- <key-production-files>; git status --porcelain   # must be empty after every batch
 ```
-Run the batches from the worktree root with HEAD detached at the head sha (`git checkout -q --detach <head-sha>` first, `git checkout -q $(cat todos/fable-review/original_branch.txt)` after the LAST batch, in the same chain as any CLI verb) — the branch itself is not at the PR head. A mutation whose only test failure is a BUILD error (an unused variable, a bad edit) is not evidence: redo it with a compiling mutation before drawing a conclusion.
+Run the batches from the worktree root with HEAD detached at the head sha (`git checkout -q --detach <head-sha>` first, `git checkout -q $(cat todos/fable-review/original_branch.txt)` after the LAST batch, in the same chain as any CLI verb; while detached, stay inside the boundary as Phase 3 says) — the branch itself is not at the PR head. **Preferred when the mutation list is long (the per-conjunct list below usually is): archived copies, in parallel, HEAD never detached.** Archive the head once (`git -C <root> archive <head-sha> | tar -x -C todos/fable-review/scratch/head-run`, then the merge sweep's COPY PREP inside it — init, remote and an index commit, because quickdocker's `--help` test needs the remote and two tests read the git index), run the FULL package there once as the control (it must be GREEN before any mutation is judged — a red control voids every verdict, so fix the copy, usually its missing index commit, and re-run it), then per mutation `cp -a` the copy, apply ONE exact-string edit (assert exactly one match), run the whole package with `TMPDIR`/`GOTMPDIR` under `~/.cache/af-test`, keep only the `--- FAIL`/`FAIL`/`ok`/`EXIT=` lines, and delete the copy by its literal path or leave it for cleanup-workspace, which removes scratch (the harness's safety check refuses an `rm -rf` whose target is built from a shell variable, even for a path that does not exist yet). Run six to eight copies at a time. Under parallel runs a few environment-sensitive tests flicker (`TestProductionSessionsSurviveDefaultSuite`, `TestQuickstartCheckModeIsReadOnly`, and `TestCleanLegacyGateLocks`, whose fixed lock dirs under /tmp collide across copies): confirm them green in the serial control and exclude them from every verdict — a mutation is KILLED only by a test named for the path it broke. A mutation whose only test failure is a BUILD error (an unused variable, a bad edit) is not evidence: redo it with a compiling mutation before drawing a conclusion. Wait for the lanes inside the turn — a Monitor on the lanes' verdict files, writing the log's finished sections as verdicts land — never on a `ScheduleWakeup`.
 
 - A new test that **passes without the fix pins nothing** — a Should-fix finding at
   minimum, a Blocker if it is the AC-mandated regression test. Ledger it.
@@ -797,11 +852,19 @@ description = """
 The PR's tests can encode the same wrong assumption as the PR's code. Break the symmetry
 once: pick one acceptance criterion; in `todos/fable-review/sideways.md` derive the
 expected observable result **by hand from the spec** (show the arithmetic or expected
-behavior); run the real system on a realistic input; record observed vs. derived. End
+behavior); run the real system on a realistic input, through the trigger the criterion names (a
+criterion that says "without a status command" is not exercised by the status verb); record
+observed vs. derived. End
 with `Verdict: MATCH`, `Verdict: MISMATCH`, or `Verdict: INFEASIBLE — [why]` on its own
-line. A MISMATCH does not stop the review — it becomes a **[Verified] Blocker ledger
-finding** (the strongest kind this process produces — append its findings.md line now; the
-verdict in sideways.md alone is not the ledger) and the checklist continues.
+line. On a MISMATCH, re-derive before you file: confirm your derivation implements the spec's
+rule and not a stricter or looser one (re-read the clause; run the system's OWN comparator or a
+second oracle on exactly the disputed rows), and record the correction in sideways.md whichever
+way it falls — on #752 the first derivation flagged four vendor advisories the audit had rightly
+excluded, because its range rule was stricter than the spec's; a MATCH retrofitted without that
+record is a vibe. A MISMATCH that survives re-derivation does not stop the review — it becomes a
+**[Verified] Blocker ledger finding** (the strongest kind this process produces — append its
+findings.md line now; the verdict in sideways.md alone is not the ledger) and the checklist
+continues.
 INFEASIBLE goes in the coverage statement, never silent.
 
 Throwaway factories, fixtures and scratch JSON for the run live under
@@ -838,14 +901,21 @@ In `todos/fable-review/audit.md`:
 
 1. **AC closure**: each acceptance criterion → the evidence in this PR (test name, hunk,
    observed behavior). An AC without evidence is a ledger finding even if the code
-   "looks like it does it".
+   "looks like it does it". Where the evidence is something you ran, name the entry point: a
+   criterion that names a trigger or an actor ("unattended", "at launch", "without a status
+   command") is evidenced by THAT trigger — a run through another verb evidences the mechanism,
+   so run the named one or record the criterion as evidenced in part.
 2. **Claims audit**: every CLAIM from intake → VERIFIED or REFUTED, with how you know.
    "No behavior change" claims get special hostility — nobody ever checks them.
 3. **Reverse audit**: every change in the diff → justified by DECIDED-SCOPE. Unasked-for
    code is scope creep: sometimes benign, sometimes the bug, always named. Compound
    requirements ("add X; update Y") audited clause by clause.
 
-**Exit criteria:** audit.md complete — every claim verdicted, every AC evidenced, nothing left unresolved. The gate greps the artifact for the literal tokens `TBD` and `TODO` regardless of context — never write either one into the file, not even to say none remain."""
+A session that finds audit.md already written (a recycle mid-step) checks it by COUNT first —
+table rows per section against the entries in intake.md's lists — and reads through only the
+sections the count shows short, instead of paying for the whole file again.
+
+**Exit criteria:** audit.md complete — every claim verdicted, every AC evidenced (a run names its entry point), nothing left unresolved. The gate greps the artifact for the literal tokens `TBD` and `TODO` regardless of context — never write either one into the file, not even to say none remain."""
 
 [[steps]]
 id = "gate-8-audits-closed"
@@ -874,7 +944,13 @@ Switch sides: audit the reviewer. In `todos/fable-review/self_audit.md`:
 - **Independent gap discovery** on the findings ledger (the six-sigma moves): escape
   paths your findings don't cover, sibling vulnerabilities in code you didn't read,
   structural-vs-behavioral verification mismatches, unstated assumptions, observability
-  (if this PR fails silently in production, would anyone know?).
+  (if this PR fails silently in production, would anyone know?), and the template hazard: when this
+  PR is the first of a series (a loop's first heal, the first of N migrations or fixtures), the next
+  instance will copy its hunk, so add that second copy in a throwaway scratch tree and re-run the
+  mutation that killed the first.
+  Then sweep the ledger's own evidence: every line still CANDIDATE, and every line you would
+  grade Should-fix or higher that rests on a read, gets RUN now where a throwaway run can reach
+  it. Phase 10 is too late to learn that a top finding does not reproduce.
 - **`## Not Reviewed`** — name what you skimmed or skipped (generated code, the frontend
   half, the migration you couldn't run). This section ships inside the review verbatim.
 - **Strongest-wrong test**: the most likely way your verdict is wrong — did you actually
@@ -898,14 +974,45 @@ Switch sides: audit the reviewer. In `todos/fable-review/self_audit.md`:
   genuinely find nothing.
   ```
   Tell it, outside the fence, how to reach the PR head without leaving the boundary:
-  read-only `git show <head-sha>:<path>` / `git grep <pattern> <head-sha>` from the
-  worktree root, `gh pr diff`/`gh pr view` for the diff, tests only in its own copy under
-  `todos/fable-review/scratch/gh-head` (never `/tmp` — WORKTREE_CONTAINMENT), and no git
-  command that changes state (no checkout, stash, reset, push). If it runs a head-built
+  read-only `git show <head-sha>:<path>` / `git grep <pattern> <head-sha> -- <path>` (sha
+  BEFORE `--`) from the worktree root, `gh pr diff`/`gh pr view` for the diff, tests only in its own copy under
+  `todos/fable-review/scratch/gh-head`, given the merge sweep's COPY PREP (init, remote, index
+  commit) (never `/tmp` — WORKTREE_CONTAINMENT), and no git
+  command that changes state (no checkout, stash, reset, push). Say in so many words that
+  everything outside this worktree is off-limits: no `cd` to the factory root, no git run
+  there, no read of its runtime state or its config — live GitHub state comes from
+  read-only `gh`. The containment hook mails YOU for the sub-agent's excursions (one
+  gap-hunter read the live dispatcher's state file and ran `git status` in the factory
+  root; its brief had not said no). If it runs a head-built
   binary against a throwaway factory under that path, it must set `AF_ROOT=<that dir>` (the
   nested-factory guard refuses otherwise). Write the four sections
   above BEFORE spawning it, so nothing but the wait remains: a turn that only acknowledges
   mail while the sub-agent runs trips the STEP_FIDELITY gate.
+  **Account for the launch in one line the gate reads.** The moment you spawn, write
+  `Gap-hunter launch: IN-FLIGHT (spawned <UTC time read from date -u>)` under the
+  `## Gap-Hunter` heading. When its final message arrives, record the report and change the
+  line to `Gap-hunter launch: RETURNED`. The two other closing values are `NOT-LAUNCHED`
+  (the escalation below ran and no sub-agent was spawned) and `UNAVAILABLE` (both launches
+  failed). **Never run `af done` on this step while the line says IN-FLIGHT.** `af done` at
+  a context boundary cycles the session, and a background sub-agent dies with the session
+  that spawned it: one run closed this step on the escalation's Result with the gap-hunter
+  seven minutes into its investigation, lost it and about 41K sub-agent tokens at the
+  handoff, and passed GATE 9 anyway — the re-spawn then found the one issue eleven phases
+  had missed. Use the wait instead of idling: run the escalation below if this is a deep
+  review, then draft what Phase 10 will assemble (the review body and one comment text per
+  ledger entry, as files under `todos/fable-review/scratch/`) while the evidence is still
+  in your context. Write each comment text ONCE, in the form the payload is generated from —
+  one record per ledger entry (id, severity, evidence bin, path, line, body) — so Phase 10
+  corrects records and generates review.md's findings and the payload from them; a prose draft
+  that Phase 10 then types again into a second file costs every comment twice. If it is still
+  IN-FLIGHT after that, the wait is this step's directive,
+  not a skipped one: print the launch line
+  (`grep -n '^Gap-hunter launch:' todos/fable-review/self_audit.md`) and end the turn with
+  one line saying you are waiting for it — its completion notification re-invokes you.
+  The fidelity gate judges one turn at a time and cannot see an earlier spawn, so the
+  printed line is what shows it this turn did its job. A fresh session that finds the line still
+  IN-FLIGHT has lost that launch, and it returned nothing: re-spawn once, from a brief
+  rebuilt out of `findings.md`, and say so in the section.
   Its output lands in self_audit.md under a MANDATORY `## Gap-Hunter` heading ending
   with `Result: FINDING | REFUTATION | NOTHING-FOUND | UNAVAILABLE | ESCALATED-TO-SIX-SIGMA` — a hit
   is appended to `findings.md` as its own line whose text contains `gap-hunter` (the file the
@@ -916,7 +1023,10 @@ Switch sides: audit the reviewer. In `todos/fable-review/self_audit.md`:
   instead to `Skill(skill: "six-sigma-challenge", args: "<draft> <PR>")` — do NOT read
   its SKILL.md and follow it manually; use the Skill tool — and record
   `Result: ESCALATED-TO-SIX-SIGMA` with its outcome. The section is required even then —
-  the adversary always leaves evidence. If the sub-agent crashes, re-spawn once — also
+  the adversary always leaves evidence. If a gap-hunter was launched as well, the escalation
+  does not stand in for its report: record the escalation's outcome, and close the section
+  with the gap-hunter's own Result once it has returned. If the sub-agent crashes, or is
+  lost with a cycled session, re-spawn once — also
   with no model override (inherit the session model). If both launches fail before any
   investigation happened (model or API unavailability), record `Result: UNAVAILABLE`
   with the verbatim errors — do NOT record NOTHING-FOUND, which asserts the adversary
@@ -926,7 +1036,8 @@ Switch sides: audit the reviewer. In `todos/fable-review/self_audit.md`:
   honest hunting — not the goal.
 
 **Exit criteria:** self_audit.md has Not-Reviewed, strongest-wrong, and the Gap-Hunter
-section with a Result."""
+section with a Result and a `Gap-hunter launch:` line that no longer says IN-FLIGHT. No ledger
+line a throwaway run could have reached is left CANDIDATE."""
 
 [[steps]]
 id = "gate-9-adversary-evidence"
@@ -941,9 +1052,11 @@ F=todos/fable-review/self_audit.md
 grep -q "## Not Reviewed" $F && grep -qiE "strongest" $F && grep -q "## Gap-Hunter" $F && grep -qE "Result: (FINDING|REFUTATION|NOTHING-FOUND|UNAVAILABLE|ESCALATED-TO-SIX-SIGMA)" $F && echo "GATE 9 PASS" || echo "GATE 9 FAIL: coverage statement, strongest-wrong, or Gap-Hunter result missing"
 # A FINDING must already be a findings.md line — Phase 10 grades findings.md, not self_audit.md:
 sed -n '/^## Gap-Hunter/,$p' $F | grep -q "Result: FINDING" && { grep -qi "gap-hunter" todos/fable-review/findings.md && echo "GATE 9 PASS: gap-hunter finding is a findings.md line" || echo "GATE 9 FAIL: Result is FINDING but no findings.md line contains gap-hunter — append it"; } || true
+# A launched gap-hunter must be accounted for — IN-FLIGHT is not a closing state, and a Result from the escalation does not cover it:
+sed -n '/^## Gap-Hunter/,$p' $F | grep -qE "^Gap-hunter launch: (RETURNED|NOT-LAUNCHED|UNAVAILABLE)" && echo "GATE 9 PASS: gap-hunter launch accounted for" || echo "GATE 9 FAIL: no closing 'Gap-hunter launch:' line (RETURNED, NOT-LAUNCHED or UNAVAILABLE) under ## Gap-Hunter — IN-FLIGHT means wait for its completion notification; in a fresh session it means the launch was lost with the previous one, so re-spawn it once"
 ```
 
-**If FAIL**: Go back to phase-9-self-audit. The adversary must leave evidence, and its finding must be a findings.md line. Do NOT proceed.
+**If FAIL**: Go back to phase-9-self-audit. The adversary must leave evidence, its finding must be a findings.md line, and a gap-hunter still in flight is not evidence yet. Do NOT proceed.
 **If PASS**: Close this step and continue."""
 
 [[steps]]
@@ -968,6 +1081,11 @@ description = """
   [Verified] (I executed or observed it — cite the log/run) / [Inferred] (I traced the
   path; the chain is stated) / [Assumed] (plausible; needs the author to confirm/deny).
   "Might have edge cases" is not a finding; it's a feeling.
+- **Write each bin as the bare tag, then its citation**: `[Verified] (head_tests.log)`, never
+  `[Verified: head_tests.log]`. GATE 10 greps the bare tag, and the colon form fails it.
+  A review with ZERO findings still states what its Approve rests on: tag each line of the
+  coverage statement's verified list with its bin, so the gate grips real evidence rather than
+  a token typed in to pass it.
 - **Negation test** (from fable-meta) on every [Verified]/[Inferred] finding: would the
   cited evidence look different if the code were correct? Evidence equally consistent
   with correct code proves nothing — strengthen it or demote the finding to [Assumed].
@@ -982,16 +1100,27 @@ description = """
   base+head, mutation-checked tests A/B, endpoint exercised with input C) and the
   `## Not Reviewed` list from self_audit.md, verbatim.
 - **Genuine praise where earned**; **questions as questions**.
+- **Drafts are inputs, not the deliverable.** If Phase 9's wait left a body draft and
+  comment texts under `todos/fable-review/scratch/`, assemble from them instead of
+  re-deriving each finding — and print from the head sha every line number a comment
+  cites in its own text before posting. Only the anchors are machine-checked; a draft
+  written before a handoff drifts (one cited a line two off the sentence it described).
 
 **2. Post (only if {{post_review}} is "true" and no dispatch constraint overrides it):**
 
 - Re-check the live head sha against target.md. If the PR moved while you reviewed,
   re-anchor every inline comment against the current diff (or note the drift and review
   the new commits) — never post stale anchors.
+- Re-check the base as well: `git ls-remote origin refs/heads/{{default_branch}}` against the base
+  sha Phase 5's merge-sweep row was written for. If it moved, that row is stale: redo the merge
+  sweep on the new base (the suite on a merged scratch copy) before the review says anything
+  about what happens "on merge".
 - ONE review submission: each anchorable finding as an inline comment (`side: RIGHT`,
   line must appear in `gh pr diff`), non-anchorable findings (the omission class, by
   nature) in the review body with full-40-char-sha permalinks using the head sha from
-  target.md:
+  target.md. An anchored finding appears in the body only as a one-line pointer to its inline
+  comment, never in full a second time (one payload carried four findings twice before it was
+  trimmed):
 ```bash
 gh api repos/<owner>/<repo>/pulls/<number>/reviews --input todos/fable-review/review-payload.json \\
   | jq -r 'select(.html_url != null) | "Review URL: \\(.html_url) (review id \\(.id), submitted \\(.submitted_at), commit \\(.commit_id))"' \\
@@ -1009,8 +1138,8 @@ gh api repos/<owner>/<repo>/pulls/<number>/reviews --input todos/fable-review/re
 - If {{post_review}} is "false": the review lands in bead notes and the completion mail
   instead; record "NOT POSTED (by dispatch)" in review.md.
 
-**Exit criteria:** review.md complete (verdict, graded ledger, coverage); posted or
-recorded per {{post_review}}."""
+**Exit criteria:** review.md complete (verdict, graded ledger, coverage); head and base
+re-checked before posting; posted or recorded per {{post_review}}."""
 
 [[steps]]
 id = "gate-10-review-deliverable"
@@ -1053,7 +1182,9 @@ gh api repos/<owner>/<repo>/pulls/<number>/comments --paginate --jq '.[] | selec
 # Diff that list against review-payload.json. NOT repos/<owner>/<repo>/pulls/<number>/reviews/<review-id>/comments:
 # that endpoint returns the legacy shape (position only; line and side null) and reads like broken anchors.
 ```
-- Body-fallback findings have full-40-char-sha permalinks that render correctly
+- Body-fallback findings have full-40-char-sha permalinks that render correctly — on a PRIVATE repo an unauthenticated fetch answers 404
+  for every one, so check each target instead with
+  `gh api "repos/<owner>/<repo>/contents/<path>?ref=<head-sha>" -H 'Accept: application/vnd.github.raw+json' | sed -n '<line>p'`
 - No dropped finding leaked into the review; no ledger entry vanished without a reason
 - The verdict line, coverage statement, and evidence bins are present
 
@@ -1114,9 +1245,19 @@ description = """
 Architecture gate (Jidoka): verify the work product matches the protocol.
 
 **Verify against the protocol checklist:**
-- [ ] prediction.md was Written BEFORE any diff fetch (check your own transcript order; after a
-      handoff the transcript is gone — compare birth times: `stat -c %w todos/fable-review/prediction.md`
-      must precede the diff file's under todos/fable-review/scratch/)
+- [ ] prediction.md was Written BEFORE any diff fetch — proven by tool-call order in the
+      transcript, which outlives a handoff on disk: the file
+      `.runtime/transcript_path` holds `<session-id><TAB><path>` — take the path with
+      `cut -f2 .runtime/transcript_path` (the whole line handed to `dirname` or `jq` fails with "No
+      such file"); that path's directory has one `<session-id>.jsonl` per session. Run this on the
+      session that did Phase 2; the Write of prediction.md must precede the first Bash call that
+      fetched diff CONTENT (a `--numstat`, a `| wc -c` or a name list is not content):
+      ```bash
+      jq -r 'select(.type=="assistant") | .timestamp as $t | .message.content[]? | select(.type=="tool_use") | (.input.file_path // .input.command // "") as $s | select($s | test("prediction[.]md$|gh pr diff|git .*diff")) | "\\($t) \\(.name) \\($s | gsub("\\n";" ") | if length > 110 then .[0:50] + " … " + .[-55:] else . end)"' <session-file> | head -12
+      ```
+      Never compare file birth times for this: Edit and `sed -i` replace the inode and Phase 2
+      rewrites prediction.md for the delta, so `stat -c %w` reads as a failure on every
+      multi-session run.
 - [ ] All 11 domain gates passed — each artifact exists and its gate grep passes
 - [ ] mutation_log.txt opens with `Reverted:` (or the evidenced NO-TESTS record)
 - [ ] The Gap-Hunter left evidence (`## Gap-Hunter` + Result in self_audit.md)
@@ -1148,6 +1289,25 @@ index dirty — every prior run hit this. The audit trail is the directory itsel
 written in prepare-for-review.
 ```bash
 ls todos/fable-review/                                     # the audit trail, present and local
+# Evidence your artifacts cite must outlive scratch: a cited scratch/<dir>/<name> survives as scratch_<dir>_<name> beside them.
+# A citation written as a directory, a brace list ({a,b}) or a placeholder (<id>) keeps every small file that directory or
+# prefix holds;
+# a whole repo copy (go.mod or .git inside) is regenerable bulk and is skipped.
+grep -ohE 'scratch/[A-Za-z0-9_./{},<>-]+' todos/fable-review/*.md todos/fable-review/*.txt 2>/dev/null | sed -E 's/[.,]*$//; s#/?[{<].*$##' | sort -u | while read -r p; do
+  f="todos/fable-review/$p"
+  if [ -f "$f" ]; then set -- "$f"
+  elif [ -d "$f" ]; then { [ -e "$f"/go.mod ] || [ -e "$f"/.git ]; } && continue; set -- $(find "$f" -maxdepth 1 -type f | head -60)
+  else set -- $(ls -d "$f"* 2>/dev/null | head -60)
+  fi
+  for g in "$@"; do [ -f "$g" ] && [ "$(stat -c %s "$g")" -lt 2000000 ] && cp -p "$g" "todos/fable-review/$(printf '%s' "${g#todos/fable-review/}" | tr '/' '_')"; done
+done; true
+# The scan above misses a file named WITHOUT its scratch/ prefix (a second name inside one citation),
+# so every small file in the top two levels of scratch is kept too, except files inside repo copies.
+find todos/fable-review/scratch -mindepth 1 -maxdepth 2 -type f -size -2000k 2>/dev/null | while read -r g; do
+  d="${g#todos/fable-review/scratch/}"; top="todos/fable-review/scratch/${d%%/*}"
+  [ "$top" != "$g" ] && { [ -e "$top"/go.mod ] || [ -e "$top"/.git ]; } && continue
+  dst="todos/fable-review/$(printf '%s' "${g#todos/fable-review/}" | tr '/' '_')"; [ -e "$dst" ] || cp -p "$g" "$dst"
+done; true
 rm -f todos/fable-review/*.diff                            # regenerable bulk: `git diff <base-sha>..<head-sha>` recreates it
 rm -rf todos/fable-review/scratch                          # head-tree extracts, throwaway factories, the gap-hunter's copy — all in-boundary scratch, all regenerable
 git reset -q -- todos/fable-review/ 2>/dev/null || true    # nothing of it may be staged
@@ -1162,7 +1322,7 @@ git stash list | grep "On $(git branch --show-current)"   # must print nothing
 **3. Do NOT push (zero-remote-footprint guard):**
 Never run `git push` in this formula; never open a PR for review artifacts.
 
-**Exit criteria:** Artifacts present locally and uncommitted, working tree clean, NOTHING pushed."""
+**Exit criteria:** Artifacts present locally and uncommitted, cited scratch evidence kept beside them, working tree clean, NOTHING pushed."""
 
 [[steps]]
 id = "prepare-for-review"

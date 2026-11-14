@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -52,6 +53,10 @@ them) and about a factory-wide statusline gate that is off. Re-running 'af up' o
 'af sling' is the remediation — 'af install --init' reprovisions factory-root
 agent dirs only.
 
+A launch whose profile declares a larger context window than this Claude Code
+version is recorded to apply is refused, naming both figures and the record;
+--accept-window launches it anyway and prints the warning.
+
 A start set larger than max_worktrees is warned about (not aborted) before launch.
 Positional 'af up <names>' ignores startup.json and starts exactly those agents.`,
 	RunE: runUp,
@@ -67,9 +72,13 @@ var upModel string
 // `af up` invocation: launch a non-loopback model profile without a fitness attestation.
 var upSkipFitness bool
 
+// upAcceptWindow applies the --accept-window override to EVERY agent started by an `af up` invocation.
+var upAcceptWindow bool
+
 func init() {
 	upCmd.Flags().StringVar(&upModel, "model", "", "Per-agent model profile (or raw model id) from models.json — applied to every agent started by this `af up`")
 	upCmd.Flags().BoolVar(&upSkipFitness, "skip-fitness", false, "Launch non-loopback model profiles without a fitness attestation (loud override; see `af config models attest`)")
+	upCmd.Flags().BoolVar(&upAcceptWindow, "accept-window", false, "Launch despite a measured or recorded context-window shortfall (always prints the warning)")
 	rootCmd.AddCommand(upCmd)
 }
 
@@ -184,6 +193,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// factory-root breadcrumb and escalate any ambiguous recovery — neither of
 	// which is visible from the per-agent stderr line under a bulk `af up`.
 	var runRecords []agentRunRecord
+	launchedEnv := map[string][]config.EnvVar{}
 	for _, name := range agents {
 		entry, ok := agentsCfg.Agents[name]
 		if !ok {
@@ -349,14 +359,20 @@ func runUp(cmd *cobra.Command, args []string) error {
 		// profile-selecting `--model` that cannot resolve is surfaced per-agent (warn + allOK=false +
 		// continue), mirroring every other best-effort sub-failure in this loop — one bad agent must
 		// not abort the rest. agentDir (worktree-aware) was derived just above.
-		c, reports, err := launchContributions(cmd.Context(), root, name, agentDir, entry, upModel, upSkipFitness, true, cmd.ErrOrStderr())
+		c, reports, err := launchContributions(cmd.Context(), root, name, agentDir, entry, upModel, launchGates{SkipFitness: upSkipFitness, AcceptWindow: upAcceptWindow, ReportCoverage: true}, cmd.ErrOrStderr())
 		if err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "%s: %v\n", name, err)
 			allOK = false
+			var wr *windowRefusal
+			if errors.As(err, &wr) && outcome.IsCreated() {
+				removeRefusedWorktree(cmd, root, wtID, name)
+				runRecords = runRecords[:len(runRecords)-1]
+			}
 			continue
 		}
 		mgr.SetLaunchContributions(&c)
-		if err := mgr.Start(); err != nil {
+		launchedEnv[reports.ModelName] = c.ModelEnv
+		if err := reports.startWithWindowLaunchFact(root, name, true, cmd.ErrOrStderr(), mgr.Start); err != nil {
 			if errors.Is(err, session.ErrAlreadyRunning) {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s: already running\n", session.SessionName(name))
 				continue
@@ -502,6 +518,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
+	warnUserScopeEnvConflicts(cmd.ErrOrStderr(), launchedEnv)
 
 	// N5 (issue #408 Phase 3): startup.json.watchdog_agents is the SOLE watchdog
 	// scope source, applied on BOTH the blanket and positional `af up` paths (the
@@ -510,6 +527,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// not fail the af up exit.
 	watchdogScope := startupCfg.WatchdogAgents
 	warnUnknownWatchdogAgents(cmd.ErrOrStderr(), watchdogScope, agentsCfg)
+	warnStaleRoleDirectives(cmd.ErrOrStderr(), agentsCfg)
 
 	// K20 (#596): say — before the watchdog exists to be blamed — which agents its
 	// recovery surface will be unable to observe. This is the one guaranteed operator
@@ -567,6 +585,23 @@ func warnUnknownWatchdogAgents(w io.Writer, scope []string, agentsCfg *config.Ag
 	}
 }
 
+const (
+	staleDirectiveFullList = "(af memory list)"
+	pre630RoleDirective    = "Read your memory and docs, and prove it."
+)
+
+func staleRoleDirective(d string) bool {
+	return strings.Contains(d, staleDirectiveFullList) || strings.TrimSpace(d) == pre630RoleDirective
+}
+
+func warnStaleRoleDirectives(w io.Writer, agentsCfg *config.AgentConfig) {
+	for _, name := range []string{"manager", "supervisor"} {
+		if e, ok := agentsCfg.Agents[name]; ok && staleRoleDirective(e.Directive) {
+			fmt.Fprintf(w, "warning: %s's directive in .agentfactory/agents.json orders a full memory read, and af never rewrites that file; replace it with %q\n", name, builtinRoleDirective)
+		}
+	}
+}
+
 // warnOmittedSinks emits a best-effort, detection-only warning for any mail/notify/
 // escalation sink that is absent from the resolved startup set, so an operator who
 // configures a startup subset is told which sink's mail will sit unprocessed until
@@ -618,13 +653,31 @@ func warnOmittedSinks(cmd *cobra.Command, root string, agentsCfg *config.AgentCo
 	// human. When recoveryRecipientReachable is false — the recipient is not in agents.json, or is
 	// neither live nor in the startup set — say so prominently and specifically, so the route is fixed
 	// before a halt needs it rather than after.
+	//
+	// Only escalationTarget receives recovery's mail, so only its line names the recovery halt. A
+	// sink missing from agents.json is told to join the roster rather than startup.json:
+	// recoveryRecipientReachable requires the roster first, and af install refuses a role it lacks.
 	for _, e := range escalationTargets() {
-		if reachable, _ := recoveryRecipientReachable(root, e); !reachable {
+		if reachable, _ := recoveryRecipientReachable(root, e); reachable {
+			continue
+		}
+		if e == escalationTarget {
 			fmt.Fprintf(cmd.ErrOrStderr(),
 				"warning: escalation recipient %q CANNOT RECEIVE a recovery-halt escalation at startup "+
 					"(not live and not in the startup set); RECOVERY HALTED escalations would go undelivered — "+
 					"add %q to startup.json agents or start it now\n", e, e)
+			continue
 		}
+		if _, ok := agentsCfg.Agents[e]; !ok {
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"warning: escalation recipient %q CANNOT RECEIVE an operator escalation: it is not in agents.json, "+
+					"so its escalation mail would go undelivered — add it to agents.json, then run 'af install %s'\n", e, e)
+			continue
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"warning: escalation recipient %q CANNOT RECEIVE an operator escalation at startup "+
+				"(not live and not in the startup set); its escalation mail would go undelivered — "+
+				"add %q to startup.json agents or start it now\n", e, e)
 	}
 }
 
@@ -951,7 +1004,53 @@ func removeRefusedWorktree(cmd *cobra.Command, root, wtID, name string) {
 	if !empty {
 		return
 	}
-	if err := worktree.Remove(root, meta); err != nil {
+	// Forced: worktree setup re-renders the agent's scaffold, so a worktree created moments ago is already dirty.
+	if err := worktree.ForceRemove(root, meta); err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "%s: warning: removing refused worktree %s: %v\n", name, wtID, err)
+		// A meta left behind with an owner and no agents is re-adopted by FindByOwner at the next launch.
+		if rmErr := os.Remove(filepath.Join(worktree.WorktreesDir(root), meta.ID+".meta.json")); rmErr != nil && !os.IsNotExist(rmErr) {
+			fmt.Fprintf(cmd.ErrOrStderr(), "%s: warning: removing refused worktree %s meta: %v\n", name, wtID, rmErr)
+		}
+	}
+}
+
+var userScopeEnvFn = readUserScopeEnv
+
+func readUserScopeEnv() map[string]json.RawMessage {
+	scope, err := readClaudeUserScope()
+	if err != nil {
+		return nil
+	}
+	return scope.Env
+}
+
+// warnUserScopeEnvConflicts names a key the user-scope settings.json sets differently from a launched
+// profile, because every session's processes see the user-scope value, which for a window key can override
+// the profile's window. Values are printed only for the two window keys: user-scope env may hold credentials.
+func warnUserScopeEnvConflicts(w io.Writer, launchedEnv map[string][]config.EnvVar) {
+	env := userScopeEnvFn()
+	if len(env) == 0 {
+		return
+	}
+	path := filepath.Join(claudeConfigDir(), "settings.json")
+	for _, profile := range sortedMapKeys(launchedEnv) {
+		for _, e := range launchedEnv[profile] {
+			raw, ok := env[e.Key]
+			if !ok {
+				continue
+			}
+			var value string
+			if json.Unmarshal(raw, &value) != nil {
+				value = string(raw)
+			}
+			if value == e.Value {
+				continue
+			}
+			line := fmt.Sprintf("warning: user-scope Claude Code settings (%s) set env %s, which profile %q also exports with a different value; every session's processes see the user-scope value", path, e.Key, profile)
+			if e.Key == config.EnvMaxContextTokens || e.Key == "CLAUDE_CODE_AUTO_COMPACT_WINDOW" {
+				line += fmt.Sprintf(", which can override the profile's window (user scope %s, profile %s)", value, e.Value)
+			}
+			fmt.Fprintln(w, line)
+		}
 	}
 }

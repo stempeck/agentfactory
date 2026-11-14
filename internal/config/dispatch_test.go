@@ -1,9 +1,11 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -414,5 +416,51 @@ func TestLoadDispatchConfig_SourceDefault(t *testing.T) {
 	}
 	if cfg.Mappings[0].Source != "issue" {
 		t.Errorf("source = %q, want %q (default)", cfg.Mappings[0].Source, "issue")
+	}
+}
+
+// A seeded dispatch.json is inert (no repos) by construction, so the seed needs the rules a
+// later repo-add would hit without the not-configured checks that stop ParseDispatchConfig first.
+func TestValidateDispatchStructure_RunsWithoutRepos(t *testing.T) {
+	cases := map[string]struct {
+		cfg  DispatchConfig
+		want string
+	}{
+		"label_and_labels": {DispatchConfig{TriggerLabel: "agentic", Mappings: []DispatchMapping{{Label: "bug", Labels: []string{"bug"}, Agent: "x"}}}, "mapping has both label and labels (ambiguous)"},
+		"bad_source":       {DispatchConfig{TriggerLabel: "agentic", Mappings: []DispatchMapping{{Labels: []string{"bug"}, Source: "bogus", Agent: "x"}}}, `mapping source must be "issue" or "pr"`},
+		"bad_cron_every":   {DispatchConfig{Crons: []CronSchedule{{Name: "c", Agent: "x", Every: "bogus"}}}, `cron "c"`},
+		"valid":            {DispatchConfig{TriggerLabel: "agentic", Mappings: []DispatchMapping{{Labels: []string{"bug"}, Agent: "x"}}}, ""},
+	}
+	for label, c := range cases {
+		t.Run(label, func(t *testing.T) {
+			err := ValidateDispatchStructure(&c.cfg)
+			if c.want == "" {
+				if err != nil {
+					t.Fatalf("ValidateDispatchStructure rejected a valid inert config: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("ValidateDispatchStructure = %v, want an error containing %q", err, c.want)
+			}
+		})
+	}
+}
+
+// Splitting the struct rules out must leave the loader's verdicts as they were: an unconfigured
+// file is still the ErrMissingField friendly skip, and a configured one fails on the same rule.
+func TestParseDispatchConfig_VerdictsUnchangedBySplit(t *testing.T) {
+	if _, err := ParseDispatchConfig([]byte(`{"repos":[],"trigger_label":"agentic","mappings":[{"label":"bug","labels":["bug"],"agent":"x"}]}`)); !errors.Is(err, ErrMissingField) || !strings.Contains(err.Error(), "at least one repo") {
+		t.Errorf("unconfigured dispatch.json: %v, want the no-repo ErrMissingField skip", err)
+	}
+	armed := DispatchConfig{Repos: []string{"o/r"}, TriggerLabel: "agentic", Mappings: []DispatchMapping{{Label: "bug", Labels: []string{"bug"}, Agent: "x"}}}
+	data, err := json.Marshal(armed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, parseErr := ParseDispatchConfig(data)
+	structErr := ValidateDispatchStructure(&armed)
+	if parseErr == nil || structErr == nil || parseErr.Error() != structErr.Error() {
+		t.Errorf("ParseDispatchConfig = %v, ValidateDispatchStructure = %v; want the same refusal", parseErr, structErr)
 	}
 }

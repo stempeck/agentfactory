@@ -2356,7 +2356,7 @@ func TestWarnIfEnclosingFactory_QuietWhenMarkerless(t *testing.T) {
 //     handles exist, record or not).
 //   - no record ⇒ the refusal survives (intake.md: "the both-handles-without-a-flag refusal
 //     survives ... for the no-record case"), naming --litellm-auth (D3: this is
-//     gatewayAuthMode's OWN tier-4 error, gateway_auth.go:246, propagated verbatim once K5
+//     gatewayAuthMode's OWN tier-4 error, propagated verbatim once K5
 //     delegates — already asserted by TestGatewayAuthMode_Tier4BothHandlesNoRecordRefusesNamingFlag
 //     at the K1 level; this subtest is the install.go-level integration check).
 func TestInstallBothHandlesResolvesFromRecord(t *testing.T) {

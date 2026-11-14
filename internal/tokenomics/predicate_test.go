@@ -21,13 +21,72 @@ func trusted(tokens int64, runs int) Appetite {
 	return Appetite{Tokens: tokens, Runs: runs, Known: true}
 }
 
+// TestPredictWindow pins that the source travels with the tokens: a figure alone cannot be argued
+// with, so every surface that divides by the prediction can also say where it came from.
+func TestPredictWindow(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile map[string]string
+		want    Window
+	}{
+		{"declared", map[string]string{config.EnvMaxContextTokens: "1050000"}, Window{Tokens: 1050000, Source: config.WindowSourceDeclared}},
+		{"nothing declared", map[string]string{}, Window{Tokens: 200000, Source: config.WindowSourceFallback}},
+		{"nil profile", nil, Window{Tokens: 200000, Source: config.WindowSourceFallback}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PredictWindow(tc.profile); got != tc.want {
+				t.Errorf("PredictWindow(%v) = %+v, want %+v", tc.profile, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSessionWindow(t *testing.T) {
+	t.Run("no observation at a host report of zero or less", func(t *testing.T) {
+		for _, host := range []int64{0, -1} {
+			got, ok := SessionWindow(map[string]string{config.EnvMaxContextTokens: "1000000"}, host)
+			if ok || got != (Window{}) {
+				t.Errorf("SessionWindow(MAX 1000000, %d) = (%+v, %v), want (zero, false)", host, got, ok)
+			}
+		}
+	})
+	tests := []struct {
+		name    string
+		profile map[string]string
+		host    int64
+		want    Window
+	}{
+		{"not-foreign id takes the host below the declaration",
+			map[string]string{"ANTHROPIC_MODEL": "claude-opus-5", config.EnvMaxContextTokens: "1000000"}, 200000,
+			Window{Tokens: 200000, Source: config.WindowSourceHost}},
+		{"not-foreign id keeps the declaration below the host",
+			map[string]string{"ANTHROPIC_MODEL": "claude-opus-5", config.EnvMaxContextTokens: "200000"}, 1000000,
+			Window{Tokens: 200000, Source: config.WindowSourceDeclared}},
+		{"foreign id keeps its declaration",
+			map[string]string{"ANTHROPIC_MODEL": "gpt-5.6-sol", config.EnvMaxContextTokens: "1050000"}, 200000,
+			Window{Tokens: 1050000, Source: config.WindowSourceDeclared}},
+		{"nothing declared takes the host",
+			map[string]string{}, 262144,
+			Window{Tokens: 262144, Source: config.WindowSourceHost}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := SessionWindow(tc.profile, tc.host)
+			if !ok || got != tc.want {
+				t.Errorf("SessionWindow(%v, %d) = (%+v, %v), want (%+v, true)", tc.profile, tc.host, got, ok, tc.want)
+			}
+		})
+	}
+}
+
 // TestAdmitClampsToBreaker proves the AC-4 clamp is WIRED INTO Admit, not merely defined (D4). This is
 // the admit-then-die band #672 names: at margin 5 the raw ceiling is 95%, so a step projected at 87.5%
 // is admitted and then recycled by the 85% breaker while it renders its own body. With the breaker
 // injected the verdict must flip to no-fit; with none injected (pre-clamp) it stays admit — the flip
 // is the proof the clamp decides, rather than a value that would have refused anyway.
 func TestAdmitClampsToBreaker(t *testing.T) {
-	w := ResolveWindow(map[string]string{config.EnvMaxContextTokens: "200000"}, 0)
+	w := PredictWindow(map[string]string{config.EnvMaxContextTokens: "200000"})
 	occ := Occupancy{Tokens: 0, Known: true}
 	app := trusted(175_000, 3) // projected 87.5%: below raw ceiling 95%, above breaker 85%
 
@@ -83,15 +142,15 @@ func TestAdmit_DoesNotDoubleCountBaseline(t *testing.T) {
 // three windows at once, so a large-window row that stayed green because of a `if window > X`
 // short-circuit would show up as a small-window row that also stopped firing.
 func TestPredicatesInertLargeWindow(t *testing.T) {
-	// The 1M window is built the way production builds it (Gotcha 6): through K1's helper, from a
+	// The 1M window is built the way production builds it (Gotcha 6): through K1's prediction, from a
 	// declared profile value. 200_000 comes back from the same helper with no declaration at all,
 	// so neither number is a literal this package owns.
-	cloudWindow := ResolveWindow(map[string]string{config.EnvMaxContextTokens: "1000000"}, 0)
+	cloudWindow := PredictWindow(map[string]string{config.EnvMaxContextTokens: "1000000"})
 	if cloudWindow.Tokens != 1_000_000 || cloudWindow.Source != config.WindowSourceDeclared {
 		t.Fatalf("cloud window = %d/%s, want 1000000/declared", cloudWindow.Tokens, cloudWindow.Source)
 	}
-	localWindow := ResolveWindow(map[string]string{config.EnvMaxContextTokens: "262144"}, 0)
-	fallbackWindow := ResolveWindow(nil, 0)
+	localWindow := PredictWindow(map[string]string{config.EnvMaxContextTokens: "262144"})
+	fallbackWindow := PredictWindow(nil)
 	if fallbackWindow.Source != config.WindowSourceFallback {
 		t.Fatalf("fallback window source = %q, want %q", fallbackWindow.Source, config.WindowSourceFallback)
 	}
@@ -360,7 +419,7 @@ func TestPredicateClampsItsOperands(t *testing.T) {
 // refuse everything: the exact inversion of AC-4, reached by an operator typing one extra zero into
 // CLAUDE_CODE_MAX_CONTEXT_TOKENS.
 //
-// The window here is constructed directly rather than through ResolveWindow because the point is
+// The window here is constructed directly rather than through PredictWindow because the point is
 // the multiplication, not the resolution — and a value this size is a typo, not a declaration any
 // backend would honour.
 func TestPredicateSurvivesAnEnormousWindow(t *testing.T) {

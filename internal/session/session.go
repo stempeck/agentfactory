@@ -138,14 +138,20 @@ var managerOwnedVars = []string{
 // otherwise a relaunch that selected nothing would go on attesting the previous session's reduction.
 var effortAttestationVars = []string{config.EnvEffortObjective, config.EnvEffortStepLabel, config.EnvEffortFormula}
 
+// launchKindVars carry the respawn mark. A reused session keeps the environment of the launch before
+// it, so every launch that does not carry the mark clears it — otherwise a fresh launch into a pane a
+// respawn last used would read as a respawn and its startup would go unmeasured.
+var launchKindVars = []string{config.EnvLaunchKind}
+
 // universeCarveOutVars are the keys the profile-key-universe hygiene (issue #602) must never
 // clear, even on a launch that does not carry them. Four groups, three reasons:
 //
-//   - redirectFamilyVars, telemetryFamilyVars and effortAttestationVars already own their keys
-//     and clear them with the proven KEY='' idiom. Two idioms for two classes is deliberate;
-//     letting the universe true-unset these would silently change the behavior #508, #329 and
-//     #709 each pinned. (The attestation names are also denylisted from every profile, so they
-//     never reach the universe; the carve-out is insurance, not the guard.)
+//   - redirectFamilyVars, telemetryFamilyVars, effortAttestationVars and launchKindVars already
+//     own their keys and clear them with the proven KEY='' idiom. Two idioms for two classes is
+//     deliberate; letting the universe true-unset these would silently change the behavior #508,
+//     #329, #709 and #754 each pinned. (The attestation and launch-kind names are also denylisted
+//     from every profile, so they never reach the universe; the carve-out is insurance, not the
+//     guard.)
 //   - envAPIKey is a legal profile key so it lands in the union, but security.md I2 decides it
 //     is never auto-cleared: a default-profile agent may authenticate via an ambient key.
 //   - managerOwnedVars would otherwise be exported and immediately unset in one command.
@@ -154,7 +160,7 @@ var effortAttestationVars = []string{config.EnvEffortObjective, config.EnvEffort
 // protect — rather than in the cmd layer that computes the raw union (ADR-004).
 var universeCarveOutVars = func() map[string]bool {
 	out := map[string]bool{envAPIKey: true}
-	for _, family := range [][]string{redirectFamilyVars, telemetryFamilyVars, effortAttestationVars, managerOwnedVars} {
+	for _, family := range [][]string{redirectFamilyVars, telemetryFamilyVars, effortAttestationVars, launchKindVars, managerOwnedVars} {
 		for _, key := range family {
 			out[key] = true
 		}
@@ -335,6 +341,9 @@ type LaunchContributions struct {
 	IntegrationEnv         []config.EnvVar
 	IntegrationKeyUniverse []string
 	HookFailModes          string
+	// LaunchKind is a field of its own rather than a ModelEnv entry because a non-empty ModelEnv
+	// takes --model from its own ANTHROPIC_MODEL only and turns on the redirect-family clears.
+	LaunchKind string
 }
 
 // SetLaunchContributions hands the Manager its composed contributions. Without it Start and
@@ -676,6 +685,15 @@ func (m *Manager) buildStartupCommand() string {
 		exports += fmt.Sprintf(" %s=''", key)
 	}
 	for _, key := range effortAttestationVars {
+		if !effective[key] {
+			exports += fmt.Sprintf(" %s=''", key)
+		}
+	}
+	if m.c.LaunchKind != "" {
+		exports += fmt.Sprintf(" %s=%s", config.EnvLaunchKind, shellQuote(m.c.LaunchKind))
+		effective[config.EnvLaunchKind] = true
+	}
+	for _, key := range launchKindVars {
 		if !effective[key] {
 			exports += fmt.Sprintf(" %s=''", key)
 		}

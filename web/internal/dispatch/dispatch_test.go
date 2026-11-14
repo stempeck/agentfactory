@@ -2,7 +2,12 @@ package dispatch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -185,4 +190,51 @@ func TestReader_Status_ParsesSchedules(t *testing.T) {
 			t.Fatalf("entries = %d, want 2 — the additive field must not disturb the existing decode", len(v.Entries))
 		}
 	})
+}
+
+// af-core persists a workflow item's stall reason (#751 K13) and emits it as `stall`; the console
+// reader keeps it, and an entry that never stalled carries no key.
+func TestReader_Status_CarriesStall(t *testing.T) {
+	const reason = `workflow "advisory-heal" terminal pr phase "pr-iterate" resolved 0 linked PRs (want exactly 1)`
+	payload := `{"dispatcher_running":true,"entries":[` +
+		`{"issue":"o/r#7","agent":"iterate","agent_running":false,"item_url":"https://x/7","source":"issue","dispatched_at":"2026-06-20T00:00:00Z","workflow":"advisory-heal","phase":"pr-iterate","stall":` + strconv.Quote(reason) + `},` +
+		`{"issue":"o/r#8","agent":"iterate","agent_running":false,"item_url":"https://x/8","source":"issue","dispatched_at":"2026-06-20T00:00:00Z","workflow":"advisory-heal","phase":"pr-iterate"}` +
+		`]}`
+	v, err := New(fakeStatus{out: payload}).Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(v.Entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(v.Entries))
+	}
+	stalled, err := json.Marshal(v.Entries[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(stalled, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["stall"] != reason {
+		t.Errorf("the stalled entry's stall = %v, want %q: the reader dropped the reason\n%s", got["stall"], reason, stalled)
+	}
+	plain, err := json.Marshal(v.Entries[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plain), `"stall"`) {
+		t.Errorf("an entry that never stalled carries a stall key: %s", plain)
+	}
+
+	src, err := os.ReadFile("dispatch.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	note := regexp.MustCompile(`(?s)KNOWN UNMAPPED:.*?\n//\n|KNOWN UNMAPPED:.*?\ntype `).FindString(string(src))
+	if note == "" {
+		t.Fatal("dispatch.go has no KNOWN UNMAPPED note")
+	}
+	if strings.Contains(note, "`stall`") || !strings.Contains(note, "`recovery`") {
+		t.Errorf("the KNOWN UNMAPPED note must name `recovery` alone once Entry carries `stall`:\n%s", note)
+	}
 }

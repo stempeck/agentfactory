@@ -76,9 +76,8 @@ func (r RecoveryConfig) IsEnabled() bool {
 // that drift apart, which is the whole reason handoff_pct is validated against recovery's values
 // instead of on its own.
 //
-// The bound is data, not a constant compiled into evaluation logic: 200000 appears here as a
-// default and nowhere else in the decision path, the same posture as models.go's
-// foreignModelWindow.
+// The bound's default IS models.go's foreignModelWindow, the window a prediction falls back to,
+// so the two cannot part (K6).
 //
 // Validation is deliberately ASYMMETRIC, and this is the load-bearing part (cross-review HIGH-1).
 // A value the operator WROTE is rejected loudly by validateStepContextRelations, exactly like
@@ -101,11 +100,11 @@ type StepContextConfig struct {
 	HandoffPct  int `json:"handoff_pct"`
 }
 
-// The shipped step_context defaults (#622 C1). defaultStepBoundTokens mirrors the 200000 window
-// models.go's foreignModelWindow already names; defaultStepHandoffPct sits between the recovery
+// The shipped step_context defaults (#622 C1). defaultStepBoundTokens IS the fallback window, so
+// the two cannot part (K6); defaultStepHandoffPct sits between the recovery
 // advisory (70) and threshold (85) so the cooperative boundary always fires first.
 const (
-	defaultStepBoundTokens = 200000
+	defaultStepBoundTokens = foreignModelWindow
 	defaultStepHandoffPct  = 75
 )
 
@@ -498,6 +497,10 @@ func SaveStartupConfig(path string, cfg *StartupConfig) error {
 	data = append(data, '\n')
 	return fsutil.WriteFileAtomic(path, data, 0644)
 }
+
+// ValidateStartupConfig exposes the loader's validation to the starter-config seed,
+// which must refuse a startup.json before writing it rather than at its first load.
+func ValidateStartupConfig(cfg *StartupConfig) error { return validateStartupConfig(cfg) }
 
 // validateStartupConfig fills gate and recovery defaults in place, rejects bad gate
 // enums, then rejects recovery relation violations.

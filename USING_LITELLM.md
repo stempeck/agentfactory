@@ -417,7 +417,7 @@ factory whose registry still has the seeded direct profiles — so it names
 `claude-fable-5` — and a gateway that has not been aliased yet:
 
 ```
-af config models check — transport-level only (necessary, not sufficient for fitness).
+af config models check — transport, per-class coverage and harness window (necessary, not sufficient for fitness).
 profile "codex": reachable; model "gpt-4o" present at http://localhost:4000
 profile "codex": class small/background → "gpt-4o-mini" (derived from ANTHROPIC_DEFAULT_HAIKU_MODEL): served
 profile "codex": class opus → "gpt-4o" (derived from ANTHROPIC_MODEL): served
@@ -435,8 +435,9 @@ class or `claude-…` alias is unserved — alias it on the gateway and re-check
 
 `--live` adds one real streamed `/v1/messages` turn, shaped like a session's
 (block-array system prompt, `max_tokens=16`), for each served id, and a failing
-turn prints the gateway's own error text; without it the check is transport and
-coverage only, which is necessary and not sufficient for fitness.
+turn prints the gateway's own error text; without `--live` the check is transport,
+coverage and, for a not-foreign profile, the window the installed harness applies,
+which is necessary and not sufficient for fitness.
 
 After editing `litellm.yaml`, rerun to restart and revalidate — the edit changes
 the recorded config identity, so the gateway reconciles (restarts) on its own,
@@ -526,16 +527,17 @@ URL. Re-run the transport probe anytime with `af config models check codex`.
   the agent keeps shedding context it still needed. Declare one larger,
   or leave a foreign id above 200k unpaired so it caps, and the backend
   overflows before the host ever compacts — blind, where nothing fires
-  at all. For agents holding a live session, `af statusline status`
-  reports both: each one whose declared window disagrees with the window
-  the host reports back, and each profile behind them whose declared
-  window will silently cap. Setting the keys
-  is not the same as verifying them — af emits the exports, and only a
-  per-profile measurement shows whether the host honored them.
+  at all. Setting the keys is not the same as verifying them — af emits
+  the exports, and the measurement is now automatic: each session's
+  reported window is compared with its profile's declaration and any
+  difference is recorded and mailed as `WINDOW_MISMATCH`, the probe
+  measures an identity no session has reported yet, and
+  `af statusline status` still names each profile whose declared window
+  will silently cap.
 - **Deleting a compaction key from *every* profile does not clear it from a live
   session.** The launch line only `unset`s keys some profile still declares, so a running
   agent keeps the old value across handoff/compact/watchdog respawns until you fully
-  recycle it — run `af down && af up` for that agent.
+  recycle it — run `tmux kill-session -t '=af-<agent>'`, then `af up <agent>`.
 - **An out-of-range window fails the whole registry on load, not just at `set`.** After an
   upgrade, a `models.json` written before this validation existed that carries a window
   outside `[100000, 1000000]` fails to load — a selecting `af sling --model P` fails fast,
@@ -544,7 +546,8 @@ URL. Re-run the transport probe anytime with `af config models check codex`.
 - **Moving the gateway off loopback changes the rules:** a non-loopback endpoint
   requires a fitness attestation before a selecting launch (`af config models
   attest codex`, or `--skip-fitness` to override loudly), and literal tokens are
-  rejected in favor of `file:` references.
+  rejected in favor of `file:` references. A launch on a recorded context-window
+  shortfall is refused the same way, and `--accept-window` overrides it loudly.
 - The watchdog recognizes gateway failures (connection refused, 502/503/504,
   LiteLLM error prefixes) and names the endpoint in its escalation mail.
 - Prompt caching, streaming, and tool use are confirmed working through LiteLLM's
@@ -552,3 +555,63 @@ URL. Re-run the transport probe anytime with `af config models check codex`.
   thinking / `--effort` is the known-degraded area.
 - Anthropic-profile agents are untouched by any of this — the profile mechanism is
   per-agent.
+
+## User-scope `env` and the profile
+
+Claude Code also reads an `env` block from your user-scope settings (`settings.json` under
+`CLAUDE_CONFIG_DIR`, default `~/.claude`). A key set there differently from a launched profile,
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` above all, can override what the profile exported for every agent.
+`af up` warns once per launched profile about each such key, and prints both values only for
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` and `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, because that block can hold
+credentials. Remove the key from user scope, or make it agree with the profile. Whether the
+user-scope value outranks the launch env for a foreign-profile session has not been measured yet.
+
+## Moving the Claude Code pin
+
+`quickstart.sh` installs the one Claude Code build that `CLAUDE_CODE_VERSION` pins, and every
+bootstrap run puts that build back when the installed version differs. Moving the pin is a
+reviewed edit:
+
+1. **Select.** By default the pin is the release that
+   `https://downloads.claude.ai/claude-code-releases/stable` names on the selection date,
+   matching npm's `stable` dist-tag, provided neither platform binary embeds the
+   `emSign ECC Root CA - G3` label or `EMSIGN_G3_BODY_PROBE`. The operator may set that
+   default aside for one pin move, and that move's `pin-data.md` records the decision. The
+   pin never drops below the floor that `TestClaudeCodeVersionFloor` holds.
+2. **Derive.** The two sha256 values are the release manifest's `platforms[…].checksum`
+   (`linux-arm64`, `linux-x64`). The three sha512 values are the npm `dist.integrity` of
+   `@anthropic-ai/claude-code` and its two linux platform packages, with `sha512-` stripped,
+   base64-decoded to lowercase hex. Run the same derivation for the current pin first and
+   continue only if it reproduces the current values byte for byte. Record every datum in a
+   `pin-data.md`.
+3. **Edit in place.** Change the six lines of `quickstart.sh` and the six rows of
+   `internal/cmd/quickstart_pins_test.go`, adding or removing no line:
+   `TestADR027ConvergenceContract` holds ADR-027's line citations into `quickstart.sh`.
+   In a checkout that has `internal/cmd/harness_window_rows_test.go`, a pin move also
+   regenerates `internal/cmd/testdata/harness_window_rows.json` with the new release first on
+   PATH (`go test ./internal/cmd -run '^TestHarnessWindowRows_Regenerate$' -update-window-rows`),
+   because `TestTrackedProfilesHaveObservationRows` keys the rows to the pin and is red on a
+   moved pin until they are regenerated. The published repository does not ship that test
+   file, so there the test and its `-update-window-rows` flag do not exist.
+4. **Measure the window** for every `claude-` id a profile uses: one headless
+   `claude -p --output-format json --model <id>` turn of the new binary against a loopback
+   stub, with a scratch `HOME` and no credential, reading `modelUsage[<id>].contextWindow`.
+   It must equal the profile's `CLAUDE_CODE_MAX_CONTEXT_TOKENS` where one is declared, and
+   stderr must show no `[claude-code:unrecognized_model]`.
+5. **After install (operator).**
+   - A running session keeps the binary it started with, and `quickstart.sh` does not say
+     so. Restart the agents started on the old release with
+     `tmux kill-session -t '=af-<agent>'`, then `af up <agent>`, which re-attaches the
+     agent's worktree; `af down <agent>` would remove a clean worktree and delete its branch.
+   - Check that a session on the new release reports `context_tokens_total` equal to its profile's
+     `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, all its transcript records name the new release, and
+     its peak context passes 200,000 with zero `compact_boundary` entries. Read one
+     fanned-out session's `subagents/*.jsonl` the same way.
+   - The statusline payload still carries `context_window.context_window_size`.
+   - ADR-023(e): re-run that ADR's `hooksweep.jq` recipe over the new transcript corpus
+     before trusting its hook-output cap.
+   - Run `af telemetry startup`, where the installed `af` has that verb
+     (`af telemetry --help` lists it).
+6. **An id that no installable release knows.** Lower that profile's
+   `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the window the probe measures. Never use
+   `DISABLE_COMPACT` or any other lever that forces a window.

@@ -77,6 +77,12 @@ func resetAgentState(ctx context.Context, w io.Writer, factoryRoot, agentName, r
 	if rmErr := os.Remove(recoveryStatePath(factoryRoot, agentName)); rmErr != nil && !os.IsNotExist(rmErr) {
 		fmt.Fprintf(os.Stderr, "%s: warning: clearing recovery breaker state: %v\n", agentName, rmErr)
 	}
+	if rmErr := os.Remove(startupTurnPath(factoryRoot, agentName)); rmErr != nil && !os.IsNotExist(rmErr) {
+		fmt.Fprintf(os.Stderr, "%s: warning: clearing the startup measurement: %v\n", agentName, rmErr)
+	}
+	if rmErr := removeStartupSignalLatches(factoryRoot, agentName); rmErr != nil {
+		fmt.Fprintf(os.Stderr, "%s: warning: clearing the startup mail latches: %v\n", agentName, rmErr)
+	}
 
 	return nil
 }

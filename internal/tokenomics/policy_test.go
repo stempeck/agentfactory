@@ -37,7 +37,7 @@ func TestPolicyIgnoresFormulaContent(t *testing.T) {
 			Interview: "default", Effort: "default", Escalate: "default",
 			AdmissionMarginPct: 10, LearnedMinRuns: 2,
 		}
-		win := ResolveWindow(map[string]string{config.EnvMaxContextTokens: "262144"}, 0)
+		win := PredictWindow(map[string]string{config.EnvMaxContextTokens: "262144"})
 		occ := Occupancy{Tokens: 190_000, Known: true}
 		// MedianMarginalCtxTokens matches the peak so the additive AppetiteFor returns a known figure and
 		// the decision stays a real no-fit across every name — without it the marginal fix would degrade

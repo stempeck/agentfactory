@@ -582,7 +582,7 @@ func TestTokenomicsStatusJSONDarkChain(t *testing.T) {
 
 // TestTokenomicsStatusJSONNamesWindowAndInputs pins the arithmetic half of the self-test: the
 // denominator, WHERE it came from, and the two operands that decide admission. A bare 200000 is
-// indistinguishable from a measurement, which is exactly why config.ResolveContextWindow returns a
+// indistinguishable from a measurement, which is exactly why config.PredictContextWindow returns a
 // source alongside it.
 func TestTokenomicsStatusJSONNamesWindowAndInputs(t *testing.T) {
 	root := setupTokenomicsFactory(t)
@@ -592,7 +592,7 @@ func TestTokenomicsStatusJSONNamesWindowAndInputs(t *testing.T) {
 
 	t.Run("an undeclared window is surfaced as a fallback", func(t *testing.T) {
 		doc, _ := statusJSON(t)
-		wantTokens, wantSource := config.ResolveContextWindow(nil, 0)
+		wantTokens, wantSource := config.PredictContextWindow(nil)
 		if doc.Window.Tokens != wantTokens {
 			t.Errorf("window.tokens = %d, want %d", doc.Window.Tokens, wantTokens)
 		}
@@ -751,7 +751,7 @@ func TestTokenomicsStatusHumanPathUnchanged(t *testing.T) {
 	})
 
 	t.Run("the human self-test names the window and its source", func(t *testing.T) {
-		wantTokens, wantSource := config.ResolveContextWindow(nil, 0)
+		wantTokens, wantSource := config.PredictContextWindow(nil)
 		if !strings.Contains(out, itoaWindow(wantTokens)) {
 			t.Errorf("status does not print the resolved window %d:\n%s", wantTokens, out)
 		}
@@ -922,7 +922,7 @@ func TestTokenomicsStatusUnreadableConfig(t *testing.T) {
 		}
 		// The window comes from models.json, not from the block that failed, so withholding it
 		// would be its own dishonesty.
-		wantTokens, _ := config.ResolveContextWindow(nil, 0)
+		wantTokens, _ := config.PredictContextWindow(nil)
 		if !strings.Contains(human, itoaWindow(wantTokens)) {
 			t.Errorf("status withheld the resolved window %d, which does not depend on startup.json:\n%s", wantTokens, human)
 		}

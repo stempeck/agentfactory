@@ -23,8 +23,8 @@ so both are consistent with a ~10,000 cap.
 **The corpus does not determine which unit the cap counts**, and it cannot: UTF-8 byte length is
 always ≥ code-point length, so no observation separates the two hypotheses. Treat the unit as
 unknown. What follows from that is a choice, not a measurement — **af's budgets are stated and
-enforced in bytes** (`len(Emit(n))` against `TotalBytes`, `internal/memory/slice.go:178-186`;
-`len(renderMailEntry(…))` against `mailInjectTotalBytes`, `internal/cmd/mail.go:611-615`) because
+enforced in bytes** (`len(memory.InjectedEntry(n, now))` against `TotalBytes`, in `memory.Slice`;
+`len(renderMailEntry(…))` against `mailInjectTotalBytes`, `internal/cmd/mail.go:612-616`) because
 bytes are the conservative unit under either hypothesis: a block that fits a byte budget fits the
 same number of code points, but not the reverse. Where this ADR states a size in code points — the
 K12 figures below — it does so because that is the *smaller* of the two numbers and therefore the one
@@ -56,7 +56,7 @@ the commands after stripping each entry's `export PATH=… && ` preamble — not
 is **no shared budget**:
 the harness's unit of truncation is the output string, so one entry per writer makes each writer's
 ceiling its own. Mail's block is capped at **4,608 B** (`mailInjectTotalBytes = 4096` +
-`mailInjectFrameBytes = 512`, `internal/cmd/mail.go:522,530`); memory's at **4,736 B**
+`mailInjectFrameBytes = 512`, `internal/cmd/mail.go:523,531`); memory's at **4,736 B**
 (`memory.DefaultTotalBytes = 4096`, `internal/memory/slice.go:24`, + `memoryInjectFrameBytes = 640`,
 `internal/cmd/memory.go:54`). Neither can now be evicted by the other or by the step body.
 
@@ -78,7 +78,7 @@ fragment channel, and a fragment of an identity is worse than none. **No on-dema
 exists** and none was added: the recovery path is the two unconditional carriers, which is why it
 matters that they are the unconditional ones. The deployed corpus is
 held byte-equal to the embedded templates by
-`TestDeployedAgentIdentityMatchesEmbeddedTemplate` (`internal/cmd/identity_parity_test.go:49`) — the
+`TestDeployedAgentIdentityMatchesEmbeddedTemplate` (`internal/cmd/identity_parity_test.go:67`) — the
 gate that makes "the harness loads `CLAUDE.md`" a guarantee rather than a hope.
 
 **(c) Mail delivered-state is session-scoped and never enters the store.** *(design decision D-4 —
@@ -162,7 +162,7 @@ description) rather than transcribing any stated number.
 does — the property the single-chain design could not offer at any budget. An empty vault or an empty
 mailbox costs nothing. Identity survives compaction through E4 and the re-rendered `CLAUDE.md`
 without spending a byte of the capped channel, and the file it survives through is now gated
-(`identity_parity_test.go:49`) rather than assumed.
+(`identity_parity_test.go:67`) rather than assumed.
 
 **What it costs.**
 
@@ -205,9 +205,9 @@ render and the re-render at every provisioning site both still stand.
   interactive twin, held byte-equal on this block)
 - `internal/cmd/prime.go:287` — the `!primeHookMode && !slimIdentity` gate: never for the hook, and
   for the tool-result prime only while `slimIdentity` is false (`prime.go:269-271`)
-- `internal/cmd/mail.go:511-530` — mail's 4,608 B ceiling and why it is measured on rendered text
+- `internal/cmd/mail.go:512-531` — mail's 4,608 B ceiling and why it is measured on rendered text
 - `internal/memory/slice.go:24`, `internal/cmd/memory.go:50-54` — memory's 4,736 B ceiling
-- `internal/cmd/identity_parity_test.go:49` — the deployed-`CLAUDE.md` parity gate that makes (b)'s
+- `internal/cmd/identity_parity_test.go:67` — the deployed-`CLAUDE.md` parity gate that makes (b)'s
   harness carrier a guarantee
 - `internal/cmd/using_hook_table_test.go` — the operator manual's hook table held against the
   installed JSON

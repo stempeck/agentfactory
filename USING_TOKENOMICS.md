@@ -17,7 +17,9 @@ thrashing shows up as re-prefill, mid-step compaction and lost work rather than 
 sees. That declared backend pool is the `AF_BACKEND_POOL_TOKENS` key on a profile in
 `.agentfactory/models.json`; the sub-agent-dispatch gate reads only that key for a backend's pool,
 never the per-request context window. Where no capacity fact is declared — which is every cloud
-profile — the capacity arm is structurally inert.
+profile — the capacity arm is structurally inert. A launch whose profile declares a larger window
+than its Claude Code version is recorded to apply is refused before it starts, and `--accept-window`
+on `af up` or `af sling` launches it anyway with a warning.
 
 `efficiency` is baseline-driven, and it applies on *every* profile, roomy ones included. It asks a
 different question: not whether the next step will fit, but what that step has historically
@@ -32,7 +34,7 @@ auditable intervention. This section is the contract for the third and fourth st
 `af tokenomics --help` and `af tokenomics status` both point here.
 
 ```bash
-af tokenomics status              # Policy table, resolved window, arithmetic inputs, why it is inert
+af tokenomics status              # Policy table, session window (observed) or predicted window (no session), arithmetic inputs, why it is inert
 af tokenomics status --json       # The same, machine-readable (always exits 0 — branch on .state)
 af tokenomics on                  # Never gated: oversight fails toward being on
 af tokenomics off                 # Operator-only, from a host shell
@@ -254,11 +256,12 @@ conclusion than the data supports.
   per-step token columns because the backend's logs stream does not carry them. That is a known gap
   in the backend, not a fault in the factory or the console — and it means a factory whose telemetry
   export is healthy still learns nothing from the backend.
-- **Fail-open means ADMIT.** When there is no occupancy reading, no resolved window, or no learned
-  data for a step, the admission predicate answers `observe` rather than `no-fit`, and the step
-  proceeds. "We have no basis to judge" and "we judged, and it fits" are kept as different answers
-  in the record, but they have the same effect on the run: nothing is held. An operator who expects
-  a step to be blocked when the harness is blind will be surprised in the safe direction.
+- **Fail-open means ADMIT.** When there is no occupancy reading, no window (the session window
+  when observed, the predicted window when there is no session), or no learned data for a step, the
+  admission predicate answers `observe` rather than `no-fit`, and the step proceeds. "We have no
+  basis to judge" and "we judged, and it fits" are kept as different answers in the record, but
+  they have the same effect on the run: nothing is held. An operator who expects a step to be
+  blocked when the harness is blind will be surprised in the safe direction.
 - **The fidelity grader also fails open, and does so more often on offline profiles.**
   `hooks/fidelity-gate.sh` invokes the grader through an `env -i` allowlist that deliberately strips
   cloud credentials; when the grader returns an empty verdict the gate notifies once and never
@@ -271,7 +274,10 @@ conclusion than the data supports.
 - **`bound_tokens` is a telemetry annotation, not the denominator.** The `step_context.bound_tokens`
   value in `startup.json` is recorded on each step as `ctx_bound_tokens` so a reader knows what the
   step was judged against, but the window every occupancy fraction is divided by resolves **per
-  agent** — declaration, then the host's report, then the fallback — and travels with a source field
+  agent**. For a running session it is the smaller of the declaration and the host's report; a
+  foreign-class profile (a model id that does not start with `claude-`) keeps its declaration, and
+  the host's report is used when nothing is declared. With no healthy reading the window is the
+  prediction: the declaration, else the 200,000 fallback. The window travels with a source field
   saying which of the three it was. On a mixed-profile factory a single `bound_tokens` is not the
   window for every agent, and a report that treated it as one would be comparing agents against a
   number none of them ran under.

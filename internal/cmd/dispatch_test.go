@@ -518,6 +518,32 @@ func TestFormatDispatchStatus(t *testing.T) {
 	}
 }
 
+// K13 persists a stall reason; the human table shows it, so `af dispatch status` without --json says
+// why an item is stuck.
+func TestFormatDispatchStatus_StallColumn(t *testing.T) {
+	now := time.Now().UTC()
+	reason := handoffReason(0)
+	out := formatDispatchStatus(true, map[string]dispatchEntry{
+		"owner/repo#7": {Agent: "engineer", Workflow: "feature-workflow", Phase: "enhancement", Stall: reason, DispatchedAt: now.Add(-time.Hour), Source: "issue"},
+		"owner/repo#8": {Agent: "writer", Workflow: "feature-workflow", Phase: "enhancement", DispatchedAt: now.Add(-time.Hour), Source: "issue"},
+	}, map[string]bool{}, nil, nil, now)
+	rows := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); len(f) > 0 {
+			rows[f[0]] = strings.TrimRight(line, " ")
+		}
+	}
+	if h := rows["ISSUE"]; !strings.HasSuffix(h, "STALL") {
+		t.Errorf("header %q does not end with a STALL column:\n%s", h, out)
+	}
+	if r := rows["owner/repo#7"]; !strings.HasSuffix(r, reason) {
+		t.Errorf("the stalled row %q does not end with its reason %q:\n%s", r, reason, out)
+	}
+	if r := rows["owner/repo#8"]; !strings.HasSuffix(r, " -") || strings.Contains(r, reason) {
+		t.Errorf("the unstalled row %q does not end with - :\n%s", r, out)
+	}
+}
+
 func TestDispatchSubcommands_Registered(t *testing.T) {
 	var found []string
 	for _, sub := range dispatchCmd.Commands() {

@@ -287,7 +287,7 @@ func TestDeclaredEffortLevelReachesSessionWhenTokenomicsOff_Sling(t *testing.T) 
 			fake, _ := setupHermeticSessions(t)
 
 			cmd, out := launchCmd(t)
-			if err := launchAgentSession(cmd, root, "manager", wtPath, wtID, "", false); err != nil {
+			if err := launchAgentSession(cmd, root, "manager", wtPath, wtID, "", launchGates{}); err != nil {
 				t.Fatalf("af sling launch: %v\n%s", err, out)
 			}
 

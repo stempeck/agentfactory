@@ -45,7 +45,7 @@ NOTHING_TO_DO; it is never skipped piecemeal.
 | Blind review < 8 three times | Escalate with full review history |
 | Comment ambiguous on user-visible behavior | Reply asking the reviewer, mark DEFERRED — never guess |
 | spec path given but not found on the PR head | Mail Supervisor and stop — never proceed as "no contract" |
-| Zero unresolved comments on the PR | Mail dispatcher NOTHING_TO_DO, close remaining steps with that reason, complete formula |
+| Zero unresolved comments on the PR | load-context action 8: mail supervisor NOTICE and note the assignment bead (8a), then close every remaining step with the primed loop (8b) |
 | Push to PR branch rejected (non-fast-forward) | Fetch, rebase onto the new PR head, re-run tests, push again |
 | Push to PR branch denied (fork without maintainer-edit) | Mail Supervisor ESCALATION — do not force-push or open a new PR |
 | Thread resolve mutation fails | Retry once; if still failing, leave the thread unresolved and note it in completion mail |
@@ -156,14 +156,16 @@ Then resolve `$PR_URI` (now a PR reference). It may arrive in one of three forms
 **4. Verify access and snapshot the PR state:**
 ```bash
 gh auth status
-gh pr view <number> --repo <owner/repo> --json number,title,state,isDraft,headRefName,headRefOid,baseRefName,url,headRepositoryOwner
+gh pr view <number> --repo <owner/repo> --json number,title,state,isDraft,headRefName,headRefOid,baseRefName,url,headRepositoryOwner,labels,reviewRequests
+gh pr view <number> --repo <owner/repo> --json body --jq .body | sha256sum
 mkdir -p todos/fable-increment
 ```
 
 Write `todos/fable-increment/pr_context.md` with: owner/repo, PR number, URL,
 title, state, isDraft, headRefName, headRefOid, baseRefName, head repository
-owner (fork detection), and the raw {{pr_uri}} input. This snapshot is the
-reference for "leave the PR exactly as found" at delivery.
+owner (fork detection), labels, reviewRequests, the body's sha256, and the raw {{pr_uri}} input. This snapshot is the
+reference for "leave the PR exactly as found" at delivery. The body is captured as a digest because
+DO-NOT-CHANGE protects it and delivery can only prove "unchanged" against a recorded value.
 
 **5. Fetch the UNRESOLVED review threads (GraphQL — REST cannot see thread resolution):**
 ```bash
@@ -219,7 +221,8 @@ When in doubt, EXCLUDE and note it for the human — NEVER invent scope.
 problem-statement item. Two KINDs share this file:
 - **KIND=thread** (from step 5): the thread node `id` (needed for the resolve mutation at
   delivery), `path:line`, top comment `databaseId` (needed for the reply at delivery), and
-  the FULL text of every comment in the thread, verbatim, with author.
+  the FULL text of every comment in the thread, verbatim, with author and `databaseId`
+  (delivery compares the live thread against these ids before resolving it).
 - **KIND=body-finding** (from step 5b): id `BODY-1`, `BODY-2`, … (there is NO thread node
   id), the owning review `databaseId`, the `path:line` the finding refers to, and the
   finding text verbatim with author. Mark each: `KIND: body-finding (no resolvable thread)`.
@@ -234,12 +237,46 @@ checklist cannot be amended from inside a review thread.
 
 **8. Decision:**
 - One or more unresolved threads OR diff-related body-findings → proceed.
-- ZERO unresolved threads AND ZERO diff-related body-findings → nothing to do:
+- ZERO unresolved threads AND ZERO diff-related body-findings → nothing to do. Run 8a, then 8b.
+
+  **8a. Record the outcome — this is the run's ONLY completion record.** `af done --skip` stores
+  no reason, and 8b closes prepare-for-review without running it (its notes come from a digest
+  template that asserts a blind-review score and a delivered sha, both false here). Fill the
+  angle-bracket fields from pr_context.md and unresolved_threads.md:
 ```bash
-af mail send supervisor -s "NOTICE: no unresolved comments on PR" -m "PR: {{pr_uri}}
-All review threads are already resolved. No changes made."
+NOTES="PR: {{pr_uri}}
+NOTHING_TO_DO: 0 unresolved review threads, 0 diff-related review-body findings.
+Excluded review-body items (left for the human): <one clause per excluded item, or none>.
+No branch, commits, push or thread replies. PR state as found: <Draft | Ready for review>, head <headRefOid>."
+EPIC=$(cat .runtime/hooked_formula)
+AT=$(af bead show "$EPIC" --json | jq -r .created_at)
+ASSIGN=$(af bead list --all --json | jq -r --arg at "$AT" 'def t: .[0:19] + "Z" | fromdateiso8601;
+  ($at | t) as $e | [.[] | select(.status == "open" and ((.labels // []) | index("assignment")))
+  | select(($e - (.created_at | t)) | fabs <= 60)] | if length == 1 then .[0].id else empty end')
+echo "assignment bead: ${ASSIGN:-none (direct dispatch)}"
+if [ -n "$ASSIGN" ] && af bead show "$ASSIGN" | grep -q 'NOTHING_TO_DO'; then
+  echo "outcome already recorded on $ASSIGN"
+else
+  af mail send supervisor -s "NOTICE: no unresolved comments on PR" -m "$NOTES"
+  [ -n "$ASSIGN" ] && af bead update "$ASSIGN" --notes "$NOTES"
+fi
 ```
-  Then close this and EACH remaining step with reason "No unresolved comments".
+
+  **8b. Close this and EACH remaining step with reason "No unresolved comments", gates included,
+  without reading their text.** Every later step acts on a fix that does not exist (no branch to
+  push, no thread to resolve, no PR to create). A close must be primed, so the loop primes once
+  per step and keeps that output out of the window:
+```bash
+for i in $(seq 1 60); do
+  P=$(af prime 2>&1 | grep -m1 -F '**Progress:')
+  [ -n "$P" ] || { echo "formula complete"; break; }
+  echo "$P"
+  R=$(af done --skip "No unresolved comments" 2>&1); echo "$R" | head -1
+  echo "$R" | grep -q 'Step closed' || { echo "$R" | tail -8; break; }
+done
+```
+  The last close completes the formula and mails WORK_DONE. If the loop stops before printing
+  `formula complete`, resolve what it printed, then run it again (it resumes at the current step).
   An empty problem statement is a recorded result — the checklist terminates honestly;
   it is never skipped piecemeal. Do NOT invent work.
 
@@ -251,7 +288,9 @@ Question: <what you need clarified>"
 
 **Exit criteria:** pr_context.md (state snapshot) and unresolved_threads.md exist as a
 full inventory — KIND=thread entries (thread/comment ids) AND a KIND=body-finding entry
-for every diff-related review-body finding; trust boundary understood."""
+for every diff-related review-body finding; trust boundary understood. On an empty problem
+statement, 8a's NOTICE mail (and assignment-bead notes when a bead exists) went out before 8b
+closed any step."""
 
 [[steps]]
 id = "branch-setup"
@@ -274,19 +313,23 @@ git branch --show-current
 **2. Ensure clean working state:**
 ```bash
 git status                  # Should show "working tree clean"
-git stash list              # Should be empty
 ```
+`git stash list` is NOT expected to be empty. Every worktree and session shares the stack,
+so its entries belong to others; never drop or pop one you did not create.
 
 If dirty state from previous work:
 ```bash
 # If changes are relevant to this PR:
 git add -A && git commit -m "WIP: <description>"
 
-# If changes are unrelated cruft (shared stack — always tag, always -u):
-git stash push -u -m "unrelated changes before {{pr_uri}}"
-# Or discard if truly garbage:
-git checkout -- .
+# If changes are unrelated scaffold drift (your own CLAUDE.md `Working directory` line,
+# which is rewritten per worktree, or a deployed settings.json), discard it per path:
+git checkout -- <path>
+# Untracked garbage: rm <path>
+# Unrelated work worth keeping: commit it on the CURRENT branch before action 3 switches away.
 ```
+Never park unrelated changes with `git stash`. Nothing in this formula drops such an
+entry, so each one stays in the shared stack for good.
 
 **3. Check out the PR head and create the work branch:**
 ```bash
@@ -393,7 +436,8 @@ fi
 **If NO design contract exists:**
 - This is acceptable — not all work has a prior design
 - contract_points.md records the null result (written above)
-- Close this step with reason "No design contract found"
+- Close this step with `af done`; the null result in contract_points.md is the recorded
+  reason ("No design contract found"). `af done` takes no `--reason` flag.
 - Proceed without contract verification
 
 **Exit criteria:** `todos/fable-increment/contract_points.md` exists — the contract path
@@ -439,8 +483,16 @@ Pre-existing failures on the PR head (recorded in baseline_tests.log).
 Proceeding with the unresolved-comment work."
 ```
 
-**Context consideration:**
-If baseline triage consumed significant context:
+**Context consideration — measured, not judged.** This prints how full the latest closed step
+left the window, as a percentage of its token bound:
+```bash
+I=$(cat .runtime/hooked_formula 2>/dev/null)
+[ -n "$I" ] && af telemetry report --instance "$I" --json | jq -r '[.rows[]? | select(.peak_ctx_tokens != null and .ctx_bound_tokens != null)] | sort_by(.started) | last | if . == null then "UNMEASURED" else (.peak_ctx_tokens * 100 / .ctx_bound_tokens | floor | tostring) end' || echo UNMEASURED
+```
+- **40 or more**: hand off with the command below. Phases 0-3 add about 40% of the bound,
+  and Phase 3 launches four sub-agents.
+- **Below 40**: continue in this session.
+- **UNMEASURED** (telemetry off): hand off if baseline triage consumed significant context.
 ```bash
 af handoff -s "Baseline recorded, ready for assigned work" \\
   -m "PR: {{pr_uri}}
@@ -558,6 +610,10 @@ Halting per fable-increment Phase 1."
   ```
   **STOP. Do not proceed. Human intervention required.**
 
+Fetch any external page a comment cites (release notes, docs) into
+`todos/fable-increment/scratch/`, never `mktemp` or /tmp. Evidence outside the worktree trips
+WORKTREE_CONTAINMENT.
+
 **Exit criteria:** Every thread's claims have verdicts with evidence; zero unresolved contradictions."""
 
 [[steps]]
@@ -570,7 +626,9 @@ description = """
 Run this command:
 ```bash
 F=todos/fable-increment/claims.md
-if grep -q "CONTRADICTED" $F && ! grep -qE "RECONCILED|DEFERRED" $F; then
+# A verdict counts only where it opens a table cell, so a null summary such as "no row is
+# CONTRADICTED" cannot fail this gate (the GATE 9 idiom).
+if grep -qE '\\| *CONTRADICTED' $F && ! grep -qE "RECONCILED|DEFERRED" $F; then
   echo "GATE 1 FAIL: unresolved contradiction — reconcile, defer to the human, or escalate"
 elif grep -qE "VERIFIED|STALE-BUT-TRUE" $F; then
   echo "GATE 1 PASS"
@@ -675,7 +733,10 @@ goes under <AGENT_TODOS>/scratch/. Never write, redirect, copy or cd to /tmp, $H
 the factory's parent directories or any path outside the worktree, and never run
 `git worktree add` — each trips the WORKTREE_CONTAINMENT guard. For an old version of a file
 use `git show <sha>:<path>`; for a mutation check edit a copy under scratch/ and point the
-tool at it (Go: `go test -overlay`); for a tmux probe use `tmux -S <AGENT_TODOS>/scratch/<name>.sock`."
+tool at it (Go: `go test -overlay`); for a tmux probe use `tmux -S <AGENT_TODOS>/scratch/<name>.sock`.
+Run tests only through the project's own test command (CLAUDE.md / Makefile) or with exactly the
+environment it sets: a bare runner call can fail for host reasons (a noexec /tmp) and report
+failures that are not real."
 
 "CONTEXT BUDGET: Overflowing your context window recycles the parent session and discards
 every investigator's work. Never read a file larger than 20KB whole — find the spot with
@@ -707,7 +768,9 @@ you can state) / [Assumed] (plausible or conventional — say so plainly); the t
 travels with the claim. Be thorough. Read the actual code. Do not guess."
 
 Collect all four from their completion notifications and the concern files on disk — never
-TaskOutput, which returns an investigator's whole transcript into your window. Read the
+TaskOutput, which returns an investigator's whole transcript into your window. While any is still
+running, end each turn with `ls -la <AGENT_TODOS>/concern_*.md` rather than prose alone: the
+fidelity gate grades a turn with no tool calls on its text and can block it. Read the
 concern files with targeted `grep -n` / `sed -n`, not whole. Consolidate the scope quarantine: copy
 every "## Out-of-scope observations (DO NOT IMPLEMENT)" section into
 `todos/fable-increment/out_of_scope.md` (write "None" if no investigator reported any).
@@ -780,8 +843,16 @@ out_of_scope.md), and every code-path variant from the Fix-Locus investigation. 
 carry through synthesis: a claim that arrives untagged from an investigator is [Assumed]
 until re-derived. Then close this step and continue.
 
-**Context management:**
-If Phase 3 consumed significant context:
+**Context management — measured, not judged.** Before closing this step, print how full
+the latest closed step left the window, as a percentage of its bound:
+```bash
+I=$(cat .runtime/hooked_formula 2>/dev/null)
+[ -n "$I" ] && af telemetry report --instance "$I" --json | jq -r '[.rows[]? | select(.peak_ctx_tokens != null and .ctx_bound_tokens != null)] | sort_by(.started) | last | if . == null then "UNMEASURED" else (.peak_ctx_tokens * 100 / .ctx_bound_tokens | floor | tostring) end' || echo UNMEASURED
+```
+- **50 or more**: close this step, then hand off with the command below. Phases 4-10 add about
+  40% of the bound.
+- **Below 50**: close this step and continue in this session.
+- **UNMEASURED** (telemetry off): close this step, then hand off if Phase 3 consumed significant context.
 ```bash
 af handoff -s "Investigation complete, consensus achieved" \\
   -m "PR: {{pr_uri}}
@@ -824,6 +895,11 @@ Rules:
 - If the hunt found no decisions: one entry, `NONE FOUND — hunted: [what you examined]`,
   with the standing `Flip condition: any judgment call discovered during implementation
   reopens this log`, status CLOSED.
+- **A flip condition that hangs on outside state gets a tag.** If its trigger can change while
+  the run continues (a registry release, an upstream advisory, a linked issue or PR), start that
+  Flip condition line with `PRE-PUSH RECHECK (<source to re-fetch>):`. Self-review action 2b
+  re-fetches every tagged source; an untagged condition matches no step's grep and is never
+  re-checked.
 
 **Exit criteria:** `todos/fable-increment/decisions.md` exists; no OPEN decisions."""
 
@@ -996,7 +1072,10 @@ description = """
 Run this command:
 ```bash
 D=todos/fable-increment
-if ! <TEST_PATTERN_CMD> 2>&1 | grep -qiE "pass|ok"; then
+# Exit status first: a pinning script that prints protective PASS lines also matches "pass|ok"
+# when it is still RED.
+OUT=$(<TEST_PATTERN_CMD> 2>&1); RC=$?
+if [ "$RC" -ne 0 ] || ! printf '%s\\n' "$OUT" | grep -qiE "pass|ok"; then
   echo "GATE 6 FAIL: target tests red — return to phase-6-implement-green, attempt N+1"
 elif ! test -s $D/green_coverage.md; then
   echo "GATE 6 FAIL: green_coverage.md missing — prove every actionable item landed or is deferred"
@@ -1187,7 +1266,10 @@ goes under <AGENT_TODOS>/scratch/. Never write, redirect, copy or cd to /tmp, $H
 the factory's parent directories or any path outside the worktree, and never run
 `git worktree add` — each trips the WORKTREE_CONTAINMENT guard. For an old version of a file
 use `git show <sha>:<path>`; for a mutation check edit a copy under scratch/ and point the
-tool at it (Go: `go test -overlay`); for a tmux probe use `tmux -S <AGENT_TODOS>/scratch/<name>.sock`."
+tool at it (Go: `go test -overlay`); for a tmux probe use `tmux -S <AGENT_TODOS>/scratch/<name>.sock`.
+Run tests only through the project's own test command (CLAUDE.md / Makefile) or with exactly the
+environment it sets: a bare runner call can fail for host reasons (a noexec /tmp) and report
+failures that are not real."
 
 "CONTEXT BUDGET: Overflowing your context window recycles the parent session and discards
 your review. Never read a file larger than 20KB whole — find the spot with `grep -n`, then
@@ -1273,7 +1355,16 @@ out_of_scope.md and the completion notes, never the diff.
 
 **If PASS**: Close this step and continue.
 
-**Context management:** If context filling:
+**Context management — measured, not judged.** Before closing this step, print how full the latest
+closed step left the window, as a percentage of its bound:
+```bash
+I=$(cat .runtime/hooked_formula 2>/dev/null)
+[ -n "$I" ] && af telemetry report --instance "$I" --json | jq -r '[.rows[]? | select(.peak_ctx_tokens != null and .ctx_bound_tokens != null)] | sort_by(.started) | last | if . == null then "UNMEASURED" else (.peak_ctx_tokens * 100 / .ctx_bound_tokens | floor | tostring) end' || echo UNMEASURED
+```
+- **85 or more**: close this step, then hand off with the command below.
+- **Below 85**: close this step and continue. Phase 9 through GATE 10 add under 10% of the
+  bound, and GATE 10 always hands off.
+- **UNMEASURED** (telemetry off): close this step, then hand off if context is filling.
 ```bash
 af handoff -s "Blind review passed" -m "PR: {{pr_uri}}
 Score: <X>/10. Ready for: phase-9-clause-audit step"
@@ -1458,7 +1549,15 @@ grep -qE "\\[Verified\\]|\\[Inferred\\]|\\[Assumed\\]" todos/fable-increment/evi
 Then confirm every thread from unresolved_threads.md has a row with evidence.
 
 **If FAIL**: Go back to phase-10-evidence-report. Do NOT proceed.
-**If PASS**: Close this step and continue to the post-work invariant steps."""
+**If PASS**: Close this step (`af done`), then cycle to a fresh session before the post-work
+invariant steps:
+```bash
+af handoff -s "Evidence complete (GATE 10)" -m "PR: {{pr_uri}}
+Artifacts: todos/fable-increment/ (evidence.md, thread_dispositions.md, delivery inputs)
+Ready for: self-review step"
+```
+Every post-work step reads its inputs from todos/fable-increment/, so nothing is lost. Hand off even
+on a one-line diff: occupancy can cross the step bound right after this gate."""
 
 # ============================================================================
 # POST-WORK INVARIANT STEPS
@@ -1494,6 +1593,23 @@ triaged to find out whose it is.
 | Completeness | Missing error handling, incomplete paths |
 | Cruft | Debug prints, commented code, TODOs |
 
+**2b. Re-fetch every flip condition that hangs on outside state:**
+Phase 4 tags each one `PRE-PUSH RECHECK`. This is the last point where a flipped fact can still
+go through action 3's fix and GATE 8 re-run; deliver-to-pr's 2b grep collects only deferred posts.
+```bash
+F=todos/fable-increment/decisions.md
+grep -n -A3 'PRE-PUSH RECHECK' $F
+```
+For each match, fetch the named source now and append one line under that decision:
+`- **Pre-push recheck** (<UTC date>): <what was fetched> -> HOLDS | FLIPPED`.
+FLIPPED: apply the flip in action 3. That means the fix, the thread_dispositions.md note that
+states the old fact, and the GATE 8 re-run. Then confirm every tag has its line:
+```bash
+T=$(grep -c 'PRE-PUSH RECHECK' $F); R=$(grep -c 'Pre-push recheck' $F)
+[ "$R" -ge "$T" ] && echo "RECHECK PASS ($T tagged)" || echo "RECHECK FAIL: $T tagged, $R re-checked"
+```
+No match means no decision hangs on outside state.
+
 **3. Fix issues found:**
 Don't just note them - fix them now. Amend or add commits as needed (your own commits
 only — never the author's). A commit made here means the blind review no longer covers HEAD.
@@ -1508,7 +1624,8 @@ git diff --stat $(cat todos/fable-increment/baseline_sha.txt)...HEAD
 
 If you accidentally modified unrelated files, remove those changes.
 
-**Exit criteria:** Changes are clean, reviewed, and ready for testing."""
+**Exit criteria:** Changes are clean, reviewed, and ready for testing; action 2b printed
+RECHECK PASS."""
 
 [[steps]]
 id = "run-tests"
@@ -1588,7 +1705,8 @@ Gate: verify implementation matches design contract (Jidoka).
 
 **If NO design contract was found in validate-contract** (`contract_points.md` records
 the null result):
-- Close this step with reason "No design contract to verify against"
+- Close this step with `af done` (it takes no `--reason` flag); the reason is "No design
+  contract to verify against"
 - Proceed to deliver-to-pr
 
 **Exit criteria:** Implementation verified against design contract (if present), or step closed as N/A."""
@@ -1629,11 +1747,37 @@ af mail send supervisor -s "ESCALATION: cannot push to PR branch" -m "PR: {{pr_u
 Fixes are committed on increment/pr-<number> (pushed to origin as backup).
 Push to the PR head branch was denied. Human action needed."
 ```
-  Record DELIVERY_BLOCKED in delivery.md, skip thread resolution (steps 3-4),
-  and continue to step 5 — do NOT resolve threads whose fixes did not land.
+  Record DELIVERY_BLOCKED in delivery.md, skip the delivery-time actions and thread
+  resolution (steps 2b-4), and continue to step 5 — do NOT resolve threads whose fixes did not land.
+
+**2b. Post the outward actions the decision log deferred to delivery:**
+A Phase 4 decision can defer an outward action to this step. Examples are a checklist
+comment on the linked issue, or a correction comment for a DEFERRED body-finding. Nothing
+else collects them, and 3c keeps DEFERRED body-findings out of its comment, so a
+deferred action missed here is never posted.
+```bash
+grep -n -i -E 'at delivery|delivery action' todos/fable-increment/decisions.md todos/fable-increment/thread_dispositions.md
+```
+Post every action listed apart from the thread replies (action 3) and the 3c comment.
+Post each one BEFORE resolving any thread it serves (a reply may link to it), and record
+its URL in delivery.md. A recycle can land between a post and its record, so first check
+the target's comments for a copy this run already posted. No matches means none were deferred.
 
 **3. Reply to and resolve each ADDRESSED thread:**
 For each thread marked ADDRESSED in todos/fable-increment/thread_dispositions.md:
+
+First confirm the thread has not moved since load-context. Resolving a thread collapses every
+comment in it, so a reviewer follow-up posted after intake would be hidden unread:
+```bash
+gh api graphql -F id='<thread-node-id>' -f query='
+query($id: ID!) {
+  node(id: $id) { ... on PullRequestReviewThread { isResolved comments(first: 50) { nodes { databaseId author { login } body } } } }
+}' --jq '.data.node'
+```
+Every `databaseId` must be one recorded for that thread in unresolved_threads.md, or a reply this
+run already posted with the drafted note (never post it twice). Any other id was never part of the
+problem statement: post the reply (a), skip the resolve (b), and list the thread in delivery.md as
+left unresolved for the human. A thread already resolved gets neither.
 
 a. Reply with the drafted note (20 words or less, stating what change was applied):
 ```bash
@@ -1652,6 +1796,13 @@ For each thread marked DEFERRED: reply with the reason (for ESCALATED decisions,
 reply asks the reviewer the specific question), but do NOT resolve — the human decides
 those.
 
+**Before posting any DEFERRED reply, 2b action or 3c comment, re-read each `path:line` it
+cites at HEAD.** The reasons come from decisions.md and out_of_scope.md, and those files
+read the code at the PR head, before your own commits shifted it. Draft each body to a file
+under todos/fable-increment/scratch/, then check every citation with `sed -n '<n>p' <path>`
+and correct the draft. Post the file itself with `-F body=@<file>`, or `--body-file` for
+`gh pr comment` / `gh issue comment`, so no quoting mangles the text.
+
 **3c. Acknowledge ADDRESSED body-findings (BODY-n) — comment, NEVER resolve:**
 Body-findings have no thread, so `resolveReviewThread` does NOT apply to them. For the
 BODY-n items marked ADDRESSED in thread_dispositions.md, post ONE consolidated PR comment
@@ -1661,7 +1812,8 @@ gh pr comment <number> --repo <owner/repo> --body "fable-increment addressed rev
 - BODY-1 (<path:line>): <note of the change applied, 20 words or less>
 - BODY-2 (<path:line>): <note of the change applied, 20 words or less>"
 ```
-Leave DEFERRED body-findings OUT of this comment (record them in delivery.md only).
+Leave DEFERRED body-findings OUT of this comment (record them in delivery.md; one whose
+decision names a comment of its own already got it in 2b).
 NEVER call `resolveReviewThread` for a BODY-n — it has no thread id.
 
 **4. Verify resolution state:**
@@ -1672,21 +1824,25 @@ Body-findings have no resolved-state — confirm instead that the step-3c commen
 
 **5. Verify the PR state is unchanged:**
 ```bash
-gh pr view <number> --repo <owner/repo> --json state,isDraft,title
+gh pr view <number> --repo <owner/repo> --json state,isDraft,title,labels,reviewRequests
+gh pr view <number> --repo <owner/repo> --json body --jq .body | sha256sum
 ```
-Compare to the snapshot in todos/fable-increment/pr_context.md. `state` and
+Compare to the snapshot in todos/fable-increment/pr_context.md. Title, labels, reviewRequests
+and the body sha256 must match too; `state` and
 `isDraft` MUST match the snapshot. You never ran gh pr ready/close/reopen/merge,
 so a mismatch means it changed externally: note it in delivery.md, do NOT
 "restore" it.
 
-**6. Write `todos/fable-increment/delivery.md`:** pushed sha, threads resolved
-(with their notes), threads deferred (with reasons), out-of-scope observations
+**6. Write `todos/fable-increment/delivery.md`:** pushed sha, each 2b action with its URL,
+threads resolved (with their notes), threads deferred (with reasons), out-of-scope observations
 reported, the design contract used and any deviations (from contract_points.md), PR
 state verification result.
 
-**Exit criteria:** Fixes on the PR branch, every ADDRESSED thread resolved with a note,
-every ADDRESSED body-finding acknowledged via the step-3c PR comment, PR state untouched,
-delivery.md written."""
+**Exit criteria:** Fixes on the PR branch, every 2b delivery-time action posted with its URL
+in delivery.md, every ADDRESSED thread resolved with a note (one that gained a comment after
+load-context is replied to, left unresolved and listed in delivery.md), every DEFERRED reply's citations
+re-read at HEAD, every ADDRESSED body-finding acknowledged via the step-3c PR comment, PR state
+untouched, delivery.md written."""
 
 [[steps]]
 id = "cleanup-workspace"
@@ -1703,13 +1859,26 @@ Ensure workspace is pristine before handoff.
 **0. Persist the completion digest BEFORE anything is deleted:**
 prepare-for-review needs these values, and a session recycle between the two steps (context
 peaks around delivery) erases anything carried only in context. Re-read
-`todos/fable-increment/evidence.md` and `todos/fable-increment/delivery.md`, then record every
-value prepare-for-review's notes template asks for: the delivered sha, the blind-review score, the
-design contract path and deviation count, the addressed/deferred thread counts, EVERY out-of-scope
-item from out_of_scope.md, and the PR state as found.
+`todos/fable-increment/evidence.md` and `todos/fable-increment/delivery.md`, then write the digest
+body AS the finished completion notes. Use the template below with every placeholder filled: the
+delivered sha, the blind-review score, the design contract path and deviation count, the
+addressed/deferred thread counts, EVERY out-of-scope item from out_of_scope.md, and the PR state
+as found. prepare-for-review posts this body unchanged to the bead and the Supervisor, so compose
+it once, here.
 ```bash
-af memory add --type outcome --formula fable-increment -s "completion digest {{pr_uri}}" -m "<the values above>"
-af memory list --formula fable-increment | grep -F "completion digest {{pr_uri}}" | grep -w active
+af memory add --type outcome --formula fable-increment -s "completion digest {{pr_uri}}" -m "Implemented via fable-increment (fixed checklist, all 11 gates) for {{pr_uri}}.
+Claims verified against the PR head (Phase 1). Consumer sweep complete (Phase 2).
+Investigation consensus achieved, scope-quarantined (Phase 3). Decisions on record with
+flip conditions (Phase 4). Test-first proven (GATE 5). Suite green vs baseline, failures
+classified, sideways check: MATCH (GATE 7). Blind review: <X>/10 (GATE 8). Clause audit +
+thread dispositions + reverse scope audit clean (GATE 9). Evidence tagged (GATE 10).
+Delivery: pushed <sha> to the PR branch (fast-forward, no new PR).
+Design contract: <path | none>; deviations documented: <N | none>.
+Threads: <X> addressed and resolved (each with a note of 20 words or less), <Y> deferred
+(left unresolved for the human).
+Out-of-scope observations (NOT implemented): <Z> — list each one.
+PR state preserved: <Draft | Ready for review> as found."
+af memory list --formula fable-increment --all-rows | grep -F "completion digest {{pr_uri}}" | grep -w active
 ```
 The second command must print the digest's row. If it prints nothing, record the digest again;
 never reach action 5 without it.
@@ -1770,7 +1939,7 @@ git log origin/<pr-head-branch>..HEAD   # Should be empty if delivery pushed eve
 git diff origin/<pr-head-branch>...HEAD # Should be empty if delivery pushed everything
 ```
 
-**Exit criteria:** Completion digest recorded in memory (action 0 printed its row), branch pushed,
+**Exit criteria:** Completion digest recorded in memory as the filled notes template (action 0 printed its row), branch pushed,
 workspace clean, no cruft (todos/fable-increment removed)."""
 
 [[steps]]
@@ -1783,40 +1952,51 @@ Record completion on the assignment.
 **Note:** Do NOT close the PR and do NOT change its state. The PR belongs to
 its author — you only delivered commits and thread resolutions.
 
-**1. Add completion notes to your assigned bead (if dispatched with one):**
+**1. Find the assignment bead.** Dispatch creates it in the same instant as the formula epic
+(label `assignment`, no assignee), so the agent-scoped `af bead list` never shows it. On PR 752
+the notes went to the epic instead. Match it by the epic's creation time:
 ```bash
-af bead update <bead-id> --notes "Implemented via fable-increment (fixed checklist, all 11 gates) for {{pr_uri}}.
-Claims verified against the PR head (Phase 1). Consumer sweep complete (Phase 2).
-Investigation consensus achieved, scope-quarantined (Phase 3). Decisions on record with
-flip conditions (Phase 4). Test-first proven (GATE 5). Suite green vs baseline, failures
-classified, sideways check: MATCH (GATE 7). Blind review: <X>/10 (GATE 8). Clause audit +
-thread dispositions + reverse scope audit clean (GATE 9). Evidence tagged (GATE 10).
-Delivery: pushed <sha> to the PR branch (fast-forward, no new PR).
-Design contract: <path | none>; deviations documented: <N | none>.
-Threads: <X> addressed and resolved (each with a note of 20 words or less), <Y> deferred
-(left unresolved for the human).
-Out-of-scope observations (NOT implemented): <Z> — list each one.
-PR state preserved: <Draft | Ready for review> as found."
+EPIC=$(cat .runtime/hooked_formula)
+AT=$(af bead show "$EPIC" --json | jq -r .created_at)
+ASSIGN=$(af bead list --all --json | jq -r --arg at "$AT" 'def t: .[0:19] + "Z" | fromdateiso8601;
+  ($at | t) as $e | [.[] | select(.status == "open" and ((.labels // []) | index("assignment")))
+  | select(($e - (.created_at | t)) | fabs <= 60)] | if length == 1 then .[0].id else empty end')
+echo "assignment bead: ${ASSIGN:-none (direct dispatch)}"
 ```
-Fill every placeholder from the completion digest that cleanup-workspace recorded (todos/ is
-already deleted). After a recycle, read it back instead of re-deriving it from git and gh:
+An empty value means direct dispatch. Never write the notes to `$EPIC` or to an older bead for the same
+PR: those belong to the formula instance or to prior runs.
+
+**2. Write the completion notes** (onto `$ASSIGN` when it is set). The notes ARE the body of the
+completion digest that cleanup-workspace composed from the notes template (todos/ is already
+deleted). Pass the body through unchanged. Never compose it again or re-derive it from git and gh,
+in this session or after a recycle:
 ```bash
-af memory list --formula fable-increment | grep -F "completion digest {{pr_uri}}" | grep -w active
-af memory show <digest-id>
+ASSIGN=<the id action 1 printed; empty for direct dispatch>
+D=$(af memory list --formula fable-increment --all-rows | grep -F "completion digest {{pr_uri}}" | grep -w active | head -1 | awk '{print $2}')
+NOTES=$(af memory show "$D" | sed '1,/^# completion digest /d' | sed '/./,$!d')
+[ -n "$NOTES" ] || echo "DIGEST MISSING: post nothing; mail the Supervisor that the completion digest for {{pr_uri}} is absent"
+[ -n "$ASSIGN" ] && [ -n "$NOTES" ] && af bead update "$ASSIGN" --notes "$NOTES"
 ```
 
-**2. Retire the digest once the bead holds it:**
+**3. Mail the same notes to the Supervisor, bead or not.** The WORK_DONE body that `af done` sends is
+fixed ("All N steps complete for formula X."), so it carries none of these numbers. This mail is the
+"completion mail" that the failure-mode and anti-pattern tables send failed resolves and out-of-scope
+findings to. Shell variables do not survive between calls, so read the body again here:
+```bash
+D=$(af memory list --formula fable-increment --all-rows | grep -F "completion digest {{pr_uri}}" | grep -w active | head -1 | awk '{print $2}')
+NOTES=$(af memory show "$D" | sed '1,/^# completion digest /d' | sed '/./,$!d')
+[ -n "$NOTES" ] && af mail send supervisor -s "COMPLETE: fable-increment {{pr_uri}}" -m "$NOTES"
+```
+
+**4. Retire the digest once the bead holds it:**
 ```bash
 af memory expire <digest-id>
 ```
 An active digest is served to every future session of this agent. Skip this action when no bead
 exists, because the digest is then the only record until submit-and-exit.
 
-If no bead exists (direct dispatch), the WORK_DONE mail from `af done` carries
-the completion signal — make sure the delivery numbers above appear in it.
-
-**Exit criteria:** Completion recorded with delivery sha, thread counts, and PR state; the digest
-expired if a bead now holds it."""
+**Exit criteria:** Completion notes are on the assignment bead (if one exists) and mailed to the
+Supervisor, with the delivery sha, thread counts and PR state; the digest is expired if a bead now holds it."""
 
 [[steps]]
 id = "submit-and-exit"

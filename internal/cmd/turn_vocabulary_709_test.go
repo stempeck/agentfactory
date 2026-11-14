@@ -180,7 +180,7 @@ func TestWithEffortLevelExportsAttestationOnEveryPath(t *testing.T) {
 
 	setup := func(t *testing.T, arm, seed bool) lifecycleFixture {
 		t.Helper()
-		fx, _, _ := primedFixture(t, roomyOccupancyPct)
+		fx, _, _ := primedFixtureWithTotal(t, roomyOccupancyPct, roomyWindowTokens)
 		declareWindow(t, fx.root, roomyWindowTokens)
 		if arm {
 			armEfficiency(t, fx.root, nil)
@@ -290,7 +290,7 @@ func TestNoProfileRespawnClearsAttestation(t *testing.T) {
 		fake, _ := setupHermeticSessions(t)
 
 		cmd, out := launchCmd(t)
-		if err := launchAgentSession(cmd, root, "manager", wtPath, wtID, "", false); err != nil {
+		if err := launchAgentSession(cmd, root, "manager", wtPath, wtID, "", launchGates{}); err != nil {
 			t.Fatalf("af sling launch: %v\n%s", err, out)
 		}
 		assertSessionAttestsNothing(t, fake.ops)

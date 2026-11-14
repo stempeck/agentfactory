@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -252,6 +253,33 @@ func (db auditDB) osv(lines ...string) {
 func (db auditDB) vuln(id string, aliases ...string) {
 	b, _ := json.Marshal(map[string]any{"id": id, "aliases": aliases})
 	db.write("vulns/"+id+".json", string(b))
+}
+
+func osvRange(typ, fixed string) map[string]any {
+	r := map[string]any{"type": typ, "events": []map[string]string{{"introduced": "0"}, {"fixed": fixed}}}
+	if typ == "GIT" {
+		r["repo"] = "https://github.com/x/y"
+	}
+	return r
+}
+
+// vulnAffected serves an OSV record whose affected[] names one package with these ranges; db.vuln
+// and vulnerableDB stay fix-free so the fixtures that predate the fix rule keep their meaning.
+func (db auditDB) vulnAffected(id, eco, name string, aliases []string, ranges ...map[string]any) {
+	if aliases == nil {
+		aliases = []string{}
+	}
+	b, _ := json.Marshal(map[string]any{"id": id, "aliases": aliases, "affected": []map[string]any{
+		{"package": map[string]string{"ecosystem": eco, "name": name}, "ranges": ranges}}})
+	db.write("vulns/"+id+".json", string(b))
+}
+
+func (db auditDB) vulnFixed(id, eco, name, fixed string, aliases ...string) {
+	db.vulnAffected(id, eco, name, aliases, osvRange("ECOSYSTEM", fixed))
+}
+
+func (db auditDB) vulnGitFixed(id, eco, name, sha string, aliases ...string) {
+	db.vulnAffected(id, eco, name, aliases, osvRange("GIT", sha))
 }
 
 func (db auditDB) faults(f ...string) {
@@ -511,6 +539,141 @@ func wantAuditExit(t *testing.T, res refRunResult, wantZero bool, mustName ...st
 	}
 }
 
+// auditRecord is schema v1 of the finding record the audit writes to ADVISORY_AUDIT_RECORD. It is
+// decoded strictly: a field the producer misspells or adds fails here before a consumer misreads it.
+type auditRecord struct {
+	Schema    int            `json:"schema"`
+	Today     string         `json:"today"`
+	ExitClass string         `json:"exit_class"`
+	Counts    auditCounts    `json:"counts"`
+	Findings  []auditFinding `json:"findings"`
+	Errors    []string       `json:"errors"`
+}
+
+type auditCounts struct {
+	Reported       int `json:"reported"`
+	Unexcused      int `json:"unexcused"`
+	Expired        int `json:"expired"`
+	NodeBehind     int `json:"node_behind"`
+	ExcusedFixable int `json:"excused_fixable"`
+	Errors         int `json:"errors"`
+}
+
+type auditFinding struct {
+	Class          string             `json:"class"`
+	Key            string             `json:"key"`
+	Pinned         bool               `json:"pinned"`
+	FixPublished   *bool              `json:"fix_published"`
+	PinnedIn       []auditPinLocation `json:"pinned_in"`
+	Advisories     []auditRecordAdv   `json:"advisories"`
+	Register       []auditRegisterRef `json:"register"`
+	Entries        []auditRecordEntry `json:"entries"`
+	ExcusedFixable []auditRecordEntry `json:"excused_fixable"`
+	Releases       []string           `json:"releases"`
+}
+
+type auditPinLocation struct {
+	Ecosystem string `json:"ecosystem"`
+	Repo      string `json:"repo"`
+}
+
+type auditRecordAdv struct {
+	ID        string   `json:"id"`
+	Aliases   []string `json:"aliases"`
+	Source    string   `json:"source"`
+	Ecosystem string   `json:"ecosystem"`
+	Repo      string   `json:"repo"`
+	Against   string   `json:"against"`
+	Fixed     []string `json:"fixed"`
+	FixedRaw  string   `json:"fixed_raw"`
+}
+
+type auditRegisterRef struct {
+	ID        string   `json:"id"`
+	Aliases   []string `json:"aliases"`
+	Reviewed  string   `json:"reviewed"`
+	RecheckBy string   `json:"recheck_by"`
+	Key       string   `json:"key"`
+}
+
+// auditRecordEntry is an expired entry (id … fix_available) or an excused-fixable one (id, advisory, fixed).
+type auditRecordEntry struct {
+	ID           string   `json:"id"`
+	Aliases      []string `json:"aliases"`
+	Reviewed     string   `json:"reviewed"`
+	RecheckBy    string   `json:"recheck_by"`
+	Excuses      []string `json:"excuses"`
+	FixAvailable string   `json:"fix_available"`
+	Advisory     string   `json:"advisory"`
+	Fixed        []string `json:"fixed"`
+}
+
+func readAuditRecord(t *testing.T, path string) auditRecord {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the audit wrote no finding record at %s: %v", path, err)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatalf("the finding record is not a JSON object: %v\n%s", err, raw)
+	}
+	for _, list := range []string{"findings", "errors"} {
+		if v := strings.TrimSpace(string(top[list])); !strings.HasPrefix(v, "[") {
+			t.Errorf("the finding record's %s is %s, want an array (empty is [])", list, v)
+		}
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	var rec auditRecord
+	if err := dec.Decode(&rec); err != nil {
+		t.Fatalf("the finding record does not decode as schema v1: %v\n%s", err, raw)
+	}
+	if rec.Schema != 1 {
+		t.Errorf("record schema = %d, want 1", rec.Schema)
+	}
+	return rec
+}
+
+// recorded runs the audit with ADVISORY_AUDIT_RECORD set, asserts the exit code exactly, and decodes the record.
+func (r auditRunner) recorded(t *testing.T, script string, db auditDB, today string, wantExit int, extra ...string) (refRunResult, auditRecord) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "record.json")
+	res := r.run(script, db, today, append([]string{"ADVISORY_AUDIT_RECORD=" + path}, extra...)...)
+	if res.exit != wantExit {
+		t.Errorf("exit = %d, want %d\nstdout:\n%s\nstderr:\n%s", res.exit, wantExit, res.stdout, res.stderr)
+	}
+	rec := readAuditRecord(t, path)
+	if rec.Today != today {
+		t.Errorf("record today = %q, want %q", rec.Today, today)
+	}
+	return res, rec
+}
+
+func (rec auditRecord) find(t *testing.T, class, key string) auditFinding {
+	t.Helper()
+	for _, f := range rec.Findings {
+		if f.Class == class && f.Key == key {
+			return f
+		}
+	}
+	t.Fatalf("the record has no %s finding for %s; findings: %+v", class, key, rec.Findings)
+	return auditFinding{}
+}
+
+func (rec auditRecord) classKeys() []string {
+	var out []string
+	for _, f := range rec.Findings {
+		out = append(out, f.Class+" "+f.Key)
+	}
+	return out
+}
+
+func acknowledged(e advisoryException, fix string) advisoryException {
+	e.FixAvailable = &fix
+	return e
+}
+
 func TestAdvisoryDecay_FailsOnFixtureAdvisory(t *testing.T) {
 	bashPath, err := exec.LookPath("bash")
 	if err != nil {
@@ -589,10 +752,17 @@ func TestAdvisoryDecay_FailsOnFixtureAdvisory(t *testing.T) {
 		if major, apt := auditShippedNode(t); major != "" && apt != "" {
 			db.nodeFeeds(major, apt)
 		}
+		// OSV's record for oauthlib 4.0.0 (#764): a lock that falls back to it fails offline.
+		// db.osv replaces the whole table: add later heals' rows to this call.
+		db.osv(auditControlLine, "PyPI\toauthlib\t4.0.0\tGHSA-3jp2-3mrg-2vxc")
+		db.vulnFixed("GHSA-3jp2-3mrg-2vxc", "PyPI", "oauthlib", "4.0.1", "CVE-2026-49272")
 		db.ghPages("BerriAI/litellm",
 			[]map[string]any{
 				ghAdvisory("GHSA-3cv6-jpf6-8222", "", ghVuln{"<1.94.0", patched("1.96.2, 1.95.1, 1.94.3, 1.93.2, 1.92.2")}),
 				ghAdvisory("GHSA-g5ff-637f-6q2m", "", ghVuln{"<1.95.0", patched("1.95.0")}),
+				ghAdvisory("GHSA-w4c7-34wj-hqm8", "", ghVuln{"<1.103.10", patched("1.103.10, 1.104.8, 1.105.6, 1.106.5")}),
+				ghAdvisory("GHSA-2rwg-2wh4-7c4f", "", ghVuln{"< 1.106.9", patched("1.106.9")}, ghVuln{"< 1.108.6", patched("1.108.6")},
+					ghVuln{"< 1.109.1", patched("1.109.1")}, ghVuln{"< 1.110.0-rc.2", patched("1.110.0-rc.2")}),
 			},
 			[]map[string]any{ghAdvisory("GHSA-7hp6-4w63-5g45", "CVE-2026-114612",
 				ghVuln{">= 1.91.0, < 1.100.4", patched("1.100.4")}, ghVuln{">= 1.103.0, <1.103.1", patched("1.103.1")})})
@@ -604,7 +774,16 @@ func TestAdvisoryDecay_FailsOnFixtureAdvisory(t *testing.T) {
 			[]map[string]any{neverMatching("GHSA-base-oo00-0002")})
 
 		before := listDir(t, filepath.Join(root, "py")) + listDir(t, filepath.Join(root, ".github"))
-		wantAuditExit(t, r.run(shipped, db, earliest), true)
+		// Not r.recorded: a missing record must not stop the subtests below, which pin the shipped register.
+		recPath := filepath.Join(t.TempDir(), "record.json")
+		if res := r.run(shipped, db, earliest, "ADVISORY_AUDIT_RECORD="+recPath); res.exit != 0 {
+			t.Errorf("exit = %d, want 0\n%s%s", res.exit, res.stdout, res.stderr)
+		}
+		if _, err := os.Stat(recPath); err != nil {
+			t.Errorf("the audit wrote no finding record at %s: %v", recPath, err)
+		} else if rec := readAuditRecord(t, recPath); rec.ExitClass != "clean" || len(rec.Findings) != 0 || rec.Counts.Errors != 0 {
+			t.Errorf("the shipped tree's record = class %q, findings %v, %d errors; want clean, none, 0", rec.ExitClass, rec.classKeys(), rec.Counts.Errors)
+		}
 		if after := listDir(t, filepath.Join(root, "py")) + listDir(t, filepath.Join(root, ".github")); after != before {
 			t.Errorf("the audit wrote into the repository:\nbefore %s\nafter  %s", before, after)
 		}
@@ -639,7 +818,47 @@ func TestAdvisoryDecay_FailsOnFixtureAdvisory(t *testing.T) {
 					due = append(due, e.ID)
 				}
 			}
-			wantAuditExit(t, r.run(shipped, db, d.AddDate(0, 0, 1).Format("2006-01-02")), false, due...)
+			res, rec := r.recorded(t, shipped, db, d.AddDate(0, 0, 1).Format("2006-01-02"), 1)
+			wantAuditExit(t, res, false, due...)
+			// Grouped by the entry's package@version: the 2026-11-27 wave is litellm@1.93.2 (AF-743, 7hp6,
+			// g5ff) and openobserve@v1.1.2 (rw8w, 3jpx), read here from the register, not restated.
+			want := map[string][]string{}
+			fix := map[string]string{}
+			for _, e := range register {
+				if e.RecheckBy == earliest {
+					k := e.Package + "@" + e.Version
+					want[k] = append(want[k], e.ID)
+					if e.FixAvailable != nil {
+						fix[e.ID] = *e.FixAvailable
+					}
+				}
+			}
+			got := map[string][]string{}
+			for _, f := range rec.Findings {
+				if f.Class != "expired" {
+					t.Errorf("one day later the record has a %s finding for %s; only the register has decayed", f.Class, f.Key)
+					continue
+				}
+				if !f.Pinned {
+					t.Errorf("expired %s is not pinned, but the shipped tree pins it", f.Key)
+				}
+				for _, e := range f.Entries {
+					got[f.Key] = append(got[f.Key], e.ID)
+					if e.FixAvailable != fix[e.ID] {
+						t.Errorf("expired entry %s fix_available = %q, the register says %q", e.ID, e.FixAvailable, fix[e.ID])
+					}
+				}
+				sort.Strings(got[f.Key])
+			}
+			for k := range want {
+				sort.Strings(want[k])
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("expired findings by key = %v, want %v (one finding per entry key)", got, want)
+			}
+			if rec.Counts.Expired != len(due) {
+				t.Errorf("counts.expired = %d, want %d (one per expired entry)", rec.Counts.Expired, len(due))
+			}
 		})
 
 		shippedTreeWith := func(t *testing.T, reg []advisoryException) string {
@@ -770,7 +989,7 @@ func TestAdvisoryDecay_FailsOnFixtureAdvisory(t *testing.T) {
 		t.Run("a CVE carried only by the GitHub advisory", func(t *testing.T) {
 			db := newAuditDB(t)
 			db.ghPages("BerriAI/litellm", []map[string]any{ghAdvisory("GHSA-7hp6-4w63-5g45", "CVE-2026-114612", ghVuln{">= 1.91.0, < 1.100.4", patched("1.100.4")})})
-			excused := auditTree(t, script, baseIssueLock, baseGatewayLock, append(baseRegister(), auditException("CVE-2026-114612", nil, gatewayLitellm, "2026-01-01", "2026-01-31")))
+			excused := auditTree(t, script, baseIssueLock, baseGatewayLock, append(baseRegister(), acknowledged(auditException("CVE-2026-114612", nil, gatewayLitellm, "2026-01-01", "2026-01-31"), "1.100.4")))
 			wantAuditExit(t, r.run(excused, db, "2026-01-15"), true)
 			bare := auditTree(t, script, baseIssueLock, baseGatewayLock, baseRegister())
 			wantAuditExit(t, r.run(bare, db, "2026-01-15"), false, "GHSA-7hp6-4w63-5g45")
@@ -857,7 +1076,7 @@ func TestAdvisoryDecay_FailsOnFixtureAdvisory(t *testing.T) {
 		}
 		reg := append(baseRegister(),
 			auditException("GHSA-osvn-0000-0001", nil, vulnerableAiohttp, "2026-01-01", "2026-01-31"),
-			auditException("GHSA-noal-0000-0001", nil, gatewayLitellm, "2026-01-01", "2026-01-31"))
+			acknowledged(auditException("GHSA-noal-0000-0001", nil, gatewayLitellm, "2026-01-01", "2026-01-31"), "1.94.0"))
 		wantAuditExit(t, r.run(auditTree(t, script, vulnerableIssueLock, baseGatewayLock, reg), db, "2026-01-15"), true,
 			"excused   GHSA-noal-0000-0001 [] GitHub BerriAI/litellm 1.93.2 (yes) (register: GHSA-noal-0000-0001)")
 	})
@@ -868,7 +1087,9 @@ func TestAdvisoryDecay_FailsOnFixtureAdvisory(t *testing.T) {
 			return append(baseRegister(), auditException("GHSA-pinv-0000-0001", nil, pin, "2026-01-01", "2026-01-31"))
 		}
 		t.Run("the reviewed pin stays excused", func(t *testing.T) {
-			wantAuditExit(t, litellmAdvisoryRun(t, "1.93.2", belowFix, reviewedFor(gatewayLitellm)), true,
+			reg := reviewedFor(gatewayLitellm)
+			reg[len(reg)-1] = acknowledged(reg[len(reg)-1], "1.94.0")
+			wantAuditExit(t, litellmAdvisoryRun(t, "1.93.2", belowFix, reg), true,
 				"excused   GHSA-pinv-0000-0001 [] GitHub BerriAI/litellm 1.93.2 (yes) (register: GHSA-pinv-0000-0001)")
 		})
 		t.Run("a moved pin re-opens the finding", func(t *testing.T) {
@@ -1158,6 +1379,554 @@ func TestAdvisoryDecay_FailsOnFixtureAdvisory(t *testing.T) {
 					tc.feeds(db)
 				}
 				wantAuditExit(t, r.run(tc.tree(t), db, "2026-01-15"), false, tc.want)
+			})
+		}
+	})
+
+	// ---- The finding record (ADVISORY_AUDIT_RECORD) and the exit classes ----------------------------
+
+	advisoryIDs := func(f auditFinding) []string {
+		var ids []string
+		for _, a := range f.Advisories {
+			ids = append(ids, a.ID)
+		}
+		sort.Strings(ids)
+		return ids
+	}
+	onlyAdvisory := func(t *testing.T, f auditFinding) auditRecordAdv {
+		t.Helper()
+		if len(f.Advisories) != 1 {
+			t.Fatalf("%s %s carries %d advisories, want 1: %+v", f.Class, f.Key, len(f.Advisories), f.Advisories)
+		}
+		return f.Advisories[0]
+	}
+	wantNoFix := func(t *testing.T, f auditFinding, raw string) {
+		t.Helper()
+		for _, a := range f.Advisories {
+			if len(a.Fixed) != 0 || a.FixedRaw != raw {
+				t.Errorf("%s at %s: fixed %q, fixed_raw %q; want [] and %q", a.ID, f.Key, a.Fixed, a.FixedRaw, raw)
+			}
+		}
+		if f.FixPublished == nil || *f.FixPublished {
+			t.Errorf("%s %s fix_published = %v, want false", f.Class, f.Key, f.FixPublished)
+		}
+	}
+	litellmRecorded := func(t *testing.T, version string, adv map[string]any, register []advisoryException, wantExit int) (refRunResult, auditRecord) {
+		db := newAuditDB(t)
+		db.ghPages("BerriAI/litellm", []map[string]any{adv})
+		return r.recorded(t, auditTree(t, script, baseIssueLock, gatewayAt(version), register), db, "2026-01-15", wantExit)
+	}
+	openobserveRecorded := func(t *testing.T, adv map[string]any, register []advisoryException, wantExit int) (refRunResult, auditRecord) {
+		db := newAuditDB(t)
+		db.ghPages("openobserve/openobserve", []map[string]any{adv})
+		return r.recorded(t, auditTree(t, script, baseIssueLock, baseGatewayLock, register), db, "2026-01-15", wantExit)
+	}
+	ooPin := auditPin{"openobserve", auditSyntheticVersions["OPENOBSERVE_VERSION"]}
+	ooKey := ooPin.name + "@" + ooPin.version
+	rw8w := ghAdvisory("GHSA-rw8w-37p9-mrrp", "CVE-2024-41809", ghVuln{">= v0.5.2", patched("v0.5.2")})
+	tbd := ghAdvisory("GHSA-3jpx-57gj-w458", "CVE-2025-64744", ghVuln{"All (before fix)", patched("TBD (maintainers will fill once fixed)")})
+	pinv := ghAdvisory("GHSA-pinv-0000-0001", "", ghVuln{"< 1.94.0", patched("1.94.0")})
+	pinvEntry := auditException("GHSA-pinv-0000-0001", nil, gatewayLitellm, "2026-01-01", "2026-01-31")
+	const probePinv = "ERROR: register entry GHSA-pinv-0000-0001 excuses litellm@1.93.2 although 1.94.0 is published; set fix_available or move the pin"
+	const gitSHA = "4444444444444444444444444444444444444444" // all digits: vparse reads it as a version, so only the GIT filter drops it
+	hasLine := func(t *testing.T, out, line string) {
+		t.Helper()
+		if !regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(line) + `$`).MatchString(out) {
+			t.Errorf("the output lacks the line %q:\n%s", line, out)
+		}
+	}
+	expiredRun := func(t *testing.T) auditRecord {
+		reg := append(baseRegister(),
+			auditException("AF-TEST-EXP1", nil, adNoPin, "2026-01-01", "2026-01-30"),
+			auditException("AF-TEST-EXP2", nil, adNoPin, "2026-01-01", "2026-01-30"),
+			auditException("AF-TEST-EXP3", nil, gatewayLitellm, "2026-01-01", "2026-01-30"))
+		res, rec := r.recorded(t, auditTree(t, script, baseIssueLock, baseGatewayLock, reg), newAuditDB(t), "2026-01-31", 1)
+		hasLine(t, res.stderr, "ERROR: register entry AF-TEST-EXP1 (recheck_by 2026-01-30) has expired as of 2026-01-31; re-review it and set a new recheck_by")
+		return rec
+	}
+
+	t.Run("record unexcused finding is grouped by key", func(t *testing.T) {
+		tree := auditTree(t, script, vulnerableIssueLock, baseGatewayLock, baseRegister())
+		_, rec := r.recorded(t, tree, vulnerableDB(t), "2026-01-15", 1)
+		if rec.ExitClass != "finding" || len(rec.Findings) != 1 {
+			t.Fatalf("record = class %q, findings %v; want one finding", rec.ExitClass, rec.classKeys())
+		}
+		f := rec.find(t, "unexcused", vulnerableAiohttp.name+"@"+vulnerableAiohttp.version)
+		if !f.Pinned || !reflect.DeepEqual(f.PinnedIn, []auditPinLocation{{"PyPI", ""}}) {
+			t.Errorf("pinned %v, pinned_in %+v; want true and the PyPI lock", f.Pinned, f.PinnedIn)
+		}
+		if got := advisoryIDs(f); !reflect.DeepEqual(got, []string{"GHSA-2fqr-mr3j-6wp8", "PYSEC-2026-2112"}) {
+			t.Errorf("advisories = %v, want both ids reported at the key", got)
+		}
+		for _, a := range f.Advisories {
+			if a.Source != "OSV" || a.Ecosystem != "PyPI" || a.Repo != "" || a.Against != "OSV PyPI aiohttp==3.12.15" {
+				t.Errorf("advisory %+v: want source OSV, ecosystem PyPI, no repo, against OSV PyPI aiohttp==3.12.15", a)
+			}
+		}
+		if len(f.Register) != 0 {
+			t.Errorf("register = %+v, want [] (no entry names these advisories)", f.Register)
+		}
+		if c := rec.Counts; c.Reported != 2 || c.Unexcused != 2 || c.Errors != 0 {
+			t.Errorf("counts = %+v, want reported 2, unexcused 2 (the summary's operands), errors 0", c)
+		}
+	})
+
+	t.Run("record unexcused finding lists the entry reviewed for another version", func(t *testing.T) {
+		reg := append(baseRegister(), auditException("GHSA-2fqr-mr3j-6wp8", []string{"CVE-2026-54279", "PYSEC-2026-2112"}, auditPin{"aiohttp", "3.12.14"}, "2026-01-01", "2026-01-31"))
+		_, rec := r.recorded(t, auditTree(t, script, vulnerableIssueLock, baseGatewayLock, reg), vulnerableDB(t), "2026-01-15", 1)
+		f := rec.find(t, "unexcused", "aiohttp@3.12.15")
+		want := []auditRegisterRef{{ID: "GHSA-2fqr-mr3j-6wp8", Aliases: []string{"CVE-2026-54279", "PYSEC-2026-2112"}, Reviewed: "2026-01-01", RecheckBy: "2026-01-31", Key: "aiohttp@3.12.14"}}
+		if !reflect.DeepEqual(f.Register, want) {
+			t.Errorf("register = %+v, want %+v (once, though both advisories name it)", f.Register, want)
+		}
+	})
+
+	t.Run("record expired entries are grouped by key", func(t *testing.T) {
+		rec := expiredRun(t)
+		if got := rec.classKeys(); !reflect.DeepEqual(got, []string{"expired litellm@1.93.2", "expired pkg@1"}) {
+			t.Fatalf("findings = %v, want one expired finding per entry key", got)
+		}
+		for key, want := range map[string][]string{"pkg@1": {"AF-TEST-EXP1", "AF-TEST-EXP2"}, "litellm@1.93.2": {"AF-TEST-EXP3"}} {
+			f := rec.find(t, "expired", key)
+			var ids []string
+			for _, e := range f.Entries {
+				ids = append(ids, e.ID)
+				if e.Reviewed != "2026-01-01" || e.RecheckBy != "2026-01-30" || e.FixAvailable != "" || len(e.Excuses) != 0 {
+					t.Errorf("entry %+v: want reviewed 2026-01-01, recheck_by 2026-01-30, no fix_available, excuses []", e)
+				}
+			}
+			if !reflect.DeepEqual(ids, want) {
+				t.Errorf("%s entries = %v, want %v", key, ids, want)
+			}
+			if f.Pinned != (key == "litellm@1.93.2") {
+				t.Errorf("%s pinned = %v", key, f.Pinned)
+			}
+		}
+		if c := rec.Counts; c.Expired != 3 || c.Errors != 0 {
+			t.Errorf("counts = %+v, want expired 3 and errors 0 (an expired entry is a finding, not an error)", c)
+		}
+		if rec.ExitClass != "finding" {
+			t.Errorf("exit_class = %q, want finding", rec.ExitClass)
+		}
+	})
+
+	t.Run("record expired finding names where the key is pinned", func(t *testing.T) {
+		rec := expiredRun(t)
+		if got := rec.find(t, "expired", "litellm@1.93.2").PinnedIn; !reflect.DeepEqual(got, []auditPinLocation{{"PyPI", ""}, {"GitHub", "BerriAI/litellm"}}) {
+			t.Errorf("litellm@1.93.2 pinned_in = %+v, want the gateway lock then the BerriAI/litellm vendor pin", got)
+		}
+		if got := rec.find(t, "expired", "pkg@1").PinnedIn; len(got) != 0 {
+			t.Errorf("pkg@1 pinned_in = %+v, want [] (no audited pin carries it)", got)
+		}
+	})
+
+	t.Run("record expired and excused fixable on one key are one finding", func(t *testing.T) {
+		keysAt := func(rec auditRecord, key string) []string {
+			var out []string
+			for _, f := range rec.Findings {
+				if f.Key == key {
+					out = append(out, f.Class+" "+f.Key)
+				}
+			}
+			return out
+		}
+		db := newAuditDB(t)
+		db.ghPages("BerriAI/litellm", []map[string]any{ghAdvisory("GHSA-g5ff-637f-6q2m", "", ghVuln{"< 1.95.0", patched("1.95.0")})})
+		reg := append(baseRegister(), auditException("GHSA-g5ff-637f-6q2m", nil, gatewayLitellm, "2026-01-01", "2026-01-30"))
+		res, rec := r.recorded(t, auditTree(t, script, baseIssueLock, baseGatewayLock, reg), db, "2026-01-31", 1)
+		hasLine(t, res.stderr, "ERROR: register entry GHSA-g5ff-637f-6q2m (recheck_by 2026-01-30) has expired as of 2026-01-31; re-review it and set a new recheck_by")
+		hasLine(t, res.stderr, "ERROR: register entry GHSA-g5ff-637f-6q2m excuses litellm@1.93.2 although 1.95.0 is published; set fix_available or move the pin")
+		if got := keysAt(rec, "litellm@1.93.2"); !reflect.DeepEqual(got, []string{"expired litellm@1.93.2"}) {
+			t.Errorf("findings for litellm@1.93.2 = %v, want one expired finding: one key, one issue", got)
+		}
+		want := []auditRecordEntry{{ID: "GHSA-g5ff-637f-6q2m", Advisory: "GHSA-g5ff-637f-6q2m", Fixed: []string{"1.95.0"}}}
+		if got := rec.find(t, "expired", "litellm@1.93.2").ExcusedFixable; !reflect.DeepEqual(got, want) {
+			t.Errorf("excused_fixable = %+v, want %+v (the key's probe rows)", got, want)
+		}
+		if c := rec.Counts; c.Expired != 1 || c.ExcusedFixable != 1 {
+			t.Errorf("counts = %+v, want expired 1 and excused_fixable 1 (one per printed line)", c)
+		}
+		t.Run("an unexpired entry at the key folds too", func(t *testing.T) {
+			db := newAuditDB(t)
+			db.ghPages("BerriAI/litellm", []map[string]any{pinv})
+			reg := append(baseRegister(), auditException("AF-TEST-EXP3", nil, gatewayLitellm, "2026-01-01", "2026-01-30"), pinvEntry)
+			res, rec := r.recorded(t, auditTree(t, script, baseIssueLock, baseGatewayLock, reg), db, "2026-01-31", 1)
+			hasLine(t, res.stderr, "ERROR: register entry GHSA-pinv-0000-0001 excuses litellm@1.93.2 although 1.94.0 is published; set fix_available or move the pin")
+			if got := keysAt(rec, "litellm@1.93.2"); !reflect.DeepEqual(got, []string{"expired litellm@1.93.2"}) {
+				t.Errorf("findings for litellm@1.93.2 = %v, want one expired finding: one key, one issue", got)
+			}
+			f := rec.find(t, "expired", "litellm@1.93.2")
+			if len(f.Entries) != 1 || f.Entries[0].ID != "AF-TEST-EXP3" {
+				t.Errorf("entries = %+v, want the expired AF-TEST-EXP3 alone", f.Entries)
+			}
+			want := []auditRecordEntry{{ID: "GHSA-pinv-0000-0001", Advisory: "GHSA-pinv-0000-0001", Fixed: []string{"1.94.0"}}}
+			if !reflect.DeepEqual(f.ExcusedFixable, want) {
+				t.Errorf("excused_fixable = %+v, want %+v (an unexpired entry at the key folds too)", f.ExcusedFixable, want)
+			}
+		})
+		t.Run("an expired key no probe names carries an empty list", func(t *testing.T) {
+			for _, f := range expiredRun(t).Findings {
+				if f.ExcusedFixable == nil || len(f.ExcusedFixable) != 0 {
+					t.Errorf("%s %s excused_fixable = %#v, want [] (always present)", f.Class, f.Key, f.ExcusedFixable)
+				}
+			}
+		})
+	})
+
+	t.Run("record node behind is a finding", func(t *testing.T) {
+		db := newAuditDB(t)
+		db.nodeIndex(auditNodeRelease{"v96.52.0", true}, auditNodeRelease{"v96.50.1", true})
+		res, rec := r.recorded(t, baseTree(t), db, "2026-01-15", 1)
+		hasLine(t, res.stderr, "ERROR: nodejs v96.50.1 is behind v96.52.0, a newer v96 security release; move NODE_APT_VERSION")
+		f := rec.find(t, "node-behind", "nodejs@v96.50.1")
+		if !f.Pinned || !reflect.DeepEqual(f.Releases, []string{"v96.52.0"}) || !reflect.DeepEqual(f.PinnedIn, []auditPinLocation{{"apt", ""}}) {
+			t.Errorf("finding = %+v; want pinned, releases [v96.52.0], pinned_in [{apt }] (NODE_APT_VERSION is an apt pin)", f)
+		}
+		if c := rec.Counts; c.NodeBehind != 1 || c.Errors != 0 || rec.ExitClass != "finding" {
+			t.Errorf("counts = %+v, class %q; want node_behind 1, errors 0, finding", c, rec.ExitClass)
+		}
+		t.Run("two newer releases are one finding", func(t *testing.T) {
+			db := newAuditDB(t)
+			db.nodeIndex(auditNodeRelease{"v96.53.0", true}, auditNodeRelease{"v96.52.0", true}, auditNodeRelease{"v96.50.1", true})
+			_, rec := r.recorded(t, baseTree(t), db, "2026-01-15", 1)
+			if f := rec.find(t, "node-behind", "nodejs@v96.50.1"); !reflect.DeepEqual(f.Releases, []string{"v96.53.0", "v96.52.0"}) || len(rec.Findings) != 1 {
+				t.Errorf("findings %v, releases %v; want one finding listing both", rec.classKeys(), f.Releases)
+			}
+			if rec.Counts.NodeBehind != 2 {
+				t.Errorf("counts.node_behind = %d, want 2 (one per printed line)", rec.Counts.NodeBehind)
+			}
+		})
+	})
+
+	t.Run("record infrastructure only exits 3", func(t *testing.T) {
+		db := newAuditDB(t)
+		db.faults("querybatch=transport")
+		_, rec := r.recorded(t, baseTree(t), db, "2026-01-15", 3)
+		if rec.ExitClass != "infrastructure" || len(rec.Findings) != 0 {
+			t.Errorf("record = class %q, findings %v; want infrastructure, none", rec.ExitClass, rec.classKeys())
+		}
+		found := false
+		for _, e := range rec.Errors {
+			found = found || strings.Contains(e, "OSV querybatch HTTP 000")
+		}
+		if !found || rec.Counts.Errors != len(rec.Errors) {
+			t.Errorf("errors = %q (counts.errors %d); want the querybatch failure, one element per error", rec.Errors, rec.Counts.Errors)
+		}
+		t.Run("without the record variable", func(t *testing.T) {
+			if res := r.run(baseTree(t), db, "2026-01-15"); res.exit != 3 {
+				t.Errorf("exit = %d, want 3\n%s", res.exit, res.stderr)
+			}
+		})
+		t.Run("a register that is not an array", func(t *testing.T) {
+			tree := baseTree(t)
+			if err := os.WriteFile(filepath.Join(filepath.Dir(filepath.Dir(tree)), advisoryRegisterPath), []byte("{}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, rec := r.recorded(t, tree, newAuditDB(t), "2026-01-15", 3); rec.ExitClass != "infrastructure" || len(rec.Findings) != 0 {
+				t.Errorf("record = class %q, findings %v; want infrastructure, none", rec.ExitClass, rec.classKeys())
+			}
+		})
+	})
+
+	t.Run("record osv outage with a vendor finding exits 1", func(t *testing.T) {
+		db := newAuditDB(t)
+		db.faults("querybatch=transport")
+		db.ghPages("BerriAI/litellm", []map[string]any{ghAdvisory("GHSA-noal-0000-0001", "", ghVuln{"< 1.94.0", patched("1.94.0")})})
+		_, rec := r.recorded(t, baseTree(t), db, "2026-01-15", 1)
+		if rec.ExitClass != "finding" || len(rec.Errors) == 0 {
+			t.Errorf("record = class %q, %d errors; want finding (a finding the run did observe outranks the outage), errors kept", rec.ExitClass, len(rec.Errors))
+		}
+		f := rec.find(t, "unexcused", "litellm@1.93.2")
+		a := onlyAdvisory(t, f)
+		if a.ID != "GHSA-noal-0000-0001" || a.Source != "GitHub" || a.Ecosystem != "GitHub" || a.Repo != "BerriAI/litellm" || !reflect.DeepEqual(a.Fixed, []string{"1.94.0"}) {
+			t.Errorf("advisory = %+v; want the BerriAI/litellm GitHub advisory fixed in 1.94.0", a)
+		}
+		if f.FixPublished == nil || !*f.FixPublished {
+			t.Errorf("fix_published = %v, want true", f.FixPublished)
+		}
+	})
+
+	t.Run("record unset variable writes no file", func(t *testing.T) {
+		for name, run := range map[string]func(t *testing.T) (string, auditDB){
+			"a finding": func(t *testing.T) (string, auditDB) {
+				return auditTree(t, script, vulnerableIssueLock, baseGatewayLock, baseRegister()), vulnerableDB(t)
+			},
+			"a clean tree": func(t *testing.T) (string, auditDB) { return baseTree(t), newAuditDB(t) },
+		} {
+			t.Run(name, func(t *testing.T) {
+				tree, db := run(t)
+				treeRoot := filepath.Dir(filepath.Dir(tree))
+				runDirs := filepath.Dir(r.t.TempDir())
+				beforeTree, beforeRuns := refWalk(t, treeRoot), refWalk(t, runDirs)
+				r.run(tree, db, "2026-01-15")
+				if after := refWalk(t, treeRoot); !reflect.DeepEqual(after, beforeTree) {
+					t.Errorf("the audit wrote into its tree:\nbefore %v\nafter  %v", beforeTree, after)
+				}
+				if after := refWalk(t, runDirs); !reflect.DeepEqual(after, beforeRuns) {
+					t.Errorf("the audit left a file in its HOME, TMPDIR or cwd:\nbefore %v\nafter  %v", beforeRuns, after)
+				}
+			})
+		}
+	})
+
+	t.Run("record relative path is a setup error", func(t *testing.T) {
+		tree := baseTree(t)
+		db := newAuditDB(t)
+		treeRoot := filepath.Dir(filepath.Dir(tree))
+		before := refWalk(t, treeRoot)
+		res := r.run(tree, db, "2026-01-15", "ADVISORY_AUDIT_RECORD=record.json")
+		if res.exit != 2 {
+			t.Errorf("exit = %d, want 2", res.exit)
+		}
+		hasLine(t, res.stderr, "ERROR: ADVISORY_AUDIT_RECORD=record.json: cannot write the finding record")
+		if after := refWalk(t, treeRoot); !reflect.DeepEqual(after, before) {
+			t.Errorf("a relative record path wrote into the tree:\nbefore %v\nafter  %v", before, after)
+		}
+		if calls := db.read("calls.log"); calls != "" {
+			t.Errorf("the audit reached the network before refusing its record path:\n%s", calls)
+		}
+	})
+
+	t.Run("record unwritable path exits 2", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(file, []byte("a regular file\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		path := file + "/record.json" // under a regular file: unwritable for every uid, root included
+		tree := auditTree(t, script, vulnerableIssueLock, baseGatewayLock, baseRegister())
+		res := r.run(tree, vulnerableDB(t), "2026-01-15", "ADVISORY_AUDIT_RECORD="+path)
+		if res.exit != 2 {
+			t.Errorf("exit = %d, want 2 (a setup error outranks the finding)", res.exit)
+		}
+		hasLine(t, res.stderr, "ERROR: ADVISORY_AUDIT_RECORD="+path+": cannot write the finding record")
+		if !regexp.MustCompile(`(?m)^advisory audit: .*, \d+ unexcused, \d+ expired, \d+ node-behind, \d+ excused-fixable, \d+ errors \(as of 2026-01-15\)$`).MatchString(res.stdout) {
+			t.Errorf("the summary line was not printed before the record write failed:\n%s", res.stdout)
+		}
+		hasLine(t, res.stdout, "UNEXCUSED GHSA-2fqr-mr3j-6wp8 [CVE-2026-54279 PYSEC-2026-2112] OSV PyPI aiohttp==3.12.15")
+		t.Run("a directory is not a record path", func(t *testing.T) {
+			dir := t.TempDir()
+			res := r.run(tree, vulnerableDB(t), "2026-01-15", "ADVISORY_AUDIT_RECORD="+dir)
+			if res.exit != 2 {
+				t.Errorf("exit = %d, want 2", res.exit)
+			}
+			hasLine(t, res.stderr, "ERROR: ADVISORY_AUDIT_RECORD="+dir+": cannot write the finding record")
+			if left := refWalk(t, dir); len(left) != 0 {
+				t.Errorf("the writer left %v in the directory", left)
+			}
+		})
+	})
+
+	t.Run("record api github branch stays get only", func(t *testing.T) {
+		fn := regexp.MustCompile(`(?ms)^http\(\) \{\n.*?^\}`).FindString(string(script))
+		arm := regexp.MustCompile(`(?s)https://api\.github\.com/\*\)(.*?);;`).FindStringSubmatch(fn)
+		if arm == nil {
+			t.Fatalf("%s's http() has no https://api.github.com/*) arm", auditScriptRel)
+		}
+		for _, banned := range []string{"-X", "--request", "--data", "-d ", "-I", "--head"} {
+			if strings.Contains(arm[1], banned) {
+				t.Errorf("the api.github.com arm of http() passes %q; GitHub is only ever read", banned)
+			}
+		}
+	})
+
+	t.Run("excused fixable without fix_available fails", func(t *testing.T) {
+		res, rec := litellmRecorded(t, "1.93.2", pinv, append(baseRegister(), pinvEntry), 1)
+		hasLine(t, res.stderr, probePinv)
+		hasLine(t, res.stdout, "excused   GHSA-pinv-0000-0001 [] GitHub BerriAI/litellm 1.93.2 (yes) (register: GHSA-pinv-0000-0001)")
+		f := rec.find(t, "excused-fixable", "litellm@1.93.2")
+		if want := []auditRecordEntry{{ID: "GHSA-pinv-0000-0001", Advisory: "GHSA-pinv-0000-0001", Fixed: []string{"1.94.0"}}}; !reflect.DeepEqual(f.Entries, want) {
+			t.Errorf("entries = %+v, want %+v", f.Entries, want)
+		}
+		if c := rec.Counts; c.ExcusedFixable != 1 || c.Errors != 0 || c.Unexcused != 0 || rec.ExitClass != "finding" {
+			t.Errorf("counts = %+v, class %q; want excused_fixable 1, errors 0, unexcused 0, finding", c, rec.ExitClass)
+		}
+		t.Run("two kept candidates", func(t *testing.T) {
+			two := ghAdvisory("GHSA-pinv-0000-0001", "", ghVuln{"< 1.94.0", patched("1.94.0")}, ghVuln{">= 1.95.0, < 1.100.4", patched("1.100.4")})
+			res, rec := litellmRecorded(t, "1.93.2", two, append(baseRegister(), pinvEntry), 1)
+			hasLine(t, res.stderr, "ERROR: register entry GHSA-pinv-0000-0001 excuses litellm@1.93.2 although 1.94.0, 1.100.4 is published; set fix_available or move the pin")
+			if got := rec.find(t, "excused-fixable", "litellm@1.93.2").Entries; len(got) != 1 || !reflect.DeepEqual(got[0].Fixed, []string{"1.94.0", "1.100.4"}) {
+				t.Errorf("entries = %+v, want one entry fixed [1.94.0 1.100.4] (every kept candidate, lowest first)", got)
+			}
+		})
+		t.Run("three kept candidates list lowest first", func(t *testing.T) {
+			three := ghAdvisory("GHSA-pinv-0000-0001", "", ghVuln{">= 1.95.0, < 1.100.4", patched("1.100.4")}, ghVuln{"< 1.94.0", patched("1.94.0")}, ghVuln{">= 1.94.0, < 1.95.1", patched("1.95.1")})
+			res, rec := litellmRecorded(t, "1.93.2", three, append(baseRegister(), pinvEntry), 1)
+			hasLine(t, res.stderr, "ERROR: register entry GHSA-pinv-0000-0001 excuses litellm@1.93.2 although 1.94.0, 1.95.1, 1.100.4 is published; set fix_available or move the pin")
+			if got := rec.find(t, "excused-fixable", "litellm@1.93.2").Entries; len(got) != 1 || !reflect.DeepEqual(got[0].Fixed, []string{"1.94.0", "1.95.1", "1.100.4"}) {
+				t.Errorf("entries = %+v, want one entry fixed [1.94.0 1.95.1 1.100.4], lowest first", got)
+			}
+			_, rec = litellmRecorded(t, "1.93.2", three, baseRegister(), 1)
+			if a := onlyAdvisory(t, rec.find(t, "unexcused", "litellm@1.93.2")); !reflect.DeepEqual(a.Fixed, []string{"1.94.0", "1.95.1", "1.100.4"}) {
+				t.Errorf("unexcused fixed = %q, want [1.94.0 1.95.1 1.100.4], lowest first", a.Fixed)
+			}
+		})
+	})
+
+	t.Run("excused fixable acknowledged passes", func(t *testing.T) {
+		res, rec := litellmRecorded(t, "1.93.2", pinv, append(baseRegister(), acknowledged(pinvEntry, "1.94.0")), 0)
+		if strings.Contains(res.stderr, "although") {
+			t.Errorf("an acknowledged fix still printed the probe line:\n%s", res.stderr)
+		}
+		if rec.ExitClass != "clean" || len(rec.Findings) != 0 {
+			t.Errorf("record = class %q, findings %v; want clean, none", rec.ExitClass, rec.classKeys())
+		}
+		t.Run("a blank acknowledgement does not silence the probe", func(t *testing.T) {
+			res, _ := litellmRecorded(t, "1.93.2", pinv, append(baseRegister(), acknowledged(pinvEntry, "")), 1)
+			hasLine(t, res.stderr, probePinv)
+		})
+	})
+
+	t.Run("excused fixable ignores a fix at or below the pin", func(t *testing.T) {
+		for name, adv := range map[string]map[string]any{"a patched version below the pin": rw8w, "an unparseable patched version": tbd} {
+			t.Run(name, func(t *testing.T) {
+				id := adv["ghsa_id"].(string)
+				res, rec := openobserveRecorded(t, adv, append(baseRegister(), auditException(id, nil, ooPin, "2026-01-01", "2026-01-31")), 0)
+				if strings.Contains(res.stderr, "although") || rec.ExitClass != "clean" {
+					t.Errorf("class %q; a candidate at or below the pin, or one that does not parse, is no published fix:\n%s", rec.ExitClass, res.stderr)
+				}
+			})
+		}
+		t.Run("a GIT range", func(t *testing.T) {
+			db := newAuditDB(t)
+			db.osv(auditControlLine, "PyPI\taiohttp\t3.12.15\tGHSA-gitr-0000-0001")
+			db.vulnGitFixed("GHSA-gitr-0000-0001", "PyPI", "aiohttp", gitSHA)
+			reg := append(baseRegister(), auditException("GHSA-gitr-0000-0001", nil, vulnerableAiohttp, "2026-01-01", "2026-01-31"))
+			res, rec := r.recorded(t, auditTree(t, script, vulnerableIssueLock, baseGatewayLock, reg), db, "2026-01-15", 0)
+			if strings.Contains(res.stderr, "although") || rec.ExitClass != "clean" {
+				t.Errorf("class %q; a commit SHA from a GIT range is no published version:\n%s", rec.ExitClass, res.stderr)
+			}
+		})
+	})
+
+	t.Run("record unexcused fixed excludes a fix at or below the pin", func(t *testing.T) {
+		_, rec := openobserveRecorded(t, rw8w, baseRegister(), 1)
+		f := rec.find(t, "unexcused", ooKey)
+		a := onlyAdvisory(t, f)
+		if a.ID != "GHSA-rw8w-37p9-mrrp" || a.Source != "GitHub" || a.Ecosystem != "GitHub" || a.Repo != "openobserve/openobserve" {
+			t.Errorf("advisory = %+v; want the openobserve/openobserve GitHub advisory", a)
+		}
+		wantNoFix(t, f, "v0.5.2")
+		if !reflect.DeepEqual(f.PinnedIn, []auditPinLocation{{"GitHub", "openobserve/openobserve"}}) {
+			t.Errorf("pinned_in = %+v, want the openobserve/openobserve vendor pin", f.PinnedIn)
+		}
+		t.Run("a patched version equal to the pin", func(t *testing.T) {
+			eq := ghAdvisory("GHSA-eqpn-0000-0001", "", ghVuln{"All (before fix)", patched(ooPin.version)})
+			_, rec := openobserveRecorded(t, eq, baseRegister(), 1)
+			wantNoFix(t, rec.find(t, "unexcused", ooKey), ooPin.version)
+		})
+	})
+
+	t.Run("record unexcused fixed excludes git range shas", func(t *testing.T) {
+		gitRun := func(t *testing.T, ranges ...map[string]any) auditFinding {
+			db := newAuditDB(t)
+			db.osv(auditControlLine, "PyPI\taiohttp\t3.12.15\tGHSA-gitr-0000-0001")
+			db.vulnAffected("GHSA-gitr-0000-0001", "PyPI", "aiohttp", nil, ranges...)
+			_, rec := r.recorded(t, auditTree(t, script, vulnerableIssueLock, baseGatewayLock, baseRegister()), db, "2026-01-15", 1)
+			return rec.find(t, "unexcused", "aiohttp@3.12.15")
+		}
+		wantNoFix(t, gitRun(t, osvRange("GIT", gitSHA)), gitSHA)
+		t.Run("beside an ECOSYSTEM range", func(t *testing.T) {
+			f := gitRun(t, osvRange("GIT", gitSHA), osvRange("ECOSYSTEM", "3.13.0"))
+			a := onlyAdvisory(t, f)
+			if !reflect.DeepEqual(a.Fixed, []string{"3.13.0"}) || a.FixedRaw != gitSHA {
+				t.Errorf("fixed %q, fixed_raw %q; want [3.13.0] and the SHA only in fixed_raw", a.Fixed, a.FixedRaw)
+			}
+			if f.FixPublished == nil || !*f.FixPublished {
+				t.Errorf("fix_published = %v, want true", f.FixPublished)
+			}
+		})
+	})
+
+	t.Run("record unexcused fixed routes an unparseable candidate to fixed_raw", func(t *testing.T) {
+		_, rec := openobserveRecorded(t, tbd, baseRegister(), 1)
+		wantNoFix(t, rec.find(t, "unexcused", ooKey), "TBD (maintainers will fill once fixed)")
+	})
+
+	t.Run("record unexcused fix published is false on the no fix path", func(t *testing.T) {
+		_, rec := r.recorded(t, auditTree(t, script, vulnerableIssueLock, baseGatewayLock, baseRegister()), vulnerableDB(t), "2026-01-15", 1)
+		wantNoFix(t, rec.find(t, "unexcused", "aiohttp@3.12.15"), "")
+	})
+
+	t.Run("record and probe agree on the fix", func(t *testing.T) {
+		db := newAuditDB(t)
+		db.osv(auditControlLine, "PyPI\taiohttp\t3.12.15\tGHSA-agre-0000-0001", "PyPI\taiohttp\t3.12.14\tGHSA-agre-0000-0001")
+		db.vulnFixed("GHSA-agre-0000-0001", "PyPI", "aiohttp", "3.13.0")
+		gateway := []auditPin{{"aiohttp", "3.12.14"}, {"litellm[proxy]", "1.93.2"}, {"pip", "26.2.2"}}
+		reg := append(baseRegister(), auditException("GHSA-agre-0000-0001", nil, vulnerableAiohttp, "2026-01-01", "2026-01-31"))
+		res, rec := r.recorded(t, auditTree(t, script, vulnerableIssueLock, gateway, reg), db, "2026-01-15", 1)
+		hasLine(t, res.stderr, "ERROR: register entry GHSA-agre-0000-0001 excuses aiohttp@3.12.15 although 3.13.0 is published; set fix_available or move the pin")
+		probe := rec.find(t, "excused-fixable", "aiohttp@3.12.15")
+		unexcused := rec.find(t, "unexcused", "aiohttp@3.12.14")
+		if len(probe.Entries) != 1 || !reflect.DeepEqual(probe.Entries[0].Fixed, []string{"3.13.0"}) || !reflect.DeepEqual(onlyAdvisory(t, unexcused).Fixed, []string{"3.13.0"}) {
+			t.Errorf("excused-fixable entries %+v and unexcused advisories %+v must both name [3.13.0], read from the one fix table", probe.Entries, unexcused.Advisories)
+		}
+		if got := rec.classKeys(); len(got) != 2 {
+			t.Errorf("findings = %v, want the excused-fixable and the unexcused one only (the covered key is not unexcused)", got)
+		}
+
+		dual := func(t *testing.T, reg []advisoryException, wantExit int) (refRunResult, auditRecord) {
+			db := newAuditDB(t)
+			db.osv(auditControlLine, "PyPI\tlitellm\t1.93.2\tGHSA-dual-0000-0001")
+			db.vulnFixed("GHSA-dual-0000-0001", "PyPI", "litellm", "1.95.0")
+			db.ghPages("BerriAI/litellm", []map[string]any{ghAdvisory("GHSA-dual-0000-0001", "", ghVuln{"< 1.95.0", patched("1.95.0")})})
+			return r.recorded(t, auditTree(t, script, baseIssueLock, baseGatewayLock, reg), db, "2026-01-15", wantExit)
+		}
+		t.Run("one candidate from two sources is one row", func(t *testing.T) {
+			_, rec := dual(t, baseRegister(), 1)
+			f := rec.find(t, "unexcused", "litellm@1.93.2")
+			a := onlyAdvisory(t, f)
+			if a.Source != "OSV" || !reflect.DeepEqual(a.Fixed, []string{"1.95.0"}) {
+				t.Errorf("advisory = %+v; want the first ($work/findings order: OSV) copy, fixed [1.95.0] once", a)
+			}
+			if rec.Counts.Unexcused != 2 {
+				t.Errorf("counts.unexcused = %d, want 2 (one per printed row)", rec.Counts.Unexcused)
+			}
+			res, rec := dual(t, append(baseRegister(), auditException("GHSA-dual-0000-0001", nil, gatewayLitellm, "2026-01-01", "2026-01-31")), 1)
+			if n := strings.Count(res.stderr, "ERROR: register entry GHSA-dual-0000-0001 excuses litellm@1.93.2 although 1.95.0 is published"); n != 1 || rec.Counts.ExcusedFixable != 1 {
+				t.Errorf("the probe line printed %d times, counts.excused_fixable %d; want 1 and 1 for one advisory reported by two sources", n, rec.Counts.ExcusedFixable)
+			}
+		})
+	})
+
+	t.Run("record does not change the printed output", func(t *testing.T) {
+		expiredReg := append(baseRegister(), auditException("AF-TEST-EXPIRED", nil, adNoPin, "2026-01-01", "2026-01-30"))
+		for name, fixture := range map[string]func(t *testing.T) (string, auditDB, string){
+			"clean": func(t *testing.T) (string, auditDB, string) { return baseTree(t), newAuditDB(t), "2026-01-15" },
+			"unexcused": func(t *testing.T) (string, auditDB, string) {
+				return auditTree(t, script, vulnerableIssueLock, baseGatewayLock, baseRegister()), vulnerableDB(t), "2026-01-15"
+			},
+			"expired": func(t *testing.T) (string, auditDB, string) {
+				return auditTree(t, script, baseIssueLock, baseGatewayLock, expiredReg), newAuditDB(t), "2026-01-31"
+			},
+			"node behind": func(t *testing.T) (string, auditDB, string) {
+				db := newAuditDB(t)
+				db.nodeIndex(auditNodeRelease{"v96.52.0", true}, auditNodeRelease{"v96.50.1", true})
+				return baseTree(t), db, "2026-01-15"
+			},
+			"infrastructure": func(t *testing.T) (string, auditDB, string) {
+				db := newAuditDB(t)
+				db.faults("querybatch=transport")
+				return baseTree(t), db, "2026-01-15"
+			},
+			"excused fixable": func(t *testing.T) (string, auditDB, string) {
+				db := newAuditDB(t)
+				db.ghPages("BerriAI/litellm", []map[string]any{pinv})
+				return auditTree(t, script, baseIssueLock, baseGatewayLock, append(baseRegister(), pinvEntry)), db, "2026-01-15"
+			},
+			"vendor finding": func(t *testing.T) (string, auditDB, string) {
+				db := newAuditDB(t)
+				db.ghPages("BerriAI/litellm", []map[string]any{ghAdvisory("GHSA-noal-0000-0001", "", ghVuln{"< 1.94.0", patched("1.94.0")})})
+				return baseTree(t), db, "2026-01-15"
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				tree, db, today := fixture(t)
+				unset := r.run(tree, db, today)
+				set := r.run(tree, db, today, "ADVISORY_AUDIT_RECORD="+filepath.Join(t.TempDir(), "record.json"))
+				if set.exit != unset.exit || set.stdout != unset.stdout || set.stderr != unset.stderr {
+					t.Errorf("setting ADVISORY_AUDIT_RECORD changed the run:\nexit %d vs %d\nstdout set:\n%s\nstdout unset:\n%s\nstderr set:\n%s\nstderr unset:\n%s",
+						set.exit, unset.exit, set.stdout, unset.stdout, set.stderr, unset.stderr)
+				}
 			})
 		}
 	})

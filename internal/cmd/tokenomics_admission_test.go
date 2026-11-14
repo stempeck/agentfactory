@@ -423,7 +423,9 @@ func TestBoundaryAdmission(t *testing.T) {
 			t.Fatal(err)
 		}
 		writeRuntimeFile(t, fx.workDir, "session_id", "sessa")
-		plantSessionSnapshot(t, fx.root, fx.agent, "sessa", 60, 1000, now.Add(-10*time.Second), now)
+		// The host agrees with the big profile's declaration, so the session window is 1000000
+		// under the marker; the small profile still declares less, which is its window without one.
+		plantSessionSnapshotWithTotal(t, fx.root, fx.agent, "sessa", 60, 1000000, 1000, now.Add(-10*time.Second), now)
 		seedAppetite(t, fx.root, "offpath", "s-1", "big", 150000, 3)
 
 		startupCfg, err := config.LoadStartupConfig(fx.root)
@@ -451,7 +453,7 @@ func TestBoundaryAdmission(t *testing.T) {
 				"the window must come from the same profile the appetite was keyed on", a.window.Tokens)
 		}
 		if !a.admits() {
-			t.Error("150000 of a 1000000-token window at 60% of 200000 occupancy fits; the mechanism " +
+			t.Error("150000 of a 1000000-token window at 60% occupancy fits; the mechanism " +
 				"refused a step its real backend has room for")
 		}
 	})
@@ -881,7 +883,7 @@ func TestAttestationOnlyWhenReduced(t *testing.T) {
 
 	setup := func(t *testing.T) lifecycleFixture {
 		t.Helper()
-		fx, _, _ := primedFixture(t, roomyOccupancyPct)
+		fx, _, _ := primedFixtureWithTotal(t, roomyOccupancyPct, roomyWindowTokens)
 		declareWindow(t, fx.root, roomyWindowTokens)
 		armEfficiency(t, fx.root, nil)
 		hookFormulaName(t, fx.workDir, "offpath")
@@ -945,7 +947,7 @@ func TestFirstSessionSelectsLevel(t *testing.T) {
 	// hookedFormulaName resolves "" exactly as it does before the first af done.
 	setup := func(t *testing.T) lifecycleFixture {
 		t.Helper()
-		fx, _, _ := primedFixture(t, roomyOccupancyPct)
+		fx, _, _ := primedFixtureWithTotal(t, roomyOccupancyPct, roomyWindowTokens)
 		declareWindow(t, fx.root, roomyWindowTokens)
 		armEfficiency(t, fx.root, nil)
 		model, _ := resolveRecordModel(fx.root, fx.workDir, fx.agent, "")

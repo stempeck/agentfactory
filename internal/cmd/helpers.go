@@ -173,12 +173,13 @@ func respawnSession(opts RespawnOptions) error {
 	// ctx — every one of its callers reaches it from a recycle decision rather than from a cobra
 	// invocation — and adding one would change a signature they all share for a cancellation
 	// nothing here can honour: the pane is replaced by the last statement below.
-	c, reports, err := launchContributions(context.Background(), opts.FactoryRoot, opts.AgentName, respawnAgentDir(opts), opts.AgentEntry, "", false, false, os.Stderr)
+	c, reports, err := launchContributions(context.Background(), opts.FactoryRoot, opts.AgentName, respawnAgentDir(opts), opts.AgentEntry, "", launchGates{}, os.Stderr)
 	opts.DroppedIntegrations = reports.DroppedIntegrations
 	if err != nil {
 		recordRecycle(opts, err)
 		return err
 	}
+	c.LaunchKind = startupLaunchRespawn
 	mgr.SetLaunchContributions(&c)
 	line, err := mgr.BuildStartupCommand()
 	if err != nil {
@@ -213,7 +214,7 @@ func respawnSession(opts RespawnOptions) error {
 	// The respawn error is captured, recorded, then returned UNCHANGED. Letting the log write
 	// decide the return value would both mask a real respawn failure and break this function's
 	// existing error contract.
-	err = tx.RespawnPane(opts.PaneID, respawnCmd)
+	err = reports.startWithWindowLaunchFact(opts.FactoryRoot, opts.AgentName, true, os.Stderr, func() error { return tx.RespawnPane(opts.PaneID, respawnCmd) })
 	recordRecycle(opts, err)
 	if err == nil {
 		reports.mailIntegrations(opts.FactoryRoot, os.Stderr)

@@ -1,6 +1,6 @@
 # ADR-022: The memory vault holds durable cross-task learnings; ephemeral per-task and handoff state stays in mail and checkpoints
 
-**Status:** Accepted
+**Status:** Accepted (amended 2026-11-13 — the standing mark; see *Amendment* below)
 **Date:** 2026-08-18
 
 ## Context
@@ -55,7 +55,7 @@ mechanisms already in the subsystem, not by discipline alone:
   keys the shortest TTL and is flagged rather than served (`internal/memory/note.go:18-24,26-30`).
 - **Per-type TTL.** A note that is not a durable learning ages out of what is served: `gotcha`/
   `outcome` expire at 90 days, `ops`/`model-behavior` at 180, `improvement` carries no TTL and is
-  nagged toward graduation instead (`internal/memory/slice.go:33-37,51`; `.designs/515/design-doc.md:85`).
+  nagged toward graduation instead (`internal/memory/slice.go:34-38,52`; `.designs/515/design-doc.md:85`).
 - **Graduation + read-time suppression.** When a learning lands somewhere durable it graduates to a
   real destination and is suppressed from the injected slice at read time — correct even if no
   periodic job runs (`internal/memory/note.go` status transitions; `.designs/515/design-doc.md:85`).
@@ -71,13 +71,37 @@ If a durable-but-non-learning artifact class (for example, long-lived cross-task
 not operational learnings) proves it genuinely needs the vault, revisit the IN-list deliberately —
 add a `--type` and its TTL — rather than widening usage silently under an existing type.
 
+## Amendment (2026-11-13): The standing mark
+
+Issue #754 adds a third mark beside graduate and expire. Frontmatter `standing: true` is set and
+cleared only by the operator verbs `af memory pin` and `af memory unpin`
+(`internal/memory/store.go` `Pin`/`Unpin`; `internal/cmd/memory.go` `runMemoryPin`/`runMemoryUnpin`).
+An agent cannot end a pin: its `graduate` and `expire` of a pinned note are refused, and the
+operator unpins it first.
+
+- **A mark, not a type.** Like `status`, `standing` says what the operator decided about a note,
+  not what kind of learning it is, so the closed `--type` vocabulary and the Flip condition above
+  stand unchanged. A pinned note is still a durable learning; it is not a new artifact class.
+- **Served first, inside the same budget.** A pinned note's date and subject reach every session
+  start as the pinned block at the head of the memory entry, bounded at 3,072 B
+  (`memory.DefaultStandingBytes`) inside the unchanged 4,736 B memory entry (ADR-023(a)); the
+  note's body stays one `af memory show` away (`internal/memory/pinned.go`).
+- **TTL suspended while it stands.** A pinned note is served whatever its TTL says, because a
+  ruling the operator has not withdrawn has not gone stale. Graduation and expiry still end it: a
+  graduated or expired note is never served, pinned or not.
+
+The boundary this ADR draws is unchanged: the vault holds durable, cross-task learnings, and
+ephemeral per-task and handoff state stays in mail and checkpoints. A pin is not a handoff
+channel; it is the operator choosing which learning every session must see first.
+
 ## Corpus links
 
 - `internal/memory/note.go:15-24` — the closed `--type` vocabulary (the IN-list) and why it is closed
-- `internal/memory/slice.go:33-37,51` — per-type TTLs and the graduation-due clock
+- `internal/memory/slice.go:34-38,52` — per-type TTLs and the graduation-due clock
 - `internal/cmd/memory.go:80-83` — command help: "Durable per-agent learnings vault"
 - `internal/cmd/recovery.go` — `contextAdvisoryBody`: durable learnings → `af memory add`, ephemeral → mail summaries
 - `.designs/515/design-doc.md:66` — #626's four writable-surface economics (why mail/checkpoints are the ephemeral channels)
 - `.designs/515/design-doc.md:16,19` — C-515-P1 (journal, not reference) and C-515-P4 (content boundaries)
 - `.designs/515/design-doc.md:85,178` — the enforced note lifecycle and Risk R9 (boundary erosion) mitigations
 - ADR-019 — no container recreation (the vault is container-local; export is the durability seam)
+- `internal/memory/pinned.go` — the pinned block, its one measure and the shared sentinel fence (Amendment)

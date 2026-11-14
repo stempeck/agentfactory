@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,15 +19,17 @@ import (
 // memoryVerbFlagNames is the reset list resetMemoryFlags walks, keyed by verb. It is a named
 // var, not a literal inside the loop, so TestResetMemoryFlags_CoversEveryVerbFlag can prove it
 // stayed complete: the helper skips names it cannot find, so a flag added to a memory verb and
-// forgotten here leaks its value into sibling tests without any compile error. Nine verbs share
+// forgotten here leaks its value into sibling tests without any compile error. Eleven verbs share
 // one process-global rootCmd, so this is not optional (mail_test.go:157-184 precedent).
 var memoryVerbFlagNames = map[string][]string{
 	"add":      {"subject", "message", "type", "formula", "evidence"},
-	"list":     {"agent", "formula", "all", "json"},
+	"list":     {"agent", "formula", "all", "json", "type", "all-rows"},
 	"show":     {},
 	"graduate": {"to"},
 	"expire":   {},
 	"import":   {"agent"},
+	"pin":      {"agent"},
+	"unpin":    {"agent"},
 	"export":   {},
 	"status":   {"nag"},
 	"check":    {"inject"},
@@ -142,8 +146,8 @@ func noteFilesUnder(t *testing.T, dir string) []string {
 
 // ---------------------------------------------------------------- AC1: surface
 
-func TestMemoryCmd_NineVerbsRegistered(t *testing.T) {
-	want := []string{"add", "check", "expire", "export", "graduate", "import", "list", "show", "status"}
+func TestMemoryCmd_ElevenVerbsRegistered(t *testing.T) {
+	want := []string{"add", "check", "expire", "export", "graduate", "import", "list", "pin", "show", "status", "unpin"}
 	for _, verb := range want {
 		c, _, err := rootCmd.Find([]string{"memory", verb})
 		if err != nil {
@@ -158,7 +162,7 @@ func TestMemoryCmd_NineVerbsRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("finding memory command: %v", err)
 	}
-	// Exact, so a tenth verb has to be a deliberate edit here (AC1 pins the surface at nine).
+	// Exact, so a twelfth verb has to be a deliberate edit here.
 	if got := len(memCmd.Commands()); got != len(want) {
 		var names []string
 		for _, c := range memCmd.Commands() {
@@ -471,7 +475,7 @@ func TestMemoryCheckInject_OverflowCountsOnlyBudgetedOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("check --inject: %v", err)
 	}
-	want := "…and 3 more — `af memory list`"
+	want := "…and 3 more — `af memory list --type <type>` or `--formula <name>`"
 	if !strings.Contains(out, want) {
 		t.Errorf("want overflow line %q (the 3 active notes the budget dropped, NOT the 5 the filter "+
 			"also excluded); got:\n%s", want, out)
@@ -1045,4 +1049,382 @@ func TestMemoryAdd_ReadsBodyFromStdin(t *testing.T) {
 	if len(notes) != 1 || !strings.Contains(notes[0].Body, "piped body text") {
 		t.Errorf("the piped body did not reach the note: %+v", notes)
 	}
+}
+
+// ---------------------------------------------------------------- list cap, order and flags (C6)
+
+const memoryListCap = 8192
+
+func memoryListOverflow(n int) string {
+	return fmt.Sprintf("… and %d more (--all-rows, --type, --formula)", n)
+}
+
+// listVaultNote is the i-th note of a large vault: a timestamp-free id, a subject long enough that
+// a few dozen rows fill the text cap, and a distinct Created, newest first by index.
+func listVaultNote(i int, now time.Time) memory.Note {
+	return memory.Note{
+		ID:      fmt.Sprintf("list-note-%04d", i),
+		Type:    memory.TypeOps,
+		Created: now.Add(-time.Duration(i+1) * time.Minute),
+		Body:    "# " + paddedSubject(fmt.Sprintf("list vault learning %04d", i), 160) + "\n\nbody\n",
+	}
+}
+
+func seedListVault(t *testing.T, root, agent string, count int, now time.Time, adjust func(i int, n *memory.Note)) {
+	t.Helper()
+	for i := 0; i < count; i++ {
+		n := listVaultNote(i, now)
+		if adjust != nil {
+			adjust(i, &n)
+		}
+		n.ID = strings.Replace(n.ID, "list-note", agent+"-note", 1)
+		seedNote(t, root, agent, n)
+	}
+}
+
+func listTextLines(out string) []string {
+	return strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+}
+
+func listRowID(line string) string {
+	f := strings.Fields(line)
+	if len(f) < 2 {
+		return ""
+	}
+	return f[1]
+}
+
+func listRowIDs(rows []string) []string {
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, listRowID(r))
+	}
+	return ids
+}
+
+func TestMemoryList_CappedPinnedFirst(t *testing.T) {
+	factoryRoot, aliceDir := setupMemoryFixture(t)
+	now := time.Now().UTC()
+	pinned := map[string]bool{}
+	// Five pins spread across the ages, the last of them the oldest note in the vault, so a list
+	// that kept recency order would cut every one of them but the first.
+	seedListVault(t, factoryRoot, "alice", 1000, now, func(i int, n *memory.Note) {
+		if i%200 == 199 {
+			n.Standing = true
+			pinned["alice-note-"+strings.TrimPrefix(n.ID, "list-note-")] = true
+		}
+	})
+	asAgentAt(t, aliceDir, "")
+
+	out, err := execMemoryOut(t, "list")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(out) > memoryListCap {
+		t.Errorf("the text output is %d B, over the %d B cap", len(out), memoryListCap)
+	}
+	lines := listTextLines(out)
+	if len(lines) < 3 {
+		t.Fatalf("want a header, rows and the overflow line, got:\n%s", out)
+	}
+	rows := lines[1 : len(lines)-1]
+	seenOther, pinsShown := false, 0
+	for _, r := range rows {
+		if pinned[listRowID(r)] {
+			pinsShown++
+			if seenOther {
+				t.Errorf("pinned row %s comes after an unpinned one", listRowID(r))
+			}
+			if !strings.Contains(r, "active (pinned)") {
+				t.Errorf("a pinned row's STATUS must read `active (pinned)`: %q", r)
+			}
+			continue
+		}
+		seenOther = true
+		if strings.Contains(r, "(pinned)") {
+			t.Errorf("an unpinned row is marked pinned: %q", r)
+		}
+	}
+	if pinsShown != len(pinned) {
+		t.Errorf("the capped text shows %d of the %d pinned rows", pinsShown, len(pinned))
+	}
+	if want := memoryListOverflow(1000 - len(rows)); lines[len(lines)-1] != want {
+		t.Errorf("the last line is %q, want %q", lines[len(lines)-1], want)
+	}
+
+	full, err := execMemoryOut(t, "list", "--all-rows")
+	if err != nil {
+		t.Fatalf("list --all-rows: %v", err)
+	}
+	fullLines := listTextLines(full)
+	if len(fullLines) != 1001 {
+		t.Fatalf("--all-rows prints %d lines, want the header and 1000 rows", len(fullLines))
+	}
+	if lines[0] != fullLines[0] {
+		t.Errorf("the capped header %q is not the full table's %q", lines[0], fullLines[0])
+	}
+	for i, r := range rows {
+		if r != fullLines[i+1] {
+			t.Fatalf("capped row %d is %q, the full table's is %q: the cut is not a line prefix of one rendering", i, r, fullLines[i+1])
+		}
+	}
+	k := len(rows)
+	oneMore := strings.Join(fullLines[:k+2], "\n") + "\n" + memoryListOverflow(1000-k-1) + "\n"
+	if len(oneMore) <= memoryListCap {
+		t.Errorf("one more row and its overflow line still fit (%d B): the cut is not the longest prefix", len(oneMore))
+	}
+}
+
+func TestMemoryList_OrderPinnedActiveNonActive(t *testing.T) {
+	factoryRoot, aliceDir := setupMemoryFixture(t)
+	now := time.Now().UTC()
+	day := 24 * time.Hour
+	for _, n := range []memory.Note{
+		{ID: "2026-01-01T0000Z-old-pin", Created: now.Add(-300 * day), Body: "# an old ruling\n", Standing: true},
+		{ID: "zz-new-pin", Created: now.Add(-2 * day), Body: "# a new ruling\n", Standing: true},
+		{ID: "lapsed-pin", Created: now.Add(-20 * day), Expires: now.Add(-day), Body: "# a ruling past its TTL\n", Standing: true},
+		{ID: "a-graduated-pin", Created: now.Add(-3 * day), Status: memory.StatusGraduated, GraduatedTo: "pr#1", Body: "# a graduated ruling\n", Standing: true},
+		// The imported id carries no timestamp and sorts ahead of every dated id, yet it is the
+		// oldest active note: only an order by Created puts it last among them (D-18).
+		{ID: "imported-ruling-note", Created: now.Add(-200 * day), Body: "# an imported learning\n"},
+		{ID: "2026-10-01T0000Z-older", Created: now.Add(-43 * day), Body: "# an older learning\n"},
+		{ID: "2026-11-12T0000Z-newer", Created: now.Add(-day), Body: "# a newer learning\n"},
+		{ID: "b-graduated", Created: now.Add(-5 * day), Status: memory.StatusGraduated, GraduatedTo: "pr#2", Body: "# graduated\n"},
+		{ID: "c-expired", Created: now.Add(-10 * day), Status: memory.StatusExpired, Body: "# expired\n"},
+	} {
+		seedNote(t, factoryRoot, "alice", n)
+	}
+	asAgentAt(t, aliceDir, "")
+
+	out, err := execMemoryOut(t, "list")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	lines := listTextLines(out)
+	if len(lines) < 2 {
+		t.Fatalf("want a header and rows, got:\n%s", out)
+	}
+	want := []string{
+		"zz-new-pin", "lapsed-pin", "2026-01-01T0000Z-old-pin",
+		"2026-11-12T0000Z-newer", "2026-10-01T0000Z-older", "imported-ruling-note",
+		"a-graduated-pin", "b-graduated", "c-expired",
+	}
+	if got := listRowIDs(lines[1:]); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("row order:\n got %q\nwant %q", got, want)
+	}
+	for _, r := range lines[1:] {
+		switch id := listRowID(r); id {
+		case "zz-new-pin", "2026-01-01T0000Z-old-pin":
+			if !strings.Contains(r, "active (pinned)") {
+				t.Errorf("pinned row %s must read `active (pinned)`: %q", id, r)
+			}
+		case "lapsed-pin":
+			if !strings.Contains(r, "expired (ttl, pinned)") || strings.Contains(r, "active (pinned)") {
+				t.Errorf("pinned row %s is past its TTL, so it must read `expired (ttl, pinned)`: %q", id, r)
+			}
+		case "a-graduated-pin":
+			if strings.Contains(r, "(pinned)") || !strings.Contains(r, memory.StatusGraduated) {
+				t.Errorf("a graduated standing note is not served, so it is not pinned: %q", r)
+			}
+		}
+	}
+}
+
+func TestMemoryList_JSONUnchanged(t *testing.T) {
+	factoryRoot, aliceDir := setupMemoryFixture(t)
+	now := time.Now().UTC()
+	seedListVault(t, factoryRoot, "alice", 1000, now, func(i int, n *memory.Note) {
+		if i%2 == 0 {
+			n.Formula, n.Run = "fable-increment", "run-1"
+		}
+		if i%250 == 0 {
+			n.Standing = true
+		}
+	})
+	seedNote(t, factoryRoot, "alice", memory.Note{
+		ID: "lapsed-pin", Created: now.Add(-20 * 24 * time.Hour), Expires: now.Add(-time.Hour),
+		Body: "# a ruling past its TTL\n", Standing: true,
+	})
+	asAgentAt(t, aliceDir, "")
+
+	out, err := execMemoryOut(t, "list", "--json")
+	if err != nil {
+		t.Fatalf("list --json: %v", err)
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("--json output does not decode: %v", err)
+	}
+	if len(rows) != 1001 {
+		t.Fatalf("--json carries %d rows, want all 1001: the text cap must not reach it", len(rows))
+	}
+	notes, err := memory.List(factoryRoot, "alice", memory.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]bool{"agent": true, "id": true, "type": true, "formula": true, "status": true, "created": true, "subject": true, "run": true}
+	required := []string{"agent", "id", "type", "status", "created", "subject"}
+	for i, row := range rows {
+		var id string
+		_ = json.Unmarshal(row["id"], &id)
+		if i < len(notes) && id != notes[i].ID {
+			t.Fatalf("row %d is %q, memory.List order has %q there", i, id, notes[i].ID)
+		}
+		for key := range row {
+			if !allowed[key] {
+				t.Errorf("row %s carries key %q, which is not one of today's eight", id, key)
+			}
+		}
+		for _, key := range required {
+			if _, ok := row[key]; !ok {
+				t.Errorf("row %s lacks key %q", id, key)
+			}
+		}
+		switch id {
+		case "alice-note-0001":
+			if _, ok := row["formula"]; ok {
+				t.Errorf("a note with no formula must omit the key: %s", row["formula"])
+			}
+			if _, ok := row["run"]; ok {
+				t.Errorf("a note with no run must omit the key: %s", row["run"])
+			}
+		case "lapsed-pin":
+			var status string
+			_ = json.Unmarshal(row["status"], &status)
+			if status != "expired (ttl)" {
+				t.Errorf("a TTL-passed pinned note reads %q in --json, want %q as memoryStatusOf reports it", status, "expired (ttl)")
+			}
+		}
+	}
+
+	t.Run("--all-rows changes nothing", func(t *testing.T) {
+		again, err := execMemoryOut(t, "list", "--json", "--all-rows")
+		if err != nil {
+			t.Fatalf("list --json --all-rows: %v", err)
+		}
+		if again != out {
+			t.Errorf("--all-rows changed the --json output (%d B against %d B)", len(again), len(out))
+		}
+	})
+}
+
+func TestMemoryList_TypeAndAllRowsFlags(t *testing.T) {
+	t.Run("flags registered with their help", func(t *testing.T) {
+		c, _, err := rootCmd.Find([]string{"memory", "list"})
+		if err != nil {
+			t.Fatalf("finding memory list: %v", err)
+		}
+		for name, usage := range map[string]string{
+			"type":     "Only notes of this type: gotcha, model-behavior, ops, outcome, improvement",
+			"all-rows": "Print every row; without it the text stops at 8,192 bytes (--all, which reads every agent's vault, does not lift it)",
+		} {
+			f := c.Flags().Lookup(name)
+			if f == nil {
+				t.Errorf("memory list registers no --%s", name)
+				continue
+			}
+			if f.Usage != usage {
+				t.Errorf("--%s help is %q, want %q", name, f.Usage, usage)
+			}
+		}
+	})
+
+	t.Run("--type filters text and json", func(t *testing.T) {
+		factoryRoot, aliceDir := setupMemoryFixture(t)
+		seedNote(t, factoryRoot, "alice", memory.Note{ID: "g-one", Type: memory.TypeGotcha, Formula: "f-a", Body: "# gotcha one\n"})
+		seedNote(t, factoryRoot, "alice", memory.Note{ID: "g-two", Type: memory.TypeGotcha, Formula: "f-b", Body: "# gotcha two\n"})
+		seedNote(t, factoryRoot, "alice", memory.Note{ID: "o-one", Type: memory.TypeOps, Formula: "f-a", Body: "# ops one\n"})
+		seedNote(t, factoryRoot, "alice", memory.Note{ID: "u-one", Type: memory.TypeOutcome, Body: "# outcome one\n"})
+		asAgentAt(t, aliceDir, "")
+
+		out, err := execMemoryOut(t, "list", "--type", "gotcha")
+		if err != nil {
+			t.Fatalf("list --type gotcha: %v", err)
+		}
+		if got := slices.Sorted(slices.Values(listRowIDs(listTextLines(out)[1:]))); strings.Join(got, " ") != "g-one g-two" {
+			t.Errorf("--type gotcha lists %q, want [g-one g-two]", got)
+		}
+
+		jsonOut, err := execMemoryOut(t, "list", "--type", "gotcha", "--json")
+		if err != nil {
+			t.Fatalf("list --type gotcha --json: %v", err)
+		}
+		var rows []struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(jsonOut), &rows); err != nil {
+			t.Fatalf("decoding: %v\n%s", err, jsonOut)
+		}
+		if len(rows) != 2 {
+			t.Errorf("--type gotcha --json carries %d rows, want 2: %s", len(rows), jsonOut)
+		}
+
+		both, err := execMemoryOut(t, "list", "--type", "gotcha", "--formula", "f-a")
+		if err != nil {
+			t.Fatalf("list --type gotcha --formula f-a: %v", err)
+		}
+		if got := listRowIDs(listTextLines(both)[1:]); strings.Join(got, " ") != "g-one" {
+			t.Errorf("--type with --formula lists %q, want [g-one]", got)
+		}
+	})
+
+	t.Run("--type refuses an unknown type naming the five", func(t *testing.T) {
+		_, aliceDir := setupMemoryFixture(t)
+		asAgentAt(t, aliceDir, "")
+		_, err := execMemoryOut(t, "list", "--type", "habit")
+		if err == nil {
+			t.Fatal("an unknown --type must be refused")
+		}
+		for _, typ := range []string{"gotcha", "model-behavior", "ops", "outcome", "improvement"} {
+			if !strings.Contains(err.Error(), typ) {
+				t.Errorf("the refusal does not name %q: %v", typ, err)
+			}
+		}
+	})
+
+	t.Run("--all-rows lifts the cap", func(t *testing.T) {
+		factoryRoot, aliceDir := setupMemoryFixture(t)
+		seedListVault(t, factoryRoot, "alice", 120, time.Now().UTC(), nil)
+		asAgentAt(t, aliceDir, "")
+
+		capped, err := execMemoryOut(t, "list")
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(capped) > memoryListCap || !strings.HasSuffix(capped, " more (--all-rows, --type, --formula)\n") {
+			t.Errorf("without --all-rows a 120-row vault must stop at the cap with its overflow line (%d B)", len(capped))
+		}
+		out, err := execMemoryOut(t, "list", "--all-rows")
+		if err != nil {
+			t.Fatalf("list --all-rows: %v", err)
+		}
+		if got := len(listTextLines(out)) - 1; got != 120 {
+			t.Errorf("--all-rows prints %d rows, want 120", got)
+		}
+		if strings.Contains(out, "more (--all-rows") {
+			t.Errorf("--all-rows still prints the overflow line")
+		}
+	})
+
+	t.Run("--all does not lift the cap", func(t *testing.T) {
+		factoryRoot, aliceDir := setupMemoryFixture(t)
+		seedListVault(t, factoryRoot, "alice", 60, time.Now().UTC(), nil)
+		seedListVault(t, factoryRoot, "bob", 60, time.Now().UTC(), nil)
+		asAgentAt(t, aliceDir, "")
+
+		out, err := execMemoryOut(t, "list", "--all")
+		if err != nil {
+			t.Fatalf("list --all: %v", err)
+		}
+		if len(out) > memoryListCap || !strings.HasSuffix(out, " more (--all-rows, --type, --formula)\n") {
+			t.Errorf("--all reads every vault but keeps the cap and its overflow line (%d B)", len(out))
+		}
+		every, err := execMemoryOut(t, "list", "--all", "--all-rows")
+		if err != nil {
+			t.Fatalf("list --all --all-rows: %v", err)
+		}
+		if got := len(listTextLines(every)) - 1; got != 120 {
+			t.Errorf("--all --all-rows prints %d rows, want both vaults' 120", got)
+		}
+	})
 }

@@ -225,7 +225,7 @@ func TestUniverseHygiene_NeverClearsManagerOwnedVars(t *testing.T) {
 func TestUniverseHygiene_EmptyUniverseZeroDelta(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
 	expected := "export AF_ROOT='/tmp/factory' AF_ROLE='ultraimplement' AF_ACTOR='ultraimplement'" +
-		telemetryOffClears + gatewayUpstreamAuthClears + effortAttestationClears + " && claude --dangerously-skip-permissions"
+		telemetryOffClears + gatewayUpstreamAuthClears + effortAttestationClears + launchKindClear + " && claude --dangerously-skip-permissions"
 
 	for _, tc := range []struct {
 		name     string
