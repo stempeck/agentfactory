@@ -44,9 +44,9 @@ func installMemStore(t *testing.T) *memstore.Store {
 // lifetime of the test. The real implementation blocks in
 // tmux.WaitForCommand waiting for claude to write a readiness sentinel; on
 // CI (and any env without claude on PATH) that never arrives and the test
-// suite hits its global timeout. Dispatch-path tests that exercise the
+// stalls for ClaudeStartTimeout (~60s) per launch. Dispatch-path tests that exercise the
 // full pipeline through instantiateFormulaWorkflow and beyond install this
-// no-op so launchAgentSession returns nil instead of hanging. Tests that
+// no-op so launchAgentSession returns nil instead of stalling. Tests that
 // need to verify the "already running" pre-flight or explicitly want
 // launch to be skipped via slingNoLaunch do NOT need this helper.
 func installNoopLaunchSession(t *testing.T) {
