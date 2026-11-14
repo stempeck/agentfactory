@@ -53,12 +53,13 @@ func TestBuildStartupCommand_Autonomous(t *testing.T) {
 	}
 }
 
-// scaffoldDirective is the directive internal/cmd/install.go seeds into a fresh agents.json,
-// pinned here so a rewrite of one without the other reds this test (T-DIR, #515). It is spelled
-// out rather than imported because internal/cmd depends on internal/session, not the reverse —
-// the pin is a copy on purpose, and its whole job is to break when the copy stops matching.
-const scaffoldDirective = "Read your memory (af memory list) and docs, and prove it. " +
-	"Record durable learnings with af memory add."
+// scaffoldDirective is a copy of builtinRoleDirective, the directive af seeds into a fresh
+// agents.json (internal/cmd/seed_configs.go:25). It cannot be imported, because internal/cmd
+// depends on internal/session and not the reverse, and changing the seed cannot redden this test:
+// the copy is kept in lock-step by hand so the nudge is exercised with the directive af ships.
+const scaffoldDirective = "Your standing rulings and newest notes are in this session's memory block; " +
+	"look up others by need with af memory list --type <type> or af memory list --formula <formula>. " +
+	"Read your docs, and prove it. Record durable learnings with af memory add."
 
 func TestBuildNudge_WithDirective(t *testing.T) {
 	entry := config.AgentEntry{
@@ -199,7 +200,7 @@ func TestBuildStartupCommand_WithoutInitialPrompt_Unchanged(t *testing.T) {
 	// KEY='' loop is the only hygiene a respawn emits, so it runs on every launch and clears
 	// the whole OTel family when telemetry is off — carrying no telemetry data, only empties.
 	expected := "export AF_ROOT='/tmp/factory' AF_ROLE='ultraimplement' AF_ACTOR='ultraimplement'" +
-		telemetryOffClears + gatewayUpstreamAuthClears + effortAttestationClears + " && claude --dangerously-skip-permissions"
+		telemetryOffClears + gatewayUpstreamAuthClears + effortAttestationClears + launchKindClear + " && claude --dangerously-skip-permissions"
 	if cmd != expected {
 		t.Errorf("command without prompt should be unchanged.\ngot:  %s\nwant: %s", cmd, expected)
 	}
@@ -221,6 +222,11 @@ const gatewayUpstreamAuthClears = " OPENAI_API_KEY='' CHATGPT_TOKEN_DIR='' CHATG
 // (issue #709 K2), immediately after gatewayUpstreamAuthClears: a running session's attestation is
 // whatever its launch line said, so a line that says nothing must say it explicitly.
 const effortAttestationClears = " AF_EFFORT_OBJECTIVE='' AF_EFFORT_STEP_LABEL='' AF_EFFORT_FORMULA=''"
+
+// launchKindClear is the suffix every launch that is not a respawn emits immediately after
+// effortAttestationClears: a reused pane keeps the environment of the launch before it, so a line
+// that is not a respawn must say so explicitly.
+const launchKindClear = " AF_LAUNCH_KIND=''"
 
 func TestBuildStartupCommand_PromptWithQuotes(t *testing.T) {
 	entry := config.AgentEntry{Type: "autonomous", Description: "test"}
@@ -645,7 +651,7 @@ func TestBuildStartupCommand_WithoutEndpoint_Unchanged(t *testing.T) {
 
 	// Baseline includes the telemetry-off hygiene clears (issue #329) — see telemetryOffClears.
 	expected := "export AF_ROOT='/tmp/factory' AF_ROLE='ultraimplement' AF_ACTOR='ultraimplement'" +
-		telemetryOffClears + gatewayUpstreamAuthClears + effortAttestationClears + " && claude --dangerously-skip-permissions"
+		telemetryOffClears + gatewayUpstreamAuthClears + effortAttestationClears + launchKindClear + " && claude --dangerously-skip-permissions"
 	if cmd != expected {
 		t.Errorf("command without endpoint should be unchanged.\ngot:  %s\nwant: %s", cmd, expected)
 	}

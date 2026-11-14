@@ -176,8 +176,12 @@ func (f memoryNagFindings) total() int {
 // so an undated note is an ordinary artifact of someone writing one by hand, and its age is
 // genuinely unknowable — nagging on the zero time would date it to year 1 and demand an answer
 // about a note written this morning.
+//
+// A pin is exempt too: the operator has ruled that it stands, so asking for its graduation is
+// asking the wrong person.
 func memoryNagDue(n memory.Note, now time.Time) bool {
 	return !n.Malformed &&
+		!n.Standing &&
 		n.Status == memory.StatusActive &&
 		n.Expires.IsZero() &&
 		!n.Created.IsZero() &&

@@ -606,6 +606,8 @@ func TestQuickstartOneConvergence(t *testing.T) {
 			cvLine("    install_playwright", `^    install_playwright\b`),
 			cvLine("_apt_security_upgrade", `^[ \t]+_apt_security_upgrade\b`),
 			cvLine("configure_factory", `^[ \t]+configure_factory\b`),
+			// configure_shell reads the .agentfactory/models.json configure_factory seeds, from the factory it cds into.
+			cvLine("configure_shell", `^[ \t]+configure_shell\b`),
 			cvLine("converge_present_components", `^[ \t]+converge_present_components\b`),
 			cvLine("_restart_rebuilt_webui", `^[ \t]+_restart_rebuilt_webui\b`),
 			cvLit(`if [ -x "$HOME/.local/bin/webui" ]; then`),

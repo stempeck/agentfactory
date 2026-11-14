@@ -217,6 +217,64 @@ func TestDispatchRefusal_RecordedWithBackoffOneMail(t *testing.T) {
 	})
 }
 
+// The window refusal reaches the dispatcher only as sling's stdout, so the second subtest replays the
+// first one's captured stdout rather than canned bytes: without the marker, the dispatcher would read a
+// plain failure.
+func TestDispatchRefusal_WindowRefusalRecorded(t *testing.T) {
+	var captured string
+
+	t.Run("sling prints the window class on the real path", func(t *testing.T) {
+		d := newWGDispatch(t)
+		wgPlantShortfall(t, d.root, wdNew, "scout")
+		stdout, stderr, err := d.dispatch(t)
+		captured = stdout
+		if err == nil {
+			t.Fatalf("af sling --agent on a recorded shortfall succeeded, want the window refusal\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if got := parseSlingRefusal(stdout); got != refusalWindow {
+			t.Fatalf("parseSlingRefusal(stdout) = %q, want %q\n%s", got, refusalWindow, stdout)
+		}
+		if strings.Contains(stdout, "Dispatched to") {
+			t.Errorf("the marker must be the pre-check's, printed before any Dispatched to line:\n%s", stdout)
+		}
+	})
+
+	t.Run("dispatcher records it and backs off", func(t *testing.T) {
+		if captured == "" {
+			t.Fatal("the first subtest captured no sling stdout to replay")
+		}
+		fake, _ := setupHermeticSessions(t)
+		root := t.TempDir()
+		cfg := refusalCfg(1800)
+		calls := 0
+		orig := dispatchItem
+		dispatchItem = func(root, agent, itemURL, caller, model string) (string, error) {
+			calls++
+			return captured, errors.New("exit status 1")
+		}
+		t.Cleanup(func() { dispatchItem = orig })
+		state := dispatchState{Dispatched: map[string]dispatchEntry{}}
+		const key = "owner/repo#9"
+
+		refusalTick(t, fake, root, &state, cfg)
+		entry, ok := state.Dispatched[key]
+		if !ok {
+			t.Fatal("a window-refused sling left no dispatch record; the next tick deletes nothing and re-slings at tick speed")
+		}
+		if entry.RefusalClass != refusalWindow || entry.RefusedAt.IsZero() || entry.ConsecutiveRefusals != 1 {
+			t.Errorf("record = %+v, want RefusalClass=%q, RefusedAt set, ConsecutiveRefusals=1", entry, refusalWindow)
+		}
+
+		refusalTick(t, fake, root, &state, cfg)
+		if calls != 1 {
+			t.Errorf("a tick inside the backoff re-slung the refused item: dispatchItem calls = %d, want 1", calls)
+		}
+		if got, ok := state.Dispatched[key]; !ok || got.RefusalClass != refusalWindow {
+			t.Errorf("the record after a tick inside the backoff = %+v (present %v), want it kept with class %q", got, ok, refusalWindow)
+		}
+	})
+}
+
 func writeRefusalAgents(t *testing.T, root, formulaName string) {
 	t.Helper()
 	agents := `{"agents":{` +

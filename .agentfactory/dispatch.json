@@ -1,1 +1,57 @@
-{"repos":[],"trigger_label":"agentic","notify_on_complete":"manager","mappings":[],"interval_seconds":300,"retry_after_seconds":1800}
+{
+  "repos": [
+    "stempeck/agentfactory"
+  ],
+  "trigger_label": "agentic",
+  "notify_on_complete": "manager",
+  "mappings": [
+    {
+      "labels": [
+        "heal-implement"
+      ],
+      "source": "issue",
+      "agent": "fable-implement"
+    },
+    {
+      "labels": [
+        "pr-review"
+      ],
+      "source": "issue",
+      "agent": "fable-review"
+    },
+    {
+      "labels": [
+        "pr-review"
+      ],
+      "source": "pr",
+      "agent": "fable-review"
+    },
+    {
+      "labels": [
+        "pr-iterate"
+      ],
+      "source": "issue",
+      "agent": "fable-increment"
+    },
+    {
+      "labels": [
+        "pr-iterate"
+      ],
+      "source": "pr",
+      "agent": "fable-increment"
+    }
+  ],
+  "interval_seconds": 300,
+  "retry_after_seconds": 1800,
+  "remove_trigger_after_dispatch": true,
+  "workflows": [
+    {
+      "label": "advisory-heal",
+      "phases": [
+        "heal-implement",
+        "pr-review",
+        "pr-iterate"
+      ]
+    }
+  ]
+}

@@ -20,6 +20,7 @@ var pinnedWireLiterals = map[string]string{
 	"EventStepEnd":          "step_end",
 	"EventInstanceEnd":      "instance_end",
 	"EventSessionStart":     "session_start",
+	"EventStartupEnd":       "startup_end",
 	"EventIntervention":     "intervention",
 	"StatusClosed":          "closed",
 	"StatusSkipped":         "skipped",

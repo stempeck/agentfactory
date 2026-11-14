@@ -36,12 +36,17 @@ func runPrimeCapturing(t *testing.T) string {
 // ordinary state af prime runs in.
 func primedFixture(t *testing.T, occupancyPct float64) (lifecycleFixture, issuestore.Issue, issuestore.Issue) {
 	t.Helper()
+	return primedFixtureWithTotal(t, occupancyPct, 200000)
+}
+
+func primedFixtureWithTotal(t *testing.T, occupancyPct float64, total int64) (lifecycleFixture, issuestore.Issue, issuestore.Issue) {
+	t.Helper()
 	fx := newLifecycleFixture(t)
 	now := boundaryTestNow()
 	epic, step := seedTwoStepBeads(t, fx)
 	writeRuntimeFile(t, fx.workDir, "hooked_formula", epic.ID)
 	writeRuntimeFile(t, fx.workDir, "session_id", "sessa")
-	plantSessionSnapshot(t, fx.root, fx.agent, "sessa", occupancyPct, 1000, now.Add(-10*time.Second), now)
+	plantSessionSnapshotWithTotal(t, fx.root, fx.agent, "sessa", occupancyPct, total, 1000, now.Add(-10*time.Second), now)
 	return fx, epic, step
 }
 

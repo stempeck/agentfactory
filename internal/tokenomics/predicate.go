@@ -7,20 +7,25 @@ import (
 )
 
 // Window is a resolved context window and the provenance of the number. The two travel together
-// for the reason config.ResolveContextWindow returns them together: "200000" is indistinguishable
-// from a measurement, a stale declaration and a guess, and a surface that printed the figure alone
-// could not be argued with.
+// for the reason config.PredictContextWindow and config.ObservedContextWindow return them together:
+// "200000" is indistinguishable from a measurement, a stale declaration and a guess, and a surface
+// that printed the figure alone could not be argued with.
 type Window struct {
 	Tokens int64
 	Source string
 }
 
-// ResolveWindow wraps K1's resolver so this package never re-declares the fallback constant, and
-// so a change to the precedence rules reaches the predicate without a second edit. It adds only the
-// pairing of the two return values into one struct.
-func ResolveWindow(profile map[string]string, hostReported int64) Window {
-	tokens, source := config.ResolveContextWindow(profile, hostReported)
+// PredictWindow and SessionWindow wrap K1's two window functions so this package never re-declares
+// the fallback constant, and so a change to the window rules reaches the predicate without a second
+// edit. They add only the pairing of the return values into one struct.
+func PredictWindow(profile map[string]string) Window {
+	tokens, source := config.PredictContextWindow(profile)
 	return Window{Tokens: tokens, Source: source}
+}
+
+func SessionWindow(profile map[string]string, hostReported int64) (Window, bool) {
+	tokens, source, ok := config.ObservedContextWindow(profile, hostReported)
+	return Window{Tokens: tokens, Source: source}, ok
 }
 
 // Occupancy is how much of the window is already consumed. Known is separate from Tokens because a
@@ -143,8 +148,8 @@ func Admit(w Window, occ Occupancy, app Appetite, p Policy) Decision {
 // The naive int64 form — projected*100 > window*headroomPct — overflows once the window passes
 // MaxInt64/100. The product wraps NEGATIVE, every comparison becomes true, and a huge window
 // starts refusing everything: the precise inversion of the invariant this predicate exists to
-// hold. config.ResolveContextWindow accepts any declared window up to MaxInt64, so an operator
-// typo in CLAUDE_CODE_MAX_CONTEXT_TOKENS is all it takes to reach it.
+// hold. config.PredictContextWindow and config.ObservedContextWindow accept any declared window up
+// to MaxInt64, so an operator typo in CLAUDE_CODE_MAX_CONTEXT_TOKENS is all it takes to reach it.
 //
 // Widening rather than dividing keeps the boundary exact, which the boundary test depends on:
 // division would round and a step that fills the margin precisely would stop admitting.

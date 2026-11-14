@@ -165,7 +165,7 @@ func TestEnsureGatewayBackend_ScriptAbsentWarns(t *testing.T) {
 func TestEnsureGatewayBackend_ModeUnresolvedWarnsAndSkipsRelaunch(t *testing.T) {
 	// RED: decisions.md D1 (err-gated on gatewayAuthMode). Both credential handles
 	// present with no record file is gatewayAuthMode's one error case
-	// (gateway_auth.go:245-247) -> no-op+warn, script never invoked.
+	// (its tier-4 refusal) -> no-op+warn, script never invoked.
 	root := gatewayBackendFixture(t)
 	writeApiKeySecret(t, root)
 	writeGatewaySubscriptionHandle(t, root)

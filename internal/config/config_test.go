@@ -805,6 +805,30 @@ func TestValidateAgentName_ReservedWatchdog(t *testing.T) {
 	}
 }
 
+func TestValidateAgentName_ReservedAf(t *testing.T) {
+	err := ValidateAgentName("af")
+	if err == nil {
+		t.Fatal("expected error for reserved name \"af\", the sender of every operator escalation")
+	}
+	if !strings.Contains(err.Error(), "reserved") || !strings.Contains(err.Error(), `"af"`) {
+		t.Errorf("error = %q, want it to name \"af\" as reserved", err.Error())
+	}
+}
+
+func TestLoadAgentConfig_ReservedAfRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agents.json")
+	if err := os.WriteFile(path, []byte(`{"agents":{"af":{"type":"autonomous","description":"d"}}}`), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := LoadAgentConfig(path)
+	if err == nil {
+		t.Fatal("a roster with an agent named \"af\" loaded; its mail would be indistinguishable from af's own escalations")
+	}
+	if !strings.Contains(err.Error(), "reserved") || !strings.Contains(err.Error(), `"af"`) {
+		t.Errorf("error = %q, want it to name \"af\" as reserved so the operator knows what to rename", err.Error())
+	}
+}
+
 // --- RemoveAgentEntry tests ---
 
 func TestRemoveAgentEntry_FormulaAgent(t *testing.T) {

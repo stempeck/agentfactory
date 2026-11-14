@@ -49,8 +49,10 @@ agent into the failure:
   says "left uncovered" instead when there is no `ANTHROPIC_MODEL` for them to derive from. The
   first is information, not a complaint; only the second is a problem.
 - `af config models check <profile>` prints one verdict per class — the effective id, where it came
-  from (`declared` or `derived from <KEY>`), and whether your gateway serves it — and exits non-zero
-  if any class or alias is unserved.
+  from (`declared` or `derived from <KEY>`), and whether your gateway serves it. For a not-foreign
+  profile it also measures the context window the installed Claude Code harness applies. It exits
+  non-zero if any class or alias is unserved, or if the harness does not recognise the model id,
+  applies a window that differs from a usable declaration, or cannot complete the probe.
 - A selecting launch warns when the profile's last coverage check is missing, stale or failing.
 
 For the gateway-side half — which `claude-…` ids to alias, where to point them, and why the fable

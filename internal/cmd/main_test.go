@@ -4,9 +4,12 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/stempeck/agentfactory/internal/testsupport/tmuxisolation"
 )
@@ -22,5 +25,15 @@ func TestMain(m *testing.M) {
 	// test timeout. Default the device-auth seam to a no-op; tests that exercise
 	// device-auth behavior override it themselves (D9).
 	runCodexDeviceAuth = func(context.Context, io.Writer, io.Writer) error { return nil }
+	// The same holds for the window plumbing: a launch would otherwise exec the host's own
+	// `claude --version` and probe its harness, `af up` would read the host's ~/.claude/settings.json,
+	// and a sling would reach a real tmux to start af-watchdog. Tests that need any of them set the
+	// seam and restore it.
+	claudeCodeVersionFn = func() string { return "" }
+	probeHarnessWindowFn = func(context.Context, map[string]string) (harnessWindowProbe, error) {
+		return harnessWindowProbe{}, errHarnessAbsent
+	}
+	userScopeEnvFn = func() map[string]json.RawMessage { return nil }
+	ensureSlingWatchdog = func(*cobra.Command, string) {}
 	os.Exit(tmuxisolation.Setup(m))
 }

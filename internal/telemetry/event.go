@@ -14,6 +14,7 @@ const (
 	EventStepEnd       = "step_end"
 	EventInstanceEnd   = "instance_end"
 	EventSessionStart  = "session_start"
+	EventStartupEnd    = "startup_end"
 	// EventIntervention is what a tokenomics mechanism records itself as when it fires (#668 K4).
 	// Its payload is scalar like every other record's: a mechanism label, the action taken, and
 	// the arithmetic that triggered it.

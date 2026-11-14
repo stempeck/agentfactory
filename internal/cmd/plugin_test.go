@@ -604,7 +604,7 @@ func TestPluginRuntimeRefusalLaunch(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	err := launchAgentSession(cmd, dir, "acme-triage", "", "", "", false)
+	err := launchAgentSession(cmd, dir, "acme-triage", "", "", "", launchGates{})
 	if err == nil {
 		t.Fatal("launchAgentSession must error (K14, or tmux-unavailable)")
 	}

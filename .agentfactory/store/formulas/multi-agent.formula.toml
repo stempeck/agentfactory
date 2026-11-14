@@ -217,9 +217,12 @@ exit code, and PASS/FAIL in the artifact.
    af config models check {{claude_model}}
    af config models check {{gpt_model}}
    ```
-   Both MUST exit 0. If either fails, STOP: report to the human that the
-   profile is unregistered (registration lives in .agentfactory/models.json,
-   gateway profiles per USING_LITELLM.md). NEVER silently substitute a
+   Both MUST exit 0. If either fails, STOP: report to the human the line the
+   check printed. A non-zero exit can mean the profile is unregistered
+   (registration lives in .agentfactory/models.json, gateway profiles per
+   USING_LITELLM.md), or that the installed Claude Code harness does not
+   recognise the model id or applies a context window that differs from the
+   profile's declaration. NEVER silently substitute a
    different model — that quietly destroys the multi-perspective property this
    formula exists to provide.
 

@@ -132,7 +132,7 @@ func TestTerminal_PersistsBeforeLabelEdit(t *testing.T) {
 	const key = "owner/repo#99"
 
 	complete := seedClosedEpic(t, store, config.CloseReasonFormulaComplete)
-	stubPRStatusGreen(t) // terminal pr gate
+	stubItemState(t, "OPEN") // terminal pr gate
 	var mails []string
 	recordWorkflowMail(t, &mails)
 

@@ -186,6 +186,36 @@ func TestUsingLitellmDocContract(t *testing.T) {
 		}
 	})
 
+	t.Run("no pending-measurement placeholder", func(t *testing.T) {
+		if strings.Contains(content, "pending operator measurement") {
+			t.Error("USING_LITELLM.md still ships the placeholder \"pending operator measurement\"; the line stays out " +
+				"until the measurement exists (PR #756 T4)")
+		}
+		if regexp.MustCompile(`(?m)^M3 result`).MatchString(content) {
+			t.Error("a line of USING_LITELLM.md starts \"M3 result\", design vocabulary with no result behind it (PR #756 T4)")
+		}
+		if !strings.Contains(content, "has not been measured yet") {
+			t.Error("USING_LITELLM.md no longer says the user-scope precedence \"has not been measured yet\"; " +
+				"that sentence is the honest statement the placeholder's removal leaves (PR #756 T4)")
+		}
+	})
+
+	t.Run("one restart instruction", func(t *testing.T) {
+		if strings.Contains(content, "af down && af up") {
+			t.Error("USING_LITELLM.md still advises `af down && af up` to recycle an agent; `af down <agent>` removes a " +
+				"clean worktree and deletes its branch (PR #756 T17)")
+		}
+		bullet := t17LitellmBullet(t, content, "- **Deleting a compaction key")
+		for _, want := range []string{"tmux kill-session -t '=af-<agent>'", "af up <agent>"} {
+			if !strings.Contains(bullet, want) {
+				t.Errorf("the \"Deleting a compaction key\" bullet does not name %q:\n%s", want, bullet)
+			}
+		}
+		if regexp.MustCompile(`af down[^.;]*(\bthen\b|&&)[^.;]*af up`).MatchString(bullet) {
+			t.Errorf("the \"Deleting a compaction key\" bullet still recycles with `af down` then `af up`:\n%s", bullet)
+		}
+	})
+
 	t.Run("LITELLM_VERSION stays in parity with quickstart.sh", func(t *testing.T) {
 		qs := readQuickstartSh(t)
 		qsMatch := quickstartLitellmVersion.FindStringSubmatch(qs)
@@ -203,4 +233,26 @@ func TestUsingLitellmDocContract(t *testing.T) {
 				"USING_LITELLM.md says %q", qsMatch[1], docMatch[1])
 		}
 	})
+}
+
+// t17LitellmBullet returns one top-level list item, from its opening line through the line before
+// the next item, blank line or heading, joined into one line so a wrapped phrase still matches.
+func t17LitellmBullet(t *testing.T, content, opening string) string {
+	t.Helper()
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		if !strings.HasPrefix(line, opening) {
+			continue
+		}
+		item := []string{line}
+		for _, next := range lines[i+1:] {
+			if strings.HasPrefix(next, "- ") || strings.TrimSpace(next) == "" || isATXHeading(next) {
+				break
+			}
+			item = append(item, strings.TrimSpace(next))
+		}
+		return strings.Join(item, " ")
+	}
+	t.Fatalf("USING_LITELLM.md has no list item opening %q", opening)
+	return ""
 }

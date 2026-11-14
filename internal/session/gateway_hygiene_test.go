@@ -155,9 +155,9 @@ func TestLaunchEnvForSubscriptionProfileCarriesNoChatgptOrOpenAIKey(t *testing.T
 // carve-out membership would be vacuous either way — but the design intent is explicit ("never
 // carved out"), and this pins it as a checkable fact rather than prose.
 func TestUniverseCarveOutVars_ExcludesGatewayFamily(t *testing.T) {
-	wantSize := 1 + len(redirectFamilyVars) + len(telemetryFamilyVars) + len(managerOwnedVars) + len(effortAttestationVars)
+	wantSize := 1 + len(redirectFamilyVars) + len(telemetryFamilyVars) + len(managerOwnedVars) + len(effortAttestationVars) + len(launchKindVars)
 	if len(universeCarveOutVars) != wantSize {
-		t.Fatalf("universeCarveOutVars has %d entries, want %d (envAPIKey + redirect + telemetry + managerOwned + effortAttestation, unchanged by the gateway family)", len(universeCarveOutVars), wantSize)
+		t.Fatalf("universeCarveOutVars has %d entries, want %d (envAPIKey + redirect + telemetry + managerOwned + effortAttestation + launchKind, unchanged by the gateway family)", len(universeCarveOutVars), wantSize)
 	}
 	for _, key := range gatewayUpstreamAuthTestKeys {
 		if universeCarveOutVars[key] {

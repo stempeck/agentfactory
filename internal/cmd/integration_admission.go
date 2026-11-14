@@ -26,6 +26,7 @@ const (
 	refusalIntegrationServiceDown    = "integration-service-down"
 	refusalIntegrationSnapshotBad    = "integration-snapshot-invalid"
 	refusalNamespacedSkillUnresolved = "namespaced-skill-unresolved"
+	refusalWindow                    = "window"
 )
 
 // slingRefusedMarker prefixes the one stdout line a refused instantiation prints, which the dispatcher parses.
@@ -390,6 +391,13 @@ func reportSlingRefusal(out, errOut io.Writer, root, caller, agent, item string,
 	if err := reportIntegrationTo(root, caller, slingRefusalReportName(agent, item), r.Class, subject, body); err != nil {
 		fmt.Fprintf(errOut, "warning: %v\n", err)
 	}
+}
+
+// reportWindowRefusal quotes the profile and prints it before class= because a profile name is any
+// JSON string and parseSlingRefusal splits on whitespace and keeps the last class= field it meets. It
+// sends no mail: the operator's mail of a window refusal is WINDOW_MISMATCH.
+func reportWindowRefusal(out io.Writer, r *windowRefusal) {
+	fmt.Fprintf(out, "%s profile=%q class=%s\n", slingRefusedMarker, r.Profile, refusalWindow)
 }
 
 // dispatchCaller is the recipient ensureCallerIdentity would persist, resolved without writing anything: the

@@ -166,7 +166,7 @@ func deriveStepContext(pair stepPair, stalenessSecs int) stepContextFacts {
 		f.boundDrift = &drift
 	}
 	if f.ctxBoundTokens != nil && f.ctxTokensEnd != nil {
-		over := *f.ctxTokensEnd > *f.ctxBoundTokens
+		over := *f.ctxTokensEnd > judgedBound(f)
 		f.overOccupancy = &over
 	}
 	f.stale = deriveStaleness(*end, stalenessSecs)
@@ -190,7 +190,7 @@ func deriveStepContext(pair stepPair, stalenessSecs int) stepContextFacts {
 
 	f.cumTokensDelta, f.consumptionState = deriveConsumption(pair)
 	if f.cumTokensDelta != nil && f.ctxBoundTokens != nil {
-		over := *f.cumTokensDelta > *f.ctxBoundTokens
+		over := *f.cumTokensDelta > judgedBound(f)
 		f.overConsumption = &over
 	}
 	return f
@@ -418,4 +418,15 @@ func applyInterruption(f *stepContextFacts, entry recoveryLogEntry) {
 		pct := entry.ObservedPct
 		f.interruptedPct = &pct
 	}
+}
+
+// judgedBound is K6: a step is judged against the smaller of the operator's bound and the window the
+// host applied, the raw total for every class, while boundDrift and the stored bound keep the
+// operator's figure.
+func judgedBound(f stepContextFacts) int64 {
+	judged := *f.ctxBoundTokens
+	if f.ctxTokensTotal != nil && *f.ctxTokensTotal > 0 && *f.ctxTokensTotal < judged {
+		judged = *f.ctxTokensTotal
+	}
+	return judged
 }

@@ -23,6 +23,7 @@ type claudeUserScope struct {
 	Path     string
 	Plugins  []claudeUserScopePlugin
 	HasHooks bool
+	Env      map[string]json.RawMessage
 }
 
 // readClaudeUserScope is the one reader of claudeConfigDir()/settings.json, shared by install's
@@ -45,6 +46,7 @@ func readClaudeUserScope() (claudeUserScope, error) {
 	var settings struct {
 		EnabledPlugins map[string]json.RawMessage `json:"enabledPlugins"`
 		Hooks          map[string]json.RawMessage `json:"hooks"`
+		Env            json.RawMessage            `json:"env"`
 	}
 	if err := json.Unmarshal(data, &settings); err != nil {
 		return claudeUserScope{}, fmt.Errorf("parsing Claude Code user settings %s: %w", scope.Path, err)
@@ -59,5 +61,11 @@ func readClaudeUserScope() (claudeUserScope, error) {
 	}
 	slices.SortFunc(scope.Plugins, func(a, b claudeUserScopePlugin) int { return strings.Compare(a.Key, b.Key) })
 	scope.HasHooks = len(settings.Hooks) > 0
+	// Decoded on its own so a non-object env leaves Env nil instead of failing the read, which
+	// af plugin install depends on.
+	var env map[string]json.RawMessage
+	if len(settings.Env) > 0 && json.Unmarshal(settings.Env, &env) == nil {
+		scope.Env = env
+	}
 	return scope, nil
 }

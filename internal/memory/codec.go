@@ -120,6 +120,15 @@ func (n *Note) setField(key, value string) {
 			return
 		}
 		n.Evidence = ev
+	case "standing":
+		switch unquoteScalar(value) {
+		case "true":
+			n.Standing = true
+		case "false", "":
+			n.Standing = false
+		default:
+			n.Malformed = true
+		}
 	}
 }
 
@@ -213,6 +222,9 @@ func Emit(n Note) []byte {
 		b.WriteString(n.Expires.UTC().Format(dateLayout))
 	}
 	b.WriteString("\n")
+	if n.Standing {
+		b.WriteString("standing: true\n")
+	}
 
 	b.WriteString(fence + "\n")
 	b.WriteString(n.Body)

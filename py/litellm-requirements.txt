@@ -593,9 +593,11 @@ cryptography==50.0.2 \
 distro==1.9.0 \
     --hash=sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2
     # via openai
-dnspython==2.9.0 \
-    --hash=sha256:9a4aedb833c3c1b49214d04d44d3032ab7a9135f7c1d29a549b4ff78fd82fda9
-    # via email-validator
+dnspython==2.9.2 \
+    --hash=sha256:af15f7d385a6ae2fb35a796fde2138004c8c42c7389090e2addc83e3b3340fd8
+    # via
+    #   -r py/litellm-requirements.in
+    #   email-validator
 email-validator==2.3.0 \
     --hash=sha256:80f13f623413e6b197ae73bb10bf4eb0908faf509ad8362c5edeb0be7fd450b4
     # via pydantic
@@ -689,8 +691,8 @@ fastuuid==0.14.0 \
     --hash=sha256:f54d5b36c56a2d5e1a31e73b950b28a0d83eb0c37b91d10408875a5a29494bad \
     --hash=sha256:f74631b8322d2780ebcf2d2d75d58045c3e9378625ec51865fe0b5620800c39d
     # via litellm
-filelock==3.20.3 \
-    --hash=sha256:4b0dda527ee31078689fc205ec4f1c1bf7d56cf88b6dc9426c4f230e46c2dce1
+filelock==4.2.9 \
+    --hash=sha256:a379c50a729e5b68c8519a4d26489f755d9769960a236ecd838190e2a78db2e9
     # via
     #   -r py/litellm-requirements.in
     #   huggingface-hub
@@ -1642,17 +1644,19 @@ numpy==2.5.4 \
     --hash=sha256:fe4d21ab149f15e4e6043dfb0de87e6e5f34ac176cde83060e9802981fca2ac2 \
     --hash=sha256:ffa6ce09a1c6a08e9667dd9c97aa0b14184e8d18f2a14b78b2a2328c9147f076
     # via soundfile
-oauthlib==4.0.0 \
-    --hash=sha256:624c28c13a0a59cabf9747dfa52af63be3e512a7f2714df16e91b5b3a145e6cd
+oauthlib==4.0.1 \
+    --hash=sha256:498a298876e996301950a5b053d12c31628bb7b895db03666430c69ce182eb61
     # via
     #   -r py/litellm-requirements.in
     #   fastapi-sso
 openai==2.54.0 \
     --hash=sha256:89089789197ccdb87f173a03145ed1598d00795220c93e96cf712b1cbf5e5f2b
     # via litellm
-opentelemetry-api==1.45.1 \
-    --hash=sha256:b31553efa588ae44bc306f863c785c5333a9ecc091248c6ee68b4b6c87fdedfb
-    # via fastapi
+opentelemetry-api==1.45.2 \
+    --hash=sha256:2cbd737377e710ee740d261c94e93fa0f08e6d037c18f17513cc0a2d94479a34
+    # via
+    #   -r py/litellm-requirements.in
+    #   fastapi
 orjson==3.13.0 \
     --hash=sha256:0526a3456db67b264c6d661b5f090077f326b6cd074d0ef53a72763595dec5d7 \
     --hash=sha256:08bf722f923d2100bc5e5a5dcf72c656db557049c1bea26582fdd5dd9d5395a1 \

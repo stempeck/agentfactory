@@ -12,14 +12,15 @@ import (
 // advisoryException is one entry of .github/advisory-exceptions.json: a known advisory the
 // advisory audit is told to accept, with the evidence that the affected path is unused.
 type advisoryException struct {
-	ID        string    `json:"id"`
-	Aliases   *[]string `json:"aliases"`
-	Package   string    `json:"package"`
-	Version   string    `json:"version"`
-	Reason    string    `json:"reason"`
-	Evidence  string    `json:"evidence"`
-	Reviewed  string    `json:"reviewed"`
-	RecheckBy string    `json:"recheck_by"`
+	ID           string    `json:"id"`
+	Aliases      *[]string `json:"aliases"`
+	Package      string    `json:"package"`
+	Version      string    `json:"version"`
+	Reason       string    `json:"reason"`
+	Evidence     string    `json:"evidence"`
+	Reviewed     string    `json:"reviewed"`
+	RecheckBy    string    `json:"recheck_by"`
+	FixAvailable *string   `json:"fix_available,omitempty"`
 }
 
 const advisoryRegisterPath = ".github/advisory-exceptions.json"
@@ -80,6 +81,9 @@ func validateAdvisoryExceptions(raw []byte) []string {
 				claim(label, a)
 			}
 		}
+		if e.FixAvailable != nil && strings.TrimSpace(*e.FixAvailable) == "" {
+			out = append(out, label+": fix_available is empty (omit it when no published fix is acknowledged)")
+		}
 		if e.ID != "" {
 			claim(label, e.ID)
 		}
@@ -118,6 +122,8 @@ func TestAdvisoryExceptionsSchema(t *testing.T) {
 			"duplicate id":          "[" + entry("X", "[]", "2026-10-27", "2026-11-26") + "," + entry("X", "[]", "2026-10-27", "2026-11-26") + "]",
 			"alias equals an id":    "[" + entry("X", `["Y"]`, "2026-10-27", "2026-11-26") + "," + entry("Y", "[]", "2026-10-27", "2026-11-26") + "]",
 			"empty register":        "[]",
+			"blank fix_available":   `[{"id":"X","aliases":[],"package":"p","version":"1","reason":"r","evidence":"e","reviewed":"2026-10-27","recheck_by":"2026-11-26","fix_available":" "}]`,
+			"empty fix_available":   `[{"id":"X","aliases":[],"package":"p","version":"1","reason":"r","evidence":"e","reviewed":"2026-10-27","recheck_by":"2026-11-26","fix_available":""}]`,
 		} {
 			if errs := validateAdvisoryExceptions([]byte(raw)); len(errs) == 0 {
 				t.Errorf("%s: accepted %s", name, raw)
@@ -129,6 +135,13 @@ func TestAdvisoryExceptionsSchema(t *testing.T) {
 		raw := "[" + entry("X", `["CVE-1"]`, "2020-01-01", "2020-01-31") + "]"
 		if errs := validateAdvisoryExceptions([]byte(raw)); len(errs) != 0 {
 			t.Errorf("a valid but expired entry was rejected: %v", errs)
+		}
+	})
+
+	t.Run("a present fix_available is accepted", func(t *testing.T) {
+		raw := `[{"id":"X","aliases":[],"package":"p","version":"1","reason":"r","evidence":"e","reviewed":"2026-10-27","recheck_by":"2026-11-26","fix_available":"1.2.3"}]`
+		if errs := validateAdvisoryExceptions([]byte(raw)); len(errs) != 0 {
+			t.Errorf("an entry acknowledging a published fix was rejected: %v", errs)
 		}
 	})
 

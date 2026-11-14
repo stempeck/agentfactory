@@ -43,7 +43,7 @@ func TestADR027ConvergenceContract(t *testing.T) {
 				t.Errorf("ADR-027 has no %q heading (the Nygard shape every ADR here uses)", h)
 			}
 		}
-		for _, want := range []string{"_converge", "CONVERGE_FAILURES", "convergence.json", "advisory-exceptions.json", "advisory-decay", "--check", "ADR-026"} {
+		for _, want := range []string{"_converge", "CONVERGE_FAILURES", "convergence.json", "advisory-exceptions.json", "advisory-decay", "--check", "ADR-026", "fix_available", "Operator acceptance required:"} {
 			if !strings.Contains(raw, want) {
 				t.Errorf("ADR-027 never names %q (BODY-3)", want)
 			}
@@ -244,4 +244,30 @@ func adr027QuickstartCites(text string) []string {
 		}
 	}
 	return cites
+}
+
+// #755: the architecture docs describe the healing loop as the operator ruled it — issues filed and heals
+// merged in agentfactory-pro, one issue per pin, the public repository healed only by a publish.
+func TestAdvisoryHealArchitectureDocsDescribeTheRuledFlow(t *testing.T) {
+	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	adr := flat(readRepoFile(t, "docs/architecture/adrs/ADR-027-bootstrap-convergence-contract.md"))
+	heal := flat(section(readRepoFile(t, "docs/architecture/trust-boundaries.md"), "### GitHub issue → dispatcher → healing agents (advisory-heal)", "\n### "))
+	if heal == "" {
+		t.Fatal("trust-boundaries.md has no advisory-heal section")
+	}
+	for doc, text := range map[string]string{"ADR-027": adr, "trust-boundaries.md §advisory-heal": heal} {
+		for _, want := range []string{"stempeck/agentfactory-pro", "one issue per pin", "healed only by a publish"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s lacks %q", doc, want)
+			}
+		}
+		for _, banned := range []string{"back-port", "A heal lands on the public repository", "run of stempeck/agentfactory fails", "one issue per finding", "factory-local"} {
+			if strings.Contains(text, banned) {
+				t.Errorf("%s still says %q", doc, banned)
+			}
+		}
+	}
+	if strings.Contains(heal, "The filer decides nothing") {
+		t.Error("trust-boundaries.md says the filer decides nothing; it groups findings by a fixed sibling map")
+	}
 }

@@ -1,0 +1,269 @@
+{
+  "schema": 1,
+  "today": "2026-11-11",
+  "exit_class": "finding",
+  "counts": {
+    "reported": 20,
+    "unexcused": 13,
+    "expired": 0,
+    "node_behind": 1,
+    "excused_fixable": 0,
+    "errors": 0
+  },
+  "findings": [
+    {
+      "class": "node-behind",
+      "key": "nodejs@v22.23.4",
+      "pinned": true,
+      "pinned_in": [
+        {
+          "ecosystem": "apt",
+          "repo": ""
+        }
+      ],
+      "releases": [
+        "v22.23.5"
+      ]
+    },
+    {
+      "class": "unexcused",
+      "key": "oauthlib@4.0.0",
+      "pinned": true,
+      "pinned_in": [
+        {
+          "ecosystem": "PyPI",
+          "repo": ""
+        }
+      ],
+      "fix_published": true,
+      "advisories": [
+        {
+          "id": "GHSA-3jp2-3mrg-2vxc",
+          "aliases": [
+            "CVE-2026-49272"
+          ],
+          "source": "OSV",
+          "ecosystem": "PyPI",
+          "repo": "",
+          "against": "OSV PyPI oauthlib==4.0.0",
+          "fixed": [
+            "4.0.1"
+          ],
+          "fixed_raw": ""
+        }
+      ],
+      "register": []
+    },
+    {
+      "class": "unexcused",
+      "key": "stdlib@1.26.10",
+      "pinned": true,
+      "pinned_in": [
+        {
+          "ecosystem": "Go",
+          "repo": ""
+        }
+      ],
+      "fix_published": true,
+      "advisories": [
+        {
+          "id": "GO-2026-6859",
+          "aliases": [
+            "CVE-2026-97054"
+          ],
+          "source": "OSV",
+          "ecosystem": "Go",
+          "repo": "",
+          "against": "OSV Go stdlib@1.26.10",
+          "fixed": [
+            "1.26.11",
+            "1.27.4"
+          ],
+          "fixed_raw": ""
+        }
+      ],
+      "register": []
+    },
+    {
+      "class": "unexcused",
+      "key": "toolchain@1.26.10",
+      "pinned": true,
+      "pinned_in": [
+        {
+          "ecosystem": "Go",
+          "repo": ""
+        }
+      ],
+      "fix_published": true,
+      "advisories": [
+        {
+          "id": "GO-2026-6848",
+          "aliases": [
+            "CVE-2026-97043"
+          ],
+          "source": "OSV",
+          "ecosystem": "Go",
+          "repo": "",
+          "against": "OSV Go toolchain@1.26.10",
+          "fixed": [
+            "1.26.11",
+            "1.27.4"
+          ],
+          "fixed_raw": ""
+        },
+        {
+          "id": "GO-2026-6849",
+          "aliases": [
+            "CVE-2026-97042"
+          ],
+          "source": "OSV",
+          "ecosystem": "Go",
+          "repo": "",
+          "against": "OSV Go toolchain@1.26.10",
+          "fixed": [
+            "1.26.11",
+            "1.27.4"
+          ],
+          "fixed_raw": ""
+        },
+        {
+          "id": "GO-2026-6850",
+          "aliases": [
+            "CVE-2026-97041"
+          ],
+          "source": "OSV",
+          "ecosystem": "Go",
+          "repo": "",
+          "against": "OSV Go toolchain@1.26.10",
+          "fixed": [
+            "1.26.11",
+            "1.27.4"
+          ],
+          "fixed_raw": ""
+        },
+        {
+          "id": "GO-2026-6851",
+          "aliases": [
+            "CVE-2026-97040"
+          ],
+          "source": "OSV",
+          "ecosystem": "Go",
+          "repo": "",
+          "against": "OSV Go toolchain@1.26.10",
+          "fixed": [
+            "1.26.11",
+            "1.27.4"
+          ],
+          "fixed_raw": ""
+        },
+        {
+          "id": "GO-2026-6852",
+          "aliases": [
+            "CVE-2026-97039"
+          ],
+          "source": "OSV",
+          "ecosystem": "Go",
+          "repo": "",
+          "against": "OSV Go toolchain@1.26.10",
+          "fixed": [
+            "1.26.11",
+            "1.27.4"
+          ],
+          "fixed_raw": ""
+        },
+        {
+          "id": "GO-2026-6853",
+          "aliases": [
+            "CVE-2026-97038"
+          ],
+          "source": "OSV",
+          "ecosystem": "Go",
+          "repo": "",
+          "against": "OSV Go toolchain@1.26.10",
+          "fixed": [
+            "1.26.11",
+            "1.27.4"
+          ],
+          "fixed_raw": ""
+        },
+        {
+          "id": "GO-2026-6854",
+          "aliases": [
+            "CVE-2026-97037"
+          ],
+          "source": "OSV",
+          "ecosystem": "Go",
+          "repo": "",
+          "against": "OSV Go toolchain@1.26.10",
+          "fixed": [
+            "1.26.11",
+            "1.27.4"
+          ],
+          "fixed_raw": ""
+        },
+        {
+          "id": "GO-2026-6855",
+          "aliases": [
+            "CVE-2026-97036"
+          ],
+          "source": "OSV",
+          "ecosystem": "Go",
+          "repo": "",
+          "against": "OSV Go toolchain@1.26.10",
+          "fixed": [
+            "1.26.11",
+            "1.27.4"
+          ],
+          "fixed_raw": ""
+        },
+        {
+          "id": "GO-2026-6856",
+          "aliases": [
+            "CVE-2026-97035"
+          ],
+          "source": "OSV",
+          "ecosystem": "Go",
+          "repo": "",
+          "against": "OSV Go toolchain@1.26.10",
+          "fixed": [
+            "1.26.11",
+            "1.27.4"
+          ],
+          "fixed_raw": ""
+        },
+        {
+          "id": "GO-2026-6857",
+          "aliases": [
+            "CVE-2026-97034"
+          ],
+          "source": "OSV",
+          "ecosystem": "Go",
+          "repo": "",
+          "against": "OSV Go toolchain@1.26.10",
+          "fixed": [
+            "1.26.11",
+            "1.27.4"
+          ],
+          "fixed_raw": ""
+        },
+        {
+          "id": "GO-2026-6858",
+          "aliases": [
+            "CVE-2026-97033"
+          ],
+          "source": "OSV",
+          "ecosystem": "Go",
+          "repo": "",
+          "against": "OSV Go toolchain@1.26.10",
+          "fixed": [
+            "1.26.11",
+            "1.27.4"
+          ],
+          "fixed_raw": ""
+        }
+      ],
+      "register": []
+    }
+  ],
+  "errors": []
+}

@@ -32,14 +32,19 @@ var statuslineCmd = &cobra.Command{
 
   af statusline on|off      switch the factory-wide statusline gate
   af statusline status      gate state, configured elements, a live self-test, any agents
-                            whose settings.json still lacks the statusLine key, and any live
-                            agent whose declared context window disagrees with the host's
+                            whose settings.json still lacks the statusLine key, any live
+                            agent whose declared context window disagrees with the host's,
+                            the window alarms (a mismatch, or unobserved), and each window
+                            finding the operator was not yet notified of ("operator not yet
+                            notified")
   af statusline render      the settings.json-invoked renderer: reads Claude Code's
                             statusline payload on stdin and prints the two-line status
 
 render rides Claude Code's per-session hot path, so it ALWAYS exits 0 and is silent on
 every failure (blank or partial output, never an error, never stderr noise). status runs
-the same pipeline loudly, so a silent render failure is still diagnosable.`,
+the same pipeline loudly, so a silent render failure is still diagnosable. status also
+runs the window detector, which records what it finds and mails a new divergence, except
+on a factory root it downgraded from a mismatch, where it only reads.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runStatusline,
 }
@@ -63,10 +68,12 @@ func statuslineFactoryEnabled(factoryRoot string) bool {
 }
 
 // runStatusline dispatches the arg-switch. render is peeled off first: it owns its own root
-// resolution and a panic backstop, and its exit-0 contract is absolute. status is read-only
-// and downgrades a factory-root mismatch (dispatch-status posture, D3); on and off write
-// state and report a mismatch instead, matching telemetry — a gate written to the wrong
-// root is worse than an error.
+// resolution and a panic backstop, and its exit-0 contract is absolute. status downgrades a
+// factory-root mismatch (dispatch-status posture, D3): on the root it resolved it runs the
+// window detector, which writes the window record and mails a new divergence; on a root it
+// downgraded from a mismatch it writes and mails nothing, because a record or a mail filed
+// under the wrong factory is worse than none. on and off write state and report a mismatch
+// instead, matching telemetry — a gate written to the wrong root is worse than an error.
 func runStatusline(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 && args[0] == "render" {
 		return runStatuslineRender(cmd)
@@ -77,10 +84,11 @@ func runStatusline(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	root, err := resolveInvokerRoot(wd)
+	downgraded := false
 	if err != nil {
 		if len(args) == 0 || args[0] == "status" {
 			if r, ok := downgradeRootMismatch(err); ok {
-				root = r
+				root, downgraded = r, true
 			} else {
 				return err
 			}
@@ -90,7 +98,7 @@ func runStatusline(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(args) == 0 || args[0] == "status" {
-		return printStatuslineStatus(root)
+		return printStatuslineStatus(root, downgraded)
 	}
 
 	switch args[0] {
@@ -304,7 +312,7 @@ func defuseNeedle(line, needle string) string {
 // (improvement.go:374-387). Unlike Pattern-7's early return, a config/pipeline failure is NOT
 // swallowed here — the self-test line is where it is caught and NAMED, so the exact breakage
 // that render hides is visible. "Return nil" governs only the exit code.
-func printStatuslineStatus(root string) error {
+func printStatuslineStatus(root string, downgraded bool) error {
 	if statuslineFactoryEnabled(root) {
 		fmt.Println("statusline: on")
 	} else {
@@ -314,6 +322,10 @@ func printStatuslineStatus(root string) error {
 	// Second, before anything that can fail: the pane has room for `⚠ HALT worker` and no more, so
 	// this is where the rest of it lives. It runs whether the gate is on or off on purpose — a
 	// factory with the statusline switched off is precisely the one whose pane cannot alarm.
+	// The window detector runs first, so the run that first records a divergence already prints
+	// its WINDOW alarm in the block below.
+	live := statuslineLiveProfiles(root)
+	report := detectWindowsFn(root, windowDetectInput{Site: windowAtStatus, Now: time.Now(), Live: live, ReadOnly: downgraded, Warn: os.Stdout})
 	if note := recoveryAlertsNote(root, time.Now()); note != "" {
 		fmt.Print(note)
 	}
@@ -335,8 +347,7 @@ func printStatuslineStatus(root string) error {
 	// K7 (#602). Appended LAST so the first-line grep contract above is untouched, and to
 	// stdout like every other status line — a misconfiguration this verb diagnoses is
 	// diagnostic content, not a failure of the verb, so it must not change the exit code.
-	live := statuslineLiveProfiles(root)
-	if note := statuslineDriftNote(root, live); note != "" {
+	if note := statuslineDriftNote(report); note != "" {
 		fmt.Print(note)
 	}
 	if note := statuslinePairingNote(live); note != "" {
@@ -560,73 +571,32 @@ func statuslineLiveProfiles(root string) map[string]liveProfile {
 // Why an operator should care: recovery triggers on the host-reported percentage, so the reported
 // window is the denominator. A declaration that disagrees with it means recovery is firing against
 // arithmetic the operator did not intend.
-func statuslineDriftNote(root string, live map[string]liveProfile) string {
-	if len(live) == 0 {
-		return ""
-	}
-	scope := make(map[string]struct{}, len(live))
-	for agent := range live {
-		scope[agent] = struct{}{}
-	}
-
-	// This threshold derivation duplicates readAgentOccupancy (agents.go:232-251) almost
-	// token-for-token, deliberately: the phase's acceptance criterion greps THIS file for the
-	// ReadObservations call, and hoisting a shared helper would move it back out. If that
-	// constraint is ever lifted, collapse the two — they are the same computation, and the
-	// staleness/darkAfter semantics must not be allowed to diverge between them.
-	startupCfg, err := config.LoadStartupConfig(root)
-	if err != nil {
-		return ""
-	}
-	staleness := time.Duration(startupCfg.Recovery.StalenessSecs) * time.Second
-	darkAfter := time.Duration(startupCfg.Recovery.DarkGraceSecs) * time.Second
-	if staleness <= 0 || darkAfter <= 0 {
-		return ""
-	}
-	readings, _ := statusline.ReadObservations(config.StatuslineSessionsDir(root), statusline.ReadOptions{
-		KnownAgents: scope,
-		Staleness:   staleness,
-		DarkAfter:   darkAfter,
-	}, time.Now())
-
-	var drifted []string
-	for _, agent := range sortedMapKeys(live) {
-		declared, ok := statuslineDeclaredWindow(live[agent])
-		if !ok {
-			continue
-		}
-		// IsHealthy, not the Observation() bool: a stale and even a dark reading still carries a
-		// datum (observation.go:225, :235), so gating on the bool alone would advise an operator
-		// using a number the host last reported hours ago.
-		reading := readings[agent]
-		if !reading.IsHealthy() {
-			continue
-		}
-		obs, hasObs := reading.Observation()
-		if !hasObs {
-			continue
-		}
-		// The writer only records this field when the host reported a positive window
-		// (daily.go:225-235), but the reader does not clamp it — so a hand-planted file must not
-		// be able to manufacture a warning out of a zero.
-		reported := obs.TokensTotal()
-		if reported <= 0 || uint64(reported) == declared {
-			continue
-		}
-		drifted = append(drifted, fmt.Sprintf("  %s: profile %q declares %d, host reports %d\n",
-			agent, live[agent].name, declared, reported))
-	}
-	if len(drifted) == 0 {
-		return ""
-	}
-
+//
+// It prints from the window detector's report and runs no detection of its own: the comparison is
+// the detector's item 5 (legacyWindowDrift), for live agents that have no launch fact.
+func statuslineDriftNote(report windowReport) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "context-window drift (declared %s vs the window the host reports):\n", config.EnvMaxContextTokens)
-	for _, line := range drifted {
-		b.WriteString(line)
+	var drifted []windowFinding
+	for _, f := range report.Findings {
+		if f.State == "legacy-drift" {
+			drifted = append(drifted, f)
+		}
 	}
-	fmt.Fprintln(&b, "  the reported window is what context recovery divides by; align the declaration with the "+
-		"backend's real window, or recovery fires early (churn) or never (blind).")
+	if len(drifted) > 0 {
+		fmt.Fprintf(&b, "context-window drift (declared %s vs the window the host reports):\n", config.EnvMaxContextTokens)
+		for _, f := range drifted {
+			fmt.Fprintf(&b, "  %s: profile %q declares %d, host reports %d\n", f.Agent, f.Profile, f.Declared, f.Applied)
+		}
+		fmt.Fprintln(&b, "  the reported window is what context recovery divides by; align the declaration with the "+
+			"backend's real window, or recovery fires early (churn) or never (blind).")
+	}
+	// The mismatch and unobserved findings themselves are the WINDOW alarms of the alerts block;
+	// only the fact that nobody was told yet is said here.
+	for _, f := range report.Findings {
+		if (f.State == "mismatch" || f.State == "unobserved") && !f.Notified {
+			fmt.Fprintf(&b, "window %s: %s on profile %q, operator not yet notified\n", f.State, f.Agent, f.Profile)
+		}
+	}
 	return b.String()
 }
 

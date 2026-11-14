@@ -105,6 +105,11 @@ const (
 	EnvEffortFormula   = "AF_EFFORT_FORMULA"
 )
 
+// EnvLaunchKind marks a launch line a respawn built (`respawn`) and is empty on every other launch.
+// As for the attestation, the session's own environment is the only carrier, so nothing in the agent
+// directory can make a respawn look fresh or a fresh launch look like a respawn.
+const EnvLaunchKind = "AF_LAUNCH_KIND"
+
 // EnvIntegrationHookFailModes carries each bound integration's hook fail mode (`<name>=<mode>,…`) on the
 // launch line. It is the one fixed key af derives for integrations; a key derived from an integration name
 // would let a hyphenated name produce an invalid or colliding identifier.
@@ -165,7 +170,8 @@ const (
 
 // foreignModelWindow is the context window the host assumes for a model id it does not
 // recognise as its own, unless CLAUDE_CODE_MAX_CONTEXT_TOKENS declares the real one. It is a
-// distinct quantity from compactWindowMax and drives the pairing lint only, never validation.
+// distinct quantity from compactWindowMax and never drives validation: it is the window a
+// prediction falls back to and the default step bound (startup.go), so the two cannot part.
 // Same source and observation date as the bounds above.
 const foreignModelWindow = 200000
 
@@ -174,7 +180,8 @@ const foreignModelWindow = 200000
 // every profile's export keys. The effort attestation joins them for the same reason:
 // a profile that exported it would attest every session it launches as reduced, and so
 // does the integration hook-fail-mode key: a manifest that set it would rewrite every
-// integration's fail mode.
+// integration's fail mode. So does the launch kind: a profile that exported `respawn` would
+// keep every startup it launches from being measured.
 var afIdentityKeys = map[string]bool{
 	"AF_ROLE":          true,
 	"AF_ACTOR":         true,
@@ -184,6 +191,7 @@ var afIdentityKeys = map[string]bool{
 	EnvEffortObjective: true,
 	EnvEffortStepLabel: true,
 	EnvEffortFormula:   true,
+	EnvLaunchKind:      true,
 
 	EnvIntegrationHookFailModes: true,
 }
@@ -321,6 +329,10 @@ func SaveModelsConfig(path string, cfg *ModelsConfig) error {
 	data = append(data, '\n')
 	return fsutil.WriteFileAtomic(path, data, 0644)
 }
+
+// ValidateModelsConfig exposes the loader's validation to the starter-config seed,
+// which must refuse a models.json before writing it rather than at its first load.
+func ValidateModelsConfig(cfg *ModelsConfig) error { return validateModelsConfig(cfg) }
 
 // validateModelsConfig is pure (no env reads) and fail-loud. It rejects, across
 // EVERY profile: identity-var keys, a non-empty ANTHROPIC_API_KEY, a malformed
@@ -470,51 +482,58 @@ func IsValidEnvKeyName(name string) bool {
 	return true
 }
 
-// Provenance of the number ResolveContextWindow returned. A window figure alone cannot be
-// argued with — "200000" is indistinguishable from a real measurement, a stale declaration, and
-// a guess — so the source travels with it and a caller can say WHY it divided by what it did.
+// Provenance of the number PredictContextWindow or ObservedContextWindow returned. A window figure
+// alone cannot be argued with — "200000" is indistinguishable from a real measurement, a stale
+// declaration, and a guess — so the source travels with it and a caller can say WHY it divided by
+// what it did.
 const (
 	WindowSourceDeclared = "declared"
 	WindowSourceHost     = "host"
 	WindowSourceFallback = "fallback"
 )
 
-// ResolveContextWindow answers "how large is this agent's context window", which is the
-// denominator every occupancy fraction is taken against. Precedence is declaration, then the
-// host's report, then the assumption the host itself makes (#668 K1/D7):
-//
-//   - The operator's CLAUDE_CODE_MAX_CONTEXT_TOKENS is first because it is the only operand
-//     that can be RIGHT about a gateway the host does not recognise. The host reports what it
-//     ASSUMES for a foreign model id; the operator reports what the backend actually has.
-//   - The host's report is next, and it is authoritative for the host's own models.
-//   - foreignModelWindow last, because a wrong denominator still beats no denominator: every
-//     consumer of this divides, and there is no sensible behavior for zero.
-//
-// It is pure, like PairingLintProfile above and for the same reason (ADR-004). The temptation
-// here is sharper than usual — the first operand's name IS an environment variable — but the
-// window resolves PER AGENT at read time while a process environment is one value for the whole
-// process, so reading it here would give every agent the launching shell's answer. The caller
-// knows which agent it is asking about and supplies that agent's profile map and the host
-// reading it already took.
-//
-// Nothing factory-global participates. In particular startup.json's bound_tokens does not: it is
-// a telemetry annotation (see StepContextConfig) and routing it here would collapse a per-agent
-// quantity into one number for the whole factory, which is exactly what D7 forbids.
-func ResolveContextWindow(profile map[string]string, hostReported int64) (window int64, source string) {
-	// DecimalTokenCount accepts the full unsigned range, so the narrowing is the hazard: a
-	// declaration above MaxInt64 would wrap to a NEGATIVE window, and a negative denominator is
-	// worse than an assumed one. Out-of-range is treated as undeclared.
-	if declared, ok := DecimalTokenCount(profile[EnvMaxContextTokens]); ok && declared > 0 && declared <= math.MaxInt64 {
-		return int64(declared), WindowSourceDeclared
-	}
-	if hostReported > 0 {
-		return hostReported, WindowSourceHost
+func ForeignModelProfile(profile map[string]string) bool {
+	model := profile[envModel]
+	return model != "" && !strings.HasPrefix(model, claudeModelPrefix)
+}
+
+// PredictContextWindow and ObservedContextWindow are separate because one answers before a session
+// exists and the other while it runs, so on a not-foreign profile whose host applies less than it
+// declares (H < D) they can disagree, and that is accepted.
+func PredictContextWindow(profile map[string]string) (window int64, source string) {
+	if d, ok := DeclaredContextWindow(profile[EnvMaxContextTokens]); ok {
+		return d, WindowSourceDeclared
 	}
 	return foreignModelWindow, WindowSourceFallback
 }
 
+func ObservedContextWindow(profile map[string]string, hostReported int64) (window int64, source string, ok bool) {
+	if hostReported <= 0 {
+		return 0, "", false
+	}
+	d, declared := DeclaredContextWindow(profile[EnvMaxContextTokens])
+	switch {
+	case !declared:
+		return hostReported, WindowSourceHost, true
+	case ForeignModelProfile(profile) || d <= hostReported: // A1-r2 row 1; rows 2-5 take min(D, H)
+		return d, WindowSourceDeclared, true
+	default:
+		return hostReported, WindowSourceHost, true
+	}
+}
+
+// DeclaredContextWindow narrows DecimalTokenCount's unsigned range: a value above MaxInt64 would
+// wrap to a negative window, so it reads as undeclared.
+func DeclaredContextWindow(raw string) (int64, bool) {
+	n, ok := DecimalTokenCount(raw)
+	if !ok || n == 0 || n > math.MaxInt64 {
+		return 0, false
+	}
+	return int64(n), true
+}
+
 // BackendPoolTokens returns the operator-declared shared pool for a profile and whether one is
-// declared. It mirrors ResolveContextWindow's narrowing guard — a value above MaxInt64 would wrap to a
+// declared. It mirrors DeclaredContextWindow's narrowing guard — a value above MaxInt64 would wrap to a
 // negative pool, worse than an undeclared one, so out-of-range is treated as undeclared — but unlike
 // the window it has NO host-reported fallback: a pool is an operator fact or it is absent, and an
 // absent pool leaves the dispatch gate inert by construction rather than dividing by a guess.
@@ -603,15 +622,15 @@ func CapacityLintProfile(name string, profile map[string]string) (warning string
 // warns — this never rejects. It is pure like the rest of this package: no environment reads
 // and no file reads (ADR-004), so any command can call it.
 func PairingLintProfile(name string, profile map[string]string) (warning string, hasWarning bool) {
-	model := profile[envModel]
-	if model == "" || strings.HasPrefix(model, claudeModelPrefix) {
+	if !ForeignModelProfile(profile) {
 		return "", false
 	}
-	// The cap this lint warns about IS the resolver's fallback — one host assumption, asked for
+	model := profile[envModel]
+	// The cap this lint warns about IS the prediction's fallback — one host assumption, asked for
 	// once rather than open-coded twice, so the two cannot drift. The silencing rule stays the
 	// lint's own: any non-empty companion silences, because the write boundary (:205-209) has
 	// already refused every companion value except "" and a positive decimal count.
-	assumed, _ := ResolveContextWindow(nil, 0)
+	assumed, _ := PredictContextWindow(nil)
 	declared, ok := DecimalTokenCount(profile[envCompactWindow])
 	if !ok || declared <= uint64(assumed) {
 		return "", false
@@ -621,6 +640,20 @@ func PairingLintProfile(name string, profile map[string]string) (warning string,
 	}
 	return fmt.Sprintf("model %q sets %s to %s for model id %q, which the host caps at %d; set %s to the model's real context window to raise it",
 		name, envCompactWindow, profile[envCompactWindow], model, assumed, EnvMaxContextTokens), true
+}
+
+// WindowDeclarationLintProfile is pure like PairingLintProfile. A profile with no model id stays
+// silent: the sentence would name the model "".
+func WindowDeclarationLintProfile(name string, profile map[string]string) (warning string, hasWarning bool) {
+	model := profile[envModel]
+	if model == "" || ForeignModelProfile(profile) {
+		return "", false
+	}
+	if _, ok := DeclaredContextWindow(profile[EnvMaxContextTokens]); ok {
+		return "", false
+	}
+	return fmt.Sprintf("model %q declares no %s; af will use whatever window the host applies to %q and cannot tell you when that is smaller than you expect",
+		name, EnvMaxContextTokens, model), true
 }
 
 // EndpointClassKeys is the inventory of requestable-model-class env keys an endpoint profile has to
@@ -648,6 +681,21 @@ var EndpointClassKeys = []string{
 	"ANTHROPIC_DEFAULT_SONNET_MODEL",
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL",
 	"CLAUDE_CODE_SUBAGENT_MODEL",
+}
+
+// WindowDecidingEnvKeys are the exports, besides the model id, that decide the context window the
+// harness applies. The window probe, the observation rows and `af config models check` all key on
+// this one list. It is closed by a test (TestHarnessWindowKeyViolations, run on the pinned binary)
+// rather than by review: a harness that starts reading a new window key would otherwise be probed
+// without it while its sessions run with it, which is the incident's shape on the pinned harness.
+// The keys are not part of a window identity, so an edit that adds or changes only one of them keeps
+// the profile's entry; `af config models check` re-measures it, and otherwise the detector corrects
+// it at the first session.
+var WindowDecidingEnvKeys = []string{
+	EnvMaxContextTokens,
+	envCompactWindow,
+	"CLAUDE_CODE_DISABLE_1M_CONTEXT",
+	"DISABLE_COMPACT",
 }
 
 // derivedEndpointClassKeys are the inventory members derivation may fill, in the order operator

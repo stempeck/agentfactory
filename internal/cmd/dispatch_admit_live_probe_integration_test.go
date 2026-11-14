@@ -443,20 +443,7 @@ func TestDispatchAdmit_LiveDenyProbe(t *testing.T) {
 	// exports AF_REQUIRE_LIVE_CLAUDE=1 does not permit even that, because a green PASS with the live
 	// half skipped is indistinguishable from a green PASS with it run.
 	t.Run("real claude CLI, one turn, two Agent tool_use blocks", func(t *testing.T) {
-		claudePath, err := exec.LookPath("claude")
-		if err != nil {
-			// The flag is read in TestMain, not here: NeutralizeAFEnv wipes the AF_* family before
-			// m.Run, so an os.Getenv on this line would always see "" and the switch would be dead
-			// code that reads like a satisfied one. Same trap, same answer as afRequireRealStore.
-			if afRequireLiveClaude {
-				t.Fatalf("%s=1 but the claude CLI is not on PATH (%v); this lane asked to guarantee "+
-					"live coverage, so a skip here is the vacuous green it was set to prevent",
-					liveProbeRequireEnv, err)
-			}
-			t.Skipf("the claude CLI is not on PATH (%v); the live half of the deny probe cannot run "+
-				"here. Set %s=1 to make this a failure. Every other failure mode in this file already "+
-				"is one.", err, liveProbeRequireEnv)
-		}
+		claudePath := liveClaudeBinary(t)
 		live := newProbeStub(t)
 		fxLive := newLiveProbeFactory(ctx, t, live.URL)
 		wireProbeHooks(t, fxLive.workDir)

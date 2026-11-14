@@ -771,9 +771,9 @@ func tokenomicsAnyMechanismOn(p tokenomics.Policy) bool {
 func resolveTokenomicsWindow(factoryRoot string) tokenomics.Window {
 	cfg, err := config.LoadModelsConfig(factoryRoot)
 	if err != nil || cfg == nil {
-		return tokenomics.ResolveWindow(nil, 0)
+		return tokenomics.PredictWindow(nil)
 	}
-	return tokenomics.ResolveWindow(cfg.Models[cfg.Default], 0)
+	return tokenomics.PredictWindow(cfg.Models[cfg.Default])
 }
 
 // resolveTokenomicsDispatchPool answers with the DEFAULT profile's declared backend-pool fact

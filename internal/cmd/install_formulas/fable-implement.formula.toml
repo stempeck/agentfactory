@@ -1217,7 +1217,8 @@ needs = ["cleanup-workspace"]
 description = """
 Verify work is complete and ready for PR submission.
 
-**Note:** Do NOT close the issue. The Supervisor will close it after successful merge.
+**Note:** Do NOT close the issue. After a successful merge the Supervisor closes it, unless the
+PR's `Resolves` line names a GitHub issue, which the merge closes.
 This enables conflict-resolution retries without reopening closed issues.
 
 **1. Verify the issue shows your work:**
@@ -1277,10 +1278,19 @@ PR's branch — no separate PR was opened. See the commits pushed above.
 
 **MODE=issue — create a pull request** whose body carries the Phase 10 evidence report
 content — the AC-by-AC evidence table, each decision with its rationale and flip
-condition, the explicitly-not-done list, and the residual risks stated plainly:
+condition, the explicitly-not-done list, and the residual risks stated plainly. Keep
+`$CLOSES` as the body's first line: for an issue link it is the closing reference the
+merge acts on, so the block stops before `gh pr create` when it cannot derive it, re-reads it
+after, and locks the PR when its repository is public:
 ```bash
-gh pr create --title "feat: {{issue}} (fable-implement)" \\
-  --body "Resolves {{issue}}.
+BEAD=$(af bead show {{issue}} --json) && DESC=$(printf '%s' "$BEAD" | jq -er .description) || { af mail send supervisor -s "HELP: cannot read {{issue}}" -m "{{issue}}"; exit 1; }
+ISSUE_URL=$(printf '%s' "$DESC" | grep -oE 'https://github[.]com/[^/ ]+/[^/ ]+/issues/[0-9]+' | head -1)
+case "$DESC" in *github.com/*/issues/[0-9]*) [ -n "$ISSUE_URL" ] || { af mail send supervisor -s "HELP: issue link not extracted" -m "{{issue}}"; exit 1; } ;; esac
+ISSUE_REPO=$(printf '%s' "$ISSUE_URL" | sed -E 's|https://github[.]com/([^/]+/[^/]+)/issues/.*|\\1|')
+ISSUE_NUM=$(printf '%s' "$ISSUE_URL" | grep -oE '[0-9]+$')
+if [ -n "$ISSUE_URL" ]; then CLOSES="Resolves $ISSUE_REPO#$ISSUE_NUM ({{issue}})."; else CLOSES="Resolves {{issue}}."; fi
+PR_URL=$(gh pr create --title "feat: {{issue}} (fable-implement)" \\
+  --body "$CLOSES
 
 Implemented via the fable-implement fixed checklist (all 11 phases, all gates passed).
 
@@ -1294,7 +1304,19 @@ Implemented via the fable-implement fixed checklist (all 11 phases, all gates pa
 <OUT-OF-SCOPE list>
 
 ## Residual Risks
-<stated plainly — what sits in the assumed bin>"
+<stated plainly — what sits in the assumed bin>")
+echo "$PR_URL"
+if [ -n "$ISSUE_URL" ]; then
+  if [ -z "$PR_URL" ]; then
+    af mail send supervisor -s "HELP: gh pr create printed no PR URL" -m "{{issue}} ($ISSUE_URL): no PR to self-check or lock"
+    exit 1
+  fi
+  FIRST=$(gh pr view "$PR_URL" --json body --jq .body | head -1)
+  case "$FIRST" in "$CLOSES") ;; *) af mail send supervisor -s "HELP: PR body lacks closing reference" -m "$PR_URL line 1: $FIRST"; exit 1 ;; esac
+  PR_REPO=$(printf '%s' "$PR_URL" | sed -E 's|https://github[.]com/([^/]+/[^/]+)/pull/.*|\\1|')
+  VIS=$(gh repo view "$PR_REPO" --json visibility --jq .visibility 2>/dev/null || echo PUBLIC)
+  if [ "$VIS" = PUBLIC ]; then gh pr lock "$PR_URL" || { af mail send supervisor -s "HELP: PR lock failed" -m "$PR_URL"; exit 1; }; fi
+fi
 ```
 
 **2. Signal completion:**
@@ -1302,26 +1324,15 @@ Implemented via the fable-implement fixed checklist (all 11 phases, all gates pa
 af done
 ```
 
-This closes the current formula step. When all steps are complete, it:
-- Mails WORK_DONE to the dispatcher
-- Cleans up the checkpoint and runtime artifacts
+On the last step, `af done` mails WORK_DONE to the dispatcher.
 
 **Ephemeral Agent Model:**
-Once you signal completion, you're done. The Supervisor will:
+After `af done` the Supervisor will:
 1. Review and merge your PR
-2. Close your issue after successful merge
-3. Create conflict-resolution tasks if needed (fresh agent handles those)
+2. Close your issue after the merge, unless `$CLOSES` names a GitHub issue, which the merge closes
+3. Hand any conflict resolution to a fresh agent
 
-**3. You're done:**
-Your work is submitted. The Supervisor knows you're done.
-Your workspace can be cleaned up - all work is pushed to origin.
-
-If you have context remaining, you may:
-- Pick up new work from `af prime`
-- Or use `af handoff` to cycle to a fresh session
-
-If the Supervisor needs conflict resolution, it will dispatch a fresh agent.
-You do NOT need to wait around.
+**3. You're done:** all work is pushed; pick up new work (`af prime`) or cycle (`af handoff`).
 
 **Exit criteria:** PR created (or PR comment posted for MODE=pr), `af done` signaled, agent done."""
 

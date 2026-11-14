@@ -32,8 +32,8 @@ func declared(tokens int64) Window {
 // layer appends for the launch under consideration — so "orchestrator + one" is a two-entry list and
 // "orchestrator + two" a three-entry one.
 func TestWithinBackendCapacity(t *testing.T) {
-	pool := declared(200_000)      // shared KV pool, e.g. lmstudio's 262_144 in production
-	cloud := ResolveWindow(nil, 0) // no declaration ⇒ {200000, fallback}: same size, no capacity fact
+	pool := declared(200_000)   // shared KV pool, e.g. lmstudio's 262_144 in production
+	cloud := PredictWindow(nil) // no declaration ⇒ {200000, fallback}: same size, no capacity fact
 	if cloud.Source != config.WindowSourceFallback {
 		t.Fatalf("cloud window source = %q, want %q", cloud.Source, config.WindowSourceFallback)
 	}

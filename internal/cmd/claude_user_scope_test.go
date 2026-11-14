@@ -82,3 +82,48 @@ func TestClaudeUserScopeReader(t *testing.T) {
 		})
 	}
 }
+
+// TestReadClaudeUserScope_NonStringEnvIsNotAnError pins that the user-scope env block can never
+// break the reader: af plugin install reads the same file, and Claude Code itself accepts any
+// JSON value there, so a shape af does not expect must cost af the comparison, never the install.
+func TestReadClaudeUserScope_NonStringEnvIsNotAnError(t *testing.T) {
+	plant := func(t *testing.T, content string) {
+		t.Helper()
+		dir := t.TempDir()
+		t.Setenv(claudeConfigDirEnv, dir)
+		if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("a non-string value inside env is kept raw", func(t *testing.T) {
+		plant(t, `{"env":{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":262144,"FEATURE":true,"NAME":"x"}}`)
+		scope, err := readClaudeUserScope()
+		if err != nil {
+			t.Fatalf("a non-string env value must not be an error, got %v", err)
+		}
+		want := map[string]string{"CLAUDE_CODE_MAX_CONTEXT_TOKENS": `262144`, "FEATURE": `true`, "NAME": `"x"`}
+		if len(scope.Env) != len(want) {
+			t.Fatalf("Env = %v, want the three keys kept raw %v", scope.Env, want)
+		}
+		for k, v := range want {
+			if got := string(scope.Env[k]); got != v {
+				t.Errorf("Env[%q] = %q, want the raw value %q", k, got, v)
+			}
+		}
+	})
+
+	t.Run("a non-object env leaves Env nil", func(t *testing.T) {
+		plant(t, `{"env":["x"],"enabledPlugins":{"playwright@x":true}}`)
+		scope, err := readClaudeUserScope()
+		if err != nil {
+			t.Fatalf("a non-object env must not be an error, got %v", err)
+		}
+		if scope.Env != nil {
+			t.Errorf("Env = %v, want nil for a non-object env", scope.Env)
+		}
+		if len(scope.Plugins) != 1 || scope.Plugins[0].Key != "playwright@x" {
+			t.Errorf("the rest of the file must still be read, Plugins = %+v", scope.Plugins)
+		}
+	})
+}

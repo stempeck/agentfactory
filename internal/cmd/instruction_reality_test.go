@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,7 +36,7 @@ import (
 // the parser and reaches no agent. Raw-byte scanning would hold a formula to words it does not
 // ship.
 //
-// install.go and recovery.go are scanned as EXACT LITERALS — the scaffold value and the two
+// seed_configs.go and recovery.go are scanned as EXACT LITERALS — the scaffold value and the two
 // advisory consts — rather than as whole source files, because those files are Go, and Go
 // comments discussing verbs are not instructions delivered to anyone.
 //
@@ -157,7 +158,7 @@ func TestInstructionReality_AcceptsProseAroundRealVerbs(t *testing.T) {
 		"never calls af done until step 10",
 		"premature af done detection",
 		"The human will `af up scenario` + `af attach scenario`",
-		"Read your memory (af memory list) and docs, and prove it.",
+		"look up others by need with af memory list --type <type> or af memory list --formula <formula>.",
 		"Record it with `af memory add -s \"<subject>\" -m \"<body>\" --type gotcha`.",
 		"`af memory check --inject` already serves your own notes at session start.",
 		"Check your inbox once: `af mail inbox --json`.",
@@ -197,7 +198,7 @@ func shippedInstructionRefs(t *testing.T) []afRef {
 		refs  []afRef
 		floor int
 	}{
-		{"install.go agents.json directive", extractAFRefs("install.go", scaffoldDirectiveText(t)), 1},
+		{"seed_configs.go built-in role directives", extractAFRefs("seed_configs.go", scaffoldDirectiveText(t)), 1},
 		{"recovery.go CONTEXT ADVISORY", extractAFRefs("recovery.go",
 			contextAdvisorySubject+"\n"+contextAdvisoryBody), 1},
 		{"role templates", roleTemplateRefs(t), 100},
@@ -233,16 +234,15 @@ func renderedImprovementInstruction() string {
 		improvementEfficiencyClause
 }
 
-// scaffoldDirectiveText reads the REAL seeded agents.json literal out of install.go rather than a
-// copy of it, so a rewrite of the directive is scanned on the next run without anyone updating
-// this test.
+// scaffoldDirectiveText is the agents.json af seeds for its built-in roles, so a rewrite of
+// any built-in directive is scanned on the next run without anyone updating this test.
 func scaffoldDirectiveText(t *testing.T) string {
 	t.Helper()
-	src, err := os.ReadFile("install.go")
+	data, err := json.Marshal(builtinAgentsConfig())
 	if err != nil {
-		t.Fatalf("read install.go: %v", err)
+		t.Fatalf("marshal built-in agents.json: %v", err)
 	}
-	return extractScaffoldLiteral(t, string(src), `"agents.json":`)
+	return string(data)
 }
 
 func roleTemplateRefs(t *testing.T) []afRef {

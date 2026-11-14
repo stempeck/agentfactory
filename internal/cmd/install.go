@@ -6,6 +6,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -53,6 +54,14 @@ var installCmd = &cobra.Command{
 
 Factory initialization creates the config directory, starter configs,
 issue store database, and hooks directory.
+
+Starter configs are seeded from the agentfactory source clone's checked-out
+.agentfactory/ configs (the working tree, including uncommitted edits) — from
+AF_SOURCE_ROOT when set, else the agentfactory source tree this af was built
+from. agents.json starts with the built-in manager and supervisor roles;
+--agents adds the agents of that clone's formulas. Without a source tree only
+agents.json, messaging.json and factory.json are written. Existing configs are
+never overwritten.
 
 Agent provisioning creates the agent directory, renders CLAUDE.md from
 the role template, and writes Claude Code settings.json with hooks.
@@ -194,37 +203,16 @@ func runInstallInit(cmd *cobra.Command) error {
 		return fmt.Errorf("creating memory directory: %w", err)
 	}
 
-	// 3. Write starter configs (only if they don't exist — idempotent)
-	starterConfigs := map[string]string{
-		// Built from the in-code defaults (incl. the C-3 git_identity) so the on-disk
-		// literal cannot drift from internal/config's constants (issue #371 Gap-6).
-		"factory.json": config.DefaultFactoryConfigJSON(),
-		// The directive names the verbs on both halves of the loop (#515). "Read your memory"
-		// alone described a habit with no mechanism behind it; naming af memory list and
-		// af memory add makes the seed a runnable instruction, which instruction_reality_test.go
-		// then holds against the cobra tree. No backticks: this is a Go raw string literal.
-		"agents.json":    `{"agents":{"manager":{"type":"interactive","description":"Interactive agent for human-supervised work","directive":"Read your memory (af memory list) and docs, and prove it. Record durable learnings with af memory add."},"supervisor":{"type":"autonomous","description":"Autonomous agent for independent task execution","directive":"Read your memory (af memory list) and docs, and prove it. Record durable learnings with af memory add."}}}`,
-		"messaging.json": `{"groups":{"all":["manager","supervisor"]}}`,
-		"dispatch.json":  `{"repos":[],"trigger_label":"agentic","notify_on_complete":"manager","mappings":[],"interval_seconds":300,"retry_after_seconds":1800}`,
-		// Opinionated defaults for fresh installs (see TestLoadStartupConfig_ScaffoldLoads).
-		"startup.json": `{"agents":["manager"],"quality":"default","fidelity":"default","start_dispatch":true,"watchdog_agents":["manager","supervisor"]}`,
-		// Per-agent model registry (issue #480); the default model tracks quickstart.sh
-		// (see TestInstallScaffold_DefaultModel_MatchesQuickstart).
-		"models.json": `{"default":"default","models":{"default":{"ANTHROPIC_MODEL":"claude-opus-5","ANTHROPIC_DEFAULT_OPUS_MODEL":"claude-opus-5","ANTHROPIC_DEFAULT_SONNET_MODEL":"claude-sonnet-5"},"lmstudio":{"ANTHROPIC_BASE_URL":"http://localhost:1234","ANTHROPIC_AUTH_TOKEN":"lm-studio","ANTHROPIC_MODEL":"qwen2.5-coder-32b","ANTHROPIC_API_KEY":""},"sonnet-5":{"ANTHROPIC_MODEL":"claude-sonnet-5"},"opus-4-8":{"ANTHROPIC_MODEL":"claude-opus-4-8"},"opus-5":{"ANTHROPIC_MODEL":"claude-opus-5"},"fable-5":{"ANTHROPIC_MODEL":"claude-fable-5"}},"agents":{"design":"opus-5","design-plan-impl":"opus-5","design-v3":"opus-5","design-v7":"opus-5","factoryworker":"sonnet-5","gherkin-breakdown":"opus-5","investigate":"opus-5","mergepatrol":"opus-5","minimalworker":"opus-5","rapid-implement":"sonnet-5","fable-implement":"sonnet-5","rapid-increment":"opus-5","fable-increment":"opus-5","rapid-soldesign-plan":"opus-5","rootcause-all":"opus-5","supervisor":"opus-5","ultra-review":"opus-5","fable-review":"opus-5","web-design":"opus-5"}}`,
+	// 3. Seed starter configs from the resolved agentfactory source clone, only if
+	// they don't exist — idempotent (issue #654; replaces the former hand-maintained
+	// literal config map).
+	afSrc, fallback := resolveAFSource(cwd) // formula.go; cwd plays factoryRoot's role here (Trap A)
+	if err := seedStarterConfigs(cmd.OutOrStdout(), cmd.ErrOrStderr(), configDir, afSrc, fallback); err != nil {
+		return fmt.Errorf("seeding starter configs: %w", err)
 	}
 
-	for name, content := range starterConfigs {
-		path := filepath.Join(configDir, name)
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-				return fmt.Errorf("writing %s: %w", name, err)
-			}
-		}
-	}
-
-	// 4. Write/update AGENTS.md with available agents from agents.json.
-	// Uses HTML comment markers for block-replace: existing content outside
-	// the block is preserved; the block is regenerated on every init.
+	// 4. Write/update AGENTS.md with available agents from agents.json, replacing only the
+	// block between agentsMdBegin and agentsMdEnd: existing content outside it is preserved.
 	if err := writeAgentsMd(cwd); err != nil {
 		return fmt.Errorf("writing AGENTS.md: %w", err)
 	}
@@ -415,6 +403,158 @@ func renderGitHooks(gitHooksDir string) error {
 		if err := os.WriteFile(filepath.Join(gitHooksDir, name), data, 0755); err != nil {
 			return fmt.Errorf("writing %s: %w", name, err)
 		}
+	}
+	return nil
+}
+
+// seedStarterConfigs seeds the seedConfigNames members of .agentfactory/ for a new
+// factory: agents.json with the built-in roles, every other member from the resolved
+// agentfactory source clone (baseConfigContent), replacing the former hand-maintained
+// literal config map (issue #654). A member already on disk is kept and never resolved,
+// so --init on a populated factory stays a no-op whatever state the source clone is in;
+// seedWithheldReason may hold back an absent member, and with no source tree the
+// clone-derived members are held back. The rest are resolved, sanitized and validated
+// BEFORE any write begins (decisions.md D6) against the agents.json this factory will
+// have — the pre-existing on-disk file (agentsAreFresh=false, violations warn) or the
+// built-in roles being seeded now (agentsAreFresh=true, violations abort the whole run
+// before any file is written) — widened by futureRoster for the members that may name
+// agents `af install --agents` has yet to generate. Writes preserve the exact
+// write-if-missing idiom (os.Stat/os.IsNotExist/0644) — never writeFormulas'
+// byte-identity-skip idiom, which would silently violate never-overwrite for a
+// pre-existing, differently-authored file. Each seeded file gets one provenance line to
+// out, with its sanitization records beneath, while kept-existing files stay silent
+// there; validation warnings go to warn. A run with something to seed appends one line
+// per member (including kept-existing outcomes) to configDir/.config-seed.log, mirroring
+// appendFidelityProvenance's space-delimited plain-text idiom; a run with nothing to seed
+// appends nothing, so re-running --init does not grow the log.
+func seedStarterConfigs(out, warn io.Writer, configDir, afSrc string, fallback bool) error {
+	factoryRoot := filepath.Dir(configDir)
+
+	existing := make(map[string]bool, len(seedConfigNames))
+	for _, name := range seedConfigNames {
+		path := filepath.Join(configDir, name)
+		switch _, statErr := os.Stat(path); {
+		case statErr == nil:
+			existing[name] = true
+		case !os.IsNotExist(statErr):
+			return fmt.Errorf("checking %s: %w", path, statErr)
+		}
+	}
+
+	type seedCandidate struct {
+		data    []byte
+		source  string
+		records []string
+	}
+	candidates := make(map[string]seedCandidate, len(seedConfigNames))
+	withheld := make(map[string]string)
+	for _, name := range seedConfigNames {
+		if existing[name] {
+			continue
+		}
+		if reason := seedWithheldReason(name, existing); reason != "" {
+			withheld[name] = reason
+			continue
+		}
+		data, source, err := baseConfigContent(name, afSrc, fallback)
+		if errors.Is(err, errNoSourceTree) {
+			withheld[name] = noSourceTreeReason
+			continue
+		}
+		if err != nil {
+			return withCloneRemedy(fmt.Errorf("resolving %s: %w", name, err), name, afSrc, fallback)
+		}
+		sanitized, records, err := sanitizeSeed(name, data, factoryRoot)
+		if err != nil {
+			return withCloneRemedy(fmt.Errorf("sanitizing %s: %w", name, err), name, afSrc, fallback)
+		}
+		candidates[name] = seedCandidate{data: sanitized, source: source, records: records}
+	}
+
+	agents := builtinAgentsConfig()
+	agentsAreFresh := !existing["agents.json"]
+	if len(candidates) > 0 {
+		if !agentsAreFresh {
+			// A present agents.json that cannot be read is surfaced, never replaced by the
+			// built-in roles: that would validate the seed against the wrong agents.
+			onDisk, err := os.ReadFile(filepath.Join(configDir, "agents.json"))
+			if err != nil {
+				return fmt.Errorf("reading existing agents.json: %w", err)
+			}
+			agents = &config.AgentConfig{}
+			if err := json.Unmarshal(onDisk, agents); err != nil {
+				return fmt.Errorf("decoding existing agents.json: %w", err)
+			}
+		}
+		future, err := futureRoster(agents)
+		if err != nil {
+			return err
+		}
+		for _, name := range seedConfigNames {
+			c, ok := candidates[name]
+			if !ok {
+				continue
+			}
+			roster := future
+			if name == "messaging.json" {
+				// The mail router rejects an unknown group member when it loads, so
+				// messaging.json is held to the agents this factory has now.
+				roster = agents
+			}
+			if err := validateSeed(name, c.data, roster, agentsAreFresh, warn); err != nil {
+				return withCloneRemedy(fmt.Errorf("validating %s: %w", name, err), name, afSrc, fallback)
+			}
+		}
+	}
+
+	logPath := filepath.Join(configDir, ".config-seed.log")
+	logFile := io.Discard
+	if len(candidates) > 0 {
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return fmt.Errorf("opening %s: %w", logPath, err)
+		}
+		defer f.Close()
+		logFile = f
+	}
+
+	var unsourced []string
+	for _, name := range seedConfigNames {
+		// kept-existing is logged honestly as the outcome — the seam has no way to
+		// know how a pre-existing file was actually created, so it does not
+		// fabricate a source for it.
+		logEntry := name + " kept-existing unknown"
+		if reason, ok := withheld[name]; ok {
+			logEntry = fmt.Sprintf("%s not-seeded (%s)", name, reason)
+			if reason == noSourceTreeReason {
+				unsourced = append(unsourced, name)
+			}
+		} else if c, ok := candidates[name]; ok {
+			path := filepath.Join(configDir, name)
+			switch _, statErr := os.Stat(path); {
+			case statErr == nil:
+				// Appeared since the first pass: still never overwritten.
+			case os.IsNotExist(statErr):
+				if err := os.WriteFile(path, c.data, 0644); err != nil {
+					return fmt.Errorf("writing %s: %w", name, err)
+				}
+				logEntry = fmt.Sprintf("%s seeded %s", name, c.source)
+				fmt.Fprintf(out, "%s: seeded (%s)\n", name, c.source)
+				if len(c.records) > 0 {
+					sanitized := strings.Join(c.records, "; ")
+					logEntry += " sanitized: " + sanitized
+					fmt.Fprintf(out, "  sanitized: %s\n", sanitized)
+				}
+			default:
+				return fmt.Errorf("checking %s: %w", path, statErr)
+			}
+		}
+		if _, err := fmt.Fprintf(logFile, "%s %s\n", time.Now().UTC().Format(time.RFC3339), logEntry); err != nil {
+			return fmt.Errorf("appending %s to %s: %w", name, logPath, err)
+		}
+	}
+	if len(unsourced) > 0 {
+		fmt.Fprintf(out, "Not seeded (agentfactory source tree not found): %s — set AF_SOURCE_ROOT to your agentfactory clone and re-run af install --init to seed them from its .agentfactory/ configs\n", strings.Join(unsourced, ", "))
 	}
 	return nil
 }

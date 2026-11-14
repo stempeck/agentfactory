@@ -48,7 +48,7 @@ NOTHING_TO_DO; it is never skipped piecemeal.
 | Blind review < 8 three times | Escalate with full review history |
 | Comment ambiguous on user-visible behavior | Reply asking the reviewer, mark DEFERRED — never guess |
 | spec path given but not found on the PR head | Mail Supervisor and stop — never proceed as "no contract" |
-| Zero unresolved comments on the PR | Mail dispatcher NOTHING_TO_DO, close remaining steps with that reason, complete formula |
+| Zero unresolved comments on the PR | load-context action 8: mail supervisor NOTICE and note the assignment bead (8a), then close every remaining step with the primed loop (8b) |
 | Push to PR branch rejected (non-fast-forward) | Fetch, rebase onto the new PR head, re-run tests, push again |
 | Push to PR branch denied (fork without maintainer-edit) | Mail Supervisor ESCALATION — do not force-push or open a new PR |
 | Thread resolve mutation fails | Retry once; if still failing, leave the thread unresolved and note it in completion mail |
@@ -235,7 +235,7 @@ NOTHING_TO_DO; it is never skipped piecemeal.
 | Blind review < 8 three times | Escalate with full review history |
 | Comment ambiguous on user-visible behavior | Reply asking the reviewer, mark DEFERRED — never guess |
 | spec path given but not found on the PR head | Mail Supervisor and stop — never proceed as "no contract" |
-| Zero unresolved comments on the PR | Mail dispatcher NOTHING_TO_DO, close remaining steps with that reason, complete formula |
+| Zero unresolved comments on the PR | load-context action 8: mail supervisor NOTICE and note the assignment bead (8a), then close every remaining step with the primed loop (8b) |
 | Push to PR branch rejected (non-fast-forward) | Fetch, rebase onto the new PR head, re-run tests, push again |
 | Push to PR branch denied (fork without maintainer-edit) | Mail Supervisor ESCALATION — do not force-push or open a new PR |
 | Thread resolve mutation fails | Retry once; if still failing, leave the thread unresolved and note it in completion mail |

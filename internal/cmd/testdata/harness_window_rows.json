@@ -1,0 +1,79 @@
+{
+  "rows": [
+    {
+      "model": "claude-opus-5-5",
+      "window_exports": {
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
+      },
+      "cli_version": "2.1.322",
+      "context_window": 1000000,
+      "unrecognized": false,
+      "provenance": "probe",
+      "captured_at": "2026-11-13T02:25:50Z",
+      "capture_method": "go test ./internal/cmd -run '^TestHarnessWindowRows_Regenerate$' -update-window-rows"
+    },
+    {
+      "model": "claude-fable-5",
+      "window_exports": {
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
+      },
+      "cli_version": "2.1.322",
+      "context_window": 1000000,
+      "unrecognized": false,
+      "provenance": "probe",
+      "captured_at": "2026-11-13T02:25:50Z",
+      "capture_method": "go test ./internal/cmd -run '^TestHarnessWindowRows_Regenerate$' -update-window-rows"
+    },
+    {
+      "model": "claude-fable-5-2",
+      "window_exports": {
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
+      },
+      "cli_version": "2.1.322",
+      "context_window": 1000000,
+      "unrecognized": false,
+      "provenance": "probe",
+      "captured_at": "2026-11-13T02:25:51Z",
+      "capture_method": "go test ./internal/cmd -run '^TestHarnessWindowRows_Regenerate$' -update-window-rows"
+    },
+    {
+      "model": "claude-opus-4-8",
+      "window_exports": {
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
+      },
+      "cli_version": "2.1.322",
+      "context_window": 1000000,
+      "unrecognized": false,
+      "provenance": "probe",
+      "captured_at": "2026-11-13T02:25:51Z",
+      "capture_method": "go test ./internal/cmd -run '^TestHarnessWindowRows_Regenerate$' -update-window-rows"
+    },
+    {
+      "model": "claude-opus-5",
+      "window_exports": {
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000"
+      },
+      "cli_version": "2.1.322",
+      "context_window": 1000000,
+      "unrecognized": false,
+      "provenance": "probe",
+      "captured_at": "2026-11-13T02:25:51Z",
+      "capture_method": "go test ./internal/cmd -run '^TestHarnessWindowRows_Regenerate$' -update-window-rows"
+    },
+    {
+      "model": "claude-sonnet-5",
+      "window_exports": {
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500000",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
+      },
+      "cli_version": "2.1.322",
+      "context_window": 1000000,
+      "unrecognized": false,
+      "provenance": "probe",
+      "captured_at": "2026-11-13T02:25:51Z",
+      "capture_method": "go test ./internal/cmd -run '^TestHarnessWindowRows_Regenerate$' -update-window-rows"
+    }
+  ]
+}

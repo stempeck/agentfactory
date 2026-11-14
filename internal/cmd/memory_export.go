@@ -323,7 +323,7 @@ func warnVaultExportStaleness(w io.Writer, root string, now time.Time) {
 	when := "never"
 	stale := true
 	if at, ok := lastMemoryExportAt(root); ok {
-		// int(hours/24) and an injected clock, matching memoryAttribution (memory.go:950-956):
+		// int(hours/24) and an injected clock, matching memory.Attribution:
 		// a test moves the clock rather than sleeping, which ADR-018 hermeticity requires.
 		switch days := int(now.Sub(at).Hours() / 24); {
 		case days <= 0:

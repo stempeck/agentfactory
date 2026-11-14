@@ -264,8 +264,9 @@ func runDispatchAdmitCore(ctx context.Context, out io.Writer, p dispatchAdmitPay
 		// BY CONSTRUCTION (the declared pool fact, not a threshold, a classifier, or the per-request
 		// window). Short-circuited here, before the roster sweep, so the cloud common path stays as cheap
 		// as "no behavior change" requires; WithinBackendCapacity re-checks the same declared source and
-		// is the authority. The per-request window (CLAUDE_CODE_MAX_CONTEXT_TOKENS / ResolveWindow) is
-		// left untouched — this gate now reads ONLY the pool fact for its capacity operand.
+		// is the authority. The per-request window (CLAUDE_CODE_MAX_CONTEXT_TOKENS /
+		// PredictWindow/SessionWindow) is left untouched — this gate now reads ONLY the pool fact for its
+		// capacity operand.
 		return nil
 	}
 	pool := tokenomics.Window{Tokens: poolTokens, Source: config.WindowSourceDeclared}

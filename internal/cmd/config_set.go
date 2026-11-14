@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stempeck/agentfactory/internal/config"
@@ -170,11 +171,24 @@ func decodeJSONStdin(cmd *cobra.Command, v any) error {
 // isUnknownFieldError reports whether err is encoding/json's unknown-field rejection.
 //
 // Matched on the message rather than a type: encoding/json returns a bare errors.New for this
-// case, so unlike *json.UnmarshalTypeError there is nothing to match with errors.As. Only
-// runConfigStatuslineSet needs to tell this error apart, and only to keep its own rejection text
-// intact; every other setter is content to surface the decoder's message as-is.
+// case, so unlike *json.UnmarshalTypeError there is nothing to match with errors.As. Among the
+// setters only runConfigStatuslineSet tells this error apart, to keep its own rejection text
+// intact; the starter-config seed tells it apart to add the binary-skew diagnosis.
 func isUnknownFieldError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "json: unknown field ")
+}
+
+// loadAgentsForCrossCheck loads agents.json for the cross-file validation every
+// strict setter performs before its write (CFG-4): the three runConfig*Set
+// prologues share this one reader. The --init seed seam deliberately keeps its
+// own read: this one runs validateAgentConfig, which would abort --init on a
+// legacy factory whose agents.json fails that validator.
+func loadAgentsForCrossCheck(root string) (*config.AgentConfig, error) {
+	agents, err := config.LoadAgentConfig(config.AgentsConfigPath(root))
+	if err != nil {
+		return nil, fmt.Errorf("loading agents.json for cross-file validation: %w", err)
+	}
+	return agents, nil
 }
 
 func runConfigDispatchSet(cmd *cobra.Command, _ []string) error {
@@ -195,9 +209,9 @@ func runConfigDispatchSet(cmd *cobra.Command, _ []string) error {
 	// Cross-file validation (L-1): every referenced agent must exist in
 	// agents.json. Runs BEFORE the write, so a dangling reference never touches
 	// the file.
-	agents, err := config.LoadAgentConfig(config.AgentsConfigPath(root))
+	agents, err := loadAgentsForCrossCheck(root)
 	if err != nil {
-		return fmt.Errorf("loading agents.json for cross-file validation: %w", err)
+		return err
 	}
 	// models.json feeds the per-mapping model cross-check. This is a NON-selecting
 	// read (af config dispatch set writes dispatch.json, never launches a profile), so
@@ -260,9 +274,9 @@ func runConfigStartupSet(cmd *cobra.Command, _ []string) error {
 	//
 	// A load failure is FATAL, matching dispatch (above): without agents.json there is nothing
 	// to check against, and writing anyway would be the silent accept this closes.
-	agents, err := config.LoadAgentConfig(config.AgentsConfigPath(root))
+	agents, err := loadAgentsForCrossCheck(root)
 	if err != nil {
-		return fmt.Errorf("loading agents.json for cross-file validation: %w", err)
+		return err
 	}
 	if err := rejectUnknownStartupAgents(&cfg, agents); err != nil {
 		return err
@@ -313,9 +327,9 @@ func runConfigMessagingSet(cmd *cobra.Command, _ []string) error {
 			config.ErrInvalidType)
 	}
 
-	agents, err := config.LoadAgentConfig(config.AgentsConfigPath(root))
+	agents, err := loadAgentsForCrossCheck(root)
 	if err != nil {
-		return fmt.Errorf("loading agents.json for cross-file validation: %w", err)
+		return err
 	}
 	if err := rejectUnknownGroupMembers(&cfg, agents); err != nil {
 		return err
@@ -443,6 +457,9 @@ func runConfigModelsSet(cmd *cobra.Command, _ []string) error {
 	if err := rejectOrphanedModelPins(root, &cfg, cmd.ErrOrStderr()); err != nil {
 		return err
 	}
+	if err := rejectUnusableProfileNames(&cfg); err != nil {
+		return err
+	}
 
 	// Read for the attestation sweep below. It has to happen before the write, because after it
 	// there is nothing left to compare against.
@@ -484,10 +501,36 @@ func runConfigModelsSet(cmd *cobra.Command, _ []string) error {
 		if warning, ok := config.CapacityLintProfile(name, cfg.Models[name]); ok {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warning)
 		}
+		if warning, ok := config.WindowDeclarationLintProfile(name, cfg.Models[name]); ok {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warning)
+		}
+		if line := windowSavePrediction(root, name, cfg.Models[name]); line != "" {
+			fmt.Fprintln(cmd.ErrOrStderr(), line)
+		}
 	}
 
 	fmt.Fprintln(cmd.OutOrStdout(), "Models configuration saved.")
 	return nil
+}
+
+// windowSavePrediction quotes the recorded observation of the identity a watched launch of this
+// profile would have now; a never-observed identity, and a foreign profile the gate never refuses,
+// predict nothing.
+func windowSavePrediction(root, name string, profile map[string]string) string {
+	if config.ForeignModelProfile(profile) {
+		return ""
+	}
+	id := windowIdentity{
+		Profile:        name,
+		ModelID:        profile["ANTHROPIC_MODEL"],
+		HarnessVersion: windowHarnessVersion(root),
+		Declared:       windowDeclared(profile[config.EnvMaxContextTokens]),
+	}
+	rec, ok := readWindowRecord(root, id, time.Now())
+	if !ok || rec.Applied <= 0 || rec.Applied >= rec.Declared {
+		return ""
+	}
+	return "warning: predicted from the record, a watched launch would be refused: " + formatWindowText(root, "", rec, rec.Applied).Head
 }
 
 // statuslineSchemaReject is the single home of the H-R1 rejection text. Both paths that can
@@ -624,6 +667,19 @@ func rejectRedactedTokens(cfg *config.ModelsConfig) error {
 		if cfg.Models[name][authTokenKey] == redactedToken {
 			return fmt.Errorf("%w: model %q sets %s to %s, which is what `af config models show` prints INSTEAD of a secret, not a token — send the real value or a %q reference",
 				config.ErrInvalidType, name, authTokenKey, redactedToken, secretPrefix)
+		}
+	}
+	return nil
+}
+
+// rejectUnusableProfileNames refuses a profile name no window record or launch fact can be filed
+// under: every watched launch of such a profile would probe again. It lives in the setter and not in
+// validateModelsConfig so that a models.json already holding one keeps loading.
+func rejectUnusableProfileNames(cfg *config.ModelsConfig) error {
+	for _, name := range sortedMapKeys(cfg.Models) {
+		if !validWindowName(name) {
+			return fmt.Errorf("%w: model profile %q cannot be saved, because no window record can be filed under its name: a profile name is 1 to %d bytes of printable characters, with no '/' or '\\' and no leading '.'",
+				config.ErrInvalidType, name, windowFieldMaxBytes)
 		}
 	}
 	return nil

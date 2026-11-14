@@ -118,8 +118,8 @@ func armEfficiency(t *testing.T, root string, extra map[string]any) {
 	}
 }
 
-// declareWindow writes a models.json whose default profile declares a context window, so
-// profileWindow resolves a DECLARED window rather than falling back. Every window-sensitive
+// declareWindow writes a models.json whose default profile declares a context window, so the
+// window wrappers resolve a DECLARED window rather than falling back. Every window-sensitive
 // assertion below turns on which of the two it got.
 func declareWindow(t *testing.T, root string, tokens int) {
 	t.Helper()
@@ -181,7 +181,7 @@ func TestEffortSelectedAtLaunchLegs(t *testing.T) {
 
 	setup := func(t *testing.T) (lifecycleFixture, string) {
 		t.Helper()
-		fx, _, _ := primedFixture(t, roomyOccupancyPct)
+		fx, _, _ := primedFixtureWithTotal(t, roomyOccupancyPct, roomyWindowTokens)
 		declareWindow(t, fx.root, roomyWindowTokens)
 		armEfficiency(t, fx.root, nil)
 		hookFormulaName(t, fx.workDir, "offpath")
@@ -259,7 +259,7 @@ func TestEffortSelectedAtLaunchLegs(t *testing.T) {
 	})
 
 	t.Run("with no learned data the leg exports nothing and removes nothing", func(t *testing.T) {
-		fx, _, _ := primedFixture(t, roomyOccupancyPct)
+		fx, _, _ := primedFixtureWithTotal(t, roomyOccupancyPct, roomyWindowTokens)
 		declareWindow(t, fx.root, roomyWindowTokens)
 		armEfficiency(t, fx.root, nil)
 		hookFormulaName(t, fx.workDir, "offpath")
@@ -384,7 +384,7 @@ func TestCapacityLastResortEffort(t *testing.T) {
 
 	setup := func(t *testing.T, window int) lifecycleFixture {
 		t.Helper()
-		fx, _, _ := primedFixture(t, roomyOccupancyPct)
+		fx, _, _ := primedFixtureWithTotal(t, roomyOccupancyPct, int64(window))
 		declareWindow(t, fx.root, window)
 		armEfficiency(t, fx.root, nil)
 		hookFormulaName(t, fx.workDir, "offpath")
@@ -428,7 +428,7 @@ func TestCapacityLastResortEffort(t *testing.T) {
 // never learns how much room there is.
 func TestRepurposedMechanismFiresWithoutPressure(t *testing.T) {
 	t.Run("thrift counsel fires on learned re-reads with the window empty", func(t *testing.T) {
-		fx, _, step := primedFixture(t, roomyOccupancyPct)
+		fx, _, step := primedFixtureWithTotal(t, roomyOccupancyPct, roomyWindowTokens)
 		declareWindow(t, fx.root, roomyWindowTokens)
 		gateOn(t, fx.root)
 		armEfficiency(t, fx.root, nil)
@@ -474,7 +474,7 @@ func TestRepurposedMechanismFiresWithoutPressure(t *testing.T) {
 	// "thrift|efficiency", so neither can suppress the other — and an old ledger written before the
 	// composite key existed still reads as "the capacity thrift has fired", which is what it meant.
 	t.Run("the two thrift entries do not suppress each other", func(t *testing.T) {
-		fx, _, step := primedFixture(t, roomyOccupancyPct)
+		fx, _, step := primedFixtureWithTotal(t, roomyOccupancyPct, roomyWindowTokens)
 		declareWindow(t, fx.root, roomyWindowTokens)
 		gateOn(t, fx.root)
 		armEfficiency(t, fx.root, nil)
@@ -515,7 +515,7 @@ func TestRepurposedMechanismFiresWithoutPressure(t *testing.T) {
 	})
 
 	t.Run("a second prime in the same session receives less", func(t *testing.T) {
-		fx, _, _ := primedFixture(t, roomyOccupancyPct)
+		fx, _, _ := primedFixtureWithTotal(t, roomyOccupancyPct, roomyWindowTokens)
 		declareWindow(t, fx.root, roomyWindowTokens)
 		gateOn(t, fx.root)
 		armEfficiency(t, fx.root, nil)
@@ -565,7 +565,7 @@ func TestRepurposedMechanismFiresWithoutPressure(t *testing.T) {
 	})
 
 	t.Run("the interview switch gates every reduction", func(t *testing.T) {
-		fx, _, step := primedFixture(t, roomyOccupancyPct)
+		fx, _, step := primedFixtureWithTotal(t, roomyOccupancyPct, roomyWindowTokens)
 		declareWindow(t, fx.root, roomyWindowTokens)
 		gateOn(t, fx.root)
 		armEfficiency(t, fx.root, map[string]any{"interview": "off"})
@@ -703,7 +703,7 @@ func TestEfficiencyRelaunchBound(t *testing.T) {
 // budget. Budget is the capacity mechanism's name, and an efficiency act wearing it would make the
 // two objectives impossible to tell apart in the one place the experiment is read from.
 func TestEfficiencyInterventionRecorded(t *testing.T) {
-	fx, _, step := primedFixture(t, roomyOccupancyPct)
+	fx, _, step := primedFixtureWithTotal(t, roomyOccupancyPct, roomyWindowTokens)
 	declareWindow(t, fx.root, roomyWindowTokens)
 	gateOn(t, fx.root)
 	armEfficiency(t, fx.root, nil)
@@ -785,7 +785,7 @@ func TestEfficiencyInterventionRecorded(t *testing.T) {
 // exported rebuild and pins that the treated run lands in the reduced arm (ReducedRuns increments).
 func TestReduceEffortRecordJoinsReducedArm(t *testing.T) {
 	const formula = "reducejoin"
-	fx, epic, step := primedFixture(t, roomyOccupancyPct)
+	fx, epic, step := primedFixtureWithTotal(t, roomyOccupancyPct, roomyWindowTokens)
 	declareWindow(t, fx.root, roomyWindowTokens)
 	gateOn(t, fx.root)
 	armEfficiency(t, fx.root, nil)
@@ -1014,7 +1014,7 @@ func TestEffortAttestationIsNotStale(t *testing.T) {
 	// launch's.
 	setup := func(t *testing.T) lifecycleFixture {
 		t.Helper()
-		fx, _, _ := primedFixture(t, roomyOccupancyPct)
+		fx, _, _ := primedFixtureWithTotal(t, roomyOccupancyPct, roomyWindowTokens)
 		declareWindow(t, fx.root, roomyWindowTokens)
 		armEfficiency(t, fx.root, nil)
 		hookFormulaName(t, fx.workDir, "offpath")

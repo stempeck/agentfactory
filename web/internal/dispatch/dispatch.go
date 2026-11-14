@@ -45,6 +45,7 @@ type Entry struct {
 	Workflow      string `json:"workflow,omitempty"`
 	Phase         string `json:"phase,omitempty"`
 	PhaseComplete bool   `json:"phase_complete,omitempty"`
+	Stall         string `json:"stall,omitempty"`
 }
 
 // Schedule is one recurring scheduled sling ("cron"), projected for the UI. Field names mirror the

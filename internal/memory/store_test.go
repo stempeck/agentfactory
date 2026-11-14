@@ -1491,3 +1491,100 @@ func noteKeys(t *testing.T, root, agent, id string) []string {
 	}
 	return keys
 }
+
+func TestPin_ActiveOnlyAndKeepsStatus(t *testing.T) {
+	root := t.TempDir()
+	path := func(id string) string { return filepath.Join(vaultDir(root, "manager"), id+".md") }
+
+	if _, err := Write(root, newNote("pin-me")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := Pin(root, "manager", "pin-me"); err != nil {
+		t.Fatalf("Pin: %v", err)
+	}
+	got := onlyNote(t, root, "manager", "pin-me")
+	if !got.Standing || got.Status != StatusActive || got.Malformed {
+		t.Errorf("after Pin: standing=%v status=%q malformed=%v, want standing active", got.Standing, got.Status, got.Malformed)
+	}
+	if strings.TrimSpace(got.Body) != strings.TrimSpace(newNote("pin-me").Body) {
+		t.Errorf("Pin rewrote the body: %q", got.Body)
+	}
+	if data, err := os.ReadFile(path("pin-me")); err != nil || !strings.Contains(string(data), "\nstanding: true\n") {
+		t.Errorf("the pinned note on disk does not carry `standing: true` (err %v):\n%s", err, data)
+	}
+
+	refused := map[string]func(id string){
+		"graduated": func(id string) {
+			if err := Graduate(root, "manager", id, "issue#631"); err != nil {
+				t.Fatalf("Graduate: %v", err)
+			}
+		},
+		"expired": func(id string) {
+			if err := Expire(root, "manager", id); err != nil {
+				t.Fatalf("Expire: %v", err)
+			}
+		},
+	}
+	for status, setup := range refused {
+		id := "already-" + status
+		if _, err := Write(root, newNote(id)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		setup(id)
+		before, err := os.ReadFile(path(id))
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		if err := Pin(root, "manager", id); err == nil {
+			t.Errorf("Pin of a %s note: got nil error, want a refusal", status)
+		}
+		if after, _ := os.ReadFile(path(id)); string(after) != string(before) {
+			t.Errorf("the refused Pin rewrote the %s note:\nbefore %q\nafter  %q", status, before, after)
+		}
+	}
+
+	raw := []byte("---\nid: hand-edited\nthis line has no colon\n---\nprecious body\n")
+	if err := os.WriteFile(path("hand-edited"), raw, 0o644); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	if err := Pin(root, "manager", "hand-edited"); err == nil {
+		t.Error("Pin of a malformed note: got nil error, want a refusal")
+	}
+	if after, _ := os.ReadFile(path("hand-edited")); string(after) != string(raw) {
+		t.Errorf("the refused Pin rewrote the malformed note:\ngot  %q\nwant %q", after, raw)
+	}
+}
+
+func TestUnpin_ClearsStandingOnly(t *testing.T) {
+	root := t.TempDir()
+	n := newNote("unpin-me")
+	n.Formula = "rootcause-all"
+	n.Evidence = []string{"issue#626"}
+	n.Expires = storeNow.Add(90 * 24 * time.Hour)
+	n.Standing = true
+	if _, err := Write(root, n); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	path := filepath.Join(vaultDir(root, "manager"), "unpin-me.md")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(before), "\nstanding: true\n") {
+		t.Fatalf("the fixture is not standing on disk:\n%s", before)
+	}
+
+	if err := Unpin(root, "manager", "unpin-me"); err != nil {
+		t.Fatalf("Unpin: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if want := strings.Replace(string(before), "standing: true\n", "", 1); string(after) != want {
+		t.Errorf("Unpin changed more than the standing mark:\n--- got ---\n%s\n--- want ---\n%s", after, want)
+	}
+	if got := onlyNote(t, root, "manager", "unpin-me"); got.Standing || got.Status != StatusActive {
+		t.Errorf("after Unpin: standing=%v status=%q, want an active, non-standing note", got.Standing, got.Status)
+	}
+}

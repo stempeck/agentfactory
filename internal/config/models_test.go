@@ -405,6 +405,27 @@ func TestLoadModelsConfig_UnquotedNumber_NamesQuotingRule(t *testing.T) {
 	}
 }
 
+func TestForeignModelProfile(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile map[string]string
+		want    bool
+	}{
+		{name: "nil profile", profile: nil, want: false},
+		{name: "empty profile", profile: map[string]string{}, want: false},
+		{name: "claude id", profile: map[string]string{"ANTHROPIC_MODEL": "claude-opus-5"}, want: false},
+		{name: "gateway id", profile: map[string]string{"ANTHROPIC_MODEL": "gpt-5.6-sol"}, want: true},
+		{name: "case-sensitive prefix", profile: map[string]string{"ANTHROPIC_MODEL": "Claude-opus-5"}, want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ForeignModelProfile(tc.profile); got != tc.want {
+				t.Errorf("ForeignModelProfile(%v) = %v, want %v", tc.profile, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPairingLintProfile(t *testing.T) {
 	foreign := func(extra map[string]string) map[string]string {
 		p := map[string]string{"ANTHROPIC_MODEL": "gpt-5.6-sol", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "220000"}
@@ -447,6 +468,12 @@ func TestPairingLintProfile(t *testing.T) {
 			profile: map[string]string{"ANTHROPIC_MODEL": "gpt-5.6-sol", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": ""},
 		},
 		{name: "a foreign id with no window never fires", profile: map[string]string{"ANTHROPIC_MODEL": "gpt-5.6-sol"}},
+		{
+			// The host's prefix test is case-sensitive, so a capitalised id is foreign to it.
+			name:    "a capitalised Claude- id is foreign and fires",
+			profile: map[string]string{"ANTHROPIC_MODEL": "Claude-opus-5", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "220000"},
+			want:    true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -464,6 +491,51 @@ func TestPairingLintProfile(t *testing.T) {
 				if !strings.Contains(warning, w) {
 					t.Errorf("warning %q should contain %q", warning, w)
 				}
+			}
+		})
+	}
+}
+
+// TestWindowDeclarationLintProfile pins the fourth save-time lint: a claude- model with no usable
+// declaration leaves af running on whatever window the host applies, with nothing to compare it to.
+// The silent half matters as much: a model-less profile would print the model as "".
+func TestWindowDeclarationLintProfile(t *testing.T) {
+	const want = `model "opus-5" declares no CLAUDE_CODE_MAX_CONTEXT_TOKENS; af will use whatever window the host applies to "claude-opus-5" and cannot tell you when that is smaller than you expect`
+	warns := []struct {
+		name    string
+		profile map[string]string
+	}{
+		{"an opus-5-shaped profile warns", map[string]string{"ANTHROPIC_MODEL": "claude-opus-5"}},
+		{"an empty declaration is no declaration", map[string]string{"ANTHROPIC_MODEL": "claude-opus-5", "CLAUDE_CODE_MAX_CONTEXT_TOKENS": ""}},
+		{"a zero declaration is no declaration", map[string]string{"ANTHROPIC_MODEL": "claude-opus-5", "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "0"}},
+		{"an auto-compact window is not a declaration", map[string]string{"ANTHROPIC_MODEL": "claude-opus-5", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "220000"}},
+	}
+	for _, tc := range warns {
+		t.Run(tc.name, func(t *testing.T) {
+			warning, ok := WindowDeclarationLintProfile("opus-5", tc.profile)
+			if !ok {
+				t.Fatalf("hasWarning = false for %v, want the window-declaration warning", tc.profile)
+			}
+			if warning != want {
+				t.Errorf("warning =\n  %q\nwant\n  %q", warning, want)
+			}
+		})
+	}
+	silent := []struct {
+		name    string
+		profile map[string]string
+	}{
+		{"a foreign profile is silent", map[string]string{"ANTHROPIC_MODEL": "gpt-5.6-sol"}},
+		{"a capitalised Claude- id is foreign and silent", map[string]string{"ANTHROPIC_MODEL": "Claude-opus-5"}},
+		{"a declared profile is silent", map[string]string{"ANTHROPIC_MODEL": "claude-opus-5", "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"}},
+		{"a profile with no model id is silent", map[string]string{"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "220000"}},
+		{"a profile with no exports at all is silent", map[string]string{}},
+		{"a nil profile is silent", nil},
+	}
+	for _, tc := range silent {
+		t.Run(tc.name, func(t *testing.T) {
+			if warning, ok := WindowDeclarationLintProfile("opus-5", tc.profile); ok || warning != "" {
+				t.Errorf("WindowDeclarationLintProfile(%v) = (%q, %v), want silence", tc.profile, warning, ok)
 			}
 		})
 	}
@@ -1072,9 +1144,9 @@ func TestCoverageLintProfile(t *testing.T) {
 	})
 }
 
-// directScaffoldModels is the install scaffold's own registry (internal/cmd/install.go:186),
-// copied verbatim so the no-delta proof is about the profiles operators actually get. The
-// endpoint profile (lmstudio) is carried too, and is resolved by
+// directScaffoldModels is a frozen copy of the models.json literal the install scaffold wrote before
+// --init seeded the tracked file, kept fixed so the no-delta proof does not move with the tracked
+// data. The endpoint profile (lmstudio) is carried too, and is resolved by
 // TestResolveModelEnv_ScaffoldEndpointProfileDoesDerive: without one in the SAME registry the
 // no-delta suite would prove only "this config has nothing to derive from", not "derivation is
 // gated per profile".

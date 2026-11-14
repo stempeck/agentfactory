@@ -603,3 +603,79 @@ func TestCodec_EmitNeverOpensAPlainScalarWithAYAMLIndicator(t *testing.T) {
 		}
 	}
 }
+
+func TestCodec_StandingEmittedOnlyWhenTrue(t *testing.T) {
+	plain := string(Emit(fullNote()))
+	if strings.Contains(plain, "standing") {
+		t.Errorf("a non-standing note emits a standing key:\n%s", plain)
+	}
+	golden := "---\n" +
+		"id: 2026-08-15T0132Z-stale-designs-grep\n" +
+		"agent: manager\n" +
+		"formula: rootcause-all\n" +
+		"run: wt-cfa6f1/4b7c266f\n" +
+		"type: gotcha\n" +
+		"created: 2026-08-15T01:32:00Z\n" +
+		"evidence: [\"issue#626\",\"pr#516\",\"commit 9f2d04d3\"]\n" +
+		"status: active\n" +
+		"graduated_to: \"\"\n" +
+		"expires: 2026-11-15\n" +
+		"---\n" +
+		"The outline-locator grep matches stale `.designs/130/` files when...\n"
+	if plain != golden {
+		t.Errorf("a non-standing note's bytes changed:\n--- got ---\n%s\n--- want ---\n%s", plain, golden)
+	}
+
+	pinned := fullNote()
+	pinned.Standing = true
+	out := string(Emit(pinned))
+	if want := strings.Replace(golden, "expires: 2026-11-15\n---\n", "expires: 2026-11-15\nstanding: true\n---\n", 1); out != want {
+		t.Errorf("a standing note must emit `standing: true` after expires, before the closing fence:\n--- got ---\n%s\n--- want ---\n%s", out, want)
+	}
+
+	back := Parse([]byte(out))
+	if back.Malformed {
+		t.Fatalf("a standing note this codec emitted parsed back as malformed:\n%s", out)
+	}
+	if !back.Standing {
+		t.Error("Standing did not survive the round trip")
+	}
+	if again := string(Emit(back)); again != out {
+		t.Errorf("emit is not a fixpoint for a standing note:\n--- once ---\n%s\n--- twice ---\n%s", out, again)
+	}
+}
+
+func TestCodec_StandingNonBooleanIsMalformed(t *testing.T) {
+	note := func(standingLine string) Note {
+		return Parse([]byte("---\n" +
+			"id: n1\n" +
+			"agent: manager\n" +
+			"type: gotcha\n" +
+			"created: 2026-08-15T01:32:00Z\n" +
+			"status: active\n" +
+			standingLine +
+			"---\n" +
+			"body\n"))
+	}
+	for _, line := range []string{"standing: yes\n", "standing: 1\n", "standing: TRUE\n"} {
+		if n := note(line); !n.Malformed {
+			t.Errorf("%q must make the note Malformed", strings.TrimSpace(line))
+		}
+	}
+	for _, tc := range []struct {
+		line     string
+		standing bool
+	}{
+		{"standing:\n", false},
+		{"standing: false\n", false},
+		{"standing: true\n", true},
+	} {
+		n := note(tc.line)
+		if n.Malformed {
+			t.Errorf("%q must not make the note Malformed", strings.TrimSpace(tc.line))
+		}
+		if n.Standing != tc.standing {
+			t.Errorf("%q reads as Standing=%v, want %v", strings.TrimSpace(tc.line), n.Standing, tc.standing)
+		}
+	}
+}

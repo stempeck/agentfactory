@@ -29,8 +29,8 @@
       "CLAUDE_CODE_EFFORT_LEVEL": "xhigh",
       "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
     },
-    "fable-5-1": {
-      "ANTHROPIC_MODEL": "claude-fable-5-1",
+    "fable-5-2": {
+      "ANTHROPIC_MODEL": "claude-fable-5-2",
       "CLAUDE_CODE_EFFORT_LEVEL": "xhigh",
       "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
     },
@@ -95,20 +95,20 @@
     }
   },
   "agents": {
-    "design": "fable-5-1",
+    "design": "fable-5-2",
     "design-plan-impl": "opus-5-5",
-    "design-v3": "fable-5-1",
-    "design-v7": "fable-5-1",
+    "design-v3": "fable-5-2",
+    "design-v7": "fable-5-2",
     "fable-implement": "opus-5-5-high",
     "fable-increment": "opus-5-5",
-    "fable-review": "fable-5-1",
+    "fable-review": "opus-5-5",
     "factoryworker": "opus-5-5-high",
     "gherkin-breakdown": "opus-5-5",
     "github-issue": "opus-5-5",
     "gpt-fable-review": "codex",
     "gpt-rootcause-all": "codex",
     "investigate": "opus-5-5",
-    "manager": "fable-5-1",
+    "manager": "fable-5-2",
     "mergepatrol": "opus-5-5",
     "minimalworker": "opus-5-5",
     "rapid-implement": "opus-5-5-high",

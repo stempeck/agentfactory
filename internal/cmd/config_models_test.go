@@ -99,8 +99,8 @@ func TestConfigModelsCheck_UsesHTTPProbeSeam(t *testing.T) {
 	if !called {
 		t.Error("check must reach the gateway ONLY through the httpProbe seam (it was never called)")
 	}
-	if !strings.Contains(out, "transport-level only") {
-		t.Errorf("check output must state it is transport-level only; out=%q", out)
+	if !strings.Contains(out, "af config models check — transport, per-class coverage and harness window (necessary, not sufficient for fitness).\n") {
+		t.Errorf("check output must open with the transport, coverage and harness window header; out=%q", out)
 	}
 	if strings.Contains(out, "sk-real-value") {
 		t.Errorf("check must NEVER print token material; out=%q", out)

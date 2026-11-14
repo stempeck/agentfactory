@@ -17,7 +17,7 @@ import (
 )
 
 var telemetryCmd = &cobra.Command{
-	Use:   "telemetry [on|off|status|report|band|usage|compare|rebuild]",
+	Use:   "telemetry [on|off|status|report|band|usage|compare|rebuild|startup]",
 	Short: "Toggle telemetry, show its status, or report per-step timing and token usage",
 	Long: `Toggle telemetry recording and export on or off, show current status,
 render the local per-step timing table, query the backend for token usage, or
@@ -37,6 +37,8 @@ judge whether a change to the factory actually made a run cheaper.
   af telemetry compare              did a change help? the verdict over two
                                     five-run arms
   af telemetry rebuild              rebuild the learned-data cache from the records
+  af telemetry startup              the manager's and supervisor's startup turn at
+                                    their first Stop
 
 Timing comes from local records; usage comes from the backend, so usage is the
 one verb that needs a reachable endpoint. It always exits 0 — read .state.
@@ -56,7 +58,13 @@ fixed say nothing in either direction. It takes --formula, --surface, --before a
 look them up. See "How improvement is proven" in USING_TOKENOMICS.md.
 
 rebuild reads every agent's records, so it ignores --agent: a per-agent cache
-would be missing every other agent's runs of the same formula step.`,
+would be missing every other agent's runs of the same formula step.
+
+startup first measures a pending startup turn that has reached its first Stop
+(so it writes the measurement, and with telemetry on a startup_end record), then
+reports the latest measurement of the manager and the supervisor, or of the one
+--agent names, as "measured" or "no measurement". It sends no mail and always
+exits 0.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runTelemetry,
 }
@@ -104,6 +112,7 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 	// holds everywhere except the two failures that happen BEFORE dispatch, which is precisely
 	// where a consumer is least able to tell an empty result from a broken one.
 	usageOut := len(args) > 0 && args[0] == "usage"
+	startupOut := len(args) > 0 && args[0] == "startup"
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -114,6 +123,10 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 		}
 		if jsonOut {
 			return emitTelemetryJSONError(err)
+		}
+		if startupOut {
+			fmt.Printf("telemetry startup: state: error (%v)\n", err)
+			return nil
 		}
 		return err
 	}
@@ -130,12 +143,16 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 		if jsonOut {
 			return emitTelemetryJSONError(err)
 		}
+		if startupOut {
+			fmt.Printf("telemetry startup: state: error (%v)\n", err)
+			return nil
+		}
 		return err
 	}
 
 	gateFile := telemetryGateFile(factoryRoot)
 
-	// status, report, band and compare have both a human and a machine-readable form, and this is
+	// status, report, band, compare and startup have both a human and a machine-readable form, and this is
 	// where --json picks between them; usage has only the machine-readable one and routes through
 	// the switch below, which is why it is absent here. on and off stay human-only, and the console
 	// can never invoke them.
@@ -151,6 +168,9 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 		}
 		if len(args) > 0 && args[0] == "compare" {
 			return emitTelemetryCompareJSON(cmd, factoryRoot)
+		}
+		if args[0] == "startup" {
+			return emitTelemetryStartupJSON(cmd, factoryRoot)
 		}
 	}
 
@@ -183,8 +203,10 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 		return runTelemetryUsage(cmd, factoryRoot)
 	case "rebuild":
 		return runTelemetryRebuild(factoryRoot)
+	case "startup":
+		return runTelemetryStartup(cmd, factoryRoot)
 	default:
-		return fmt.Errorf("usage: af telemetry [on|off|status|report|band|usage|rebuild]")
+		return fmt.Errorf("usage: af telemetry [on|off|status|report|band|usage|compare|rebuild|startup]")
 	}
 
 	return nil

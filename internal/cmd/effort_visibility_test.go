@@ -82,7 +82,7 @@ func TestEffortExcuseVisibleInRelaunchedTurnWindow(t *testing.T) {
 // clause names.
 func TestTurnInterventionsNamesLaunchedLevel(t *testing.T) {
 	const nextStep = "step-2"
-	fx, _, _ := primedFixture(t, roomyOccupancyPct)
+	fx, _, _ := primedFixtureWithTotal(t, roomyOccupancyPct, roomyWindowTokens)
 	declareWindow(t, fx.root, roomyWindowTokens)
 	armEfficiency(t, fx.root, nil)
 	hookFormulaName(t, fx.workDir, "offpath")

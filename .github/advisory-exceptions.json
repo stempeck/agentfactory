@@ -17,7 +17,8 @@
     "reason": "Privilege escalation that needs an authenticated non-admin gateway principal: an internal_user minting an API key. The agentfactory gateway has no user or key store, so no internal_user can exist; the only principal is the master key, which is already proxy_admin. Kept on 1.93.2 by operator decision D21 (2026-10-26). This does not claim the gateway is unexposed: it listens on the wildcard address.",
     "evidence": "Both gateway configs quickstart.sh writes (the api-key heredoc, quickstart.sh:1316-1362, and subscription_yaml_body, :1373-1428) set general_settings.master_key: os.environ/LITELLM_MASTER_KEY and no database_url, and neither launch line (quickstart.sh:1548-1549, :1557-1558) exports DATABASE_URL. In litellm 1.93.2, prisma_client is created only from a database_url (proxy/proxy_server.py:915-919 from DATABASE_URL, :4534-4537 from general_settings.database_url; ProxyStartupEvent._setup_prisma_client at :8191 leaves it None otherwise), and /key/generate refuses with db_not_connected_error when prisma_client is None (proxy/management_endpoints/key_management_endpoints.py:1550-1554), as does /user/new (internal_user_endpoints.py:413-414). Source read from the sha256-verified PyPI wheel litellm-1.93.2-cp312-cp312-manylinux_2_28_aarch64.whl. TestGatewayConfigHasNoUserDatabase pins the config fact.",
     "reviewed": "2026-10-27",
-    "recheck_by": "2026-11-26"
+    "recheck_by": "2026-11-26",
+    "fix_available": "1.100.4"
   },
   {
     "id": "GHSA-g5ff-637f-6q2m",
@@ -27,27 +28,8 @@
     "reason": "Arbitrary local file read that needs an authenticated non-admin gateway principal: an internal_user_viewer calling /utils/transform_request with vertex_ai_credentials. The agentfactory gateway has no user or key store, so no internal_user_viewer can exist; the only principal is the master key, which is already proxy_admin. Kept on 1.93.2 by operator decision D21 (2026-10-26). This does not claim the gateway is unexposed: it listens on the wildcard address.",
     "evidence": "Both gateway configs quickstart.sh writes (the api-key heredoc, quickstart.sh:1316-1362, and subscription_yaml_body, :1373-1428) set general_settings.master_key: os.environ/LITELLM_MASTER_KEY and no database_url, and neither launch line (quickstart.sh:1548-1549, :1557-1558) exports DATABASE_URL. In litellm 1.93.2, prisma_client is created only from a database_url (proxy/proxy_server.py:915-919, :4534-4537, :8191), and user creation refuses with db_not_connected_error when prisma_client is None (proxy/management_endpoints/internal_user_endpoints.py:413-414 for /user/new; key_management_endpoints.py:1550-1554 for /key/generate), so no viewer principal can be created. Source read from the sha256-verified PyPI wheel litellm-1.93.2-cp312-cp312-manylinux_2_28_aarch64.whl. GitHub lists no CVE for this advisory. TestGatewayConfigHasNoUserDatabase pins the config fact.",
     "reviewed": "2026-10-27",
-    "recheck_by": "2026-11-26"
-  },
-  {
-    "id": "GHSA-69hj-f68j-2879",
-    "aliases": ["CVE-2026-112909"],
-    "package": "filelock",
-    "version": "3.20.3",
-    "reason": "UnixFileLock truncate/chmod of a file another LOCAL USER renames or hard-links onto the lock path. The precondition is a second local user, and the agentfactory deployment has none: every factory process runs as the single 'dev' user the container creates, and the only other principal, root, needs no filelock defect to modify dev's files. Severity medium (CVSS 6.1). First patched 4.2.1, which is also the fallback py/litellm-requirements.in:7 already documents for the 3.20.3 pin — prefer moving the pin at the next lock refresh over renewing this entry.",
-    "evidence": "filelock==3.20.3 is pinned only in py/litellm-requirements.txt:692 (via py/litellm-requirements.in:7 and huggingface-hub); no agentfactory Python imports filelock (grep over py/ *.py: 0 matches). Dockerfile:55's 'useradd -m -s /bin/bash dev' is the image's only user creation (FROM ubuntu:24.04, Dockerfile:1), and quickdocker.sh execs every factory process with '-u dev'. GitHub global advisory GHSA-69hj-f68j-2879, fetched 2026-10-30: severity medium, CVSS 6.1, vulnerable <= 4.2.0, first_patched_version 4.2.1, published 2026-10-28.",
-    "reviewed": "2026-10-30",
-    "recheck_by": "2026-11-29"
-  },
-  {
-    "id": "GHSA-8mx5-7m5m-r77g",
-    "aliases": ["CVE-2026-112910"],
-    "package": "filelock",
-    "version": "3.20.3",
-    "reason": "Windows-only: the defect is in WindowsFileLock (the mode argument is ignored, so the lock file and ReadWriteLock database inherit the directory's ACL). No supported agentfactory path runs the litellm venv on Windows — quickstart.sh is a Bash script and the shipped deployment is the ubuntu:24.04 container — and on Unix filelock takes the UnixFileLock path this advisory does not cover. Severity medium (CVSS 5.3). First patched 4.2.1; same pin-move preference as GHSA-69hj-f68j-2879.",
-    "evidence": "The litellm venv is installed only by quickstart.sh (the py/litellm-requirements.txt lock install at quickstart.sh:2242-2250 and the redeploy paths at :3261-3293), a Bash script, inside the container Dockerfile:1 bases on ubuntu:24.04. GitHub global advisory GHSA-8mx5-7m5m-r77g, fetched 2026-10-30: severity medium, CVSS 5.3, summary 'filelock: WindowsFileLock ignores mode', vulnerable >= 3.10.0 <= 4.2.0, first_patched_version 4.2.1, published 2026-10-28.",
-    "reviewed": "2026-10-30",
-    "recheck_by": "2026-11-29"
+    "recheck_by": "2026-11-26",
+    "fix_available": "1.95.0"
   },
   {
     "id": "GHSA-w4c7-34wj-hqm8",
@@ -57,7 +39,19 @@
     "reason": "Unauthenticated local-file read on the proxy that exists only when a LiteLLM ENTERPRISE LICENSE is active; the vendor advisory states 'Open source deployments without a license are not affected, because the relevant codepaths only load when an Enterprise license is active.' The agentfactory gateway is an unlicensed open-source deployment: nothing in the repo sets a license. This does not claim the gateway is unexposed: it listens on the wildcard address. Severity critical (CVSS 10.0) WHEN licensed — re-verify this entry before any licensing change; patched lines start at 1.103.10, ten minor lines above the 1.93.2 pin kept by operator decision D21 (2026-10-26).",
     "evidence": "The string 'license' appears nowhere in quickstart.sh (case-insensitive grep: 0) and LITELLM_LICENSE nowhere in the repo (grep: 0). Both gateway configs quickstart.sh writes set only general_settings.master_key (api-key heredoc, quickstart.sh:2396-2397; subscription config, :2459-2460), and neither launch line (:2586, :2595) exports a license variable. GitHub repository advisory BerriAI/litellm GHSA-w4c7-34wj-hqm8, fetched 2026-10-30: severity critical, CVSS 10.0, state published, no CVE assigned, summary 'Unauthenticated file read leaks master key on Enterprise proxy', patched_versions 1.103.10/1.104.8/1.105.6/1.106.5.",
     "reviewed": "2026-10-30",
-    "recheck_by": "2026-11-29"
+    "recheck_by": "2026-11-29",
+    "fix_available": "1.103.10"
+  },
+  {
+    "id": "GHSA-2rwg-2wh4-7c4f",
+    "aliases": [],
+    "package": "litellm",
+    "version": "1.93.2",
+    "reason": "Environment-variable and file read through the Azure Entra ID credential parameters (tenant_id, client_id, client_secret, azure_username, azure_password, azure_scope), which the 1.93.2 request-body blocklist does not cover. It needs an authenticated low-privilege gateway principal: the advisory's impact is such a user reading the proxy's secrets, LITELLM_MASTER_KEY among them. The agentfactory gateway has no user or key store, so no such principal can exist; the only principal is the master key, which is already proxy_admin, and its holders (the agents) already read their key from the same secrets directory as the upstream credentials. The vendor scopes the advisory to deployments with an azure/ or azure_ai/ model, and no gateway config af writes has one, but this entry does not rely on that: a request-supplied custom_llm_provider can likely select the Azure provider for a listed model. Kept on 1.93.2 by operator decision D21 (2026-10-26). This does not claim the gateway is unexposed: it listens on the wildcard address.",
+    "evidence": "Issue stempeck/agentfactory-pro#763. GitHub repository advisory BerriAI/litellm GHSA-2rwg-2wh4-7c4f, fetched 2026-11-13: severity high, CVSS 7.7, state published, no CVE assigned, patched_versions 1.106.9/1.108.6/1.109.1/1.110.0-rc.2. The first release the audit clears is 1.110.0-rc.2, with no stable 1.110.0 as of 2026-11-13. Both gateway configs quickstart.sh writes (the api-key heredoc, quickstart.sh:2399-2442, and subscription_yaml_body, :2457-2511) and the af install --init seed .agentfactory/litellm.yaml set general_settings.master_key: os.environ/LITELLM_MASTER_KEY and no database_url, and neither launch line (:2637, :2646) exports DATABASE_URL. In litellm 1.93.2, /key/generate and /user/new refuse with db_not_connected_error when there is no database (proxy/management_endpoints/key_management_endpoints.py:1550-1554, internal_user_endpoints.py:413-414), so no non-admin principal can be created. The agent profiles authenticate with the master key file .agentfactory/secrets/litellm.key (quickstart.sh:2534, :2548), in the chmod 700 .agentfactory/secrets directory (:2229, :2304) that also holds the upstream credentials. The blocklist gap is real: _BANNED_REQUEST_BODY_PARAMS (proxy/auth/auth_utils.py:253-302, including its derived observability and custom-pricing sets) names none of the six Entra parameters, which the Azure provider reads (llms/azure/common_utils.py:283-291), and does not ban custom_llm_provider, which litellm.completion takes from the request (main.py:4980). Source read from the sha256-verified PyPI wheel litellm-1.93.2-cp312-cp312-manylinux_2_28_aarch64.whl. TestGatewayConfigHasNoUserDatabase pins the no-database fact.",
+    "reviewed": "2026-11-13",
+    "recheck_by": "2026-12-13",
+    "fix_available": "1.106.9"
   },
   {
     "id": "GHSA-rw8w-37p9-mrrp",

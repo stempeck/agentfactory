@@ -147,9 +147,10 @@ func TestConfigModelsCheck_DirectEndpoint_ClaudeAliasesDoNotHardFail(t *testing.
 	})
 }
 
-// TestCheckedInLitellm_HaikuAliasMatchesModelsJson pins T6/F1: every claude-haiku-* alias in the checked-in
-// litellm.yaml must route to the lane models.json declares for the HAIKU class (gpt-5.6-luna), not the main
-// lane. Both the alias ids and wantLane are read from the files, so a new haiku version needs no test change.
+// TestCheckedInLitellm_HaikuAliasMatchesModelsJson pins T6/F1: every checked-in litellm.yaml haiku alias
+// must route to the lane models.json declares for the HAIKU class (gpt-5.6-luna), not the main lane.
+// wantLane is derived from models.json and aliases are matched by the claude-haiku- prefix, so neither
+// a re-laned HAIKU class nor a new haiku version needs a test edit.
 func TestCheckedInLitellm_HaikuAliasMatchesModelsJson(t *testing.T) {
 	moduleRoot := findModuleRoot(t)
 

@@ -528,10 +528,10 @@ func TestWorkflow_IssueStarted_AdvancesThroughPRPhases_NoRedispatch(t *testing.T
 	// Every issue→pr handoff (the gate) and every pr-phase sling (the URL rewrite)
 	// resolves to exactly one linked PR. A single fixed PR every call is the stable
 	// happy path. The terminal pr-iterate is dual-source (phaseConsumesPR ⇒ true), so
-	// the terminal pr-status gate DOES fire; stub a green PR so the merge-ready gate
-	// passes and the workflow terminates.
+	// the terminal pr phase reads the linked PR's state; stub it OPEN so the workflow
+	// terminates.
 	stubLinkedPRs(t, []int{42})
-	stubPRStatusGreen(t)
+	stubItemState(t, "OPEN")
 
 	var slung, urls, ids []string
 	recordSlingsWithURL(t, store, &slung, &urls, &ids)

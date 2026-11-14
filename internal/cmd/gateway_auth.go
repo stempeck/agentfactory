@@ -173,25 +173,24 @@ func gatewayAuthModeRecordPath(root string) string {
 var litellmAuthModeLanePrefixRe = regexp.MustCompile(`^\s+model:\s*([^\s#]+)`)
 
 // gatewayAuthMode is K1 (issue #693 Phase 1): the record-over-inference resolver for the
-// LiteLLM gateway's auth mode. It is a distinct, additive resolver in this phase — it does
-// NOT call, delegate to, or get called by the existing resolveLitellmAuthMode ladder
-// (install.go:924); that reconciliation is Phase 2a's K5 job (decisions.md D1). Two parallel
-// ladders coexisting for this one phase is spec-sanctioned scaffolding, not the silently-
-// duplicated resolver the K1 GOTCHA-DECISION warns against, because it is named and dated here
-// with a forward pointer to the phase that unifies them.
+// LiteLLM gateway's auth mode, which resolveLitellmAuthMode delegates to when neither
+// --litellm-auth nor AF_LITELLM_AUTH decides.
 //
 // Record present: content must be exactly "api-key" or "codex-subscription" after trimming one
 // optional trailing "\n" (and a defensive "\r"); anything else — including a present-but-empty
 // file — is invalid content and errors naming the file (decisions.md D4; a zero-byte record is
 // treated as a torn write, never as "absent").
 //
-// Record absent (os.IsNotExist): write-once migration through 5 tiers, first match wins,
-// immediate return (decisions.md D3): (1) an existing gateway-relaunch.sh's baked
-// LITELLM_AUTH_MODE= line; (2) litellm.yaml's model_list lane prefix; (3) exactly one non-empty
-// credential handle; (4) both handles and no other signal — the single surviving refusal naming
-// --litellm-auth; (5) neither — default api-key. Migration never writes the record itself
-// (quickstart's setup_litellm, K13, is the only writer in the tree); it reports migrated=true so
-// callers can log "mode inferred (no record yet)".
+// Record absent (os.IsNotExist): write-once migration, first match wins, immediate return. The
+// tiers keep their #693 numbers but no longer run in that order: (1) an existing
+// gateway-relaunch.sh's baked LITELLM_AUTH_MODE= line; (3) exactly one non-empty credential
+// handle; (4) both handles — the single surviving refusal naming --litellm-auth; (2)
+// litellm.yaml's model_list lane prefix, only when neither handle exists; (5) default api-key.
+// The handles outrank the yaml because `af install --init` seeds litellm.yaml from the
+// agentfactory clone, and a file af wrote itself is weaker evidence than a credential the
+// operator imported. Migration never writes the record itself (quickstart's setup_litellm, K13,
+// is the only writer in the tree); it reports migrated=true so callers can log "mode inferred
+// (no record yet)".
 func gatewayAuthMode(root string) (mode string, migrated bool, err error) {
 	recPath := gatewayAuthModeRecordPath(root)
 	data, statErr := os.ReadFile(recPath)
@@ -217,6 +216,18 @@ func gatewayAuthMode(root string) (mode string, migrated bool, err error) {
 		}
 	}
 
+	// Tiers 3/4: credential-handle presence.
+	hasKey := apiKeySecretPresent(root)
+	hasSubscription := gatewayHandleNonEmpty(root)
+	switch {
+	case hasKey && hasSubscription:
+		return "", false, fmt.Errorf("both an OpenAI API key and a ChatGPT-subscription handle exist with no recorded gateway auth mode; pass --litellm-auth=<api-key|codex-subscription> to choose one")
+	case hasSubscription:
+		return "codex-subscription", true, nil
+	case hasKey:
+		return "api-key", true, nil
+	}
+
 	// Tier 2: litellm.yaml's model_list lane prefix (openai/ only ⇒ api-key, chatgpt/ only ⇒
 	// codex-subscription).
 	if yaml, yamlErr := os.ReadFile(filepath.Join(config.ConfigDir(root), "litellm.yaml")); yamlErr == nil {
@@ -239,19 +250,8 @@ func gatewayAuthMode(root string) (mode string, migrated bool, err error) {
 		}
 	}
 
-	// Tiers 3/4/5: credential-handle presence.
-	hasKey := apiKeySecretPresent(root)
-	hasSubscription := gatewayHandleNonEmpty(root)
-	switch {
-	case hasKey && hasSubscription:
-		return "", false, fmt.Errorf("both an OpenAI API key and a ChatGPT-subscription handle exist with no recorded gateway auth mode; pass --litellm-auth=<api-key|codex-subscription> to choose one")
-	case hasSubscription:
-		return "codex-subscription", true, nil
-	case hasKey:
-		return "api-key", true, nil
-	default:
-		return "api-key", true, nil
-	}
+	// Tier 5: default.
+	return "api-key", true, nil
 }
 
 // removeStaleGatewayCoverageRecord clears the model-coverage verdict recorded under every

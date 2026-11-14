@@ -243,7 +243,7 @@ func TestDownVaultStaleness_NotLeakedToARefusedAgentCaller(t *testing.T) {
 }
 
 // The formatting rows below drive the helper directly with an injected clock, so a boundary is
-// pinned by moving time rather than by sleeping (ADR-018; the memoryAttribution precedent).
+// pinned by moving time rather than by sleeping (ADR-018; the memory.Attribution precedent).
 func TestUpVaultStaleness_AgeWordingAcrossBoundaries(t *testing.T) {
 	root := seedStalenessFactory(t, 1)
 	now := time.Now().UTC()
@@ -321,7 +321,7 @@ func TestUpAlarms_QuietFactorySaysNothing(t *testing.T) {
 
 	stdout, _ := upPreflight(t, root)
 
-	for _, class := range []string{"HALT", "DARK", "NOSTEP", "WDOG", "alerts:"} {
+	for _, class := range []string{"HALT", "DARK", "NOSTEP", "WDOG", "WINDOW", "STARTUP", "alerts:"} {
 		if strings.Contains(stdout, class) {
 			t.Errorf("a quiet factory reported %q at startup; stdout=%q", class, stdout)
 		}

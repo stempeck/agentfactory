@@ -139,6 +139,7 @@ by one throttle tick — a temporary undercount, never the wrong direction (`sca
 |---|---|---|
 | `recorded-real/main_excerpt.jsonl` | **recorded-real** — first 80 lines of a real main transcript (agent `manager`, v2.1.x), redacted | Multiplicity on real data: 30 usage records → 9 distinct `message.id` (3.16×). Interleaved non-`assistant` records prove foreign types are skipped. Ground truth: naive `31761`, deduped `10040`, held-back-window `7357`. |
 | `recorded-real/subagent_excerpt.jsonl` | **recorded-real** — first 40 lines of a real `subagents/agent-*.jsonl`, redacted | The **partial-vs-final** shape and the **sidechain** case: 24 usage records (all `isSidechain: true`) → 7 distinct ids, 6 groups where an in-flight record's `output_tokens` is lower than the completed one's. Ground truth held-back window: **max-wins `2941`, first-wins `31`**. This is the fixture that kills a first-wins implementation. |
+| `recorded-real/source_754_first_stop.jsonl` | **recorded-real** — issue #754's source session `e51b5585` (v2.1.308), cut at its first `stop_hook_summary` record, 186 lines, redacted by its own rule (below) | The **first-Stop cut** on real data: `TranscriptPeakOccupancy` reads the peak main-session occupancy before the first Stop record as **134117** (`TestStartupCost_SourceSession`). Captured by the operator (Blocker B-1), never regenerated from code. |
 
 **Redaction rule applied to both** (`recorded-real` provenance class — captured, then scrubbed):
 every `content` block is reduced to its `{"type": …}`, all `text`/`thinking`/tool payloads, `cwd`
@@ -147,6 +148,11 @@ request ids, timestamps, `isSidechain`, `stop_reason` and the full `usage` objec
 verbatim — those are the structural facts the reader depends on, and none of them is conversation
 content. Verified: no non-empty `text`/`thinking`/`description`/`content`/`command`/`prompt` string
 survives in either file.
+
+**Redaction rule applied to `source_754_first_stop.jsonl`** (stricter than the rule above): every
+record keeps only `type`, `subtype`, `isSidechain`, `timestamp` and `version`, and its `message`
+keeps only `id`, `role`, `usage` and `stop_reason`. No content block, request id or session id
+survives at all.
 
 ## Fixtures built in-code (not on disk)
 

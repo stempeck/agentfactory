@@ -207,7 +207,7 @@ Configuration lives in `.agentfactory/dispatch.json` (created by `af install --i
 |-------|:--------:|---------|-------------|
 | `repos` | Yes | — | GitHub repos to poll (e.g. `["owner/repo"]`) |
 | `trigger_label` | Yes | — | Label used to query GitHub; only items with this label are fetched |
-| `notify_on_complete` | No | `"manager"` | Agent to notify (via `--caller`) when dispatched work finishes |
+| `notify_on_complete` | No | `"manager"` | Agent to notify (via `--caller`) when dispatched work finishes; a workflow also mails it `WORKFLOW_COMPLETE: <workflow label>` when its final phase completes |
 | `interval_seconds` | No | `300` | Polling interval (seconds) when running `af dispatch start` |
 | `retry_after_seconds` | No | `1800` | Time (seconds) before re-dispatching the same issue if the agent has gone idle |
 | `remove_trigger_after_dispatch` | No | `false` | Remove the `trigger_label` from the issue/PR after dispatching |
@@ -255,8 +255,11 @@ source of truth for which agent runs each phase.
 
 With this config, label an issue `agentic` + `feature-workflow`: the dispatcher adds the
 `design` label and slings `design-v3`; when that instance completes it swaps `design`→
-`build` and slings `rapid-implement`; when the final phase completes it removes the last phase
-label and `agentic`, then notifies `notify_on_complete`.
+`build` and slings `rapid-implement`; when the final phase completes it mails `notify_on_complete` a
+`WORKFLOW_COMPLETE: feature-workflow` message, then removes the last phase label and `agentic`. The
+dispatcher files that mail in-process as sender `af`. Earlier releases shelled out to `af mail send`,
+which an operator-started dispatcher, having no agent identity, could not run, so the mail was never
+sent. A send that fails stalls the item, and the next dispatch cycle sends it again.
 
 | Field | Required | Default | Description |
 |-------|:--------:|---------|-------------|
@@ -267,6 +270,19 @@ Validation rules (enforced when the config loads): every phase must back a singl
 mapping whose agent has a formula; phases run top-to-bottom; a phase label may not equal
 the `trigger_label` or the workflow's own label; and in v1 all phases of one workflow
 must be the same `source` (all `issue` or all `pr`).
+
+**A final phase that consumes a pull request.** When any mapping of the last phase's label has
+`"source": "pr"`, the pipeline completes once that phase's formula is done and the item has exactly
+one linked pull request that is open or merged. Approval, checks and mergeability are not read: one
+GitHub account cannot approve its own pull request, and the operator's merge comes after
+completion. A linked pull request closed without merging before the pipeline completes stalls the
+item, mailed once like any stall; one closed after `WORKFLOW_COMPLETE` is not seen again, because
+the completed item is no longer watched. An item that leaves the open set before its pipeline ends
+(merged early, or closed by hand) has its workflow record dropped on a later cycle, but only when
+GitHub reports closed or merged for that item when asked directly and that cycle's query for its
+source succeeded below its 50-item limit; the cycle prints `drop <key>: …`, and a failed read keeps
+the record. A transient `gh` error holds the item for the next cycle and prints
+`hold <key>: workflow "<label>" phase "<phase>": <reason>` to stderr.
 
 #### Crons (recurring scheduled slings)
 
@@ -802,6 +818,7 @@ Deep guides for the factory's measurement, model, and token-economics subsystems
 - [USING_TOKENOMICS.md](USING_TOKENOMICS.md) — the af tokenomics behavior contract: the `capacity` and `efficiency` objectives, guarantees, permitted interventions, per-mechanism records, and how an improvement is proven
 - [USING_PLUGINS.md](USING_PLUGINS.md) — plugin repositories: installing third-party specialist agents and integrations with `af plugin list|install|verify|acquire|check|remove`, and keeping them updated
 - [USING_INTEGRATIONS.md](USING_INTEGRATIONS.md) — third-party tools (hooks, MCP, services) bound per formula or factory-wide
+- [USING_ADVISORYLOOPS.md](USING_ADVISORYLOOPS.md) — the advisory healing loop: a red `advisory-decay` run files issues that a three-phase dispatcher workflow heals into pull requests
 - [web/README.md](web/README.md) — the optional web console
 
 ## Troubleshooting
@@ -860,7 +877,7 @@ tr '\0' '\n' < /proc/$(ps -o tpgid= -p $(tmux display -p -t af-<agent> '#{pane_p
 ```
 
 The process holds `file:` secret references already dereferenced, which is why the last line redacts them.
-`af config models check` answers whether the profile itself works.
+`af config models check` tests the profile and the harness window.
 
 ### Which integrations is this agent running with?
 

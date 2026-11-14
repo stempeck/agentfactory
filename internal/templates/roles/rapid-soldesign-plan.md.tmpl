@@ -45,6 +45,9 @@ The orchestrator never busy-waits. When an action says "wait for signal X":
    When the sub-agent mails you, the `af mail check --inject` hook wakes this session and you
    re-run the check. Unprocessed completion mails accumulate in the inbox, so on each
    wake you can tell exactly which signals have arrived.
+4. Mail that matches no awaited signal — a persistent sub-agent's NOTICE, IMPROVEMENT
+   self-edit report or READY ping — is not a signal: read it for content worth carrying
+   into a later action, archive it, run the step's check, and end the turn as in 3.
 
 **NEVER probe dispatch/liveness with a mutating command.** Verifying "is the sub-agent
 already dispatched / still alive" during an await — including when a STEP_FIDELITY verdict
@@ -131,6 +134,9 @@ ran its cleanup step, and by finalize the row had silently reverted to `Pending 
 had to be re-derived by hand. Nothing failed loudly; the file simply went backwards.
 
 **Therefore: every action that edits the progress file commits it in the same action.**
+
+Edit rows with `sed -i "s@<old row>@<new row>@"` and grep the row afterwards: never `#` as
+the delimiter, because row text carries `PR #N` and a `#`-delimited edit silently does nothing.
 
 ```bash
 ROOT="${AF_WORKTREE:-$AF_ROOT}"
@@ -313,6 +319,9 @@ The orchestrator never busy-waits. When an action says "wait for signal X":
    When the sub-agent mails you, the `af mail check --inject` hook wakes this session and you
    re-run the check. Unprocessed completion mails accumulate in the inbox, so on each
    wake you can tell exactly which signals have arrived.
+4. Mail that matches no awaited signal — a persistent sub-agent's NOTICE, IMPROVEMENT
+   self-edit report or READY ping — is not a signal: read it for content worth carrying
+   into a later action, archive it, run the step's check, and end the turn as in 3.
 
 **NEVER probe dispatch/liveness with a mutating command.** Verifying "is the sub-agent
 already dispatched / still alive" during an await — including when a STEP_FIDELITY verdict
@@ -399,6 +408,9 @@ ran its cleanup step, and by finalize the row had silently reverted to `Pending 
 had to be re-derived by hand. Nothing failed loudly; the file simply went backwards.
 
 **Therefore: every action that edits the progress file commits it in the same action.**
+
+Edit rows with `sed -i "s@<old row>@<new row>@"` and grep the row afterwards: never `#` as
+the delimiter, because row text carries `PR #N` and a `#`-delimited edit silently does nothing.
 
 ```bash
 ROOT="${AF_WORKTREE:-$AF_ROOT}"

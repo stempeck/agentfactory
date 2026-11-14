@@ -13,7 +13,7 @@ func TestCheckCIOnly(t *testing.T) {
 		blocked bool
 	}{
 		// BLOCKS — cwd under a factory worktree (the live-factory signal; immune to NeutralizeAFEnv).
-		{"cwd under worktrees", "/home/dev/af/agentfactory-pro/.agentfactory/worktrees/wt-abc123/internal/cmd", true},
+		{"cwd under worktrees", "/home/dev/af/agentfactory/.agentfactory/worktrees/wt-abc123/internal/cmd", true},
 		{"cwd under worktrees, trailing", "/home/x/proj/.agentfactory/worktrees/wt-abc123", true},
 		// ALLOWS — a checkout not under a factory worktree (the CI / clean-human path).
 		{"clean CI checkout", "/home/runner/work/agentfactory-pro/agentfactory-pro/internal/cmd", false},

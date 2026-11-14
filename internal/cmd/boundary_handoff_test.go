@@ -41,6 +41,13 @@ func boundaryTestNow() time.Time { return time.Now() }
 // capture site must treat as absent.
 func plantSessionSnapshot(t *testing.T, root, agent, sessionID string, pct float64, cumTokens int64, writtenAt, now time.Time) statusline.ChannelReading {
 	t.Helper()
+	return plantSessionSnapshotWithTotal(t, root, agent, sessionID, pct, 200000, cumTokens, writtenAt, now)
+}
+
+// plantSessionSnapshotWithTotal plants a snapshot whose host reports total as the window, for a
+// fixture whose premise is a window other than 200000: the session window now follows the host.
+func plantSessionSnapshotWithTotal(t *testing.T, root, agent, sessionID string, pct float64, total, cumTokens int64, writtenAt, now time.Time) statusline.ChannelReading {
+	t.Helper()
 	dir := config.StatuslineSessionsDir(root)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -52,8 +59,8 @@ func plantSessionSnapshot(t *testing.T, root, agent, sessionID string, pct float
 		"agent":                agent,
 		"written_at":           writtenAt.UTC().Format(time.RFC3339),
 		"context_used_pct":     pct,
-		"context_tokens_used":  int64(pct * 2000),
-		"context_tokens_total": int64(200000),
+		"context_tokens_used":  int64(pct * float64(total/100)),
+		"context_tokens_total": total,
 		"cum_tokens":           cumTokens,
 	}
 	data, err := json.Marshal(body)

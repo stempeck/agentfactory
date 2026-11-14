@@ -98,9 +98,15 @@ type agentListItem struct {
 	// (fresh|stale|dark|none|malformed) — malformed is never collapsed into none.
 	// Recovery is the K5 breaker's verdict: none|recovering|halted. None of the three
 	// feeds deriveAgentStatus: the honesty enum keeps its three inputs.
-	ContextPct   int    `json:"context_pct"`
-	ContextState string `json:"context_state"`
-	Recovery     string `json:"recovery"`
+	//
+	// WindowDeclared and WindowApplied are the one documented exception to the stable key
+	// set: both are absent when the agent's own figure of its current launch equals the
+	// declaration or is unknown, so their presence alone says the two disagree.
+	ContextPct     int    `json:"context_pct"`
+	ContextState   string `json:"context_state"`
+	Recovery       string `json:"recovery"`
+	WindowDeclared int64  `json:"window_declared,omitempty"`
+	WindowApplied  int64  `json:"window_applied,omitempty"`
 }
 
 // runAgentsList is the RunE for `af agents list`. It enumerates agents.json and,
@@ -200,6 +206,9 @@ func runAgentsList(cmd *cobra.Command, _ []string) error {
 			if pct, has := reading.UsedPct(); has {
 				item.ContextPct = int(math.Round(pct))
 			}
+		}
+		if declared, applied, ok := windowAgentFigures(root, name, time.Now()); ok {
+			item.WindowDeclared, item.WindowApplied = declared, applied
 		}
 		populateAgentStep(ctx, store, name, &item)
 		item.Status = deriveAgentStatus(f.running, item.StepState, item.IsGate)

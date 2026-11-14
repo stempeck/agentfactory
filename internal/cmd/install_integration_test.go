@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -39,6 +40,9 @@ func TestInstallInit_CreatesDispatchJson(t *testing.T) {
 		}
 	}
 
+	// dispatch.json derives from the agentfactory clone, so bootstrap from this one.
+	clone := findModuleRoot(t)
+	t.Setenv("AF_SOURCE_ROOT", clone)
 	output, err := runInstallInDir(t, dir, "--init")
 	// Reset flag to avoid affecting subsequent tests (cobra doesn't reset bool flags)
 	installInitFlag = false
@@ -59,25 +63,48 @@ func TestInstallInit_CreatesDispatchJson(t *testing.T) {
 		t.Fatalf("dispatch.json is not valid JSON: %v", err)
 	}
 
-	if cfg["trigger_label"] != "agentic" {
-		t.Errorf("trigger_label should be 'agentic', got: %v", cfg["trigger_label"])
-	}
 	repos, ok := cfg["repos"].([]interface{})
 	if !ok || len(repos) != 0 {
 		t.Errorf("repos should be empty array, got: %v", cfg["repos"])
 	}
+	// #654 seeds the clone's dispatch.json mappings and settings verbatim (design-doc.md,
+	// integration.md:68) rather than blanking them — compared dynamically against
+	// the clone's file so a future tracked edit does not re-break this test,
+	// matching the idiom in install_configs_seedworthy_test.go.
+	wantPath := filepath.Join(clone, ".agentfactory", "dispatch.json")
+	wantRaw, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", wantPath, err)
+	}
+	var wantCfg map[string]interface{}
+	if err := json.Unmarshal(wantRaw, &wantCfg); err != nil {
+		t.Fatalf("%s is not valid JSON: %v", wantPath, err)
+	}
+	wantMappings, ok := wantCfg["mappings"].([]interface{})
+	if !ok {
+		t.Fatalf("%s mappings is not an array: %v", wantPath, wantCfg["mappings"])
+	}
+
 	mappings, ok := cfg["mappings"].([]interface{})
-	if !ok || len(mappings) != 0 {
-		t.Errorf("mappings should be empty array, got: %v", cfg["mappings"])
+	if !ok {
+		t.Fatalf("mappings should be an array, got: %v", cfg["mappings"])
 	}
-	if interval, ok := cfg["interval_seconds"].(float64); !ok || int(interval) != 300 {
-		t.Errorf("interval_seconds should be 300, got: %v", cfg["interval_seconds"])
+	gotMappingsJSON, err := json.Marshal(mappings)
+	if err != nil {
+		t.Fatalf("marshaling seeded mappings: %v", err)
 	}
-	if retry, ok := cfg["retry_after_seconds"].(float64); !ok || int(retry) != 1800 {
-		t.Errorf("retry_after_seconds should be 1800, got: %v", cfg["retry_after_seconds"])
+	wantMappingsJSON, err := json.Marshal(wantMappings)
+	if err != nil {
+		t.Fatalf("marshaling tracked mappings: %v", err)
 	}
-	if notify, ok := cfg["notify_on_complete"].(string); !ok || notify != "manager" {
-		t.Errorf("notify_on_complete should be 'manager', got: %v", cfg["notify_on_complete"])
+	if string(gotMappingsJSON) != string(wantMappingsJSON) {
+		t.Errorf("mappings should match the clone's dispatch.json (%d entries), got %d entries: %s",
+			len(wantMappings), len(mappings), gotMappingsJSON)
+	}
+	for _, key := range []string{"trigger_label", "interval_seconds", "retry_after_seconds", "notify_on_complete"} {
+		if !reflect.DeepEqual(cfg[key], wantCfg[key]) {
+			t.Errorf("%s should match the clone's dispatch.json (%v), got: %v", key, wantCfg[key], cfg[key])
+		}
 	}
 
 	// The learnings vault root (issue #515 Phase 3) rides along on this --init run rather than

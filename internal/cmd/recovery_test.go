@@ -30,12 +30,16 @@ type mailRecorder struct {
 
 func (m *mailRecorder) install(t *testing.T) *mailRecorder {
 	t.Helper()
-	orig := sendHandoffMail
+	orig, origEscalation := sendHandoffMail, escalationMailFn
 	sendHandoffMail = func(agentName, subject, body string) error {
 		m.sent = append(m.sent, recordedMail{agentName, subject, body})
 		return m.err
 	}
-	t.Cleanup(func() { sendHandoffMail = orig })
+	escalationMailFn = func(root, to, subject, body string) error {
+		m.sent = append(m.sent, recordedMail{to, subject, body})
+		return m.err
+	}
+	t.Cleanup(func() { sendHandoffMail, escalationMailFn = orig, origEscalation })
 	return m
 }
 

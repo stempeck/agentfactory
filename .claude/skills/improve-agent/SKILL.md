@@ -281,6 +281,33 @@ Present findings to the user interactively:
 
 Apply accepted changes. Do NOT commit — leave as local modification for user to handle agent regeneration and formula sync.
 
+## Phase 9: Repository-Neutral Sweep (MANDATORY)
+
+Run this after every apply, over the WHOLE formula, not only the lines this session wrote. A formula
+runs in any repository, where a PR or issue number from the one this session worked in names a
+different item or none. This is the one edit allowed outside the steps Phase 6 touched.
+
+```bash
+grep -nEi '#[0-9]|(^|[^[:alpha:]])(PRs?|pull requests?|issues?)[ #]+[0-9]|/(pull|issues)/[0-9]' <formula-path>
+```
+
+Classify every hit:
+
+- **A PR or issue reference** (`on PR 123`, `#123`, `PRs 123 and 456`, a link to a real repository's
+  pull or issue): delete the number and the story it anchors. Keep the sentence's instruction, and
+  keep its reason only when the reason changes what the agent does, stated without the number.
+  `Evidence outside the worktree trips WORKTREE_CONTAINMENT, and on PR 123 it sent an investigator
+  back to re-fetch the page.` becomes `Evidence outside the worktree trips WORKTREE_CONTAINMENT.`
+- **Not a reference, leave it**: placeholder examples (`https://github.com/owner/repo/pull/42`,
+  `owner/repo#42`), ordinal labels (`Reviewer #1`, `Why #2`), and template variables (`{{issue}}`).
+
+The grep finds only a number with a marker in front of it, so read each sentence you edit for further
+bare numbers it lists and remove them too. Never change a step id, gate, artifact path or capture
+directive to remove a number; name such a hit in the output instead. Re-run the grep: every remaining
+hit must be in the leave-it class.
+
+**Output**: "Repository-neutral sweep: N references removed", or "Repository-neutral sweep: clean".
+
 ## Anti-Patterns
 
 | Anti-Pattern | Why it fails | Correct approach |

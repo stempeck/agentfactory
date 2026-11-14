@@ -212,13 +212,9 @@ func TestLoadStartupConfig_MalformedJSON(t *testing.T) {
 	}
 }
 
-// Case 7: the install scaffold must parse correctly with its opinionated defaults.
-// This test mirrors the live scaffold seed in internal/cmd/install.go:113: the #408
-// watchdog-scope fix widened watchdog_agents to ["manager","supervisor"], but the
-// startup `agents` default stays manager-only (PR #410 T1/T3 — the autonomous
-// supervisor is not auto-started on a fresh install). It MUST stay in lockstep with
-// that literal; the drift-proof guard is TestInstallScaffold_StartupAgentsDefaultManagerOnly
-// (install_scaffold_test.go), which source-parses the REAL literal.
+// Case 7: the opinionated install-scaffold shape must load — manager-only `agents`
+// (PR #410 T1/T3: the autonomous supervisor is not auto-started on a fresh install),
+// the #408 widened `watchdog_agents`, and `start_dispatch`.
 func TestLoadStartupConfig_ScaffoldLoads(t *testing.T) {
 	scaffoldDir := writeStartupRoot(t, `{"agents":["manager"],"quality":"default","fidelity":"default","start_dispatch":true,"watchdog_agents":["manager","supervisor"]}`)
 
@@ -1059,6 +1055,29 @@ func TestStartupTokenomicsNumericBounds(t *testing.T) {
 			}
 			if !tc.ok && err == nil {
 				t.Error("want rejected, got nil")
+			}
+		})
+	}
+}
+
+// The starter-config seed must judge a startup.json before writing it, so the exported validator
+// has to give exactly the loader's verdict.
+func TestValidateStartupConfig_ExportedMatchesLoader(t *testing.T) {
+	for label, doc := range map[string]string{
+		"valid":                 `{"agents":["manager"],"quality":"default","fidelity":"on","watchdog_agents":["manager"]}`,
+		"fidelity_strict":       `{"fidelity":"strict"}`,
+		"quality_high":          `{"quality":"high"}`,
+		"advisory_at_threshold": `{"recovery":{"context_threshold_pct":80,"context_advisory_pct":80}}`,
+	} {
+		t.Run(label, func(t *testing.T) {
+			var cfg StartupConfig
+			if err := json.Unmarshal([]byte(doc), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			exportedErr := ValidateStartupConfig(&cfg)
+			_, loadErr := LoadStartupConfig(writeStartupRoot(t, doc))
+			if (exportedErr == nil) != (loadErr == nil) || (exportedErr != nil && exportedErr.Error() != loadErr.Error()) {
+				t.Errorf("ValidateStartupConfig = %v, LoadStartupConfig = %v; want the same verdict", exportedErr, loadErr)
 			}
 		})
 	}

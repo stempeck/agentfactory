@@ -81,16 +81,16 @@ OPENOBSERVE_BIN="$HOME/.local/bin/openobserve"
 
 # K6 pin block (issue #743). Every value is a literal, never a ${X:-…} default: the image exports
 # GO_VERSION/GO_SHA256_* for its own go1.24.2. Each digest's evidence is a row of
-# .designs/743/implementation-plan/pin-data.md; a bump is a reviewed edit here and in
-# internal/cmd/quickstart_pins_test.go, never a runtime input.
+# .designs/743/implementation-plan/pin-data.md (CLAUDE_CODE_*: .designs/754/implementation-plan/pin-data.md);
+# a bump is a reviewed edit here and in internal/cmd/quickstart_pins_test.go, never a runtime input.
 NODE_MAJOR="22"
-NODE_APT_VERSION="22.23.4-1nodesource1"
+NODE_APT_VERSION="22.23.5-1nodesource1"
 GH_VERSION="2.103.2"
 GH_SHA256_ARM64="4c3e99a50bd8b181a3fe9d69b25dd978bac768148d88f01507c6b4d1ef61a443"
 GH_SHA256_AMD64="62ccf747115ddc61237efffdde66a3c8f70ba249433dc64f70801089b59c59c8"
-GO_TOOLCHAIN_VERSION="go1.26.10"
-GO_SHA256_ARM64="3f4227ce7b206a513e794f1393adb473a07b46e94d18bd15d1c684bbb7319797"
-GO_SHA256_AMD64="ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5"
+GO_TOOLCHAIN_VERSION="go1.27.4"
+GO_SHA256_ARM64="3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92"
+GO_SHA256_AMD64="7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840"
 PLAYWRIGHT_VERSION="1.64.1"
 PLAYWRIGHT_SHA512="1c2ad5847af9410bb0628b301141936fb806a79db6c9f95bbff493f27178b05586b8b8d00add7b43f12e6e918648d2989f5b6c4c23d9c6a1e11c27d5511bbb50"
 PLAYWRIGHT_CORE_SHA512="042e2cf32e9211503a435ad2c594eda3c848d4a508df15e51c6660bc6a8fe08a8f748fdae855fd1f6f480cdcfbbcaa3d976d5be8b7d8a2c49c3cbe8cdf1c720d"
@@ -102,12 +102,12 @@ CODEX_VERSION="0.164.0"
 CODEX_SHA512="4d68fb506c8f45edcf8ff03775d340c6cd6d7b76bf5bfc4077e2742c7aeb1539ac49f6a118c38b17fbe7f3c0f7402220013dc1d6b9b5cbf677358134af1e9c65"
 CODEX_LINUX_ARM64_SHA512="2cbe624d08f20cbe18457e38116aa121f110e6e1a79a0c64401252c63652789f0bd4e83cde9765cd4256fcf449efaa1a570395821e875f0b8f12204d10753896"
 CODEX_LINUX_AMD64_SHA512="5cb028696b06393da487397e3f81580cf4e4cc0afd5b45455c569592a945764334b286b5807ff84b4c120f9ec49371c7c248ab0041b3dbf3307a1b1e87e97932"
-CLAUDE_CODE_VERSION="2.1.308"
-CLAUDE_CODE_SHA256_ARM64="fdd22e6cbb734d580f5664c48df4294eeec850218ff07f186f9af30426396ee1"
-CLAUDE_CODE_SHA256_AMD64="356733f185fa988e6bf3aa9a555269fdd167982a2e2a80d3c8a78037bb92ad58"
-CLAUDE_CODE_NPM_SHA512="6f61e7b3383237bdf045314ff8860f0c9367f400d79c6ea3af6ea26cbfb0d371d22aa7dbe86a84f099dfaf89b3dfb66fe004ff34ff81e7fddcd45f3d59375648"
-CLAUDE_CODE_LINUX_ARM64_SHA512="c6d4f609dee7fb264df4f8966d61da65ff70db961f955fbb54e5f92013c1fc8584aca64586cb2ddbf032d6d4a0abf333a75be9e7ac70151a8f6ba50023d05923"
-CLAUDE_CODE_LINUX_AMD64_SHA512="7df52bc9ebe91fb3ce4ad3c9ff1a54239475a3361b1fda3f0db87fc4f4a6c9525e8442e744c6664677a37509aad137a3396fd26cd9c9161086320c08b0ea854d"
+CLAUDE_CODE_VERSION="2.1.322"
+CLAUDE_CODE_SHA256_ARM64="f220ca50ea4f3222043ff83cc224a1262e0196e9897acc0871efa94235b0c1fd"
+CLAUDE_CODE_SHA256_AMD64="bfb3703ad5380242328459bc62ada4bde8ae7ba57c6e1eeadb9c00e08874c478"
+CLAUDE_CODE_NPM_SHA512="a0fee85b8bcce4344459f2f58e7e094869662dcac9e509a9a60003ad53490543e20b5990e58bd1ae47b4a27f9867fdd084a21a089b5dafa8cfbde85c0102072d"
+CLAUDE_CODE_LINUX_ARM64_SHA512="618369d68a7ced659c04413a8c2d6778e8cc0cf767e08cbe9141f215c2351ac2e5e08c07ec48d997054a729b19a956c4d085c415a3a5766c8e1c2d72de3d7c02"
+CLAUDE_CODE_LINUX_AMD64_SHA512="d03a1a3405cb58261820669c85604291352c4bc74e3a0be4e11d9f14a76b2de8cef579514f069650c0fd38d7439afd1cb1da70c63e2a2d437acd631a1b64b3ea"
 # 46 characters from inside the emSign ECC Root CA - G3 certificate body: 2.1.224 embeds that root
 # as an unlabeled PEM, so the DER label alone misses it (H-2).
 EMSIGN_G3_BODY_PROBE="FBVIcUqEqy6HyC5ltqtdyzdc6LBtCGI79G1Y4PPwT01xyS"
@@ -1708,16 +1708,61 @@ configure_shell() {
     local begin_marker="# BEGIN agentfactory model config"
     local end_marker="# END agentfactory model config"
 
+    # Derived from the seeded .agentfactory/models.json's default profile (issue #654
+    # CFG-9) rather than a hardcoded literal, so the shell env and the seed can never
+    # drift apart. configure_factory runs before configure_shell in main() specifically
+    # so models.json already exists here (the ANTHROPIC_MODEL:- env override is
+    # preserved either way). Read before the strip below, so a failed read leaves the
+    # previous block in place. Only ANTHROPIC_MODEL is required: a profile may declare
+    # nothing else (most seeded ones do), so an undeclared class is left to Claude Code
+    # rather than exported as an invented id; effort keeps its literal fallback.
+    local default_model default_opus_model default_sonnet_model default_haiku_model effort
+    if [ ! -e .agentfactory/models.json ]; then
+        log_error ".agentfactory/models.json not found — run af install --init in the factory first"
+        return 1
+    fi
+    if ! default_model="$(jq -er '.models[.default].ANTHROPIC_MODEL' .agentfactory/models.json 2>/dev/null)" || [ -z "$default_model" ]; then
+        log_error ".agentfactory/models.json: cannot read ANTHROPIC_MODEL from the default profile — edit the file so the profile named by \"default\" declares ANTHROPIC_MODEL"
+        return 1
+    fi
+    if ! default_opus_model="$(jq -r '.models[.default].ANTHROPIC_DEFAULT_OPUS_MODEL // empty' .agentfactory/models.json 2>/dev/null)"; then
+        log_error ".agentfactory/models.json: cannot read ANTHROPIC_DEFAULT_OPUS_MODEL from the default profile"
+        return 1
+    fi
+    if ! default_sonnet_model="$(jq -r '.models[.default].ANTHROPIC_DEFAULT_SONNET_MODEL // empty' .agentfactory/models.json 2>/dev/null)"; then
+        log_error ".agentfactory/models.json: cannot read ANTHROPIC_DEFAULT_SONNET_MODEL from the default profile"
+        return 1
+    fi
+    if ! default_haiku_model="$(jq -r '.models[.default].ANTHROPIC_DEFAULT_HAIKU_MODEL // empty' .agentfactory/models.json 2>/dev/null)"; then
+        log_error ".agentfactory/models.json: cannot read ANTHROPIC_DEFAULT_HAIKU_MODEL from the default profile"
+        return 1
+    fi
+    [ -n "$default_opus_model" ] || log_info "Default profile declares no ANTHROPIC_DEFAULT_OPUS_MODEL; leaving the opus class to Claude Code's default"
+    [ -n "$default_sonnet_model" ] || log_info "Default profile declares no ANTHROPIC_DEFAULT_SONNET_MODEL; leaving the sonnet class to Claude Code's default"
+    [ -n "$default_haiku_model" ] || log_info "Default profile declares no ANTHROPIC_DEFAULT_HAIKU_MODEL; leaving the haiku class to Claude Code's default"
+    if ! effort="$(jq -r '.models[.default].CLAUDE_CODE_EFFORT_LEVEL // empty' .agentfactory/models.json 2>/dev/null)"; then
+        log_error ".agentfactory/models.json: cannot read CLAUDE_CODE_EFFORT_LEVEL from the default profile"
+        return 1
+    fi
+    [ -n "$effort" ] || effort=xhigh
+
     if grep -q "$begin_marker" "$shell_config" 2>/dev/null; then
-        sed -i "/$begin_marker/,/$end_marker/d" "$shell_config"
+        sed -i.af-strip "/$begin_marker/,/$end_marker/d" "$shell_config"; rm -f "$shell_config.af-strip"
     fi
 
     {
         echo "$begin_marker"
-        echo 'export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-opus-5}"'
-        echo 'export ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL:-claude-opus-5}"'
-        echo 'export ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-5}"'
-        echo 'export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_CODE_EFFORT_LEVEL:-xhigh}"'
+        echo "export ANTHROPIC_MODEL=\"\${ANTHROPIC_MODEL:-$default_model}\""
+        if [ -n "$default_opus_model" ]; then
+            echo "export ANTHROPIC_DEFAULT_OPUS_MODEL=\"\${ANTHROPIC_DEFAULT_OPUS_MODEL:-$default_opus_model}\""
+        fi
+        if [ -n "$default_sonnet_model" ]; then
+            echo "export ANTHROPIC_DEFAULT_SONNET_MODEL=\"\${ANTHROPIC_DEFAULT_SONNET_MODEL:-$default_sonnet_model}\""
+        fi
+        if [ -n "$default_haiku_model" ]; then
+            echo "export ANTHROPIC_DEFAULT_HAIKU_MODEL=\"\${ANTHROPIC_DEFAULT_HAIKU_MODEL:-$default_haiku_model}\""
+        fi
+        echo "export CLAUDE_CODE_EFFORT_LEVEL=\"\${CLAUDE_CODE_EFFORT_LEVEL:-$effort}\""
         echo 'export CLAUDE_CODE_DISABLE_AUTO_MEMORY="${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-1}"'
         echo 'export DISABLE_AUTOUPDATER="${DISABLE_AUTOUPDATER:-1}"'
         echo "$end_marker"
@@ -1950,8 +1995,8 @@ configure_login_init() {
     local end="# END agentfactory webui login guard"
     touch "$profile"
     # Idempotent (replaceable) + dedup: strip our block and any legacy create-time block.
-    sed -i "/$begin/,/$end/d" "$profile" 2>/dev/null || true
-    sed -i "/# >>> phase4 webui login-init relaunch guard/,/# <<< phase4 webui login-init relaunch guard/d" "$profile" 2>/dev/null || true
+    sed -i.af-strip "/$begin/,/$end/d" "$profile" 2>/dev/null || true
+    sed -i.af-strip "/# >>> phase4 webui login-init relaunch guard/,/# <<< phase4 webui login-init relaunch guard/d" "$profile" 2>/dev/null || true; rm -f "$profile.af-strip"
     {
         echo "$begin"
         echo "# bash --login (container PID 1 on docker start) reads ~/.bash_profile, NOT ~/.bashrc,"
@@ -1986,7 +2031,7 @@ _litellm_auth_mode_write() {
 # helper for the per-mode litellm config file. Returns 0 when the caller should (re)write the
 # mode's seed now — the target is absent, or (api-key only) an existing litellm.yaml carries
 # ONLY chatgpt/ lanes, a hand-switched pre-693 artifact (decisions.md D2: mirrors
-# gatewayAuthMode's tier-2 lane scan, gateway_auth.go:220-240, exactly — chatgpt-only triggers,
+# gatewayAuthMode's tier-2 lane scan exactly — chatgpt-only triggers,
 # both-present or neither-present does not). Returns 1 when an existing, non-legacy file must be
 # left untouched (content and mtime unchanged). The legacy save-aside (never delete, ADR-017) +
 # log_warn naming the copy fire here as a side effect; the actual heredoc write stays in
@@ -2428,19 +2473,25 @@ model_list:
   - model_name: claude-sonnet-5
     litellm_params:
       model: chatgpt/responses/gpt-5.6-sol
+  - model_name: claude-sonnet-5-5
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-sol
   - model_name: claude-opus-4-8
     litellm_params:
       model: chatgpt/responses/gpt-5.6-sol
   - model_name: claude-fable-5
     litellm_params:
       model: chatgpt/responses/gpt-5.6-sol
-  - model_name: claude-fable-5-1
+  - model_name: claude-fable-5-2
     litellm_params:
       model: chatgpt/responses/gpt-5.6-sol
   - model_name: claude-opus-5-5
     litellm_params:
       model: chatgpt/responses/gpt-5.6-sol
   - model_name: claude-haiku-4-5       # haiku-class requests go to the small backend
+    litellm_params:
+      model: chatgpt/responses/gpt-5.6-luna
+  - model_name: claude-haiku-5-5
     litellm_params:
       model: chatgpt/responses/gpt-5.6-luna
 
@@ -2629,7 +2680,7 @@ EOF
     # has-session check when a session is present.
     local bash_profile_path="$HOME/.bash_profile"
     touch "$bash_profile_path"
-    sed -i '/BEGIN agentfactory litellm login guard/,/END agentfactory litellm login guard/d' "$bash_profile_path" 2>/dev/null || true
+    sed -i.af-strip '/BEGIN agentfactory litellm login guard/,/END agentfactory litellm login guard/d' "$bash_profile_path" 2>/dev/null || true; rm -f "$bash_profile_path.af-strip"
     cat >> "$bash_profile_path" << EOF
 # BEGIN agentfactory litellm login guard
 "$relaunch_script"
@@ -2966,7 +3017,7 @@ EOF
     local tbegin="# BEGIN agentfactory telemetry login guard"
     local tend="# END agentfactory telemetry login guard"
     touch "$profile"
-    sed -i "/$tbegin/,/$tend/d" "$profile" 2>/dev/null || true
+    sed -i.af-strip "/$tbegin/,/$tend/d" "$profile" 2>/dev/null || true; rm -f "$profile.af-strip"
     cat >> "$profile" << EOF
 $tbegin
 [ -x "$factory_root/.agentfactory/telemetry/relaunch.sh" ] && "$factory_root/.agentfactory/telemetry/relaunch.sh"
@@ -3544,8 +3595,8 @@ main() {
     log_step "Phase 3: Configuring workspace"
 
     configure_git_defaults
-    configure_shell
     configure_factory
+    configure_shell
     converge_present_components
     _restart_rebuilt_webui
     configure_login_init

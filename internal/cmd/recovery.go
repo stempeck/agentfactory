@@ -152,9 +152,10 @@ cap) and it never expires on its own — a self-clearing breaker is a breaker th
 never stops anything. This is the supported way to clear it after investigating,
 and it is the command the RECOVERY HALTED escalation names.
 
-It mutates breaker state ONLY. It does not kill or start sessions, does not touch
-worktrees, and does not close beads: after resetting, relaunch with 'af up <agent>'
-if the agent is not running.`,
+It mutates breaker state and the agent's startup measurement (the STARTUP alarm's
+source) ONLY. It does not kill or start sessions, does not touch worktrees, and does
+not close beads: after resetting, relaunch with 'af up <agent>' if the agent is not
+running.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRecoveryReset,
 }
@@ -204,6 +205,15 @@ func runRecoveryReset(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if rmErr := os.Remove(startupTurnPath(root, agent)); rmErr == nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "recovery reset %s: cleared the startup measurement (STARTUP alarm)\n", agent)
+	} else if !os.IsNotExist(rmErr) {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: recovery reset %s: clearing the startup measurement: %v\n", agent, rmErr)
+	}
+	if rmErr := removeStartupSignalLatches(root, agent); rmErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: recovery reset %s: clearing the startup mail latches: %v\n", agent, rmErr)
+	}
+
 	// Read before removing so the printed action can name what was actually cleared. This read
 	// cannot fail: an absent breaker is the zero value and an unreadable one is the corrupt latch.
 	st := loadRecoveryState(root, agent)
@@ -223,7 +233,7 @@ func runRecoveryReset(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "recovery reset %s: cleared breaker state (attempts=%d); recovery re-armed\n",
 			agent, st.Attempts)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "recovery reset %s: breaker state only — this does not relaunch the agent (use 'af up %s')\n",
+	fmt.Fprintf(cmd.OutOrStdout(), "recovery reset %s: breaker state and startup measurement only — this does not relaunch the agent (use 'af up %s')\n",
 		agent, agent)
 	return nil
 }
@@ -560,10 +570,12 @@ func saveRecoveryState(root, agent string, st recoveryState) error {
 // constrained to [a-zA-Z][a-zA-Z0-9_-]* — these fixed labels are the ENTIRE set of strings that can
 // reach an operator's pane from this path (security.md:57). Nothing read off disk is ever echoed.
 const (
-	alarmClassHalt   = "HALT"
-	alarmClassDark   = "DARK"
-	alarmClassNoStep = "NOSTEP"
-	alarmClassWdog   = "WDOG"
+	alarmClassHalt    = "HALT"
+	alarmClassDark    = "DARK"
+	alarmClassNoStep  = "NOSTEP"
+	alarmClassWdog    = "WDOG"
+	alarmClassWindow  = "WINDOW"
+	alarmClassStartup = "STARTUP"
 
 	// haltReasonUnclassified is what a halt cause outside this file's haltReason* set reads as. It
 	// belongs to the vocabulary rather than to haltReasonLabel's switch because it is the label an
@@ -582,11 +594,27 @@ const (
 // can act on; `af statusline status` and `af up` name every raised alarm including this one, and
 // the pane still carries the +N that says there is more. The residual is real: a factory with any
 // standing HALT shows its dead watchdog only as part of that count.
+//
+// WINDOW is agent-scoped and an operator can act on it, so it ranks ahead of WDOG; a launch the
+// operator accepted with --accept-window, or a foreign-class profile the gate never refuses, leaves
+// nothing to act on, so its WINDOW ranks after WDOG and a standing one never demotes a dead watchdog
+// to the +N count. STARTUP is agent-scoped too, so it also ranks ahead of WDOG.
 var alarmClassRank = map[string]int{
-	alarmClassHalt:   0,
-	alarmClassDark:   1,
-	alarmClassNoStep: 2,
-	alarmClassWdog:   3,
+	alarmClassHalt:    0,
+	alarmClassDark:    1,
+	alarmClassNoStep:  2,
+	alarmClassWindow:  3,
+	alarmClassStartup: 4,
+	alarmClassWdog:    5,
+}
+
+const alarmRankStandingWindow = 6
+
+func alarmRank(a recoveryAlarm) int {
+	if a.class == alarmClassWindow && (a.reason == windowReasonAccepted || a.reason == windowReasonForeign) {
+		return alarmRankStandingWindow
+	}
+	return alarmClassRank[a.class]
 }
 
 // maxBreakerBytes bounds what the alarm will read. This scan runs on the statusline's render tick,
@@ -605,8 +633,10 @@ const watchdogHeartbeatStaleAfter = 3 * watchdogTickSecs * time.Second
 type recoveryAlarm struct {
 	class  string
 	agent  string
-	reason string        // HALT only, always a haltReason* constant
+	reason string        // HALT: a haltReason* constant; WINDOW: a windowReason* constant
 	quiet  time.Duration // WDOG only
+	detail string        // WINDOW only: one sentence with the figures, built by its source reader from bounded values only
+	above  bool          // WINDOW only: the session reports more than the declaration, which no harness upgrade ends
 }
 
 // recoveryAlarms is the ONE read of the alarm's durable sources; the pane token, `af statusline
@@ -668,11 +698,13 @@ func recoveryAlarms(root string, now time.Time) ([]recoveryAlarm, error) {
 	if quiet, ok := watchdogQuietFor(root, now); ok {
 		raised = append(raised, recoveryAlarm{class: alarmClassWdog, quiet: quiet})
 	}
+	raised = append(raised, windowAlarms(root, now)...)
+	raised = append(raised, startupAlarms(root)...)
 
 	// By severity first, then by name. The pane shows raised[0] and nothing else, so this sort is
 	// what decides which of several conditions an operator is told about — not a tidiness pass.
 	sort.Slice(raised, func(i, j int) bool {
-		if ri, rj := alarmClassRank[raised[i].class], alarmClassRank[raised[j].class]; ri != rj {
+		if ri, rj := alarmRank(raised[i]), alarmRank(raised[j]); ri != rj {
 			return ri < rj
 		}
 		return raised[i].agent < raised[j].agent
@@ -787,9 +819,12 @@ func formatQuietFor(d time.Duration) string {
 // Unlike the pane token this does NOT travel statusline.SanitizeToken — a 64-rune cap would cut
 // these lines mid-sentence. It is safe without one only because every field it interpolates was
 // closed upstream: agent survived config.ValidateAgentName, reason came out of haltReasonLabel's
-// switch, class is a constant, quiet is a duration. A future field read straight off disk would
-// break that and put an attacker-chosen escape on the operator's terminal, since both callers
-// fmt.Print this verbatim.
+// switch, class is a constant, quiet is a duration. detail is the one field carrying values read
+// off disk, and it is safe to print only because the reader that fills it (windowAlarms) bounds each
+// value: agents pass config.ValidateAgentName, profiles and model ids are %q-quoted and capped, the
+// version is a harnessVersionToken; the STARTUP reader (startupAlarms) bounds the values of its detail
+// the same way. A future field read straight off disk without such a bound would
+// put an attacker-chosen escape on the operator's terminal, since both callers fmt.Print this verbatim.
 func (a recoveryAlarm) describe() string {
 	switch a.class {
 	case alarmClassHalt:
@@ -809,6 +844,11 @@ func (a recoveryAlarm) describe() string {
 	case alarmClassWdog:
 		return fmt.Sprintf("WDOG no watchdog tick for %s — recovery is unsupervised; check the watchdog session and re-run 'af up'",
 			formatQuietFor(a.quiet))
+	case alarmClassWindow:
+		return fmt.Sprintf("WINDOW %s (%s) — %s %s", a.agent, a.reason, a.detail, windowClearingAct(a.reason, a.agent, a.above))
+	case alarmClassStartup:
+		return fmt.Sprintf("STARTUP %s — %s Clears when this agent's next measured startup is within budget with its rulings block delivered, "+
+			"or run 'af recovery reset %s' if the agent is gone for good.", a.agent, a.detail, a.agent)
 	}
 	return ""
 }
@@ -1801,35 +1841,38 @@ func escalateNoStep(root, agent string, r statusline.ChannelReading, st *recover
 
 // --- K8: verified escalation ------------------------------------------------------------------
 
-// escalateRecovery sends an operator escalation and records what actually happened to it.
-//
-// Existence is checked BEFORE the send and the outcome is checked AFTER (the done.go:252-255
-// contract), and `escalation_sent` and `recipient_session_live` are recorded SEPARATELY. A send
-// into a roster member's mailbox that has no live session is not delivery: `supervisor` is a member
-// whose 2,443 lifetime messages were all purged unread. That case takes the undelivered branch —
-// breadcrumb and stderr — while still recording that the send itself succeeded.
+// escalateRecovery sends a recovery escalation and records what actually happened to it.
 //
 // Halting never depends on any of this. The latch is the operator's protection; delivery is only
 // how they find out.
 func escalateRecovery(root, recipient, subject, body string, st *recoveryState) {
-	reachable, live := recoveryRecipientReachable(root, recipient)
-	st.RecipientSessionLive = live
+	st.EscalationSent, st.RecipientSessionLive = escalateOperator(root, recipient, escalationClassRecovery, subject, body)
+}
 
+// escalateOperator is the one operator-escalation send. It holds no state of its own, so every
+// caller records its two results wherever that caller keeps state.
+//
+// Existence is checked BEFORE the send and the outcome is checked AFTER (the done.go:252-255
+// contract), and sent and live are returned SEPARATELY. A send into a roster member's mailbox that
+// has no live session is not delivery: `supervisor` is a member whose 2,443 lifetime messages were
+// all purged unread. That case takes the undelivered branch — breadcrumb and stderr — while still
+// reporting that the send itself succeeded.
+func escalateOperator(root, recipient, class, subject, body string) (sent, live bool) {
+	reachable, live := recoveryRecipientReachable(root, recipient)
 	if !reachable {
-		st.EscalationSent = false
-		noteUndeliveredEscalation(root, recipient,
+		noteUndeliveredEscalation(root, class, recipient,
 			"recipient is absent from agents.json, or absent from both the live-session set and startup.json")
-		return
+		return false, false
 	}
-	if err := sendHandoffMail(recipient, subject, body); err != nil {
-		st.EscalationSent = false
-		noteUndeliveredEscalation(root, recipient, "send failed: "+err.Error())
-		return
+	if err := escalationMailFn(root, recipient, subject, body); err != nil {
+		noteUndeliveredEscalation(root, class, recipient, "send failed: "+err.Error())
+		return false, live
 	}
-	st.EscalationSent = true
 	if !live {
-		noteUndeliveredEscalation(root, recipient, "sent into a mailbox whose agent has no live session")
+		noteUndeliveredEscalation(root, class, recipient, "sent into a mailbox whose agent has no live session")
+		return true, false
 	}
+	return true, true
 }
 
 // recoveryRecipientReachable implements the K8 rule: agents.json ∩ (live session ∨ startup.json).
@@ -1867,8 +1910,8 @@ func recoveryRecipientReachable(root, recipient string) (reachable, live bool) {
 // appends rather than truncates (the authority.go:252-256 rationale) because repeated
 // undeliverable escalations are exactly the pattern an operator needs to see accumulate, and it
 // swallows its errors because an escalation that could not be recorded must still not stop a halt.
-func noteUndeliveredEscalation(root, recipient, detail string) {
-	msg := fmt.Sprintf("RECOVERY HALTED (escalation undelivered to %q): %s", recipient, detail)
+func noteUndeliveredEscalation(root, class, recipient, detail string) {
+	msg := fmt.Sprintf("%s (escalation undelivered to %q): %s", class, recipient, detail)
 	fmt.Fprintf(os.Stderr, "recovery: %s\n", msg)
 	if root == "" {
 		return

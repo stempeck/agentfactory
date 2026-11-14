@@ -14,6 +14,23 @@ mark-only: a note that became durable truth **graduates** with a destination, a 
 being true **expires**, and both are frontmatter marks — the file stays on disk. Agents have no
 destructive verb here at all, so curation is yours.
 
+**Listing notes.** `af memory list` prints pinned notes first (their status reads
+`active (pinned)`, or `expired (ttl, pinned)` for a pin whose TTL has passed and is still
+served), then active notes, then the rest, each newest first, and stops at 8,192 B
+with a last line saying how many rows it left out. Narrow it with `af memory list --type <type>`
+(`gotcha`, `model-behavior`, `ops`, `outcome` or `improvement`) or `--formula <name>`, or print
+every row with `--all-rows`. `--all` is a different flag: it reads every agent's vault instead of
+one, and it does not lift the cap; only `--all-rows` does. `--json` is never capped.
+
+**Pinning a ruling.** You can also **pin** a note with `af memory pin <id> --agent <name>`, a third
+mark: its date and subject (the first line of its body) reach every session start of that agent
+until you clear it with `af memory unpin <id> --agent <name>`. A pin is served whatever its TTL
+says. An agent cannot graduate or expire a pinned note; you unpin it first. `af memory pin`
+prints the exact line a session will receive and refuses a pin that would take the pinned block
+past its ceiling, listing the current pins so you can consolidate or unpin one. `af memory status`
+lists every agent's pins, reports a block that is over its ceiling, and names any unpinned note
+whose subject mentions a ruling.
+
 **What survives what.** The vault lives outside every directory a teardown reaches, so it is
 untouched by `af done`, `af down`, `af down <agent> --reset`, `af sling --agent <name> --reset`,
 worktree garbage collection, and regenerating an agent workspace with `af install --agents`. The
@@ -62,10 +79,12 @@ frontmatter, so a later triage can tell a seeded note from one an agent observed
 
 **The vault reaches the agent on its own.** `af memory check --inject` is registered as its own
 `SessionStart` hook entry — not chained behind `af prime` — so an agent opens every session already
-holding its top notes (up to 5, ≤ 4 KB of note bodies; **4,736 B** including the framing text). Being
+holding its pinned rulings first, as one date-and-subject line each (≤ 3,072 B), then its top notes
+(up to 5; pins and notes together ≤ 4 KB; **4,736 B** including the framing text). Being
 its own entry is what makes that budget meaningful: it is spent independently of the identity file
 and of mail, so a large formula step or a full mailbox cannot crowd the vault out, and an empty vault
-costs nothing at all. Everything past the top 5 stays one `af memory list` away. That is also why
+costs nothing at all. Everything past the top 5 stays one `af memory list` away, or
+`af memory list --all-rows` once the vault outgrows the list's 8,192 B cap. That is also why
 subject lines are worth writing well — the injected block is the first thing the agent reads, and a
 note that does not earn its place in the top 5 is only found by an agent that goes looking.
 

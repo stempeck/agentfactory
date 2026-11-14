@@ -444,7 +444,7 @@ func TestValidateAgentName(t *testing.T) {
 			t.Errorf("ValidateAgentName(%q) = %v, want nil", v, err)
 		}
 	}
-	invalid := []string{"", "agent;rm", "../../etc", "agent name", "123start", "dispatch", "operator", "watchdog"}
+	invalid := []string{"", "agent;rm", "../../etc", "agent name", "123start", "dispatch", "operator", "watchdog", "af"}
 	for _, v := range invalid {
 		if err := ValidateAgentName(v); err == nil {
 			t.Errorf("ValidateAgentName(%q) = nil, want error", v)

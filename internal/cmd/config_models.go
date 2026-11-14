@@ -108,7 +108,7 @@ which profile that agent resolves to.`,
 
 var configModelsCheckCmd = &cobra.Command{
 	Use:   "check [profile]",
-	Short: "Transport-level probe of endpoint-bearing model profiles",
+	Short: "Probe model profiles: endpoint transport, per-class coverage, and the context window the installed harness applies",
 	Long: `Probe endpoint-bearing profiles (or a single named profile): resolve the
 file: secret (exists / non-empty / mode), reach ANTHROPIC_BASE_URL, and report a per-class
 verdict for every model class a session can request — including the claude-* ids the host
@@ -121,8 +121,10 @@ streamed /v1/messages turn per served class, shaped like a session's turn (block
 system prompt); that performs real, billable requests. A failing probe prints the
 gateway's own error text verbatim.
 
-This is transport-level only — necessary, not sufficient, for fitness. Never prints
-token material.`,
+For every profile whose model id is not foreign, it also runs the installed Claude Code harness
+once against a loopback stub and reports the context window it applies; an unrecognised id, a
+window that differs from the declaration, or a probe that cannot complete fails the check. This is
+necessary, not sufficient, for fitness. Never prints token material.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runConfigModelsCheck,
 }
@@ -153,7 +155,7 @@ func init() {
 // `make test`) — this is the FIRST http client in internal/cmd, so the seam is
 // mandatory. It receives the resolved token to authenticate the request; the token
 // is never returned or logged (T-2 redaction stays at the output layer). Modelled on
-// runGitDetect's context.WithTimeout bound and ghPRStatus's (T, error) inline-decode.
+// runGitDetect's context.WithTimeout bound and ghItemState's (T, error) inline-decode.
 var httpProbe = func(baseURL, authToken string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), modelsProbeTimeout)
 	defer cancel()
@@ -305,7 +307,7 @@ func runConfigModelsCheck(cmd *cobra.Command, args []string) error {
 		names = []string{args[0]}
 	} else {
 		for name, profile := range cfg.Models {
-			if profile[baseURLKey] != "" {
+			if profile[baseURLKey] != "" || !config.ForeignModelProfile(profile) {
 				names = append(names, name)
 			}
 		}
@@ -326,7 +328,7 @@ func runConfigModelsCheck(cmd *cobra.Command, args []string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	fmt.Fprintln(out, "af config models check — transport-level only (necessary, not sufficient for fitness).")
+	fmt.Fprintln(out, "af config models check — transport, per-class coverage and harness window (necessary, not sufficient for fitness).")
 
 	aliasIDs := directProfileClaudeIDs(cfg)
 	dispatchCfg := loadDispatchConfigForPinCheck(root, out)
@@ -337,7 +339,7 @@ func runConfigModelsCheck(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if hardFailures > 0 {
-		return fmt.Errorf("%d transport check(s) failed", hardFailures)
+		return fmt.Errorf("%d profile check(s) failed", hardFailures)
 	}
 	return nil
 }
@@ -551,9 +553,17 @@ func anyServedWithPrefix(served []string, prefix string) bool {
 func checkProfile(out io.Writer, root, name string, profile map[string]string, aliasIDs []string, isDefault bool, dispatchCfg *config.DispatchConfig) (hardFailure bool) {
 	base := profile[baseURLKey]
 	if base == "" {
-		fmt.Fprintf(out, "profile %q: no ANTHROPIC_BASE_URL — nothing to probe (local/default model)\n", name)
-		return false
+		if config.ForeignModelProfile(profile) {
+			fmt.Fprintf(out, "profile %q: foreign-class model id and no ANTHROPIC_BASE_URL — nothing to probe\n", name)
+			return false
+		}
+		return checkHarnessWindow(out, root, name, profile)
 	}
+	defer func() {
+		if !config.ForeignModelProfile(profile) && checkHarnessWindow(out, root, name, profile) {
+			hardFailure = true
+		}
+	}()
 
 	secret := profile[authTokenKey]
 	if strings.HasPrefix(secret, secretPrefix) {
@@ -1295,12 +1305,12 @@ func invalidateStaleFitnessAttestations(root string, before, after map[string]ma
 	sort.Strings(stale)
 
 	for _, name := range stale {
-		// Profile names are not validated anywhere and are joined straight into a path, so a
-		// name like "../x" resolves outside the attestation directory — and a sweep that runs
-		// on every save would turn a stdin document into an arbitrary-file delete. Only a plain
-		// file name may be removed. Such a profile CAN be attested (attest joins the same path),
-		// so this leaves it permanently attested rather than merely unattestable; that is the
-		// lesser harm, and the real fix is validating profile names where they are accepted.
+		// `set` refuses a name like "../x", but a models.json written by hand still loads with one,
+		// and names are joined straight into a path: it resolves outside the attestation
+		// directory, and a sweep that runs on every save would turn the registry being replaced
+		// into an arbitrary-file delete. Only a plain file name may be removed. Such a profile CAN
+		// be attested (attest joins the same path), so this leaves it permanently attested rather
+		// than merely unattestable; that is the lesser harm.
 		if name != filepath.Base(name) || name == "." || name == ".." {
 			continue
 		}
@@ -1452,4 +1462,48 @@ func sortedMapKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// checkHarnessWindow judges the probe's own figure, the window the installed harness applies now,
+// never the entry writeProbeRecord returns: a session row the probe yielded to is reported beside it.
+// A harness that is on PATH and cannot be measured fails, as an unreachable endpoint does.
+func checkHarnessWindow(out io.Writer, root, name string, profile map[string]string) (hardFailure bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), harnessProbeCheckTimeout)
+	defer cancel()
+	p, err := probeHarnessWindowFn(ctx, profile)
+	if errors.Is(err, errHarnessAbsent) {
+		fmt.Fprintf(out, "profile %q: claude not on PATH — window not measured\n", name)
+		return false
+	}
+	id := windowIdentity{Profile: name, ModelID: profile[modelKey], HarnessVersion: windowHarnessVersion(root), Declared: windowDeclared(profile[config.EnvMaxContextTokens])}
+	var stands windowRecord
+	var writeErr error
+	if err == nil {
+		stands, writeErr = writeProbeRecord(root, id, p, time.Now())
+		if errors.Is(writeErr, errProbeVersionMismatch) {
+			err, writeErr = writeErr, nil
+		}
+	}
+	if err != nil {
+		fmt.Fprintf(out, "profile %q: window probe did not complete (%v) — window not measured\n", name, err)
+		return true
+	}
+	kept := ""
+	if writeErr == nil && stands.Source == "session" {
+		kept = fmt.Sprintf(" (the record keeps the session figure %d)", stands.Applied)
+	}
+	switch {
+	case p.Unrecognized:
+		fmt.Fprintf(out, "profile %q: Claude Code %s does not recognise model %q (window %d)%s\n", name, p.HarnessVersion, profile[modelKey], p.ContextWindow, kept)
+		hardFailure = true
+	case id.Declared > 0 && p.ContextWindow != id.Declared:
+		fmt.Fprintf(out, "profile %q: Claude Code %s applies a %d-token window to model %q, but the profile declares %d%s\n", name, p.HarnessVersion, p.ContextWindow, profile[modelKey], id.Declared, kept)
+		hardFailure = true
+	default:
+		fmt.Fprintf(out, "profile %q: window %d on Claude Code %s (model %q)%s\n", name, p.ContextWindow, p.HarnessVersion, profile[modelKey], kept)
+	}
+	if writeErr != nil {
+		fmt.Fprintf(out, "warning: window record for profile %q could not be written (%v)\n", name, writeErr)
+	}
+	return hardFailure
 }
