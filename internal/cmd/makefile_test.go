@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMakefileSupplyChainInvariants(t *testing.T) {
@@ -218,4 +220,90 @@ func adRemovedPaths(recipe string) []string {
 
 func adUnder(path, dir string) bool {
 	return path == dir || strings.HasPrefix(path, dir+string(filepath.Separator))
+}
+
+// The 6m figure is the operator's decision in #138: internal/cmd alone outgrew the old 4m.
+func TestMakeTestIntegrationPerPackageBudget(t *testing.T) {
+	recipe, ok := mtiRecipe(readRepoFile(t, "Makefile"), "test-integration")
+	if !ok {
+		t.Fatal("Makefile has no test-integration: rule")
+	}
+	var root, web []mtiGoTestRun
+	for _, run := range mtiGoTestRuns(recipe) {
+		if run.inWeb {
+			web = append(web, run)
+		} else {
+			root = append(root, run)
+		}
+	}
+	if len(root) != 1 || len(web) != 1 {
+		t.Fatalf("test-integration has %d root-module and %d web go test runs, want one of each:\n%s",
+			len(root), len(web), strings.Join(recipe, "\n"))
+	}
+
+	t.Run("the root-module run allows each package 6 minutes", func(t *testing.T) {
+		if root[0].err != nil || root[0].timeout != 6*time.Minute {
+			t.Errorf("root-module integration budget = %v (%v), want 6m0s:\n%s", root[0].timeout, root[0].err, root[0].line)
+		}
+	})
+	t.Run("the web module run keeps a budget of its own", func(t *testing.T) {
+		if web[0].err != nil {
+			t.Errorf("web module integration run: %v:\n%s", web[0].err, web[0].line)
+		}
+	})
+}
+
+type mtiGoTestRun struct {
+	line    string
+	inWeb   bool
+	timeout time.Duration
+	err     error
+}
+
+func mtiRecipe(makefile, target string) ([]string, bool) {
+	var recipe []string
+	inRule := false
+	for _, line := range strings.Split(makefile, "\n") {
+		switch {
+		case strings.HasPrefix(line, target+":"):
+			inRule = true
+		case inRule && strings.HasPrefix(line, "\t"):
+			recipe = append(recipe, line)
+		case inRule:
+			return recipe, true
+		}
+	}
+	return recipe, inRule
+}
+
+func mtiGoTestRuns(recipe []string) []mtiGoTestRun {
+	var runs []mtiGoTestRun
+	for _, line := range recipe {
+		command := strings.TrimLeft(strings.TrimSpace(line), "@+-")
+		// The recipe's own @# notes quote `go test ./...`; they are not runs.
+		if strings.HasPrefix(command, "#") {
+			continue
+		}
+		fields := strings.Fields(command)
+		start := slices.IndexFunc(fields, func(f string) bool { return f == "go" })
+		if start < 0 || start+1 >= len(fields) || fields[start+1] != "test" {
+			continue
+		}
+		run := mtiGoTestRun{line: line, inWeb: strings.Contains(command, "cd web")}
+		var values []string
+		for i, f := range fields[start+2:] {
+			if v, ok := strings.CutPrefix(f, "-timeout="); ok {
+				values = append(values, v)
+			} else if f == "-timeout" && start+3+i < len(fields) {
+				values = append(values, fields[start+3+i])
+			}
+		}
+		if len(values) != 1 {
+			run.err = fmt.Errorf("want exactly one -timeout flag, found %d", len(values))
+		} else {
+			run.timeout, run.err = time.ParseDuration(values[0])
+		}
+		runs = append(runs, run)
+	}
+	return runs
 }

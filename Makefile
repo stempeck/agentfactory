@@ -98,7 +98,7 @@ $(VENV_MARKER): $(PY_REQS)
 
 test-integration: $(VENV_MARKER)
 	@mkdir -p $(AF_TEST_TMPDIR)
-	PATH="$(CURDIR)/$(VENV)/bin:$$PATH" TMPDIR=$(AF_TEST_TMPDIR) GOTMPDIR=$(AF_TEST_TMPDIR) CGO_ENABLED=0 go test -tags=integration -timeout=4m ./...
+	PATH="$(CURDIR)/$(VENV)/bin:$$PATH" TMPDIR=$(AF_TEST_TMPDIR) GOTMPDIR=$(AF_TEST_TMPDIR) CGO_ENABLED=0 go test -tags=integration -timeout=6m ./...
 	@# Issue #425 Phase 5A: the web console is a SEPARATE Go module (web/go.mod), so the root
 	@# `go test ./...` above never descends into it. Run its integration tier explicitly — the only
 	@# `cd web` precedent is build-webui above. The `//go:build integration` bridge test lives here
