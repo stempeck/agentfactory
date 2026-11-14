@@ -3,6 +3,84 @@
 Notable changes to agentfactory. The project began 2026-05-01; snapshot tags `V001`–`V012`
 mark pre-release checkpoints. `v0.1.0` is the first formal release.
 
+## v0.5.0 — 2026-11-14
+
+Agents run on the context window they really get, af's own alarms reach you, advisory findings
+become healing pull requests, and new factories start from current configs. (#135)
+
+### Agents run on the context window they really get
+
+- af records the context window Claude Code actually applied for each identity (profile, model
+  id, Claude Code version, declared window). A harness upgrade or a changed declaration starts a
+  fresh record. (#135)
+- The first time a session reports a window other than its profile's declaration, `manager` and
+  `supervisor` get a `WINDOW_MISMATCH` mail and a `WINDOW` alarm shows in the alerts of
+  `af statusline status`. A session that has reported no window since launch shows
+  as `unobserved` instead of looking healthy. (#135)
+- `af up`, `af sling --agent` and `af sling --formula` refuse a launch whose recorded window is
+  smaller than its profile declares, naming both figures. `--accept-window` launches it anyway
+  and prints the warning. (#135)
+- `af config models check` runs the installed Claude Code against every profile whose model id
+  is not foreign and fails on an unrecognised model id, a window that differs from the
+  declaration, or a probe that cannot complete. `af tokenomics status` prints the context window it
+  resolved and where that number came from. `af agents list --json` adds `window_declared` and
+  `window_applied`. (#135)
+- Claude Code is pinned to **2.1.322**, and CI's integration lane runs the window agreement test
+  against that pin. (#135)
+
+### Startup turns are measured, and rulings are pinned
+
+- `af telemetry startup [--agent manager|supervisor] [--json]` reports each role's latest startup
+  turn: context occupancy at its first Stop against a 90,000-token budget, the harness version,
+  and whether the pinned rulings were delivered. Over budget or missing rulings raises a `STARTUP`
+  alarm; `af recovery reset <agent>` clears it. (#135)
+- Startup no longer reads the whole memory vault, and `af up` warns when `agents.json` still
+  carries the old `af memory list` directive. (#135)
+- `af memory pin <id> --agent <name>` serves a note's date and subject at the head of every
+  session start for that agent until `af memory unpin`; the pinned block is capped at 3,072 bytes.
+  `af memory status` lists every agent's pins. `af memory list` shows pinned notes first, stops at
+  8,192 bytes unless `--all-rows`, and adds `--type` and `--formula` filters. (#135)
+
+### af's own mail arrives, and dispatcher workflows report stalls
+
+- `WORKFLOW_COMPLETE`, `WORKFLOW_STALL`, `RECOVERY HALTED` and the `WINDOW` / `STARTUP` alarms
+  are filed in-process from sender `af`, so they arrive from an operator-started dispatcher and
+  from the watchdog alike. (#135)
+- Each new stall reason mails `WORKFLOW_STALL: <workflow>` once and shows as `stall` in
+  `af dispatch status --json` and as a STALL column in the text table. Each
+  dispatcher cycle says what it did: `hold …` on a transient `gh` error, `drop …` for an item
+  merged or closed before its pipeline ended, `skip …` for a trigger-labelled item that matches
+  nothing. (#135)
+
+### Advisory findings become healing pull requests
+
+- `.github/advisory-audit.sh` writes a record of every finding and its exit status separates the
+  outcomes: 0 clean, 1 a finding, 2 a setup error, 3 infrastructure errors only. An exception that
+  still excuses an advisory whose fix is published is reported as `excused-fixable`. (#135)
+- In the repository the `advisory-decay` job's filing steps name, a failed scheduled run files one
+  locked issue per pin, labelled `agentic` and `advisory-heal`, using the checksum-verified `gh`
+  that `quickstart.sh` pins. An `advisory-heal` dispatcher workflow takes each issue through
+  fable-implement, fable-review and fable-increment to a pull request for you to merge, and the
+  merge closes the issue. New operator guide [USING_ADVISORYLOOPS.md](USING_ADVISORYLOOPS.md). (#135)
+
+### New factories start from current configs
+
+- `af install --init` seeds `dispatch.json`, `startup.json`, `models.json`, `litellm.yaml`,
+  `messaging.json` and `factory.json` from the clone you bootstrapped from (`AF_SOURCE_ROOT`, or
+  the tree `af` was built from); `agents.json` holds only `manager` and `supervisor`. Files you
+  already have are kept, and every rewrite is logged to `.agentfactory/.config-seed.log`
+  (ADR-028). `quickstart.sh` works with BSD sed. (#135)
+
+### Also in this release  (#135)
+
+- Sturdier `design-v7`, `rapid-soldesign-plan`, `fable-review`, `fable-increment` and
+  `improve-agent` formulas. (#135)
+- Pins: Go 1.27.4, Node.js 22.23.5, `oauthlib` 4.0.1 and `filelock` 4.2.9 in the gateway lock. (#135)
+- ADR-029 (a declared window is a prediction, a recorded one an observation); window, startup and
+  pinning coverage in USING_RECOVERY, USING_TELEMETRY, USING_MEMORY, USING_MODELS and
+  USING_TOKENOMICS; "User-scope `env` and the profile" and "Moving the Claude Code pin" in
+  USING_LITELLM. (#135)
+
 ## v0.4.0 — 2026-11-01
 
 Security and reproducible installs, plugins and a ChatGPT-subscription gateway, and token
