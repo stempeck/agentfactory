@@ -23,7 +23,7 @@ model_list:
   - model_name: claude-fable-5
     litellm_params:
       model: chatgpt/responses/gpt-5.6-sol
-  - model_name: claude-fable-5-1
+  - model_name: claude-fable-5-2
     litellm_params:
       model: chatgpt/responses/gpt-5.6-sol
   - model_name: claude-opus-4-8

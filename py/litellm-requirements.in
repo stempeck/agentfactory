@@ -9,4 +9,6 @@ certifi>=2026.10.19  # GHSA-6q48-6c7w-9gw2
 PyJWT>=2.15.0  # GHSA-42vr-xj54-vc7v, GHSA-x33g-cr3x-6449
 urllib3>=2.8.0  # GHSA-vxq7-64xx-v4gw, GHSA-8988-9cw3-xx77, GHSA-gh4c-6fx4-qh6g
 mcp>=1.30.0  # GHSA-84m7-p3x7-pcfv
+opentelemetry-api>=1.45.2  # GHSA-mf5v-w3w3-f6cg
+dnspython>=2.9.2  # GHSA-vvf4-9x63-8xvv
 huggingface-hub<2  # hub 2.x pulls httpx2/httpcore2, whose fixed releases need idna>=3.18 against idna==3.15: GHSA-7mj9-2mp8-4m2p, GHSA-8xx6-hgc6-gc2m, GHSA-h4x7-gw46-3wm6, GHSA-pf96-p4fj-6566
