@@ -347,3 +347,9 @@ SELF-VERIFY VERDICT: PASS
   `advisory_decay_test.go:788`, a `py/__pycache__` folder appeared, and `internal/cmd` ran 233.051s, so no timeout fired and 6m won't fix it.
   #137 is still OPEN at `fc0b8170` with `integration` FAILURE. Once #138 merges, #137 needs a branch update to get a fresh
   `pull_request` run, because a rerun reuses the old merge ref. No gate call and no push. HOLD continues.
+- 16:08Z re-check (watchdog relaunch, "progress backstop"): there is one change. The fix for #138 is now PR #139 (`af/fable-implement-fd5e3f`
+  at `e5b18a39`, opened 14:37Z). It sets `Makefile:101` to `-timeout=6m`, all checks are green including `integration`, and it is `BLOCKED`
+  with `REVIEW_REQUIRED`. #139 says it does not fix the `TestAdvisoryDecay` `py/__pycache__` race. #137 is still OPEN at `fc0b8170`
+  with `integration` FAILURE, and `origin/main` is still `bec32c58`. I posted the unblock path on #137 (issuecomment-6880370400):
+  #139 needs the operator's review and merge, then I update #137 from main for a fresh run. A failure that is only the pycache race
+  gets one rerun. No gate call and no push. HOLD continues.
