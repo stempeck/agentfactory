@@ -218,3 +218,24 @@ tree.
   → no output. Everything in the v0.5.0 section is merged in `bec32c58`.
 
 GATE-3 VERDICT: PASS
+
+## Step 12 — Phase 4: Tier B drafts — NOT PRODUCED (operator instruction)
+
+No long-form article, short-form post, figures or paste vehicle were produced this cycle. The
+operator's instruction for this cycle (bead af-4073aec6, relayed verbatim) is "no actually medium
+article or marketing this time". Drafting them anyway would spend the operator's review time on
+pieces they have already declined. The formula's own outcome for a declined piece is GATE 4
+`SKIP`, recorded there from the same instruction. So no `cycle-af-4073aec6-medium.md`,
+`-linkedin.md`, `-screen-*.png` or `-paste.html` exists, and the cleanup manifest has nothing
+from this step to account for.
+
+## GATE-4 (Draft approval) — RESOLVED: every Tier B piece SKIP
+
+- No drafts exist (Step 12), so the per-draft forms are recorded in `cycle-af-4073aec6-story.md`
+  `## Tier B — Operator Decision (GATE 4)`: Medium SKIP, LinkedIn SKIP, sourced to the operator's
+  instruction (bead af-4073aec6).
+- Notify: the operator was told on **#136** at GATE 2 ("Tier B: SKIP. No Medium article, no
+  LinkedIn post, no README marketing refresh."). A second "drafts awaiting your edit" issue
+  would announce drafts that do not exist, so none was opened. #136 is closed now that both gates
+  are resolved. The release discussion (including the CI blocker) continues on the CHANGELOG PR.
+- SKIP handling: marked skipped for the cycle report; no argument.

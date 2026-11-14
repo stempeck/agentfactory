@@ -52,3 +52,14 @@ same step v0.3.0 → v0.4.0 took for new features.
   on GitHub, so it cannot be checked with `gh`. Notify issue #136
   (https://github.com/stempeck/agentfactory/issues/136) tells the operator exactly what was
   recorded and how to override it (REORDER / END-CYCLE). Same instruction → Tier B SKIP at GATE 4.
+
+## Tier B — Operator Decision (GATE 4)
+
+No drafts were written this cycle, so each Tier B piece the runbook's Channels name carries its
+decision here:
+
+- Long-form (Medium) — Decision: SKIP
+- Short-form (LinkedIn) — Decision: SKIP
+
+Source, transcribed by marketing-cycle: the operator's instruction in bead af-4073aec6 — "no
+actually medium article or marketing this time". Stated to the operator on #136 ("Tier B: SKIP").
