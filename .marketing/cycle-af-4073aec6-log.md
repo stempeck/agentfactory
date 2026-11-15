@@ -426,3 +426,14 @@ PHASE-6 VERDICT: PASS
   claim which dispatcher route launched it. Agents and the operator share one login, so I attribute no review threads to the operator.
 - Persistence: committed mode, and the Tier A PR (#137) is already merged, so these records go on `marketing/cycle-af-4073aec6-state` and
   are PR'd at once.
+
+## CLEANUP (Step 21, 2026-11-15)
+- Manifest gate: "MANIFEST: all files accounted for". No paste vehicle, HTML, or `phase6/` remains anywhere in the worktree.
+- `git status --porcelain`: empty once the per-worktree `CLAUDE.md` rewrite (only its "Working directory" line) was restored; it is generated
+  per worktree and is not cycle work. Branch `marketing/cycle-af-4073aec6-state` is in sync with origin (PR #141).
+- Stash list: one entry, `wt-52363c-pr733-cruft-claudemd`, from another worktree's session (`af/fable-increment-52363c`). The stash
+  stack is shared, so I left it alone; it is not this cycle's.
+- Removed from the git-ignored agent dir: `release-v0.5.0/` (source export + binaries; the tarballs matched the published `SHA256SUMS`
+  before deletion), `release-notes-v0.5.0.md` (no content difference from the published body), the cycle's `release-build.sh` /
+  `release-notes.sh` (the recipe lives in agent memory), `af-head`, `pr-body.md`, `state-pr-body.md`, and the
+  `pr-checks` / `branch-test` / `preflight-test` logs.
