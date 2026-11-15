@@ -377,3 +377,15 @@ SELF-VERIFY VERDICT: PASS
   `sha256sum -c` OK for both, and `af --version` prints `v0.5.0`. Known nit: the CHANGELOG heading reads `2026-11-14` but the release
   shipped 2026-11-15. I left it, since fixing it needs a new PR.
 - Exit criteria met: the PR is merged, and the release was cut because the decision was YES. Closing gate af-981972b6.
+
+## Step 18 — Publish support (gate af-94d15c77) — RESOLVED: release URL recorded, every Tier B piece SKIP
+
+- Mechanics: none needed. No drafts exist (GATE 4: Medium SKIP, LinkedIn SKIP, quoted from the operator's instruction in bead
+  af-4073aec6), so I made no paste vehicle and there was nothing to copy into the Medium or LinkedIn fields.
+- Checklist: `.marketing/cycle-af-4073aec6-publish-checklist.md` gives the order (release done, Medium SKIP, LinkedIn SKIP, homepage
+  unchanged) and the form: release = https://github.com/stempeck/agentfactory/releases/tag/v0.5.0, Medium SKIP, LinkedIn SKIP,
+  each SKIP with its source.
+- Notify: `gh issue create` opened #140 (https://github.com/stempeck/agentfactory/issues/140) with the checklist as its body. Every piece
+  had its URL or SKIP, so I closed #140 straight away, with a comment saying how to override (reopen it and paste a URL).
+- Homepage: no article URL was recorded, so I didn't run the allowlist check or `gh repo edit --homepage`. The homepage stays on the
+  previous Medium article (`three-things-my-agent-factory-couldnt-do-last-month-4c98d4a7c1b4`).
