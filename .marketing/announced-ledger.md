@@ -17,6 +17,7 @@ history but absent here are the untold backlog.
 | Tier A docs refresh for #117 (**no release cut this cycle**): README formula count 24→**26** (+`lineage`, +`rapid-soldesign`), skills 12→**13** (+`architecture-diagram`), new "Plugins & the model gateway" command block (`af plugin` family + `af gateway auth import/status`), quickstart `--litellm --litellm-auth=codex-subscription`; CHANGELOG `## Unreleased` section for #117 | GitHub README/CHANGELOG (PR #119, merged to `main` `82afc5a7`) | 2026-10-06 | https://github.com/stempeck/agentfactory/pull/119 |
 | #124 **security** flagship, Tier A: new README "Security & reproducible installs" section — ADR-026 (every change keeps or strengthens every security control), bootstrap **convergence** (every `quickstart.sh` / `af install --agents` run brings each component to its pin and verifies it: sha256/sha512 digests, signed apt, pip `--require-hashes`; a required component that can't converge exits non-zero), pending Ubuntu security updates installed for the original build's packages, `convergence.json` (ADR-027), the daily CI advisory audit, trust-bounded plugins (ADR-025) and the `fable-secure` optional external-scanner scan-gate; CHANGELOG entry for #124 | GitHub README/CHANGELOG (PR #129, merged to `main` `0bf9f381`) | 2026-11-01 | https://github.com/stempeck/agentfactory/pull/129 |
 | v0.4.0 release: security & reproducible installs (#124) first, then plugins + ChatGPT-subscription gateway + config-faithful relaunch (#117) and token economics (#111), plus #127 model-generation config; CHANGELOG folded into one `## v0.4.0 — 2026-11-01` (PR #131, closes the standing v0.4.0 tag gap); **first release with prebuilt binaries** (`af` + `webui`, linux amd64/arm64, `SHA256SUMS`) | GitHub release (Latest, tag → `eab2b02c`) | 2026-11-01 | https://github.com/stempeck/agentfactory/releases/tag/v0.4.0 |
+| v0.5.0 release (#135; **release-only cycle**): agents run on the context window they really get (recorded window per identity, `WINDOW_MISMATCH` mail + `WINDOW` alarm, `unobserved` state, short-window launch refusal with `--accept-window`, `af config models check` measures the window, Claude Code pin 2.1.322); startup turns measured (`af telemetry startup`, 90,000-token budget, `STARTUP` alarm) and rulings pinned (`af memory pin/unpin`); af's own mail arrives in-process from sender `af`, plus `WORKFLOW_STALL` and the `stall` field in dispatch status; advisory findings become healing pull requests (`advisory-audit.sh` exit codes, `excused-fixable`, locked `agentic` + `advisory-heal` issues, `advisory-heal` dispatcher workflow, USING_ADVISORYLOOPS.md); new factories seeded from current configs (ADR-028); CHANGELOG `## v0.5.0` (PR #137); prebuilt binaries (`af` + `webui`, linux amd64/arm64, `SHA256SUMS`) | GitHub release (Latest, tag → `637fa507`) + CHANGELOG (PR #137) | 2026-11-15 | https://github.com/stempeck/agentfactory/releases/tag/v0.5.0 |
 
 *LinkedIn (short-form) was **SKIPPED** this cycle by operator decision (#108: "I'll post the next
 one to LinkedIn. Not this one."). The draft `cycle-af-c967c569-linkedin.md` stays ready with the
@@ -35,7 +36,34 @@ now, no one reads it." Nothing was posted, so no social row is claimed. The draf
 `cycle-af-a6b105d1-medium.md` / `-linkedin.md` stay in the tree as unpublished. The release and README
 carried this cycle. The v0.4.0 tag gap from the cycles above is closed.*
 
-## Untold backlog (updated cycle af-a6b105d1)
+*Cycle af-4073aec6 (2026-11-14 to 2026-11-15): **release-only** by operator instruction ("skip straight
+to the part where it publishes a release, no actually medium article or marketing this time"). No
+Tier B drafts were written, Medium and LinkedIn are SKIP, and no social row is claimed. The v0.5.0
+release and its CHANGELOG section are the only surfaces that told #135.*
+
+## Untold backlog (updated cycle af-4073aec6)
+Now told (cycle af-4073aec6), in the v0.5.0 release notes and CHANGELOG only: all of #135. None of it has
+a README section or a social piece. The strongest #135 items are still untold as stories (see Top 3).
+
+Top 3 for next cycle (ranked):
+1. **Advisory findings become healing pull requests** (#135): a red scheduled audit files a locked
+   issue, the `advisory-heal` dispatcher workflow takes it through fable-implement / fable-review /
+   fable-increment to a PR, and the operator merges. This fits the security positioning the operator set
+   (#125). This cycle showed the same fable chain end to end: #138 (labelled `advisory-heal`)
+   became PR #139 (`af/fable-implement-fd5e3f`), which went through review threads T1–T5 and
+   fable-increment fixes, was merged as `ef5287e7`, and closed #138. Before telling it, confirm which
+   dispatcher route launched #139. #138 was a CI-timeout fix, not an advisory, so tell the mechanism with an honest example.
+2. **Agents run on the context window they really get** (#135): ranked first for pain and reach in
+   this cycle's ranking. Every Claude Code user can be handed a smaller window than declared without
+   being told. Demo: one `WINDOW` alarm line and one refused `af up`.
+3. **A reference security-scanner integration for `fable-secure`** (#128, still OPEN): tell it when it
+   ships, not before.
+
+Still untold (carried): the dogfooding story told head-on (this cycle: the agent held a release on red
+CI, routed the blocker, and cut v0.5.0 with binaries once main was green); the durable memory vault,
+now with pinned rulings (`af memory pin`), as "recover AND remember".
+
+## Prior backlog (cycle af-a6b105d1)
 Now told (cycle af-a6b105d1), on GitHub surfaces only: the **security / supply-chain** story (#124:
 convergence, integrity verification, daily advisory audit, ADR-026/027) in the README and the v0.4.0
 release; **token economics** (#111) reaches users through the v0.4.0 release notes. Both were drafted for

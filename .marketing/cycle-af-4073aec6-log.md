@@ -362,3 +362,78 @@ SELF-VERIFY VERDICT: PASS
   I checked it first. #139 squash-merged at 14:56:41Z as `ef5287e7`, `Makefile:101` on `origin/main` reads `-timeout=6m`, and main push run
   43727096869 at `ef5287e7` succeeded. I merged `origin/main` into this branch. It merged cleanly, since main touched none of #137's files,
   and I pushed so #137 gets a fresh `pull_request` run on the new merge ref. HOLD continues until #137 is green and merged.
+- 2026-11-15 15:21Z manager mail af-678e303a: the operator merged #137 ("i merged it, you can let the marketing-cycle agent know").
+  I checked it: #137 MERGED at 15:21:29Z as `637fa507`, which is `origin/main`. My fresh PR run 43728720037 on `6f79b125` was
+  cancelled by the concurrency rule, not failed. `637fa507^{tree}` == `6f79b125^{tree}` (`9ee13f8d`), but no green run
+  had tested that tree, so I waited for main push run 43729432001 on `637fa507`. It passed all seven jobs,
+  `integration` and `unit` included.
+- 15:28Z release cut, because the decision was YES (GATE-2 APPROVE, "skip straight to the part where it publishes a release"). `main` is checked out
+  in the shared parent, so instead of `git checkout main` I detached this worktree at the freshly fetched `origin/main` (`637fa507`),
+  ran `gh release create v0.5.0 --target main`, then switched back to this branch.
+  https://github.com/stempeck/agentfactory/releases/tag/v0.5.0. The tag is on `637fa507`, published 15:28:32Z, not a draft or
+  prerelease, and `releases/latest` = v0.5.0. The notes are the merged CHANGELOG v0.5.0 section plus Downloads, as v0.4.0.
+  Assets: `agentfactory_v0.5.0_linux_{amd64,arm64}.tar.gz` (`af`, `webui`, CHANGELOG.md, LICENSE; Go 1.27.4 = CI pin,
+  `CGO_ENABLED=0`, `-trimpath`, deterministic tar) and `SHA256SUMS` (amd64 `b1ac5e6a…`, arm64 `b7bdc728…`). I downloaded them back:
+  `sha256sum -c` OK for both, and `af --version` prints `v0.5.0`. Known nit: the CHANGELOG heading reads `2026-11-14` but the release
+  shipped 2026-11-15. I left it, since fixing it needs a new PR.
+- Exit criteria met: the PR is merged, and the release was cut because the decision was YES. Closing gate af-981972b6.
+
+## Step 18 — Publish support (gate af-94d15c77) — RESOLVED: release URL recorded, every Tier B piece SKIP
+
+- Mechanics: none needed. No drafts exist (GATE 4: Medium SKIP, LinkedIn SKIP, quoted from the operator's instruction in bead
+  af-4073aec6), so I made no paste vehicle and there was nothing to copy into the Medium or LinkedIn fields.
+- Checklist: `.marketing/cycle-af-4073aec6-publish-checklist.md` gives the order (release done, Medium SKIP, LinkedIn SKIP, homepage
+  unchanged) and the form: release = https://github.com/stempeck/agentfactory/releases/tag/v0.5.0, Medium SKIP, LinkedIn SKIP,
+  each SKIP with its source.
+- Notify: `gh issue create` opened #140 (https://github.com/stempeck/agentfactory/issues/140) with the checklist as its body. Every piece
+  had its URL or SKIP, so I closed #140 straight away, with a comment saying how to override (reopen it and paste a URL).
+- Homepage: no article URL was recorded, so I didn't run the allowlist check or `gh repo edit --homepage`. The homepage stays on the
+  previous Medium article (`three-things-my-agent-factory-couldnt-do-last-month-4c98d4a7c1b4`).
+
+## PHASE-6 (Step 19, 2026-11-15) — verify every published page
+Tier B URLs: none. Medium = SKIP and LinkedIn = SKIP (operator, bead af-4073aec6), so no social page exists to verify. The one
+surface published this cycle is the GitHub release, so I checked it against the same list. Mode: full. I took a screenshot with the
+bundled headless chromium, as the runbook allows (Playwright MCP needs branded chrome), and fetched the full rendered body
+(`body_html`, API `html+json`).
+
+URL: https://github.com/stempeck/agentfactory/releases/tag/v0.5.0
+1. Literal `##` / `**` / fences / raw `[text](url)`: none. In the rendered body_html, with code spans excluded: literal `#` 0, `**` 0,
+   fences 0, raw links 0, stray backticks 0. 7 `<h3>` sections render as headings, and the inline code renders as code. The
+   screenshot agrees. The CHANGELOG's relative `USING_ADVISORYLOOPS.md` link was rewritten by GitHub to
+   `/stempeck/agentfactory/blob/v0.5.0/USING_ADVISORYLOOPS.md`. All 3 hrefs return 200: that file, `blob/v0.5.0/CHANGELOG.md`, and `pull/135`.
+2. Missing, duplicated or placeholder images, stray alt text: none. The notes carry no images (`<img>` 0). Assets show `5`.
+   The expanded-assets fragment lists each one once: amd64 tar.gz, arm64 tar.gz, SHA256SUMS, and the 2 source archives.
+3. Subtitle as body paragraph / stray leading `# `: none. The title is in the release title field with the Latest badge, the tag is
+   `v0.5.0`, and the commit is `637fa50` with a green check. The body opens with the summary paragraph.
+4. Repo checks: homepageUrl is unchanged. It is last cycle's Medium article; no article shipped this cycle, so by the step-18 exit
+   criterion it stays. curl gets 403 (Medium's Cloudflare bot block, a known gotcha), but the article is live in the
+   @glennstempeck RSS feed (1 match). Topics include all 4 runbook primary topics (claude-code, ai-agents, multi-agent-systems,
+   agentic-ai), and topic search lists stempeck/agentfactory under each of the 4.
+Findings requiring operator edits: none. No comment posted on the publish issue (#140).
+Diagnostics deleted: the screenshot and body dump (agent dir `phase6/`, git-ignored). Paste vehicle
+`cycle-af-4073aec6-paste.html`: never created (no drafts this cycle), and it is not in the tree.
+
+PHASE-6 VERDICT: PASS
+
+## PHASE-7 (Step 20, 2026-11-15) — ledger and report
+- `announced-ledger.md`: added a v0.5.0 release row (#135 features → GitHub release + CHANGELOG PR #137 → 2026-11-15 → release URL),
+  a cycle note (release-only, no social row claimed), and the untold backlog updated for this cycle (Top 3: healing advisory PRs, real
+  context windows, #128 scanner when it ships).
+- `cycle-af-4073aec6-report.md`: covers what shipped autonomously, what the operator published (nothing), what was skipped and why,
+  operator-click items (the pycache race, channel strategy, release automation), the Top 3, and the recrawl check (≈2026-11-29).
+- Claims checked as I wrote them: #138 is CLOSED with label `advisory-heal` only (not `agentic` any more). #139 is MERGED as `ef5287e7`, closes
+  #138, and its head is `af/fable-implement-fd5e3f`. `af dispatch status --json` holds no entry for #138/#139, so the report does not
+  claim which dispatcher route launched it. Agents and the operator share one login, so I attribute no review threads to the operator.
+- Persistence: committed mode, and the Tier A PR (#137) is already merged, so these records go on `marketing/cycle-af-4073aec6-state` and
+  are PR'd at once.
+
+## CLEANUP (Step 21, 2026-11-15)
+- Manifest gate: "MANIFEST: all files accounted for". No paste vehicle, HTML, or `phase6/` remains anywhere in the worktree.
+- `git status --porcelain`: empty once the per-worktree `CLAUDE.md` rewrite (only its "Working directory" line) was restored; it is generated
+  per worktree and is not cycle work. Branch `marketing/cycle-af-4073aec6-state` is in sync with origin (PR #141).
+- Stash list: one entry, `wt-52363c-pr733-cruft-claudemd`, from another worktree's session (`af/fable-increment-52363c`). The stash
+  stack is shared, so I left it alone; it is not this cycle's.
+- Removed from the git-ignored agent dir: `release-v0.5.0/` (source export + binaries; the tarballs matched the published `SHA256SUMS`
+  before deletion), `release-notes-v0.5.0.md` (no content difference from the published body), the cycle's `release-build.sh` /
+  `release-notes.sh` (the recipe lives in agent memory), `af-head`, `pr-body.md`, `state-pr-body.md`, and the
+  `pr-checks` / `branch-test` / `preflight-test` logs.
