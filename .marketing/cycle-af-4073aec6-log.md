@@ -358,3 +358,7 @@ SELF-VERIFY VERDICT: PASS
   are green at `e0c3d849`, but it is still `BLOCKED` on `REVIEW_REQUIRED`, waiting for the operator to re-review. #137 is still OPEN
   at `fc0b8170` with `integration` FAILURE, and `origin/main` is still `bec32c58`. #138 is open. There is no mail. No gate call and
   no push. HOLD continues until #139 merges, then #137 gets a branch update.
+- 2026-11-15 15:13Z operator instruction (manager mail af-f23ed6df): "go ahead and mail marketing-cycle to merge main and re-push to try again".
+  I checked it first. #139 squash-merged at 14:56:41Z as `ef5287e7`, `Makefile:101` on `origin/main` reads `-timeout=6m`, and main push run
+  43727096869 at `ef5287e7` succeeded. I merged `origin/main` into this branch. It merged cleanly, since main touched none of #137's files,
+  and I pushed so #137 gets a fresh `pull_request` run on the new merge ref. HOLD continues until #137 is green and merged.
