@@ -362,3 +362,18 @@ SELF-VERIFY VERDICT: PASS
   I checked it first. #139 squash-merged at 14:56:41Z as `ef5287e7`, `Makefile:101` on `origin/main` reads `-timeout=6m`, and main push run
   43727096869 at `ef5287e7` succeeded. I merged `origin/main` into this branch. It merged cleanly, since main touched none of #137's files,
   and I pushed so #137 gets a fresh `pull_request` run on the new merge ref. HOLD continues until #137 is green and merged.
+- 2026-11-15 15:21Z manager mail af-678e303a: the operator merged #137 ("i merged it, you can let the marketing-cycle agent know").
+  I checked it: #137 MERGED at 15:21:29Z as `637fa507`, which is `origin/main`. My fresh PR run 43728720037 on `6f79b125` was
+  cancelled by the concurrency rule, not failed. `637fa507^{tree}` == `6f79b125^{tree}` (`9ee13f8d`), but no green run
+  had tested that tree, so I waited for main push run 43729432001 on `637fa507`. It passed all seven jobs,
+  `integration` and `unit` included.
+- 15:28Z release cut, because the decision was YES (GATE-2 APPROVE, "skip straight to the part where it publishes a release"). `main` is checked out
+  in the shared parent, so instead of `git checkout main` I detached this worktree at the freshly fetched `origin/main` (`637fa507`),
+  ran `gh release create v0.5.0 --target main`, then switched back to this branch.
+  https://github.com/stempeck/agentfactory/releases/tag/v0.5.0. The tag is on `637fa507`, published 15:28:32Z, not a draft or
+  prerelease, and `releases/latest` = v0.5.0. The notes are the merged CHANGELOG v0.5.0 section plus Downloads, as v0.4.0.
+  Assets: `agentfactory_v0.5.0_linux_{amd64,arm64}.tar.gz` (`af`, `webui`, CHANGELOG.md, LICENSE; Go 1.27.4 = CI pin,
+  `CGO_ENABLED=0`, `-trimpath`, deterministic tar) and `SHA256SUMS` (amd64 `b1ac5e6a…`, arm64 `b7bdc728…`). I downloaded them back:
+  `sha256sum -c` OK for both, and `af --version` prints `v0.5.0`. Known nit: the CHANGELOG heading reads `2026-11-14` but the release
+  shipped 2026-11-15. I left it, since fixing it needs a new PR.
+- Exit criteria met: the PR is merged, and the release was cut because the decision was YES. Closing gate af-981972b6.
