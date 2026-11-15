@@ -873,7 +873,7 @@ func TestSessionStartOutputFitsInlineLimit_EveryRole(t *testing.T) {
 		t.Fatalf("the embedded roster enumerates %d roles but internal/templates/roles/ holds %d templates", len(roles), len(shipped))
 	}
 
-	// A hang detector, not a budget: the whole sweep measures ~15s against Makefile:99's 4m
+	// A hang detector, not a budget: the whole sweep measures ~15s against the integration run's
 	// per-package timeout, which the rest of this package's integration tests also draw on.
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()

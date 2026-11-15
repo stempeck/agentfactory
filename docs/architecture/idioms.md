@@ -218,7 +218,7 @@ idiom for "keep the production wiring direct; keep test override cheap."
 | File:line | Seam | Origin | Notes |
 |-----------|------|--------|-------|
 | `internal/cmd/helpers.go:17-24` | `newIssueStore` | commit `c93f9ef` | The issuestore seam. Production returns mcpstore; tests return memstore or fakes. |
-| `internal/cmd/sling.go:616` | `launchAgentSession` | commit `c3cf1f1` | The tmux/claude seam. Without this, dispatch tests hang for 4 minutes. |
+| `internal/cmd/sling.go:1159` | `launchAgentSession` | commit `c3cf1f1` | The tmux/claude seam. Without this, each dispatch launch stalls ~60s (ClaudeStartTimeout) where claude is absent. |
 
 **Enforcement:** Convention — no gate stops a developer from calling
 `mcpstore.New` directly.
