@@ -389,3 +389,28 @@ SELF-VERIFY VERDICT: PASS
   had its URL or SKIP, so I closed #140 straight away, with a comment saying how to override (reopen it and paste a URL).
 - Homepage: no article URL was recorded, so I didn't run the allowlist check or `gh repo edit --homepage`. The homepage stays on the
   previous Medium article (`three-things-my-agent-factory-couldnt-do-last-month-4c98d4a7c1b4`).
+
+## PHASE-6 (Step 19, 2026-11-15) — verify every published page
+Tier B URLs: none. Medium = SKIP and LinkedIn = SKIP (operator, bead af-4073aec6), so no social page exists to verify. The one
+surface published this cycle is the GitHub release, so I checked it against the same list. Mode: full. I took a screenshot with the
+bundled headless chromium, as the runbook allows (Playwright MCP needs branded chrome), and fetched the full rendered body
+(`body_html`, API `html+json`).
+
+URL: https://github.com/stempeck/agentfactory/releases/tag/v0.5.0
+1. Literal `##` / `**` / fences / raw `[text](url)`: none. In the rendered body_html, with code spans excluded: literal `#` 0, `**` 0,
+   fences 0, raw links 0, stray backticks 0. 7 `<h3>` sections render as headings, and the inline code renders as code. The
+   screenshot agrees. The CHANGELOG's relative `USING_ADVISORYLOOPS.md` link was rewritten by GitHub to
+   `/stempeck/agentfactory/blob/v0.5.0/USING_ADVISORYLOOPS.md`. All 3 hrefs return 200: that file, `blob/v0.5.0/CHANGELOG.md`, and `pull/135`.
+2. Missing, duplicated or placeholder images, stray alt text: none. The notes carry no images (`<img>` 0). Assets show `5`.
+   The expanded-assets fragment lists each one once: amd64 tar.gz, arm64 tar.gz, SHA256SUMS, and the 2 source archives.
+3. Subtitle as body paragraph / stray leading `# `: none. The title is in the release title field with the Latest badge, the tag is
+   `v0.5.0`, and the commit is `637fa50` with a green check. The body opens with the summary paragraph.
+4. Repo checks: homepageUrl is unchanged. It is last cycle's Medium article; no article shipped this cycle, so by the step-18 exit
+   criterion it stays. curl gets 403 (Medium's Cloudflare bot block, a known gotcha), but the article is live in the
+   @glennstempeck RSS feed (1 match). Topics include all 4 runbook primary topics (claude-code, ai-agents, multi-agent-systems,
+   agentic-ai), and topic search lists stempeck/agentfactory under each of the 4.
+Findings requiring operator edits: none. No comment posted on the publish issue (#140).
+Diagnostics deleted: the screenshot and body dump (agent dir `phase6/`, git-ignored). Paste vehicle
+`cycle-af-4073aec6-paste.html`: never created (no drafts this cycle), and it is not in the tree.
+
+PHASE-6 VERDICT: PASS
