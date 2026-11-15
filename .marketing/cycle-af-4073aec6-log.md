@@ -414,3 +414,15 @@ Diagnostics deleted: the screenshot and body dump (agent dir `phase6/`, git-igno
 `cycle-af-4073aec6-paste.html`: never created (no drafts this cycle), and it is not in the tree.
 
 PHASE-6 VERDICT: PASS
+
+## PHASE-7 (Step 20, 2026-11-15) — ledger and report
+- `announced-ledger.md`: added a v0.5.0 release row (#135 features → GitHub release + CHANGELOG PR #137 → 2026-11-15 → release URL),
+  a cycle note (release-only, no social row claimed), and the untold backlog updated for this cycle (Top 3: healing advisory PRs, real
+  context windows, #128 scanner when it ships).
+- `cycle-af-4073aec6-report.md`: covers what shipped autonomously, what the operator published (nothing), what was skipped and why,
+  operator-click items (the pycache race, channel strategy, release automation), the Top 3, and the recrawl check (≈2026-11-29).
+- Claims checked as I wrote them: #138 is CLOSED with label `advisory-heal` only (not `agentic` any more). #139 is MERGED as `ef5287e7`, closes
+  #138, and its head is `af/fable-implement-fd5e3f`. `af dispatch status --json` holds no entry for #138/#139, so the report does not
+  claim which dispatcher route launched it. Agents and the operator share one login, so I attribute no review threads to the operator.
+- Persistence: committed mode, and the Tier A PR (#137) is already merged, so these records go on `marketing/cycle-af-4073aec6-state` and
+  are PR'd at once.
